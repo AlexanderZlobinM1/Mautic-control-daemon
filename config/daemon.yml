@@ -1,0 +1,13 @@
+php_binary: /usr/bin/php
+
+# Где искать инсталляции Mautic (рекурсивный поиск local.php)
+search_paths:
+  - /var/www
+
+loop_interval_seconds: 10
+
+segment:
+  max_parallel_updates: 2      # одновременно запущенных segment:update
+  stale_after_minutes: 30      # порог "устаревшего" сегмента (для будущей логики)
+
+log_level: INFO
