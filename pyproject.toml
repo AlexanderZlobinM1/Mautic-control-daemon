@@ -1,0 +1,18 @@
+[project]
+name = "mcd-agent"
+version = "0.9.106"
+description = "MauticControlDaemon host agent"
+requires-python = ">=3.10"
+readme = "README.md"
+dependencies = [
+  "PyMySQL>=1.1.1",
+  "phpserialize>=1.3",
+  "cryptography>=42.0.0",
+]
+
+[project.scripts]
+mcd-agent = "mcd_agent.cli:main"
+mcd-cli = "mcd_agent.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["mcd_agent*"]

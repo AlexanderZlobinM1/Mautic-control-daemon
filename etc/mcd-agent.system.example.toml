@@ -1,0 +1,792 @@
+# MCD system-level config (split mode)
+# Low-level paths, SQL templates, command templates and service integration.
+#
+# This file is intended to be included from the main config file:
+# [include]
+# files = ["./mcd-agent.system.example.toml", "./mcd-agent.operator.example.toml"]
+#
+# Operator/runtime tuning should stay in mcd-agent.operator.example.toml.
+
+[discovery]
+# Roots for local.php discovery.
+roots = ["/var/www"]
+# Skip noisy paths.
+exclude_path_contains = ["/vendor/", "/node_modules/"]
+# Supported Mautic majors.
+supported_mautic_majors = [4, 5, 6, 7]
+
+[runtime]
+# MCC can hot-override supported runtime keys per host via:
+#   mcc_cli host-runtime set --host <host> --set key=value
+# Runtime precedence:
+#   MCC host-runtime override > local [runtime] > profile defaults
+
+# PHP binary for console commands.
+php_bin = "/usr/bin/php"
+# User for Mautic console execution.
+mautic_run_as_user = "www-data"
+
+# Global policy: long tasks are never killed by timeout.
+command_timeout_sec = 0
+# Watchdog timeout for running tasks, sec; 0 means disabled.
+worker_watchdog_sec = 0
+# Segment planner cycles per dispatch tick.
+segment_cycles_per_tick = 4
+# SQL ring for simple segments (direct DB rebuild; excluded from Mautic segment rings).
+segment_sql_ring_enabled = false
+# Max SQL segment rebuilds per scheduler tick.
+segment_sql_ring_max_per_tick = 1
+# Minimum time between starts of the same SQL-managed segment, sec.
+segment_sql_min_repeat_sec = 3600
+# Persistent SQL-ring lock heartbeat interval, sec.
+segment_sql_lock_heartbeat_sec = 15
+# Orphan policy for stale SQL-ring locks:
+# - manual        : never reclaim automatically
+# - reclaim_stale : reclaim when heartbeat is older than orphan_after_sec
+segment_sql_orphan_policy = "reclaim_stale"
+# Consider running SQL-ring lock stale after this many seconds without heartbeat.
+segment_sql_orphan_after_sec = 900
+# Restrict page_hits-based SQL segments to quiet window only.
+segment_sql_page_hits_quiet_only = false
+# Quiet window start hour for page_hits-based SQL segments.
+segment_sql_page_hits_quiet_hour = 2
+# Quiet window length in minutes for page_hits-based SQL segments.
+segment_sql_page_hits_quiet_window_min = 180
+# SQL ring rules (runtime-dynamic JSON map/list; each rule must return `lead_id`).
+segment_sql_ring_rules = {}
+# How to stop throttled segment workers: graceful|kill.
+segment_kill_mode = "graceful"
+# Grace period in seconds before hard kill when graceful stop is used.
+segment_kill_grace_sec = 10
+
+# SQLite file for task state / weight cache / inventory.
+state_db_path = "/opt/mcd/var/mcd-state.db"
+# Historical task retention depth in days (non-running rows older than this are purged).
+tasks_history_keep_days = 2
+# Hard cap for historical non-running task rows.
+tasks_history_max_rows = 25000
+# Enable periodic DB compaction in quiet window.
+tasks_compact_enabled = true
+# Minimum interval between compaction runs (sec).
+tasks_compact_interval_sec = 3600
+# Quiet window start hour for compaction (host local time).
+tasks_compact_quiet_hour = 3
+# Quiet window length in minutes for compaction.
+tasks_compact_quiet_window_min = 60
+# Run SQLite VACUUM after purge (only when no running tasks).
+tasks_compact_vacuum = true
+# Archive task rows removed from live state to compressed JSONL before deletion.
+tasks_archive_enabled = true
+# Directory for short postmortem task archives. Scheduler logic never reads it.
+tasks_archive_dir = "/opt/mcd/var/task-history"
+# Retention for compressed postmortem archives.
+tasks_archive_keep_days = 14
+# Legacy pause file (backward-compatibility only).
+# Primary mode control is profile (`passive` vs others).
+scheduler_pause_flag_path = "/opt/mcd/var/scheduler.pause"
+# Weight recompute interval, sec (86400 = daily).
+weights_recalc_interval_sec = 86400
+# Retry count for failed command run.
+task_retry_max = 1
+# Delay before retry, sec.
+task_retry_delay_sec = 2
+# Periodic running-task reconcile interval, sec.
+# Used to clean stale tracked tasks and re-adopt valid live processes.
+scheduler_reconcile_interval_sec = 60
+# Action for stuck process: skip|restart.
+worker_stuck_policy = "skip"
+# Max restarts by watchdog for one task.
+worker_stuck_restart_limit = 1
+# Consider PHP console process "stuck" after this many seconds in host signals.
+php_console_stuck_sec = 1800
+# Enable temporary DB dispatch pause when host pressure signals cross threshold.
+host_pressure_pause_enabled = true
+# Minimum stuck PHP console count required to trigger host-pressure pause.
+host_pressure_php_stuck_pause_threshold = 8
+# Minimum swap pressure level required to trigger host-pressure pause.
+# 0=disabled, 1=warn, 2=critical
+host_pressure_swap_level_pause_threshold = 2
+# Max concurrent generic jobs (from [[jobs]]).
+jobs_max_workers = 2
+
+# Segment ids forced to priority ring.
+segment_whitelist = []
+# Path to segment whitelist file. MCD writes scoped lines like
+# "instance.example.com: 187 191"; old one-id-per-line files are converted once.
+segment_whitelist_file = "/etc/mcd/segment-whitelist.txt"
+# Per-instance segment whitelist overrides keyed by instance_uid/root/domain.
+segment_whitelist_instance_settings = {}
+# Campaign ids forced to priority ring.
+campaign_whitelist = []
+# Path to campaign whitelist file (one id per line).
+campaign_whitelist_file = "/etc/mcd/campaign-whitelist.txt"
+
+# Batch for mautic:segments:update.
+segment_batch_limit = 1000
+# Batch for mautic:campaigns:trigger.
+campaign_batch_limit = 1000
+# Campaign limit for trigger command. 0/off/unlimited omits --campaign-limit.
+campaign_limit = 0
+# Safety audit: periodically enqueue published campaigns as explicit
+# `mautic:campaigns:trigger -i ID` runs, bounded per campaign by this interval.
+campaign_trigger_audit_interval_sec = 300
+# Limit for mautic:import.
+import_limit = 1000
+
+# Enable import polling loop.
+enable_import_polling = true
+# Import polling interval, sec.
+import_poll_interval_sec = 15
+# Check MCC for newer MCD versions and show notify in operations.
+mcd_update_notify = true
+# Enable automatic MCD self-update from MCC.
+# Default is true; set false only for explicit manual control.
+mcd_auto_update_enabled = true
+# How often to re-check MCC version manifest, sec.
+mcd_update_check_interval_sec = 3600
+# Legacy channel alias (kept for backward compatibility).
+mcd_update_channel = "approved"
+# Update policy: off|lts|approved|test|cluster.
+# - off      : never auto-update
+# - lts      : only latest build flagged lts
+# - approved : latest approved build (default)
+# - test     : latest test build
+# - cluster  : latest cluster build
+mcd_update_policy = "approved"
+# Force test build selection regardless of update policy.
+mcd_update_allow_test_build = false
+# Retry delay after MCC says "wait for free update slot".
+mcd_update_wait_retry_sec = 60
+# Do not self-update while campaign trigger/rebuild/update console jobs are running.
+mcd_update_defer_during_campaigns = true
+# Enable self-update artifacts cleanup (`/opt/mcd/var/updates`, preupdate tar backups).
+mcd_update_cleanup_enabled = true
+# How often to run cleanup policy, sec.
+mcd_update_cleanup_interval_sec = 86400
+# Keep this number of latest downloaded agent archives (`mcd-agent-*.tar.gz`).
+# Default is 0: after a successful update only the running installation remains.
+mcd_update_keep_archives = 0
+# Keep this number of latest preupdate source backups (`mcd-src-preupdate-*.tgz`).
+# Default is 0: stale agent copies are removed during update cleanup.
+mcd_update_keep_preupdate_backups = 0
+# Remove older self-update artifacts even if keep-count not exceeded.
+mcd_update_artifacts_max_age_days = 30
+# Number of local config history snapshots stored by MCD.
+mcd_config_history_limit = 10
+# Retention for delivered profile events in local SQLite outbound queue.
+# Older `status=sent` rows are pruned automatically in quiet window.
+outbound_events_sent_keep_days = 14
+
+# Mark this host as template source in MCC dashboard.
+# Template hosts can auto-promote clones to normal hosts (see key below).
+host_template = false
+# When true and host_template=true, clone is detected by hostname mismatch:
+# local OS hostname != configured [mcc].host_name.
+# Agent then pushes state as a new host identity and MCC auto-registers it.
+template_autopromote_on_clone = true
+
+# Service profiles (MCC-managed dynamic host tuning, independent from MCD build version).
+# Enable service-profile subsystem.
+service_profiles_enabled = true
+# Auto-apply profile from MCC on daemon loop. Hosts pull dynamic stack
+# parameters from MCC and apply them idempotently without explicit push.
+service_profiles_auto_apply = true
+# Poll interval (sec) for auto-apply cycle.
+service_profiles_poll_interval_sec = 3600
+# Components controlled by service profiles.
+# Supported: php_fpm, mysql, apt
+service_profiles_components = ["php_fpm", "mysql", "apt"]
+
+# Global Mautic 6 core patch policy for PluginUpdateEvent metadata bug:
+# - required : daemon auto-checks and auto-applies hotfix every planning cycle
+# - off      : daemon never applies this patch automatically
+# You can still apply/revert manually via `mcd-cli mautic6-patch ...`.
+mautic6_core_patch_policy = "required"
+# Optional semantic version guardrails for auto-apply:
+# - empty means "no boundary"
+# - if min/max are set, patch is applied only when local Mautic version is in range
+#   (example for temporary bug window: min=6.0.0, max=6.0.8)
+mautic6_core_patch_version_min = ""
+mautic6_core_patch_version_max = ""
+# If local Mautic version cannot be resolved:
+# - true  => apply patch anyway
+# - false => skip patch until version is known
+mautic6_core_patch_apply_if_version_unknown = true
+
+# Deprecated: page-hit cascade core patch is retired. MCD handles stale page-hit
+# queue cleanup in daemon housekeeping instead of patching Mautic core.
+pagehit_cascade_patch_policy = "off"
+
+# Enable campaign rebuild worker.
+enable_campaign_rebuild = false
+# Rebuild planner interval, sec.
+campaign_rebuild_poll_interval_sec = 300
+# Max cycles per rebuild tick.
+campaign_rebuild_max_cycles_per_tick = 4
+
+# Enable contacts cleanup task.
+enable_contacts_cleanup = false
+# Minimum interval between cleanup runs, sec.
+contacts_cleanup_interval_sec = 86400
+# Quiet window start hour (instance timezone).
+contacts_cleanup_quiet_hour = 2
+# Quiet window length in minutes.
+contacts_cleanup_quiet_window_min = 60
+# Leads table email field name.
+contacts_cleanup_email_field = "email"
+# Leads table phone field name.
+contacts_cleanup_phone_field = "mobile"
+# Cleanup mode:
+# - "email_and_mobile": delete only contacts where both fields are empty
+# - "email_only": delete contacts where email is empty (mobile ignored)
+contacts_cleanup_mode = "email_and_mobile"
+# Max rows deleted per cleanup run.
+contacts_cleanup_max_delete_per_run = 10000
+
+# MCC-managed per-instance empty leads cleanup. The instance settings map is
+# normally written by MCC from the Clean Empty Contacts tile.
+empty_leads_cleanup_enabled = false
+empty_leads_cleanup_interval_sec = 900
+empty_leads_cleanup_batch_size = 50000
+empty_leads_cleanup_max_batches_per_run = 10
+# Default cron-window length for legacy cron schedules, e.g. 22:00 + 660 min.
+empty_leads_cleanup_quiet_window_min = 660
+# 0 means unlimited cleanup cycles inside the active nightly/cron window.
+empty_leads_cleanup_max_runs_per_window = 0
+empty_leads_cleanup_instance_settings = {}
+
+# Enable orphan page_hits cleanup task.
+enable_page_hits_orphan_cleanup = false
+# Minimum interval between orphan cleanup runs, sec.
+page_hits_orphan_cleanup_interval_sec = 3600
+# Quiet window start hour (instance timezone).
+page_hits_orphan_cleanup_quiet_hour = 2
+# Quiet window length in minutes.
+page_hits_orphan_cleanup_quiet_window_min = 180
+# Per-batch delete size for orphan page_hits.
+page_hits_orphan_cleanup_batch_size = 5000
+# Max delete batches per cleanup run.
+page_hits_orphan_cleanup_batches_per_run = 12
+# Sleep between orphan delete batches, sec.
+page_hits_orphan_cleanup_sleep_sec = 0.2
+# Keep recent orphan page_hits younger than this grace window, minutes.
+page_hits_orphan_cleanup_grace_min = 60
+# Max runtime budget of one orphan cleanup run, sec.
+page_hits_orphan_cleanup_max_run_sec = 180
+page_hits_orphan_cleanup_instance_settings = {}
+
+# Leuchtfeuer Housekeeping plugin scheduling for Mautic 4/5/6/7 instances.
+housekeeping_plugin_enabled = false
+housekeeping_plugin_interval_sec = 86400
+housekeeping_plugin_quiet_hour = 3
+housekeeping_plugin_quiet_window_min = 120
+housekeeping_plugin_days_old = 365
+housekeeping_plugin_flags = []
+housekeeping_plugin_optimize_tables = false
+housekeeping_plugin_dry_run = true
+housekeeping_plugin_instance_settings = {}
+
+# Enable daily cache:clear task (MCD-managed, runtime-dynamic).
+enable_cache_clear = false
+# Minimum interval between cache:clear runs, sec.
+cache_clear_interval_sec = 86400
+# Quiet window start hour (instance timezone).
+cache_clear_quiet_hour = 7
+# Quiet window length in minutes.
+cache_clear_quiet_window_min = 60
+
+# Enable daily cache warm task (MCD-managed, runtime-dynamic).
+enable_cache_warm = false
+# Minimum interval between cache warm runs, sec.
+cache_warm_interval_sec = 86400
+# Quiet window start hour (instance timezone).
+cache_warm_quiet_hour = 8
+# Quiet window length in minutes.
+cache_warm_quiet_window_min = 60
+
+# Viber plugin stats task (MCD-managed, runtime-dynamic).
+# If an instance has a Viber plugin directory, active profiles run:
+#   viber:stats:update
+# Default interval is 10 minutes. Per-instance overrides are keyed by
+# instance_uid/root/domain and are normally written by MCC Web.
+viber_stats_enabled = true
+viber_stats_interval_sec = 600
+viber_stats_instance_settings = {}
+
+# Monitored mailbox parser (MCD-managed replacement for mautic:email:fetch).
+# Per-instance overrides are keyed by instance_uid/root/domain and normally
+# written by MCC Web.
+monitored_email_parser_enabled = false
+monitored_email_parser_interval_sec = 900
+monitored_email_parser_batch_size = 100
+monitored_email_parser_force_seen = false
+monitored_email_parser_delete_processed = false
+monitored_email_parser_disable_mautic_fetch = true
+monitored_email_parser_types = ["feedback_loop"]
+monitored_email_parser_whitelist = []
+monitored_email_parser_instance_settings = {}
+
+# Filesystem permissions watchdog (MCD-managed, runtime-dynamic).
+# Keeps critical Mautic writable paths owned by `mautic_run_as_user`.
+fs_permissions_guard_enabled = true
+# Minimum interval between checks per instance, sec.
+fs_permissions_guard_interval_sec = 300
+# Relative paths under instance root to monitor and auto-repair.
+fs_permissions_guard_paths = [
+  "var/cache",
+  "var/logs",
+  "var/spool",
+  "var/tmp",
+  "app/config",
+  "config",
+  "media/files",
+  "media/images",
+  "translations",
+]
+# Ensure console runner is executable (chmod ug+x) and owned by runtime user.
+fs_permissions_guard_fix_console_exec = true
+# Console path relative to instance root.
+fs_permissions_guard_console_relpath = "bin/console"
+
+# DB watchdog (observe-first skeleton).
+# Collects processlist telemetry and rule-hit stats; no KILL actions are executed while observe_only=true.
+# Rules are runtime-dynamic and can be supplied from MCC via host-runtime JSON.
+# Merge model:
+# - global_rules: default/global rule set
+# - host_rules  : per-host override map/list; matching host patch overrides defaults by rule id
+db_watchdog = { enabled = false, interval_sec = 300, observe_only = true, processlist_limit = 500, sample_limit = 25, long_query_sec = 900, orphan_query_sec = 1200, mcd_tmp_segment_query_sec = 1800, kill_mcd_tmp_segment_queries = true, global_rules = [], host_rules = {} }
+
+[sql]
+# Queue metric for throttling decision (must return one numeric value).
+mail_queue_count = "SELECT COUNT(*) AS cnt FROM {prefix}message_queue WHERE status = 'pending'"
+
+# Segment source ids (published).
+segments_due = "SELECT ll.id FROM {prefix}lead_lists ll WHERE ll.is_published = 1 AND (  ll.last_built_date IS NULL   OR ll.last_built_date < '{window_start_utc_24h}'   OR COALESCE(ll.date_modified, ll.date_added) > COALESCE(ll.last_built_date, '1970-01-01 00:00:00')   OR EXISTS (    SELECT 1     FROM {prefix}lead_lists_leads lll     WHERE lll.leadlist_id = ll.id       AND (ll.last_built_date IS NULL OR lll.date_added > ll.last_built_date)     LIMIT 1  )  OR EXISTS (    SELECT 1     FROM {prefix}lead_lists_leads lll     INNER JOIN {prefix}leads l ON l.id = lll.lead_id     WHERE lll.leadlist_id = ll.id       AND lll.manually_removed = 0       AND (        ll.last_built_date IS NULL         OR COALESCE(l.date_modified, l.date_added) > ll.last_built_date      )     LIMIT 1  )) ORDER BY COALESCE(ll.last_built_date, '1970-01-01 00:00:00') ASC, ll.id ASC"
+# Campaign source ids. Trigger workers only launch campaigns with due event-log
+# rows; rebuild workers create missing event logs for newly eligible contacts.
+# Note: for Mautic 4 the agent auto-removes `c.deleted` predicate at runtime
+# because some M4 schemas do not have this column.
+campaigns_due = "SELECT DISTINCT c.id FROM {prefix}campaigns c WHERE c.is_published = 1 AND (c.deleted IS NULL) AND (c.publish_up IS NULL OR c.publish_up <= '{now_local}') AND EXISTS (  SELECT 1   FROM {prefix}campaign_lead_event_log el   WHERE el.campaign_id = c.id     AND el.date_triggered IS NULL     AND (      (el.trigger_date IS NOT NULL AND el.trigger_date >= '{window_start_utc_7d}' AND el.trigger_date <= '{now_utc}')       OR (el.is_scheduled = 1 AND el.trigger_date IS NULL)    )   LIMIT 1) ORDER BY c.id"
+
+# Segment weight source rows.
+segment_weights = "SELECT ll.id, UNIX_TIMESTAMP(ll.date_added) AS created_ts, UNIX_TIMESTAMP(ll.date_modified) AS modified_ts, UNIX_TIMESTAMP(ll.last_built_date) AS built_ts, COALESCE(a.recent_cnt, 0) AS recent_activity FROM {prefix}lead_lists ll LEFT JOIN (SELECT leadlist_id, COUNT(*) AS recent_cnt FROM {prefix}lead_lists_leads WHERE manually_removed = 0 AND date_added >= '{window_start_utc_24h}' GROUP BY leadlist_id) a ON a.leadlist_id = ll.id WHERE ll.is_published = 1"
+# Campaign weight source rows (published only; no publish window filter).
+# Note: for Mautic 4 the agent auto-removes `c.deleted` predicate at runtime
+# because some M4 schemas do not have this column.
+campaign_weights = "SELECT c.id, UNIX_TIMESTAMP(COALESCE(c.publish_up, c.date_added)) AS publish_ts, COALESCE(p.pending_cnt, 0) AS pending_cnt, COALESCE(r.recent_cnt, 0) AS recent_activity FROM {prefix}campaigns c LEFT JOIN (SELECT campaign_id, COUNT(*) AS pending_cnt FROM {prefix}campaign_leads WHERE manually_removed = 0 AND date_last_exited IS NULL GROUP BY campaign_id) p ON p.campaign_id = c.id LEFT JOIN (SELECT campaign_id, COUNT(*) AS recent_cnt FROM {prefix}campaign_leads WHERE manually_removed = 0 AND date_added >= '{window_start_utc_24h}' GROUP BY campaign_id) r ON r.campaign_id = c.id WHERE c.is_published = 1 AND (c.deleted IS NULL)"
+
+# Import queue metric (must return one numeric value).
+import_pending_count = "SELECT COUNT(*) AS cnt FROM {prefix}imports WHERE is_published = 1 AND (status IN (1,2,7) OR CAST(status AS CHAR) IN ('pending','in_progress','delayed')) AND (date_started IS NULL OR CAST(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(properties, '$.line')), '1') AS UNSIGNED) <= line_count)"
+
+[commands]
+# Segment by id template.
+segment_update_template = "mautic:segments:update -i {id} --batch-limit={batch_limit}"
+# Full segment loop template.
+segment_full_update_template = "mautic:segments:update --batch-limit={batch_limit}"
+# Campaign update by id template (alias to rebuild in scheduler).
+campaign_update_template = "mautic:campaigns:update -i {id}"
+# Campaign trigger by id template. {campaign_limit_arg} expands to " --campaign-limit=N" or empty.
+campaign_trigger_template = "mautic:campaigns:trigger -i {id}{campaign_limit_arg} --batch-limit={batch_limit}"
+# Campaign rebuild by id template.
+campaign_rebuild_template = "mautic:campaigns:rebuild -i {id}"
+# Import template.
+import_template = "mautic:import --limit={import_limit}"
+# Cache clear template.
+cache_clear_template = "cache:clear"
+# Cache warm template.
+cache_warm_template = "cache:warmup"
+
+[cluster]
+# Optional local cluster identity. MCC normally injects these dynamically.
+# Without MCC, use these keys in the shared/Galera config plus
+# [backup.cluster].authority_host or per-node node_role when needed.
+id = ""
+name = ""
+node_role = "" # node|replica|arbiter|other
+# node_index = 1
+
+[cluster.routing]
+# Cluster MCD nodes are command entrypoints. With mysql_hybrid state enabled,
+# commands submitted on any node are routed through the shared Galera-backed
+# queue to the configured execution node(s).
+enabled = true
+# Segments and campaigns run only on this node.
+cron_host = ""
+# Imports run only on this node.
+import_host = ""
+# Cluster backup runs only on this node.
+backup_host = ""
+# Cache operations fan out to these nodes. Empty means local compatibility mode.
+cache_hosts = []
+
+[state]
+# Agent state backend:
+# - "sqlite"       : legacy local-only state
+# - "mysql_hybrid" : primary shared state in MySQL/MariaDB + local SQLite fallback queue
+backend = "sqlite"
+# Shared MySQL/MariaDB endpoint for MCD state (general DB-backed mode).
+mysql_host = ""
+mysql_port = 3306
+mysql_database = "mcd_state"
+mysql_user = ""
+mysql_password = ""
+# Prefix for service tables inside state DB.
+mysql_table_prefix = "mcd_"
+# Network timeouts (sec) for state DB operations.
+mysql_connect_timeout_sec = 5
+mysql_read_timeout_sec = 15
+mysql_write_timeout_sec = 15
+# Store latest built MCC payload snapshot in shared state DB.
+mysql_snapshot_enabled = true
+
+[mcc]
+# Optional MCC URL for connected mode.
+url = ""
+# Optional MCC token for API auth.
+token = ""
+# Push state to MCC `/api/v1/agent/state`.
+push_enabled = true
+# Periodic full push interval (seconds).
+push_interval_sec = 300
+# Immediate push on arbitrary snapshot changes (usually noisy). Keep off by default.
+push_on_change = false
+# Log-signal polling interval for alert-triggered push (seconds).
+push_alert_poll_interval_sec = 60
+# Journald window for alert signal aggregation (minutes).
+push_alert_window_min = 5
+# APT metrics refresh interval (seconds). Agent refreshes sooner if APT/DPKG state changed.
+push_apt_state_interval_sec = 120
+# Periodic runtime-overrides pull from MCC.
+runtime_overrides_poll_enabled = true
+# Periodic config drift guard via /agent/config-desired (disabled by default).
+profile_guard_enabled = true
+# Optional explicit host name to map this agent in MCC inventory.
+# If empty, system hostname is used.
+host_name = ""
+# Optional explicit URL to MCD version manifest JSON.
+# If empty and mcc.url is set, default path is: {mcc.url}/mauticctl/mcd/manifest.json
+mcd_manifest_url = ""
+
+[plugins]
+# Base URL for plugin manifest/packages.
+repo_base_url = "https://servercontrol.sales-snap.com"
+# Optional fallback origin IP used only when primary FQDN fetch fails.
+# Request URL/Host remains the same; only DNS resolution is forced to this IP.
+# Example: repo_fallback_ip = "65.21.54.91"
+repo_fallback_ip = ""
+# Manifest path pattern.
+manifest_path_template = "/mauticctl/packages/mautic{major}/manifest.json"
+# Run cache:clear after plugin actions.
+post_cache_clear = true
+# Run mautic:plugin:install after plugin actions.
+post_plugin_install = true
+# Metadata filename placed in plugin directory.
+state_filename = ".mcd-plugin.json"
+# Cluster plugin operations: reference node waits this long for Syncthing/file
+# propagation before cache clear fan-out.
+cluster_file_sync_wait_sec = 900
+# Cluster plugin operations: max wait for per-node cache:clear requests.
+cluster_cache_clear_wait_sec = 600
+
+[custom]
+# Base URL for custom scripts manifest/files.
+# If empty, MCD falls back to [mcc].url.
+repo_base_url = ""
+# Manifest path for custom scripts.
+manifest_path = "/mauticctl/custom/manifest.json"
+# Local cache for downloaded manifest/scripts/logs.
+cache_dir = "/opt/mcd/var/custom"
+# Default run mode: auto|tmux|screen|direct.
+run_mode_default = "auto"
+# In auto mode prefer tmux when available.
+prefer_tmux = true
+# In auto mode fallback to screen when tmux is unavailable.
+prefer_screen = true
+# Session prefix for detached runs.
+tmux_session_prefix = "mcd-custom"
+# Enable periodic local cache cleanup for custom scripts.
+cleanup_enabled = true
+# Minimum interval between cleanup runs (sec).
+cleanup_interval_sec = 86400
+# Quiet window start hour for cleanup (local host time).
+cleanup_quiet_hour = 3
+# Quiet window duration for cleanup (minutes).
+cleanup_quiet_window_min = 60
+# Keep detached execution logs for this many days.
+logs_keep_days = 14
+# Hard cap for detached execution log files.
+logs_max_files = 200
+# Keep downloaded custom scripts for this many days.
+downloads_keep_days = 30
+# Hard cap for cached download entries (key directories/files).
+downloads_max_entries = 200
+
+[backup]
+# Enable MCD backup module (`mcd-cli backup ...`).
+enabled = false
+# Local state/semaphore dir (last run, last success, error, history).
+state_dir = "/opt/mcd/var/state/backup"
+# Lock dir (prevents parallel backup for one instance).
+lock_dir = "/opt/mcd/var/locks"
+# Local sshfs mount base dir.
+mount_base_dir = "/opt/mcd/var/backup/mounts"
+# Remote root dir inside mounted share.
+remote_root_dir = "backup"
+# Optional host folder override (default: system hostname).
+host_name = ""
+# Optional custom instance folder pattern.
+# Available placeholders: {instance_uid}, {instance_name}, {root}, {domain}
+# instance_name = "{instance_uid}"
+# Keep N latest date-folders on remote share.
+retention_copies = 10
+# Mount timeout (sec).
+mount_timeout_sec = 15
+# Unmount timeout (sec).
+unmount_timeout_sec = 10
+# Dump timeout (sec).
+# Use bounded value to avoid infinite backup guard pause on hung dump process.
+dump_timeout_sec = 10800
+# Restore behavior: apply archived files to `/`.
+restore_apply_files = true
+# Restore behavior: apply database dumps with myloader.
+restore_apply_databases = true
+
+[backup.schedule]
+# Run host backup on schedule from daemon loop.
+# Works in all profiles, including passive.
+enabled = false
+# Minimum interval between scheduled runs in seconds.
+interval_sec = 86400
+# Quiet-window start hour (local host time).
+quiet_hour = 2
+# Quiet-window duration in minutes.
+quiet_window_min = 60
+# Pre-backup guard window in seconds.
+# During this window MCD does not start NEW Mautic jobs (segments/campaigns/import/jobs).
+# Already running jobs are never killed by this guard.
+# After backup finishes, normal dispatch resumes automatically.
+pre_pause_sec = 3600
+
+[backup.secrets]
+# Secret-store key path for backup profile vault in local MCD sqlite DB.
+# Used to encrypt storage/mysql credentials for `backup profile-set`.
+key_path = "/opt/mcd/var/keys/backup-secrets.key"
+
+[backup.storage]
+# SSHFS target credentials/path.
+host = ""
+port = 22
+user = ""
+remote_path = "/"
+# Preferred auth via key file.
+key_file = "/root/.ssh/backup-storage"
+# Optional password reference key (external secret source integration).
+password_ref = ""
+# Optional password auth (not recommended; keep empty when key_file is used).
+password = ""
+
+[backup.mysql]
+# Optional dedicated MySQL credentials for backup/restore.
+# If empty, instance DB credentials from Mautic local.php are used.
+host = ""
+port = 3306
+user = ""
+password = ""
+# Optional password reference key (external secret source integration).
+password_ref = ""
+database = ""
+
+[backup.archive]
+# Optional config/files archive in backup directory.
+enabled = true
+name = "files.tar.gz"
+paths = [
+  "/etc/mysql",
+  "/etc/nginx",
+  "/etc/apache2",
+  "/etc/php",
+  "/etc/cron.d",
+  "/var/spool/cron",
+  "/etc/systemd/system",
+  "/opt/mcd/etc",
+  "/var/www",
+]
+
+[backup.mydumper]
+bin = "/usr/bin/mydumper"
+threads = 6
+verbose = 3
+compress = true
+long_query_guard = 0
+kill_long_queries = false
+# Run backup dump with lowered scheduler/IO priority (recommended for production).
+use_nice = true
+nice_level = 15
+use_ionice = true
+ionice_class = 2
+ionice_level = 7
+# Additional raw args passed to mydumper.
+# Notes:
+# - MCD auto-adds `--sync-thread-lock-mode=AUTO` when supported by local mydumper.
+# - MCD prefers `--trx-tables` when supported, otherwise falls back to
+#   `--trx-consistency-only` for older mydumper versions.
+# - If you set lock/transaction flags manually here, MCD will not override them.
+extra_args = []
+# myloader binary for restore.
+myloader_bin = "/usr/bin/myloader"
+# myloader parallel threads for restore.
+myloader_threads = 4
+
+[backup.xtrabackup]
+package = "percona-xtrabackup-80"
+bin = "/usr/bin/xtrabackup"
+parallel = 4
+# Default physical backup policy: weekly full + daily incrementals.
+incremental_enabled = true
+full_interval_days = 7
+# Retention policy for physical chains: keep 3 full backups and incrementals for 7 days.
+retention_full_copies = 3
+retention_incremental_days = 7
+# Additional raw args passed to xtrabackup. MCD adds --slave-info when supported.
+extra_args = []
+
+[backup.cluster]
+# Cluster backup mode is configured as one logical cluster feature.
+# All nodes may receive the same config, but only the authority node can run it.
+# Local operational layer uses xtrabackup on a local data disk.
+enabled = false
+local_root_dir = "/mnt/data/backup/local/ananasrs"
+# Autonomous authority guard. Prefer authority_host when all nodes share the
+# same Galera-backed config; otherwise authority_role=replica uses cluster.node_role.
+authority_role = "replica"
+authority_host = ""
+# Daily local full xtrabackup start time (host local time).
+full_hour = 1
+full_minute = 0
+# Remote offsite starts only after a successful local full and not before this time.
+offsite_not_before_hour = 2
+offsite_not_before_minute = 0
+# Offsite DB source:
+# - xtrabackup: prepare a reflink clone of current local full and run a
+#   temporary same-version read-only mysqld for mydumper. Preferred for
+#   clusters because live replica DDL cannot break the logical dump.
+# - live_replica: run mydumper directly against the configured DB endpoint.
+offsite_source = "xtrabackup"
+# Local incrementals from current daily full.
+incremental_start_hour = 8
+incremental_end_hour = 20
+incremental_interval_sec = 7200
+# Local files snapshot is assembled on the backup authority from node layers.
+# Default transport is Syncthing: every expected web node prepares its own
+# file layer under files_sync_dir; the replica receives those layers and
+# assembles files/snapshots/latest without pulling files over SSH.
+files_snapshot_enabled = true
+# syncthing|local. `local` is legacy single-node hardlink snapshot mode.
+files_transport = "syncthing"
+# Syncthing-shared folder root. On backup replica this should point to the
+# receiving folder on the data disk; on web nodes it can stay under /opt/mcd.
+files_sync_dir = "/opt/mcd/var/cluster-backup-files"
+# Node-local paths prepared by each expected node. Keep this host-specific:
+# service configs, cron/systemd/firewall/network/MCD config and small helper
+# scripts. Do not put Mautic code here; the application tree is a shared
+# cluster artifact.
+files_node_paths = [
+  "/etc/cron.d",
+  "/etc/crontab",
+  "/etc/fstab",
+  "/etc/haproxy",
+  "/etc/hostname",
+  "/etc/hosts",
+  "/etc/mcd",
+  "/etc/mysql",
+  "/etc/netplan",
+  "/etc/nginx",
+  "/etc/php",
+  "/etc/systemd/system",
+  "/etc/timezone",
+  "/opt/mcd/etc",
+  "/opt/mcd/var/state",
+  "/usr/local/bin",
+  "/usr/local/sbin",
+  "/var/lib/syncthing-mcd/config.xml",
+  "/var/lib/syncthing-mcd/cert.pem",
+  "/var/lib/syncthing-mcd/key.pem",
+]
+# Shared paths are produced by one node only (files_shared_producer_host, or node #1 by default).
+files_shared_paths = ["/var/www/mautic"]
+files_shared_producer_host = ""
+# Expected producer node host ids/names. When set, replica refuses to assemble
+# a snapshot until every expected layer has a fresh manifest.
+files_expected_nodes = []
+# Reject layers older than this many seconds.
+files_layer_max_age_sec = 86400
+# Daemon producer interval on expected nodes.
+files_produce_interval_sec = 3600
+# Legacy local-mode source paths. Kept for compatibility with files_transport="local".
+files_snapshot_paths = []
+files_snapshot_exclude = [
+  "var/www/mautic/var/cache/***",
+  "var/www/mautic/var/logs/***",
+  "var/www/mautic/var/spool/***",
+  "var/www/mautic/var/sessions/***",
+  "var/www/mautic/app/cache/***",
+  "var/www/mautic/app/logs/***",
+  "*/var/www/mautic/var/cache/***",
+  "*/var/www/mautic/var/logs/***",
+  "*/var/www/mautic/var/spool/***",
+  "*/var/www/mautic/var/sessions/***",
+  "*/var/www/mautic/app/cache/***",
+  "*/var/www/mautic/app/logs/***",
+]
+# Remote offsite layer uses mydumper directly to Storage Box.
+remote_enabled = true
+remote_retention_daily = 7
+remote_retention_weekly = 4
+
+[[jobs]]
+# Job name (for logs/state).
+name = "email-fetch"
+# Enable/disable this job.
+enabled = false
+# Interval in seconds.
+interval_sec = 900
+# Command template executed via Mautic console.
+command_template = "mautic:email:fetch"
+# Timeout for this job; 0 means no timeout.
+timeout_sec = 0
+
+[[jobs]]
+# Job name (for logs/state).
+name = "broadcasts-send"
+# Enable/disable this job.
+enabled = false
+# Interval in seconds.
+interval_sec = 60
+# Command template executed via Mautic console.
+command_template = "mautic:broadcasts:send --limit=100"
+# Timeout for this job; 0 means no timeout.
+timeout_sec = 0
+
+[[jobs]]
+# Job name (for logs/state).
+name = "messages-send"
+# Enable/disable this job.
+enabled = false
+# Interval in seconds.
+interval_sec = 60
+# Command template executed via Mautic console.
+command_template = "mautic:messages:send"
+# Timeout for this job; 0 means no timeout.
+timeout_sec = 0
+
+[[instances]]
+# Logical instance name in local inventory.
+name = "custom-instance-1"
+# Mautic root path.
+root = "/srv/mautic/custom"
+# Major version hint (4/5/6/7).
+mautic_major = 6
+# Explicit console path.
+console_path = "/srv/mautic/custom/bin/console"
+# Explicit local.php path.
+local_php_path = "/srv/mautic/custom/config/local.php"

@@ -1,0 +1,16 @@
+[Unit]
+Description=MCD Agent
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/mcd-agent
+ExecStart=/usr/bin/python3 -m mcd_agent run --config /etc/mcd-agent.toml
+Restart=always
+RestartSec=3
+KillMode=process
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

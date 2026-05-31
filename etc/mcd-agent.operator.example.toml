@@ -1,0 +1,180 @@
+# MCD operator-level config (split mode)
+# Main scheduler tuning knobs used by operator/MCC.
+#
+# IMPORTANT precedence:
+# 1) profile baseline is applied
+# 2) any value set manually in [runtime] below overrides profile
+#
+# Example:
+# - profile tiny gives segments 1
+# - if you set segment_regular_parallel_idle = 3 here
+# - final value will be 3 (customized tiny)
+
+[profile]
+# custom|passive|tiny|mini|midi|maxi|hiload
+name = "passive"
+
+# Profile defaults snapshot:
+# passive: planning-only, cron untouched, no Mautic task dispatch
+# tiny   : single ring, no throttle, no whitelist, segments 1, trigger 1, rebuild 1, campaign total 1 (single campaign chain rebuild->trigger)
+# mini   : single ring, no throttle, no whitelist, segments 4, trigger 2, rebuild 1, campaign total 1
+# midi   : dual ring, no throttle, whitelist on, priority size 10, seg 3+1, trigger 3+1
+# maxi   : dual ring, throttle 200/5m, whitelist on, seg 5+1, trigger 3+1, rebuild 2+1
+# hiload : dual ring, throttle 200/5m, whitelist on, seg 6+2, trigger 4+2, rebuild 3+1
+
+[runtime]
+# MCC dynamic runtime table (hot apply):
+#   mcc_cli host-runtime set --host <host> --set key=value
+# Effective precedence:
+#   MCC host-runtime override > local [runtime] > profile defaults
+
+# Ring layout: dual|single.
+ring_mode = "single"
+
+# Disable queue throttling logic entirely (true|false).
+disable_throttle = true
+
+# Ignore all whitelist sources (true|false).
+disable_whitelist = true
+
+# Segment weight threshold for entering priority ring.
+segment_priority_weight_threshold = 999999
+# Number of priority segment ids by score.
+segment_priority_size = 0
+# Number of priority campaign ids by score.
+campaign_priority_size = 0
+# Count of latest campaigns forced to priority.
+campaign_latest_priority_count = 0
+
+# Segment parallel slots for priority ring when not throttled.
+segment_priority_parallel_idle = 0
+# Segment parallel slots for regular ring when not throttled.
+segment_regular_parallel_idle = 1
+
+# Segment parallel slots for priority ring when throttled.
+segment_priority_parallel_throttled = 0
+# Segment parallel slots for regular ring when throttled.
+segment_regular_parallel_throttled = 1
+# SQL ring for simple segments (direct DB rebuild; excluded from regular/priority rings).
+segment_sql_ring_enabled = false
+# Max SQL segment rebuilds per scheduler tick.
+segment_sql_ring_max_per_tick = 1
+# Minimum time between starts of the same SQL-managed segment, sec.
+segment_sql_min_repeat_sec = 3600
+# Persistent SQL-ring lock heartbeat interval, sec.
+segment_sql_lock_heartbeat_sec = 15
+# Orphan policy for stale SQL-ring locks.
+# - manual        : never reclaim automatically
+# - reclaim_stale : reclaim lock after orphan timeout
+segment_sql_orphan_policy = "reclaim_stale"
+# Consider SQL-ring lock stale after this many seconds without heartbeat.
+segment_sql_orphan_after_sec = 900
+# Allow page_hits-based SQL segments only in quiet window.
+segment_sql_page_hits_quiet_only = false
+# Quiet window start hour for page_hits-based SQL segments.
+segment_sql_page_hits_quiet_hour = 2
+# Quiet window length in minutes for page_hits-based SQL segments.
+segment_sql_page_hits_quiet_window_min = 180
+# Enable orphan page_hits cleanup ring.
+enable_page_hits_orphan_cleanup = false
+# Minimum interval between orphan cleanup runs, sec.
+page_hits_orphan_cleanup_interval_sec = 3600
+# Quiet window start hour (instance timezone).
+page_hits_orphan_cleanup_quiet_hour = 2
+# Quiet window length in minutes.
+page_hits_orphan_cleanup_quiet_window_min = 180
+# Per-batch delete size for orphan page_hits.
+page_hits_orphan_cleanup_batch_size = 5000
+# Max delete batches per cleanup run.
+page_hits_orphan_cleanup_batches_per_run = 12
+# Sleep between orphan delete batches, sec.
+page_hits_orphan_cleanup_sleep_sec = 0.2
+# Keep recent orphan page_hits younger than this grace window, minutes.
+page_hits_orphan_cleanup_grace_min = 60
+# Max runtime budget of one orphan cleanup run, sec.
+page_hits_orphan_cleanup_max_run_sec = 180
+page_hits_orphan_cleanup_instance_settings = {}
+
+# Leuchtfeuer Housekeeping plugin scheduling for Mautic 4/5/6/7 instances.
+housekeeping_plugin_enabled = false
+housekeeping_plugin_interval_sec = 86400
+housekeeping_plugin_quiet_hour = 3
+housekeeping_plugin_quiet_window_min = 120
+housekeeping_plugin_days_old = 365
+housekeeping_plugin_flags = []
+housekeeping_plugin_optimize_tables = false
+housekeeping_plugin_dry_run = true
+housekeeping_plugin_instance_settings = {}
+
+# Monitored mailbox parser (MCD-managed replacement for mautic:email:fetch).
+monitored_email_parser_enabled = false
+monitored_email_parser_interval_sec = 900
+monitored_email_parser_batch_size = 100
+monitored_email_parser_force_seen = false
+monitored_email_parser_delete_processed = false
+monitored_email_parser_disable_mautic_fetch = true
+monitored_email_parser_types = ["feedback_loop"]
+monitored_email_parser_whitelist = []
+monitored_email_parser_instance_settings = {}
+# JSON map/list of SQL segment rules.
+# Rule format (must return `lead_id` column):
+# segment_sql_ring_rules = { "188" = { select_sql = "SELECT l.id AS lead_id FROM {prefix}leads l WHERE l.email IS NOT NULL AND l.email <> ''", depends_on = [] } }
+segment_sql_ring_rules = {}
+# During throttle run only whitelist segments.
+segment_throttle_whitelist_only = false
+# Allowed whitelist segment parallel slots during whitelist-only throttle.
+segment_throttle_whitelist_parallel = 1
+# During whitelist-only throttle kill running non-whitelist segment tasks.
+segment_throttle_kill_non_whitelist = false
+
+# Campaign UPDATE is treated as synonym of REBUILD and is not scheduled separately.
+# Keep both values at 0.
+campaign_update_priority_parallel = 0
+# Campaign UPDATE (synonym) regular ring slots.
+campaign_update_regular_parallel = 0
+# Total campaign workers cap across trigger+rebuild (0 = no shared cap).
+campaign_total_parallel = 1
+# Campaign TRIGGER parallel slots for priority ring.
+campaign_trigger_priority_parallel = 0
+# Campaign TRIGGER parallel slots for regular ring.
+campaign_trigger_regular_parallel = 1
+
+# Campaign REBUILD parallel slots for priority ring.
+campaign_rebuild_priority_parallel = 0
+# Campaign REBUILD parallel slots for regular ring.
+campaign_rebuild_regular_parallel = 1
+
+# Queue pending threshold for throttle activation.
+queue_throttle_threshold = 200
+# Window length (minutes) where queue must stay above threshold.
+queue_throttle_window_min = 5
+
+# Segment mode: id_weighted|classic_loop.
+segment_mode = "id_weighted"
+
+# Mark host as template source (true|false).
+# Template hosts are highlighted in MCC dashboard.
+host_template = false
+# Auto-promote clone to normal host when local OS hostname differs from configured [mcc].host_name.
+# When true, cloned host self-registers as new host in MCC and clears template role for the clone.
+template_autopromote_on_clone = true
+
+# Mautic 6 core patch policy for PluginUpdateEvent metadata bug.
+# - required : keep host auto-patched by daemon
+# - off      : do not auto-patch (manual only)
+mautic6_core_patch_policy = "required"
+# Optional version scope for patch auto-apply:
+# empty = no boundary, set values to limit patch window.
+mautic6_core_patch_version_min = ""
+mautic6_core_patch_version_max = ""
+# If local version is unknown, apply patch by default.
+mautic6_core_patch_apply_if_version_unknown = true
+# Deprecated: page-hit cascade core patch is retired. MCD handles stale page-hit
+# queue cleanup in daemon housekeeping instead of patching Mautic core.
+pagehit_cascade_patch_policy = "off"
+
+# Note:
+# - segment_cycles_per_tick and segment_kill_* are system-level parameters
+#   and are configured in mcd-agent.system.example.toml.
+# - DB watchdog runtime policy is configured via `runtime.db_watchdog` JSON map
+#   (recommended from MCC host-runtime overrides).

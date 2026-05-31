@@ -1,0 +1,86 @@
+# MCD main config (dev/example split mode)
+#
+# Split config layout:
+# - system file: low-level paths, SQL, command templates
+# - operator file: profile and scheduler tuning
+# - for production entrypoint+local override, see README section "Split Config"
+#
+# Merge order:
+# 1) include files in listed order
+# 2) this file values
+#
+# Profile precedence rule:
+# - profile applies baseline defaults first
+# - any value set manually in [runtime] overrides profile value
+
+[include]
+files = [
+  "./mcd-agent.system.example.toml",
+  "./mcd-agent.operator.example.toml",
+]
+
+[config]
+# Config schema version for migration/import logic.
+# Keep this value when editing config manually so MCC can track format.
+schema_version = 1
+
+[daemon]
+# Polling refresh (sec): reload due ids/weights/queue metrics.
+poll_interval_sec = 30
+# Dispatch refill (sec): keeps target parallelism by running-count.
+dispatch_interval_sec = 0.2
+
+[profile]
+# Default for NEW deployments: passive.
+# Use `mcd-cli profile <name> --yes` (or MCC wrapper) to switch host profile later.
+name = "passive"
+
+[mcc]
+# Push endpoint on MCC API.
+url = ""
+# Bearer token for agent push auth.
+token = ""
+# Enable push model from MCD to MCC.
+push_enabled = true
+# Periodic state push every 5 minutes.
+push_interval_sec = 300
+# Immediate push on arbitrary snapshot changes (usually noisy). Keep off by default.
+push_on_change = false
+# Critical log-signal poll interval (seconds).
+push_alert_poll_interval_sec = 60
+# Critical log-signal window (minutes).
+push_alert_window_min = 5
+# APT metrics refresh interval (seconds). Agent refreshes sooner if APT/DPKG state changed.
+push_apt_state_interval_sec = 120
+# Periodic runtime-overrides pull from MCC.
+runtime_overrides_poll_enabled = true
+# Periodic config drift guard via /agent/config-desired (disabled by default).
+profile_guard_enabled = true
+# Optional explicit host name for MCC inventory mapping.
+host_name = ""
+
+[state]
+# Shared state mode for all installations:
+# - sqlite       : local-only state
+# - mysql_hybrid : primary state in MySQL/MariaDB + local SQLite fallback queue
+backend = "sqlite"
+mysql_host = ""
+# Optional explicit unix socket path (recommended for root@localhost auth_socket).
+# When empty, agent auto-detects common local sockets for passwordless local auth.
+mysql_unix_socket = ""
+mysql_port = 3306
+mysql_database = "mcd_state"
+mysql_user = ""
+mysql_password = ""
+mysql_table_prefix = "mcd_"
+mysql_connect_timeout_sec = 5
+mysql_read_timeout_sec = 15
+mysql_write_timeout_sec = 15
+mysql_snapshot_enabled = true
+
+[custom]
+# Optional custom scripts base URL.
+# If empty, MCD uses [mcc].url.
+repo_base_url = ""
+# Manifest path for centralized custom scripts.
+manifest_path = "/mauticctl/custom/manifest.json"
