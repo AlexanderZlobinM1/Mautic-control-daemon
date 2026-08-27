@@ -14,6 +14,7 @@ from typing import Any
 
 from mcd_agent.config import AgentConfig
 from mcd_agent.executor import execute_mautic_command
+from mcd_agent.install_type import app_bundle_dir_candidates, plugin_dir_candidates
 from mcd_agent.inventory import InstanceInventory, MauticInstall, ensure_seeded
 
 
@@ -38,11 +39,12 @@ def _sha256_file(path: Path) -> str:
 
 
 def _asset_path(root: str, name: str) -> Path:
-    base = Path(root)
     if name == "plugins":
-        return base / "plugins"
+        candidates = plugin_dir_candidates(root)
+        return next((p for p in candidates if p.exists()), candidates[0])
     if name == "bundles":
-        return base / "app" / "bundles"
+        candidates = app_bundle_dir_candidates(root)
+        return next((p for p in candidates if p.exists()), candidates[0])
     raise ValueError(f"unsupported asset name: {name}")
 
 

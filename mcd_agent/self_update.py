@@ -20,7 +20,7 @@ from mcd_agent.cluster_routing import cluster_route_targets
 from mcd_agent.config import AgentConfig
 from mcd_agent.host_identity import resolve_agent_identity
 from mcd_agent.state_backend import mysql_state_connection, mysql_state_enabled, mysql_state_table_names
-from mcd_agent.version_identity import agent_version_payload, installed_agent_version
+from mcd_agent.version_identity import agent_version_payload, installed_agent_version, package_agent_version
 
 try:
     import fcntl
@@ -322,6 +322,7 @@ def _install_requirements_for_staged_source(install_dir: Path, staged_src_dir: P
     venv_python = install_dir / "venv" / "bin" / "python"
     if not venv_python.exists():
         raise RuntimeError(f"venv python not found: {venv_python}")
+    _ensure_venv_pip(venv_python)
     cmd = [
         str(venv_python),
         "-m",
@@ -336,6 +337,76 @@ def _install_requirements_for_staged_source(install_dir: Path, staged_src_dir: P
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "pip install failed").strip()
         raise RuntimeError(f"dependency install failed: {detail}")
+
+
+def _install_agent_package_for_source(install_dir: Path, source_dir: Path) -> None:
+    pyproject = source_dir / "pyproject.toml"
+    if not pyproject.exists():
+        raise RuntimeError(f"agent pyproject.toml not found: {pyproject}")
+    venv_python = install_dir / "venv" / "bin" / "python"
+    if not venv_python.exists():
+        raise RuntimeError(f"venv python not found: {venv_python}")
+    _ensure_venv_pip(venv_python)
+    site_proc = subprocess.run(
+        [
+            str(venv_python),
+            "-c",
+            "import site; print(site.getsitepackages()[0])",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if site_proc.returncode == 0:
+        site_dir = Path((site_proc.stdout or "").strip())
+        if site_dir.exists():
+            for dist_info in site_dir.glob("mcd_agent-*.dist-info"):
+                if dist_info.is_dir():
+                    shutil.rmtree(dist_info)
+    cmd = [
+        str(venv_python),
+        "-m",
+        "pip",
+        "install",
+        "--disable-pip-version-check",
+        "--no-input",
+        "--no-deps",
+        "--force-reinstall",
+        str(source_dir),
+    ]
+    proc = subprocess.run(cmd, cwd="/", capture_output=True, text=True)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "pip install agent package failed").strip()
+        raise RuntimeError(f"agent package install failed: {detail}")
+
+
+def _ensure_venv_pip(venv_python: Path) -> None:
+    probe = subprocess.run([str(venv_python), "-m", "pip", "--version"], cwd="/", capture_output=True, text=True)
+    if probe.returncode == 0:
+        return
+    proc = subprocess.run(
+        [str(venv_python), "-m", "ensurepip", "--upgrade"],
+        cwd="/",
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "ensurepip failed").strip()
+        raise RuntimeError(f"pip bootstrap failed: {detail}")
+
+
+def _agent_package_sync_needed(source_ver: str | None = None) -> bool:
+    source = str(source_ver or installed_agent_version() or "").strip()
+    if not source:
+        return False
+    package = package_agent_version()
+    return package != source
+
+
+def _repair_agent_package_sync(install_dir: Path, source_dir: Path) -> str:
+    before = package_agent_version() or "-"
+    _install_agent_package_for_source(install_dir, source_dir)
+    after = package_agent_version() or "-"
+    return f"agent package sync repaired: package={before}->{after}"
 
 
 def _pre_switch_smoke_check(install_dir: Path, staged_src_dir: Path) -> None:
@@ -655,6 +726,54 @@ def _cluster_local_update_blockers(cfg: AgentConfig) -> list[dict[str, Any]]:
                 }
             )
     return blockers
+
+
+def _defer_update_for_backup_lock(
+    cfg: AgentConfig,
+    state: dict[str, Any],
+    *,
+    target: str,
+    session_id: str,
+    now_s: int,
+) -> str | None:
+    """Fail closed before an update can restart MCD during a backup.
+
+    The automatic updater already checks this lock, but explicit CLI apply used
+    to bypass that check and could restart the service while a cluster offsite
+    dump still owned a prepared read-only mysqld. Keep the same safety rule for
+    every update path, including source/package mismatch restarts.
+    """
+    if not bool(getattr(cfg, "backup_enabled", False)):
+        return None
+    try:
+        locked = backup_lock_active(cfg)
+    except Exception as e:
+        msg = f"MCD update deferred: backup state cannot be verified ({str(e)[:300]})"
+        status = "deferred_backup_probe"
+    else:
+        if not locked:
+            return None
+        msg = "MCD update deferred: backup lock is active"
+        status = "deferred_backup_lock"
+    state.update(
+        {
+            "last_status": status,
+            "last_result": msg,
+            "last_target": target,
+            "last_attempt_ts": now_s,
+            "last_session_id": session_id,
+        }
+    )
+    _write_state(cfg, state)
+    if session_id:
+        release_session(
+            cfg,
+            session_id,
+            result_status="deferred",
+            result_message=msg,
+            new_version=installed_agent_version(),
+        )
+    return msg
 
 
 def _cluster_payload_plan(payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -1098,12 +1217,26 @@ def apply_update(cfg: AgentConfig, plan: dict[str, Any]) -> tuple[bool, str]:
     state = _read_state(cfg)
     session_id = str(plan.get("session_id", "")).strip()
     now_s = int(time.time())
+    backup_defer = _defer_update_for_backup_lock(
+        cfg,
+        state,
+        target=target,
+        session_id=session_id,
+        now_s=now_s,
+    )
+    if backup_defer is not None:
+        return False, backup_defer
+    install_dir = Path(str(getattr(cfg, "mcd_install_dir", "/opt/mcd") or "/opt/mcd"))
+    src_dir = install_dir / "src"
     current_installed = installed_agent_version()
     if _semver(target) <= _semver(current_installed):
-        if current_installed != __version__:
+        if current_installed != __version__ or _agent_package_sync_needed(current_installed):
+            repair_note = ""
+            if _agent_package_sync_needed(current_installed):
+                repair_note = "; " + _repair_agent_package_sync(install_dir, src_dir)
             msg = (
                 f"source/running version mismatch repaired: source={current_installed} "
-                f"running={__version__}; service restart scheduled"
+                f"running={__version__}{repair_note}; service restart scheduled"
             )
             state.update(
                 {
@@ -1161,8 +1294,6 @@ def apply_update(cfg: AgentConfig, plan: dict[str, Any]) -> tuple[bool, str]:
                 )
             return False, msg
 
-    install_dir = Path(str(getattr(cfg, "mcd_install_dir", "/opt/mcd") or "/opt/mcd"))
-    src_dir = install_dir / "src"
     backup_dir = install_dir / "var" / "backup"
     updates_dir = install_dir / "var" / "updates"
     src_next_dir = updates_dir / f"src.next-{target}"
@@ -1207,6 +1338,7 @@ def apply_update(cfg: AgentConfig, plan: dict[str, Any]) -> tuple[bool, str]:
             os.replace(src_dir, old_src_dir)
         os.replace(src_next_dir, src_dir)
         swapped = True
+        _install_agent_package_for_source(install_dir, src_dir)
 
         release_session(
             cfg,
@@ -1274,6 +1406,8 @@ def apply_update(cfg: AgentConfig, plan: dict[str, Any]) -> tuple[bool, str]:
                     shutil.rmtree(src_dir)
                 with tarfile.open(backup_path, "r:gz") as tf:
                     tf.extractall(install_dir)
+            if src_dir.exists():
+                _install_agent_package_for_source(install_dir, src_dir)
         except Exception:
             pass
         try:
@@ -1405,12 +1539,16 @@ def maybe_auto_update(cfg: AgentConfig, *, force: bool = False) -> tuple[str | N
 
     if status in {"up_to_date", "disabled"}:
         current_installed = installed_agent_version()
-        if current_installed != __version__:
+        if current_installed != __version__ or _agent_package_sync_needed(current_installed):
+            install_dir = Path(str(getattr(cfg, "mcd_install_dir", "/opt/mcd") or "/opt/mcd"))
+            repair_note = ""
+            if _agent_package_sync_needed(current_installed):
+                repair_note = "; " + _repair_agent_package_sync(install_dir, install_dir / "src")
             _restart_service_async()
             state["last_status"] = "version_mismatch_restart"
             state["last_result"] = (
                 f"source/running version mismatch repaired: source={current_installed} "
-                f"running={__version__}; service restart scheduled"
+                f"running={__version__}{repair_note}; service restart scheduled"
             )
             _clear_active_campaign_process_state(state)
             state["next_check_ts"] = now_s + max(60, int(cfg.mcd_update_wait_retry_sec or 60))
@@ -1430,12 +1568,16 @@ def maybe_auto_update(cfg: AgentConfig, *, force: bool = False) -> tuple[str | N
         target = str(decision.get("target", "")).strip()
         current_installed = installed_agent_version()
         if _semver(target) <= _semver(current_installed):
-            if current_installed != __version__:
+            if current_installed != __version__ or _agent_package_sync_needed(current_installed):
+                install_dir = Path(str(getattr(cfg, "mcd_install_dir", "/opt/mcd") or "/opt/mcd"))
+                repair_note = ""
+                if _agent_package_sync_needed(current_installed):
+                    repair_note = "; " + _repair_agent_package_sync(install_dir, install_dir / "src")
                 _restart_service_async()
                 state["last_status"] = "version_mismatch_restart"
                 state["last_result"] = (
                     f"source/running version mismatch repaired: source={current_installed} "
-                    f"running={__version__}; service restart scheduled"
+                    f"running={__version__}{repair_note}; service restart scheduled"
                 )
                 _clear_active_campaign_process_state(state)
                 state["next_check_ts"] = now_s + max(60, int(cfg.mcd_update_wait_retry_sec or 60))

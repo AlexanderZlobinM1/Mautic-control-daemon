@@ -61,6 +61,8 @@ from mcd_agent.custom_scripts import fetch_custom_manifest, format_custom_script
 from mcd_agent.db import MauticDB
 from mcd_agent.daemon import TaskStore, list_external_runtime_task_summaries, run_loop
 from mcd_agent.discovery import discover_mautic
+from mcd_agent.email_activity_report import collect_email_activity_report
+from mcd_agent.email_counters import audit_campaign_email_counters, repair_campaign_email_counters
 from mcd_agent.env import (
     build_policy_plan,
     default_policy,
@@ -76,6 +78,7 @@ from mcd_agent.executor import (
 )
 from mcd_agent.fs_permissions import ensure_instance_permissions
 from mcd_agent.instance_delete import delete_instance_artifacts
+from mcd_agent.instance_runtime import apply_instance_runtime
 from mcd_agent.instance_migrate import (
     collect_source_probe,
     finalize_target_relay,
@@ -92,6 +95,7 @@ from mcd_agent.instance_migrate import (
 )
 from mcd_agent.inventory import InstanceInventory, ensure_seeded
 from mcd_agent.install_type import detect_install_type
+from mcd_agent.mautic_composer_move import move_zip_to_composer
 from mcd_agent.mautic_image_install import install_from_image
 from mcd_agent.mautic_upgrade import run_upgrade_apply, run_upgrade_check, run_upgrade_interactive
 from mcd_agent.mautic6_core_patch import (
@@ -99,10 +103,20 @@ from mcd_agent.mautic6_core_patch import (
     patch_status as mautic6_patch_status,
     revert_m6_plugin_update_metadata_patch,
 )
-from mcd_agent.mautic_version_cache import (
-    discover_and_refresh_mautic_version_cache,
-    install_zabbix_mautic_version_userparameter,
+from mcd_agent.mautic_locks import cleanup_stale_mautic_file_locks
+from mcd_agent.local_mail import (
+    configure_local_mail,
+    disable_local_mail,
+    local_mail_status,
+    receive_local_mail,
+    submit_local_mail,
 )
+from mcd_agent.logical_issues import (
+    read_logical_issues_snapshot,
+    remediate_logical_issue,
+    scan_install_logical_issues,
+)
+from mcd_agent.mail_config import apply_mail_profile, preflight_mail_profile
 from mcd_agent.maintenance_mode import collect_maintenance_state, restore_cron_service_if_needed, stop_cron_service
 from mcd_agent.mode import _resolve_mutable_config_path, profile_set, profile_status
 from mcd_agent.nginx_baseline import ensure_nginx_baseline
@@ -119,7 +133,7 @@ from mcd_agent.service_profiles import fetch_service_profile, service_profiles_a
 from mcd_agent.signals import collect_signals, format_signals_json, format_signals_text
 from mcd_agent.state_push import push_state_now, queue_profile_event
 from mcd_agent.state_backend import create_state_database_with_admin, state_backend_status, state_database_exists
-from mcd_agent.self_update import apply_update, check_with_mcc, update_status
+from mcd_agent.self_update import apply_update, check_with_mcc, maybe_auto_update, update_status
 from mcd_agent.tuner import format_tune_result, tune_segments
 from mcd_agent.uninstall import run_uninstall
 from mcd_agent.version_identity import agent_version_payload, installed_agent_version
@@ -267,7 +281,7 @@ def _apt_service_postcheck() -> tuple[bool, list[str]]:
     return ok, lines
 
 
-def _state_backend_status_payload(cfg) -> dict[str, object]:
+def _state_backend_config_and_status(cfg) -> tuple[object, dict[str, object]]:
     cfg_eff = cfg
     # Status must reflect effective runtime (local config + MCC runtime overrides),
     # otherwise CLI can show legacy while daemon already runs in mysql_hybrid.
@@ -283,21 +297,26 @@ def _state_backend_status_payload(cfg) -> dict[str, object]:
     try:
         raw = state_backend_status(cfg_eff, probe=True)
         if isinstance(raw, dict):
-            return raw
+            return cfg_eff, raw
     except Exception as e:
-        return {
+        return cfg_eff, {
             "desired_backend": "unknown",
             "active_backend": "sqlite",
             "mode": "legacy",
             "reason": "status_error",
             "error": str(e),
         }
-    return {
+    return cfg_eff, {
         "desired_backend": "unknown",
         "active_backend": "sqlite",
         "mode": "legacy",
         "reason": "status_unavailable",
     }
+
+
+def _state_backend_status_payload(cfg) -> dict[str, object]:
+    _cfg_eff, status = _state_backend_config_and_status(cfg)
+    return status
 
 
 def _print_state_backend_status(cfg) -> dict[str, object]:
@@ -313,7 +332,18 @@ def _state_db_missing_only(cfg, st: dict[str, object]) -> bool:
         return False
     exists, msg = state_database_exists(cfg)
     if msg == "ok":
-        return not bool(exists)
+        if not bool(exists):
+            return True
+        reason = str(st.get("reason", "") or "").strip().lower()
+        error = str(st.get("error", "") or "").strip().lower()
+        return reason == "mysql_schema_unavailable" and any(
+            token in error
+            for token in (
+                "state schema not initialized",
+                "state schema version missing",
+                "unsupported state schema version",
+            )
+        )
     txt = str(msg or "").lower()
     if any(token in txt for token in ("unknown database", "access denied", "denied")):
         return True
@@ -498,7 +528,7 @@ def _default_config_path() -> str:
     return candidates[0]
 
 
-def _select_root_for_ops(cfg, root: str | None) -> str:
+def _select_root_for_ops(cfg, root: str | None, *, allow_missing_absolute: bool = False) -> str:
     inv = InstanceInventory(cfg.state_db_path)
     ensure_seeded(inv, cfg)
     installs = inv.list_instances()
@@ -506,6 +536,8 @@ def _select_root_for_ops(cfg, root: str | None) -> str:
         for inst in installs:
             if inst.root == root or inst.instance_uid == root:
                 return inst.root
+        if allow_missing_absolute and Path(root).is_absolute():
+            return root
         raise RuntimeError(f"Mautic install not found for root: {root}")
     if not installs:
         raise RuntimeError("No Mautic install found")
@@ -513,6 +545,31 @@ def _select_root_for_ops(cfg, root: str | None) -> str:
         roots = ", ".join(x.root for x in installs)
         raise RuntimeError(f"Multiple installs found, pass --root: {roots}")
     return installs[0].root
+
+
+def _select_instance_for_ops(cfg, root: str | None):
+    inv = InstanceInventory(cfg.state_db_path)
+    ensure_seeded(inv, cfg)
+    installs = inv.list_instances()
+    target = str(root or "").strip()
+    if target:
+        for inst in installs:
+            domains = [str(x).strip().lower() for x in (getattr(inst, "domains", []) or [])]
+            if (
+                inst.root == target
+                or inst.instance_uid == target
+                or inst.name == target
+                or str(inst.primary_domain or "").strip().lower() == target.lower()
+                or target.lower() in domains
+            ):
+                return inst
+        raise RuntimeError(f"Mautic install not found for root: {target}")
+    if not installs:
+        raise RuntimeError("No Mautic install found")
+    if len(installs) > 1:
+        roots = ", ".join(x.root for x in installs)
+        raise RuntimeError(f"Multiple installs found, pass --root: {roots}")
+    return installs[0]
 
 
 def _run_manual_command_with_scheduler(
@@ -526,6 +583,14 @@ def _run_manual_command_with_scheduler(
     run_as_user: str | None,
 ) -> tuple[int, str]:
     task_type = command_task_type(command)
+    if (
+        str(getattr(cfg, "profile_name", "") or "").strip().lower() == "passive"
+        and task_type is not None
+    ):
+        return 2, (
+            "passive profile rejects MCD user-task execution; "
+            "cron remains external and maintenance must be explicit"
+        )
     route = cluster_route_for_command(command)
     route_targets = cluster_route_targets(cfg, route)
     if route_targets:
@@ -568,6 +633,15 @@ def _run_manual_command_with_scheduler(
                 "cluster route requires mysql_hybrid state backend; "
                 f"route={route} targets={','.join(route_targets)}"
             )
+        if not remote_targets:
+            return execute_mautic_command(
+                php_bin=php_bin,
+                root=root,
+                command=command,
+                instance_id=instance_id,
+                timeout_sec=timeout_sec,
+                run_as_user=run_as_user,
+            )
 
         reqs: list[tuple[str, int]] = []
         command_payload = _MANUAL_CMD_SEP.join(cmd_args)
@@ -587,9 +661,9 @@ def _run_manual_command_with_scheduler(
         if not reqs:
             return 2, f"cluster route has no valid targets for route={route}"
 
-        wait_sec = max(1.0, min(8.0, float(cfg.dispatch_interval_sec) * 3.0))
+        wait_sec = max(1.0, float(timeout_sec or cfg.command_timeout_sec or 0) + 5.0)
         deadline = time.time() + wait_sec
-        terminal = {"launched", "done", "failed", "timeout", "lost", "skipped", "cancelled"}
+        terminal = {"done", "failed", "timeout", "lost", "skipped", "cancelled"}
         statuses: dict[tuple[str, int], str] = {}
         while time.time() < deadline:
             all_terminal = True
@@ -610,72 +684,24 @@ def _run_manual_command_with_scheduler(
         bad = [
             st
             for st in statuses.values()
-            if str(st).strip().lower() in {"failed", "timeout", "lost", "cancelled"}
+            if str(st).strip().lower() in {"failed", "timeout", "lost", "skipped", "cancelled"}
         ]
-        rc = 1 if bad else 0
+        unfinished = [
+            st
+            for st in statuses.values()
+            if str(st).strip().lower() not in terminal
+        ]
+        rc = 1 if bad or unfinished else 0
         return rc, f"cluster routed route={route} " + " ".join(parts)
 
-    if not task_type:
-        return execute_mautic_command(
-            php_bin=php_bin,
-            root=root,
-            command=command,
-            instance_id=instance_id,
-            timeout_sec=timeout_sec,
-            run_as_user=run_as_user,
-        )
-
-    profile = (cfg.profile_name or "").strip().lower()
-    if profile == "passive":
-        return execute_mautic_command(
-            php_bin=php_bin,
-            root=root,
-            command=command,
-            instance_id=instance_id,
-            timeout_sec=timeout_sec,
-            run_as_user=run_as_user,
-        )
-
-    try:
-        cmd_args = build_mautic_exec_args(
-            php_bin=php_bin,
-            root=root,
-            command=command,
-            instance_id=instance_id,
-            run_as_user=run_as_user,
-        )
-    except ValueError as e:
-        return 2, str(e)
-    except FileNotFoundError as e:
-        return 3, str(e)
-
-    store = TaskStore(cfg.state_db_path, cfg)
-    req_id = store.enqueue_manual_request(
+    return execute_mautic_command(
+        php_bin=php_bin,
         root=root,
-        task_type=task_type,
-        entity_id=instance_id,
-        command_str=_MANUAL_CMD_SEP.join(cmd_args),
+        command=command,
+        instance_id=instance_id,
         timeout_sec=timeout_sec,
+        run_as_user=run_as_user,
     )
-
-    wait_sec = max(1.0, min(8.0, float(cfg.dispatch_interval_sec) * 3.0))
-    deadline = time.time() + wait_sec
-    terminal = {"launched", "done", "failed", "timeout", "lost", "skipped", "cancelled"}
-    while time.time() < deadline:
-        st = store.get_manual_request_status(req_id)
-        if st is None:
-            break
-        st_norm = st.strip().lower()
-        if st_norm in terminal:
-            if st_norm == "launched":
-                return 0, f"queued request_id={req_id} status=launched"
-            if st_norm in {"failed", "timeout", "lost"}:
-                return 1, f"queued request_id={req_id} status={st_norm}"
-            return 0, f"queued request_id={req_id} status={st_norm}"
-        time.sleep(0.15)
-
-    st = store.get_manual_request_status(req_id) or "unknown"
-    return 0, f"queued request_id={req_id} status={st}"
 
 
 def _build_cache_hard_local_cli_args(cfg, root: str) -> list[str]:
@@ -1385,8 +1411,8 @@ def _run_interactive_hub(cfg, root: str | None, no_color: bool) -> int:
             continue
         if choice == "6":
             while True:
-                st_backend = _state_backend_status_payload(cfg)
-                show_create_state_db = _state_db_missing_only(cfg, st_backend)
+                cfg_eff, st_backend = _state_backend_config_and_status(cfg)
+                show_create_state_db = _state_db_missing_only(cfg_eff, st_backend)
                 ipv6_disabled = _ipv6_disabled_now()
                 ipv6_toggle_to_disabled = not bool(ipv6_disabled)
                 ipv6_toggle_label = "Disable IPv6" if ipv6_toggle_to_disabled else "Enable IPv6"
@@ -1412,8 +1438,8 @@ def _run_interactive_hub(cfg, root: str | None, no_color: bool) -> int:
                     _print_state_backend_status(cfg)
                     continue
                 if c3 == "3" and show_create_state_db:
-                    host_default = str(cfg.state_mysql_host or "localhost")
-                    port_default = int(cfg.state_mysql_port or 3306)
+                    host_default = str(cfg_eff.state_mysql_host or "localhost")
+                    port_default = int(cfg_eff.state_mysql_port or 3306)
                     admin_host = (_ask(f"DB admin host [{host_default}]: ").strip() or host_default)
                     admin_port_raw = _ask(f"DB admin port [{port_default}]: ").strip()
                     try:
@@ -1422,13 +1448,13 @@ def _run_interactive_hub(cfg, root: str | None, no_color: bool) -> int:
                         print("Invalid port")
                         continue
                     admin_user = (_ask("DB admin user [root]: ").strip() or "root")
-                    sock_default = str(cfg.state_mysql_unix_socket or "").strip()
+                    sock_default = str(cfg_eff.state_mysql_unix_socket or "").strip()
                     sock_prompt = f"DB admin unix socket [{sock_default or 'auto'}]: "
                     admin_sock = _ask(sock_prompt).strip() or sock_default or None
                     while True:
                         admin_pwd = getpass.getpass("DB admin password (empty allowed): ")
                         ok, msg, cfg_after = _bootstrap_state_db_with_admin(
-                            cfg,
+                            cfg_eff,
                             admin_user=admin_user,
                             admin_password=admin_pwd if admin_pwd != "" else None,
                             admin_host=admin_host,
@@ -1536,6 +1562,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "campaign:trigger",
             "segments:update",
             "campaign:rebuild",
+            "campaigns:rebuild",
             "campaigns:update",
             "campaigns:trigger",
             "import",
@@ -1565,6 +1592,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sh_cr = sub.add_parser("campaign:rebuild", help="Shorthand for exec --command campaign:rebuild")
     _add_shorthand_exec_args(sh_cr, with_instance_id=True)
+
+    sh_crs = sub.add_parser("campaigns:rebuild", help="Shorthand for exec --command campaigns:rebuild")
+    _add_shorthand_exec_args(sh_crs, with_instance_id=True)
 
     sh_cu = sub.add_parser("campaigns:update", help="Shorthand for exec --command campaigns:update")
     _add_shorthand_exec_args(sh_cu, with_instance_id=True)
@@ -1633,6 +1663,49 @@ def _build_parser() -> argparse.ArgumentParser:
     lock_cleanup.add_argument("--max-rows", type=int, default=20)
     lock_cleanup.add_argument("--json", action="store_true")
 
+    logical_issues = sub.add_parser("logical-issues", help="Inspect and remediate instance logical errors")
+    logical_issues_sub = logical_issues.add_subparsers(dest="logical_issues_cmd", required=True)
+    logical_scan = logical_issues_sub.add_parser("scan", help="Scan one instance and persist current logical errors")
+    logical_scan.add_argument("--config", default=default_cfg)
+    logical_scan.add_argument("--root", help="Mautic root or instance uid")
+    logical_scan.add_argument("--json", action="store_true")
+    logical_status = logical_issues_sub.add_parser("status", help="Read the persisted logical error snapshot")
+    logical_status.add_argument("--config", default=default_cfg)
+    logical_status.add_argument("--root", help="Mautic root or instance uid")
+    logical_status.add_argument("--json", action="store_true")
+    logical_remediate = logical_issues_sub.add_parser(
+        "remediate", help="Apply a guarded remediation to one active logical error"
+    )
+    logical_remediate.add_argument("--config", default=default_cfg)
+    logical_remediate.add_argument("--root", help="Mautic root or instance uid")
+    logical_remediate.add_argument("--issue-id", required=True)
+    logical_remediate.add_argument("--action", choices=["disable_segments"], required=True)
+    logical_remediate.add_argument("--actor", default="Emmy Starwell")
+    logical_remediate.add_argument("--json", action="store_true")
+
+    email_counters = sub.add_parser(
+        "email-counters",
+        help="Audit/repair Mautic email sent_count drift after campaign trigger completion",
+    )
+    email_counters.add_argument("--config", default=default_cfg)
+    email_counters.add_argument("--root", help="Mautic root, instance uid, name, or domain")
+    email_counters.add_argument("--campaign-id", type=int, required=True)
+    email_counters.add_argument("op", choices=["audit", "repair"], nargs="?", default="audit")
+    email_counters.add_argument("--json", action="store_true")
+
+    email_activity = sub.add_parser(
+        "report:email-activity",
+        help="Collect Mautic sent/read/click/unsubscribe activity report",
+    )
+    email_activity.add_argument("--config", default=default_cfg)
+    email_activity.add_argument("--root", help="Mautic root, instance uid, name, or domain")
+    email_activity.add_argument("--days", type=int, default=7)
+    email_activity.add_argument("--summary", action="store_true", help="Include daily totals")
+    email_activity.add_argument("--extended", action="store_true", help="Include per-email breakdown")
+    email_activity.add_argument("--contact-mode", choices=["all", "fresh", "old"], default="all")
+    email_activity.add_argument("--contact-age-days", type=int, default=30)
+    email_activity.add_argument("--json", action="store_true")
+
     tune = sub.add_parser("tune-segments", help="Benchmark and tune segment parallelism")
     tune.add_argument("--config", default=default_cfg)
     tune.add_argument("--root")
@@ -1674,6 +1747,7 @@ def _build_parser() -> argparse.ArgumentParser:
     up.add_argument("--with-system-upgrade", action="store_true")
     up.add_argument("--target", help="Explicit target Mautic version")
     up.add_argument("--allow-minor", action="store_true", help="Allow one-step minor upgrade within the current major")
+    up.add_argument("--allow-major", action="store_true", help="Allow the guarded Composer Mautic 6 to 7 upgrade flow")
 
     img = sub.add_parser("mautic-image", help="Install a Mautic instance from an MCC image")
     img.add_argument("--config", default=default_cfg)
@@ -1681,9 +1755,60 @@ def _build_parser() -> argparse.ArgumentParser:
     img.add_argument("--image-ref", required=True)
     img.add_argument("--domain", required=True)
     img.add_argument("--php-version", required=True)
+    img.add_argument("--certbot-dns-credential-ref", default="")
     img.add_argument("--yes", action="store_true")
     img.add_argument("--no-certbot", action="store_true")
+    img.add_argument("--own-mail", action="store_true")
+    img.add_argument("--mail-profile-id", default="")
     img.add_argument("--json", action="store_true")
+
+    local_mail = sub.add_parser("local-mail", help="Manage per-instance own-host mail")
+    local_mail_sub = local_mail.add_subparsers(dest="op", required=True)
+    local_mail_configure = local_mail_sub.add_parser("configure")
+    local_mail_configure.add_argument("--config", default=default_cfg)
+    local_mail_configure.add_argument("--instance-domain", required=True)
+    local_mail_configure.add_argument("--root", required=True)
+    local_mail_configure.add_argument("--json", action="store_true")
+    local_mail_disable = local_mail_sub.add_parser("disable")
+    local_mail_disable.add_argument("--config", default=default_cfg)
+    local_mail_disable.add_argument("--instance-domain", required=True)
+    local_mail_disable.add_argument("--json", action="store_true")
+    local_mail_status = local_mail_sub.add_parser("status")
+    local_mail_status.add_argument("--config", default=default_cfg)
+    local_mail_status.add_argument("--instance-domain", required=True)
+    local_mail_status.add_argument("--push", action="store_true")
+    local_mail_status.add_argument("--json", action="store_true")
+    local_mail_submit = local_mail_sub.add_parser("submit")
+    local_mail_submit.add_argument("--config", default=default_cfg)
+    local_mail_submit.add_argument("--instance-domain", required=True)
+    local_mail_submit.add_argument("sendmail_args", nargs=argparse.REMAINDER)
+    local_mail_receive = local_mail_sub.add_parser("receive")
+    local_mail_receive.add_argument("--config", default=default_cfg)
+    local_mail_receive.add_argument("--instance-domain", required=True)
+    local_mail_receive.add_argument("--kind", choices=["bounce", "feedback_loop"], required=True)
+
+    mail_config = sub.add_parser("mail-config", help="Apply an MCC-stored instance mail profile")
+    mail_config_sub = mail_config.add_subparsers(dest="mail_config_op", required=True)
+    mail_config_apply = mail_config_sub.add_parser("apply")
+    mail_config_apply.add_argument("--config", default=default_cfg)
+    mail_config_apply.add_argument("--profile-id", required=True)
+    mail_config_apply.add_argument("--instance-domain", required=True)
+    mail_config_apply.add_argument("--root", required=True)
+    mail_config_apply.add_argument("--json", action="store_true")
+    mail_config_preflight = mail_config_sub.add_parser("preflight")
+    mail_config_preflight.add_argument("--config", default=default_cfg)
+    mail_config_preflight.add_argument("--profile-id", required=True)
+    mail_config_preflight.add_argument("--instance-domain", required=True)
+    mail_config_preflight.add_argument("--root", required=True)
+    mail_config_preflight.add_argument("--json", action="store_true")
+
+    cmove = sub.add_parser("composer-move", help="Move a zip Mautic instance to a Composer skeleton")
+    cmove.add_argument("--config", default=default_cfg)
+    cmove.add_argument("--root", required=True)
+    cmove.add_argument("--domain", required=True)
+    cmove.add_argument("--mautic-major", type=int, required=True)
+    cmove.add_argument("--yes", action="store_true")
+    cmove.add_argument("--json", action="store_true")
 
     hub = sub.add_parser("interactive", help="Unified interactive menu")
     hub.add_argument("--config", default=default_cfg)
@@ -1728,6 +1853,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "php-fpm",
             "mysql",
             "apt",
+            "wazuh",
             "mautic_db_indexes",
             "mautic-db-indexes",
             "db_indexes",
@@ -1753,8 +1879,6 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=[
             "status",
             "bootstrap-mysql-user",
-            "refresh-mautic-version-cache",
-            "install-mautic-version-cache",
         ],
         nargs="?",
         default="status",
@@ -1875,7 +1999,16 @@ def _build_parser() -> argparse.ArgumentParser:
     inst_migrate.add_argument("--domains-json", default="[]")
     inst_migrate.add_argument("--php-version")
     inst_migrate.add_argument("--wipe-target", action="store_true")
+    inst_migrate.add_argument("--wipe-target-db", action="store_true")
     inst_migrate.add_argument("--json", action="store_true")
+
+    inst_runtime = sub.add_parser("instance-runtime", help="Normalize instance PHP runtime")
+    inst_runtime.add_argument("--config", default=default_cfg)
+    inst_runtime.add_argument("op", choices=["status", "apply"], nargs="?", default="status")
+    inst_runtime.add_argument("--root", help="Instance root, uid, name, or primary domain")
+    inst_runtime.add_argument("--dry-run", action="store_true", help="Plan only; do not write files")
+    inst_runtime.add_argument("--no-reload", action="store_true", help="Do not reload php-fpm/nginx after a successful apply")
+    inst_runtime.add_argument("--json", action="store_true")
 
     upd = sub.add_parser("self-update", help="MCD self-update via MCC approved/test/lts/cluster channels")
     upd.add_argument("--config", default=default_cfg)
@@ -1939,9 +2072,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     bkp.add_argument("--date", help="Restore from backup date folder YYYY-MM-DD")
     bkp.add_argument("--path", help="Restore from explicit backup path")
+    bkp.add_argument("--remote-root-dir", help="One-shot remote root override for instance-run")
     bkp.add_argument("--profile-json-file", help="JSON file with backup profile payload for profile-set")
     bkp.add_argument("--profile-json-stdin", action="store_true", help="Read backup profile JSON payload from stdin")
     bkp.add_argument("--replace", action="store_true", help="Replace backup profile payload instead of merge")
+    bkp.add_argument("--skip-prepare-check", action="store_true", help="Store backup profile without package/storage/DB verification")
     bkp.add_argument("--json", action="store_true")
 
     custom = sub.add_parser("custom", help="Run custom script from MCC manifest")
@@ -2064,6 +2199,7 @@ def main() -> int:
         "segments:update",
         "campaign:trigger",
         "campaign:rebuild",
+        "campaigns:rebuild",
         "campaigns:update",
         "campaigns:trigger",
         "import",
@@ -2128,13 +2264,59 @@ def main() -> int:
             _push_state_after_change(cfg, "permissions-fix")
         return rc
 
-    if args.cmd == "instance-delete":
+    if args.cmd == "logical-issues":
         cfg = load_config(args.config)
         note = maybe_notify_update(cfg)
         if note:
             print(f"NOTICE: {note}")
         try:
             root = _select_root_for_ops(cfg, args.root)
+        except Exception as e:
+            print(json.dumps({"status": "error", "reason": str(e)}, ensure_ascii=True, indent=2))
+            return 2
+        if args.logical_issues_cmd == "status":
+            payload = read_logical_issues_snapshot(cfg.state_db_path, root)
+            print(json.dumps(payload, ensure_ascii=True, indent=2))
+            return 0 if str(payload.get("status") or "") != "error" else 1
+        inventory = InstanceInventory(cfg.state_db_path)
+        ensure_seeded(inventory, cfg)
+        install = next((item for item in inventory.list_instances() if str(item.root) == root), None)
+        if install is None:
+            print(
+                json.dumps(
+                    {"status": "error", "reason": "instance not found in local inventory", "root": root},
+                    ensure_ascii=True,
+                    indent=2,
+                )
+            )
+            return 2
+        try:
+            if args.logical_issues_cmd == "scan":
+                payload = scan_install_logical_issues(cfg, install)
+                _push_state_after_change(cfg, "logical-issues-scan")
+            else:
+                payload = remediate_logical_issue(
+                    cfg,
+                    install,
+                    issue_id=args.issue_id,
+                    action=args.action,
+                    actor=args.actor,
+                )
+                _push_state_after_change(cfg, "logical-issue-remediation")
+        except Exception as e:
+            payload = {"status": "error", "reason": str(e), "root": root}
+            print(json.dumps(payload, ensure_ascii=True, indent=2))
+            return 1
+        print(json.dumps(payload, ensure_ascii=True, indent=2))
+        return 0 if str(payload.get("status") or "") != "error" else 1
+
+    if args.cmd == "instance-delete":
+        cfg = load_config(args.config)
+        note = maybe_notify_update(cfg)
+        if note:
+            print(f"NOTICE: {note}")
+        try:
+            root = _select_root_for_ops(cfg, args.root, allow_missing_absolute=True)
         except Exception as e:
             print(str(e))
             return 2
@@ -2301,6 +2483,7 @@ def main() -> int:
         cutoff_utc = (
             datetime.now(timezone.utc) - timedelta(seconds=max(1800, int(getattr(args, "min_age_sec", 21600) or 21600)))
         ).strftime("%Y-%m-%d %H:%M:%S")
+        file_lock_min_age_sec = max(0, int(getattr(args, "min_age_sec", 21600) or 21600))
         results: list[dict[str, object]] = []
         changed = 0
         for inst in installs:
@@ -2310,9 +2493,24 @@ def main() -> int:
                 "instance_uid": inst.instance_uid,
                 "cutoff_utc": cutoff_utc,
             }
+            try:
+                file_payload = cleanup_stale_mautic_file_locks(
+                    inst.root,
+                    min_age_sec=file_lock_min_age_sec,
+                )
+                row["file_locks"] = file_payload.get("file_locks", [])
+                row["cleared_file_locks"] = int(file_payload.get("cleared_file_locks", 0) or 0)
+                row["skipped_live_file_locks"] = int(file_payload.get("skipped_live_file_locks", 0) or 0)
+                changed += int(row["cleared_file_locks"])
+            except Exception as e:
+                row["file_lock_status"] = "error"
+                row["file_lock_reason"] = str(e)
+                row["cleared_file_locks"] = 0
             if not inst.db:
-                row["status"] = "skipped"
+                row["status"] = "ok"
                 row["reason"] = "missing_db_config"
+                row["cleared_segments"] = 0
+                row["cleared_campaigns"] = 0
                 results.append(row)
                 continue
             try:
@@ -2344,16 +2542,135 @@ def main() -> int:
         else:
             for row in results:
                 print(
-                    "root={root} status={status} cleared_segments={segments} cleared_campaigns={campaigns}".format(
+                    (
+                        "root={root} status={status} cleared_segments={segments} "
+                        "cleared_campaigns={campaigns} cleared_file_locks={file_locks}"
+                    ).format(
                         root=str(row.get("root") or ""),
                         status=str(row.get("status") or "unknown"),
                         segments=int(row.get("cleared_segments", 0) or 0),
                         campaigns=int(row.get("cleared_campaigns", 0) or 0),
+                        file_locks=int(row.get("cleared_file_locks", 0) or 0),
                     )
                 )
                 if str(row.get("status") or "") == "error":
                     print(f"  reason={str(row.get('reason') or '')}")
+                if str(row.get("file_lock_status") or "") == "error":
+                    print(f"  file_lock_reason={str(row.get('file_lock_reason') or '')}")
             print(f"cutoff_utc={cutoff_utc}")
+        return 0
+
+    if args.cmd == "email-counters":
+        cfg = load_config(args.config)
+        note = maybe_notify_update(cfg)
+        if note and not bool(getattr(args, "json", False)):
+            print(f"NOTICE: {note}")
+        try:
+            inst = _select_instance_for_ops(cfg, getattr(args, "root", None))
+            if not inst.db:
+                raise RuntimeError(f"Mautic install has no DB config: {inst.root}")
+            db = MauticDB(inst.db)
+            if str(args.op or "audit") == "repair":
+                payload = repair_campaign_email_counters(db, int(args.campaign_id))
+            else:
+                payload = audit_campaign_email_counters(db, int(args.campaign_id))
+            payload["root"] = inst.root
+            payload["instance_uid"] = inst.instance_uid
+            payload["name"] = inst.name
+        except Exception as e:
+            if bool(getattr(args, "json", False)):
+                print(json.dumps({"status": "error", "reason": str(e)}, ensure_ascii=True, indent=2))
+            else:
+                print(f"email-counters failed: {e}")
+            return 1
+        if bool(getattr(args, "json", False)):
+            print(json.dumps(payload, ensure_ascii=True, indent=2, default=str))
+        else:
+            print(
+                "email-counters {mode}: root={root} campaign_id={campaign_id} "
+                "checked={checked} mismatches={mismatches} repairable={repairable} repaired={repaired} skipped={skipped}".format(
+                    mode=str(payload.get("mode") or args.op),
+                    root=str(payload.get("root") or ""),
+                    campaign_id=int(payload.get("campaign_id", 0) or 0),
+                    checked=int(payload.get("checked", 0) or 0),
+                    mismatches=int(payload.get("mismatches", 0) or 0),
+                    repairable=int(payload.get("repairable", 0) or 0),
+                    repaired=int(payload.get("repaired", 0) or 0),
+                    skipped=int(payload.get("skipped", 0) or 0),
+                )
+            )
+            for row in payload.get("emails", []):
+                if not isinstance(row, dict):
+                    continue
+                drift = int(row.get("drift", 0) or 0)
+                if drift == 0:
+                    continue
+                print(
+                    "  email_id={email_id} cached={cached} actual={actual} drift={drift} "
+                    "pending={pending} global_pending={global_pending} status={status} reason={reason}".format(
+                        email_id=int(row.get("email_id", 0) or 0),
+                        cached=int(row.get("cached_sent_count", 0) or 0),
+                        actual=int(row.get("actual_sent_count", 0) or 0),
+                        drift=drift,
+                        pending=int(row.get("campaign_pending_event_logs", 0) or 0),
+                        global_pending=int(row.get("global_pending_event_logs", 0) or 0),
+                        status=str(row.get("status") or ""),
+                        reason=str(row.get("reason") or ""),
+                    )
+                )
+        if str(args.op or "audit") == "repair" and int(payload.get("repaired", 0) or 0) > 0:
+            _push_state_after_change(cfg, "email-counters-repair")
+        return 0
+
+    if args.cmd == "report:email-activity":
+        cfg = load_config(args.config)
+        note = maybe_notify_update(cfg)
+        if note and not bool(getattr(args, "json", False)):
+            print(f"NOTICE: {note}")
+        try:
+            inst = _select_instance_for_ops(cfg, getattr(args, "root", None))
+            if not inst.db:
+                raise RuntimeError(f"Mautic install has no DB config: {inst.root}")
+            include_summary = bool(getattr(args, "summary", False))
+            include_extended = bool(getattr(args, "extended", False))
+            if not include_summary and not include_extended:
+                include_summary = True
+                include_extended = True
+            payload = collect_email_activity_report(
+                MauticDB(inst.db),
+                days=int(getattr(args, "days", 7) or 7),
+                include_summary=include_summary,
+                include_extended=include_extended,
+                contact_mode=str(getattr(args, "contact_mode", "all") or "all"),
+                contact_age_days=int(getattr(args, "contact_age_days", 30) or 30),
+            )
+            payload["root"] = inst.root
+            payload["instance_uid"] = inst.instance_uid
+            payload["name"] = inst.name
+            payload["primary_domain"] = inst.primary_domain
+        except Exception as e:
+            if bool(getattr(args, "json", False)):
+                print(json.dumps({"status": "error", "reason": str(e)}, ensure_ascii=True, indent=2))
+            else:
+                print(f"email activity report failed: {e}")
+            return 1
+        if bool(getattr(args, "json", False)):
+            print(json.dumps(payload, ensure_ascii=True, indent=2, default=str))
+        else:
+            totals = payload.get("summary_totals") if isinstance(payload.get("summary_totals"), dict) else {}
+            print(
+                "email-activity: root={root} days={days} summary_rows={summary_rows} "
+                "extended_rows={extended_rows} sent={sent} read={read} clicks={clicks} unsubscribed={unsubscribed}".format(
+                    root=str(payload.get("root") or ""),
+                    days=int(payload.get("days", 0) or 0),
+                    summary_rows=len(payload.get("summary_rows") or []),
+                    extended_rows=len(payload.get("extended_rows") or []),
+                    sent=int(totals.get("sent", 0) or 0),
+                    read=int(totals.get("read", 0) or 0),
+                    clicks=int(totals.get("clicks", 0) or 0),
+                    unsubscribed=int(totals.get("unsubscribed", 0) or 0),
+                )
+            )
         return 0
 
     if args.cmd == "exec":
@@ -2494,6 +2811,7 @@ def main() -> int:
             with_system_upgrade=bool(args.with_system_upgrade),
             target_override=str(args.target or "").strip() or None,
             allow_minor=bool(args.allow_minor),
+            allow_major=bool(args.allow_major),
         )
         if rc == 0:
             _push_state_after_change(cfg, "mautic-upgrade-apply")
@@ -2575,6 +2893,9 @@ def main() -> int:
                     php_version=str(args.php_version),
                     yes=bool(args.yes),
                     run_certbot=not bool(args.no_certbot),
+                    certbot_dns_credential_ref=str(args.certbot_dns_credential_ref or "").strip() or None,
+                    own_mail=bool(args.own_mail),
+                    mail_profile_id=str(args.mail_profile_id or "").strip() or None,
                 )
         else:
             result = install_from_image(
@@ -2584,10 +2905,109 @@ def main() -> int:
                 php_version=str(args.php_version),
                 yes=bool(args.yes),
                 run_certbot=not bool(args.no_certbot),
+                certbot_dns_credential_ref=str(args.certbot_dns_credential_ref or "").strip() or None,
+                own_mail=bool(args.own_mail),
+                mail_profile_id=str(args.mail_profile_id or "").strip() or None,
             )
         if bool(args.json):
             print(json.dumps(result, ensure_ascii=True, indent=2))
         _push_state_after_change(cfg, "mautic-image-install")
+        return 0
+
+    if args.cmd == "local-mail":
+        cfg = load_config(args.config)
+        if args.op == "submit":
+            return submit_local_mail(
+                domain=str(args.instance_domain),
+                sendmail_args=list(args.sendmail_args or []),
+                cfg=cfg,
+            )
+        if args.op == "receive":
+            try:
+                message = sys.stdin.buffer.read(25 * 1024 * 1024 + 1)
+                result = receive_local_mail(
+                    cfg,
+                    domain=str(args.instance_domain),
+                    kind=str(args.kind),
+                    data=message,
+                )
+                logging.info(
+                    "own-host inbound domain=%s type=%s status=%s contacts=%s dnc_added=%s",
+                    result.get("instance_domain", "-"),
+                    result.get("type", "-"),
+                    result.get("status", "-"),
+                    result.get("contacts", 0),
+                    result.get("dnc_added", 0),
+                )
+                return 0
+            except Exception as exc:
+                print(f"own-host inbound processing failed: {exc}", file=sys.stderr)
+                return 75
+        try:
+            if args.op == "configure":
+                if not str(args.root or "").strip():
+                    raise RuntimeError("--root is required for local-mail configure")
+                result = configure_local_mail(cfg, domain=str(args.instance_domain), root=str(args.root))
+            elif args.op == "disable":
+                result = disable_local_mail(cfg, domain=str(args.instance_domain))
+            else:
+                result = local_mail_status(cfg, domain=str(args.instance_domain), push=bool(args.push))
+        except Exception as exc:
+            if bool(args.json):
+                print(json.dumps({"status": "error", "error": str(exc)}, ensure_ascii=True))
+            else:
+                print(f"local-mail error: {exc}", file=sys.stderr)
+            return 1
+        if bool(args.json):
+            print(json.dumps(result, ensure_ascii=True, indent=2))
+        else:
+            print(json.dumps(result, ensure_ascii=True))
+        return 0
+
+    if args.cmd == "mail-config":
+        cfg = load_config(args.config)
+        try:
+            operation = preflight_mail_profile if str(args.mail_config_op) == "preflight" else apply_mail_profile
+            result = operation(
+                cfg,
+                profile_id=str(args.profile_id),
+                domain=str(args.instance_domain),
+                root=str(args.root),
+            )
+        except Exception as exc:
+            if bool(args.json):
+                print(json.dumps({"status": "error", "error": str(exc)}, ensure_ascii=True))
+            else:
+                print(f"mail-config error: {exc}", file=sys.stderr)
+            return 1
+        print(json.dumps(result, ensure_ascii=True, indent=2 if bool(args.json) else None))
+        return 0
+
+    if args.cmd == "composer-move":
+        cfg = load_config(args.config)
+        note = maybe_notify_update(cfg)
+        if note:
+            print(f"NOTICE: {note}")
+        if bool(args.json):
+            with contextlib.redirect_stdout(sys.stderr):
+                result = move_zip_to_composer(
+                    cfg,
+                    root=str(args.root),
+                    domain=str(args.domain),
+                    mautic_major=int(args.mautic_major or 0),
+                    yes=bool(args.yes),
+                )
+        else:
+            result = move_zip_to_composer(
+                cfg,
+                root=str(args.root),
+                domain=str(args.domain),
+                mautic_major=int(args.mautic_major or 0),
+                yes=bool(args.yes),
+            )
+        if bool(args.json):
+            print(json.dumps(result, ensure_ascii=True, indent=2))
+        _push_state_after_change(cfg, "composer-move")
         return 0
 
     if args.cmd == "reload-config":
@@ -2656,7 +3076,7 @@ def main() -> int:
             print(json.dumps(payload, ensure_ascii=True, indent=2))
             return 0
         if args.op == "fetch":
-            if comp not in {"php_fpm", "php-fpm", "mysql", "apt", "mautic_db_indexes", "mautic-db-indexes", "db_indexes", "db-indexes"}:
+            if comp not in {"php_fpm", "php-fpm", "mysql", "apt", "wazuh", "mautic_db_indexes", "mautic-db-indexes", "db_indexes", "db-indexes"}:
                 print(json.dumps({"status": "error", "reason": f"unsupported component: {comp}"}, ensure_ascii=True))
                 return 2
             if comp.replace("-", "_") in {"mautic_db_indexes", "db_indexes"}:
@@ -2713,28 +3133,6 @@ def main() -> int:
             out = {"status": "ok", "zabbix_mysql_monitor": zbx_state}
             print(json.dumps(out, ensure_ascii=True, indent=2))
             return 0
-
-        if op == "refresh-mautic-version-cache":
-            out = discover_and_refresh_mautic_version_cache(cfg)
-            print(json.dumps(out, ensure_ascii=True, indent=2))
-            return 0 if str(out.get("status", "")).lower() == "ok" else 1
-
-        if op == "install-mautic-version-cache":
-            install_res = install_zabbix_mautic_version_userparameter(restart_service=not bool(args.no_restart))
-            refresh_res = discover_and_refresh_mautic_version_cache(cfg)
-            out = {
-                "status": "ok"
-                if str(install_res.get("status", "")).lower() == "ok"
-                and str(refresh_res.get("status", "")).lower() == "ok"
-                else "error",
-                "install": install_res,
-                "refresh": refresh_res,
-            }
-            print(json.dumps(out, ensure_ascii=True, indent=2))
-            if out["status"] == "ok":
-                _push_state_after_change(cfg, "zabbix-mautic-version-cache")
-                return 0
-            return 1
 
         fetched = fetch_service_profile(cfg, "apt")
         profile = fetched.get("profile") if isinstance(fetched, dict) else None
@@ -2920,7 +3318,7 @@ def main() -> int:
                 return 1
         env = dict(os.environ)
         env["DEBIAN_FRONTEND"] = "noninteractive"
-        cmd_update = ["apt-get", "update"]
+        cmd_update = ["apt-get", "update", "--allow-releaseinfo-change"]
         cmd_upgrade = [
             "apt-get",
             "dist-upgrade",
@@ -2982,7 +3380,7 @@ def main() -> int:
         note = maybe_notify_update(cfg)
         if note:
             print(f"NOTICE: {note}")
-        st = _state_backend_status_payload(cfg)
+        cfg_eff, st = _state_backend_config_and_status(cfg)
         if args.op == "status":
             if args.json:
                 print(json.dumps(st, ensure_ascii=True, indent=2))
@@ -3001,7 +3399,7 @@ def main() -> int:
             return 0
 
         # op == init
-        if not _state_db_missing_only(cfg, st):
+        if not _state_db_missing_only(cfg_eff, st):
             out = {
                 "ok": False,
                 "reason": "state_db_init_allowed_only_in_legacy_missing_or_inaccessible_state",
@@ -3014,23 +3412,23 @@ def main() -> int:
                 print(json.dumps(st, ensure_ascii=True))
             return 1
 
-        host_default = str(args.admin_host or cfg.state_mysql_host or "localhost")
-        port_default = int(args.admin_port or cfg.state_mysql_port or 3306)
+        host_default = str(args.admin_host or cfg_eff.state_mysql_host or "localhost")
+        port_default = int(args.admin_port or cfg_eff.state_mysql_port or 3306)
         user_default = str(args.admin_user or "root")
-        sock_default = str(args.admin_unix_socket or cfg.state_mysql_unix_socket or "").strip()
+        sock_default = str(args.admin_unix_socket or cfg_eff.state_mysql_unix_socket or "").strip()
         if bool(args.admin_password_stdin):
             admin_pwd = sys.stdin.read().rstrip("\n")
         else:
             admin_pwd = getpass.getpass("DB admin password (empty allowed): ")
         ok, msg, cfg_after = _bootstrap_state_db_with_admin(
-            cfg,
+            cfg_eff,
             admin_user=user_default,
             admin_password=admin_pwd if admin_pwd != "" else None,
             admin_host=host_default,
             admin_port=port_default,
             admin_socket=sock_default or None,
         )
-        after = _state_backend_status_payload(cfg_after if ok else cfg)
+        after = _state_backend_status_payload(cfg_after if ok else cfg_eff)
         out = {"ok": bool(ok), "message": msg, "status": after}
         if args.json:
             print(json.dumps(out, ensure_ascii=True, indent=2))
@@ -3313,6 +3711,8 @@ def main() -> int:
             payload = preflight_target_relay(
                 target_root=str(args.target_root or "").strip(),
                 target_db_name=str(args.target_db_name or "").strip(),
+                wipe_target_root=bool(args.wipe_target),
+                wipe_target_db=bool(args.wipe_target_db),
             )
             print(json.dumps(payload, ensure_ascii=True, indent=2))
             return 0 if bool(payload.get("ok", False)) else 1
@@ -3416,6 +3816,50 @@ def main() -> int:
             print(format_source_probe_text(payload))
         return 0 if bool(payload.get("ok", False)) else 1
 
+    if args.cmd == "instance-runtime":
+        cfg = load_config(args.config)
+        note = maybe_notify_update(cfg)
+        if note and not bool(getattr(args, "json", False)):
+            print(f"NOTICE: {note}")
+        inv = InstanceInventory(cfg.state_db_path)
+        ensure_seeded(inv, cfg)
+        installs = inv.list_instances()
+        dry_run = bool(args.dry_run) or str(args.op) == "status"
+        payload = apply_instance_runtime(
+            installs,
+            root=args.root,
+            dry_run=dry_run,
+            reload_services=not bool(args.no_reload),
+        )
+        if bool(args.json):
+            print(json.dumps(payload, ensure_ascii=True, indent=2, default=str))
+        else:
+            print(
+                "instance runtime: status={status} changed={changed} dry_run={dry_run}".format(
+                    status=str(payload.get("status", "unknown")),
+                    changed=1 if bool(payload.get("changed")) else 0,
+                    dry_run=1 if bool(payload.get("dry_run")) else 0,
+                )
+            )
+            for row in payload.get("instances", []) if isinstance(payload.get("instances"), list) else []:
+                nginx_files = row.get("nginx_files", [])
+                php_versions = row.get("php_versions", [])
+                print(
+                    "root={root} status={status} timezone={timezone} php={php} files={files}{reason}".format(
+                        root=str(row.get("root") or ""),
+                        status=str(row.get("status") or ""),
+                        timezone=str(row.get("timezone") or ""),
+                        php=",".join(str(x) for x in php_versions if x),
+                        files=len(nginx_files) if isinstance(nginx_files, list) else 0,
+                        reason=(" reason=" + str(row.get("reason") or "")) if row.get("reason") else "",
+                    )
+                )
+            if payload.get("reason"):
+                print("reason=" + str(payload.get("reason")))
+        if str(payload.get("status")) == "ok" and not dry_run:
+            _push_state_after_change(cfg, "instance-runtime")
+        return 0 if str(payload.get("status")) == "ok" else 1
+
     if args.cmd == "self-update":
         cfg = load_config(args.config)
         if args.op == "status":
@@ -3444,6 +3888,10 @@ def main() -> int:
             print("MCC update slots are busy; retry in 60s")
             return 2
         if st in {"up_to_date", "disabled"}:
+            msg, _retry = maybe_auto_update(cfg, force=True)
+            if msg:
+                print(msg)
+                return 0
             print(json.dumps(decision, ensure_ascii=True))
             return 0
         if st not in {"update", "update_available"}:
@@ -3685,7 +4133,7 @@ def main() -> int:
             _push_state_after_change(cfg, "backup-run")
             return 0 if res.ok else 1
         if args.op == "instance-run":
-            res = backup_instance_run(cfg, args.root)
+            res = backup_instance_run(cfg, args.root, remote_root_dir=args.remote_root_dir)
             if args.json:
                 print(
                     json.dumps(
@@ -3765,8 +4213,15 @@ def main() -> int:
             payload = json.loads(raw)
             if not isinstance(payload, dict):
                 raise RuntimeError("backup profile payload must be a JSON object")
-            backup_profile_set(cfg, payload, merge=not bool(args.replace))
+            result = backup_profile_set(
+                cfg,
+                payload,
+                merge=not bool(args.replace),
+                prepare_check=not bool(args.skip_prepare_check),
+            )
             masked = backup_profile_masked(cfg)
+            if isinstance(result.get("_prepare_check"), dict):
+                masked["_prepare_check"] = result["_prepare_check"]
             print(json.dumps(masked, ensure_ascii=True, indent=2))
             _push_state_after_change(cfg, "backup-profile-set")
             return 0

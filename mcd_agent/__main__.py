@@ -21,6 +21,17 @@ def _bootstrap_requirements_on_missing_module(exc: ModuleNotFoundError) -> bool:
         f"mcd bootstrap: missing module '{missing}', installing requirements from {req}",
         file=sys.stderr,
     )
+    pip_probe = subprocess.run([sys.executable, "-m", "pip", "--version"], cwd="/", capture_output=True, text=True)
+    if pip_probe.returncode != 0:
+        ensure = subprocess.run(
+            [sys.executable, "-m", "ensurepip", "--upgrade"],
+            cwd="/",
+            capture_output=True,
+            text=True,
+        )
+        if ensure.returncode != 0:
+            detail = (ensure.stderr or ensure.stdout or "ensurepip failed").strip()
+            print(f"mcd bootstrap: pip bootstrap failed: {detail}", file=sys.stderr)
     cmd = [
         sys.executable,
         "-m",

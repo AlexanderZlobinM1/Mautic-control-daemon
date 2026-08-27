@@ -18,6 +18,7 @@ from dataclasses import replace
 
 from mcd_agent.backup import _run_mydumper, _run_myloader, _verify_dump_dir
 from mcd_agent.config import AgentConfig
+from mcd_agent.form_embed import render_form_embed_location
 from mcd_agent.db import MauticDB
 from mcd_agent.install_readiness import collect_mautic_install_readiness
 from mcd_agent.inventory import InstanceInventory, ensure_seeded
@@ -25,11 +26,25 @@ from mcd_agent.localphp import parse_local_php
 from mcd_agent.mautic_image_install import _mysql_admin_base, _mysql_exec, _quote_ident, _quote_sql
 from mcd_agent.models import DBConfig
 from mcd_agent.models import MauticInstall
+from mcd_agent.nginx_baseline import (
+    _nginx_supports_http2_directive,
+    ensure_mautic_public_app_asset_locations,
+    ensure_nginx_baseline,
+    normalize_legacy_http2_listen,
+)
+from mcd_agent.nginx_templates import render_nginx_template
 
 
 _MIN_TARGET_HEADROOM_BYTES = 5 * 1024 * 1024 * 1024
 _DOMAIN_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
 _DB_IDENT_RE = re.compile(r"^[A-Za-z0-9_$-]{1,64}$")
+_MYSQL_DATE_FORMAT_GENERATED_RE = re.compile(
+    r"GENERATED\s+ALWAYS\s+AS\s*\(\s*date_format\s*\(\s*`(?P<column>[^`]+)`\s*,\s*(?:_[A-Za-z0-9]+)?'(?P<fmt>[^']+)'\s*\)\s*\)",
+    re.IGNORECASE,
+)
+NGINX_SITES_AVAILABLE = Path("/etc/nginx/sites-available")
+NGINX_SITES_ENABLED = Path("/etc/nginx/sites-enabled")
+LETSENCRYPT_ROOT = Path("/etc/letsencrypt")
 
 
 def _utc_now() -> str:
@@ -174,6 +189,37 @@ def _patch_local_php_db(root: Path, db: DBConfig) -> None:
             raise RuntimeError(f"local.php key not found: {key}")
         text = new_text
     path.write_text(text, encoding="utf-8")
+
+
+def _patch_local_php_instance_paths(root: Path) -> list[str]:
+    path = _local_php_path(root)
+    root = root.resolve()
+    media_root = _nginx_web_root(root) / "media" / "files"
+    replacements = {
+        "cache_path": root / "var" / "cache",
+        "log_path": root / "var" / "logs",
+        "tmp_path": root / "var" / "tmp",
+        "import_campaigns_dir": root / "var" / "import",
+        "import_leads_dir": root / "var" / "import",
+        "upload_dir": media_root,
+        "contact_export_dir": media_root / "temp",
+        "report_temp_dir": media_root / "temp",
+        "form_upload_dir": media_root / "form",
+    }
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    changed: list[str] = []
+    for key, value_path in replacements.items():
+        value = str(value_path)
+        pattern = rf"(['\"]{re.escape(key)}['\"]\s*=>\s*)['\"][^'\"]*['\"]"
+        new_text, count = re.subn(pattern, lambda m, v=value: m.group(1) + _quote_sql(v), text, count=1)
+        if count > 0 and new_text != text:
+            changed.append(key)
+            text = new_text
+    if changed:
+        path.write_text(text, encoding="utf-8")
+        for value_path in replacements.values():
+            value_path.mkdir(parents=True, exist_ok=True)
+    return changed
 
 
 def _quote_for_ssh(value: str) -> str:
@@ -347,19 +393,57 @@ def _prepare_target_db(db: DBConfig) -> None:
     _mysql_exec("FLUSH PRIVILEGES")
 
 
-def preflight_target_relay(*, target_root: str, target_db_name: str) -> dict[str, Any]:
+def _assert_safe_target_wipe_path(target: Path) -> None:
+    resolved = target.resolve()
+    protected = {
+        Path("/"),
+        Path("/var"),
+        Path("/var/www"),
+        Path("/etc"),
+        Path("/usr"),
+        Path("/opt"),
+        Path("/home"),
+        Path("/root"),
+        Path("/tmp"),
+    }
+    if resolved in protected:
+        raise RuntimeError(f"refusing to wipe protected target path: {resolved}")
+    if len(resolved.parts) < 3:
+        raise RuntimeError(f"refusing to wipe shallow target path: {resolved}")
+
+
+def preflight_target_relay(
+    *,
+    target_root: str,
+    target_db_name: str,
+    wipe_target_root: bool = False,
+    wipe_target_db: bool = False,
+) -> dict[str, Any]:
     target = Path(target_root).resolve()
     if not str(target).startswith("/"):
         raise RuntimeError("target root must be absolute")
     problems: list[str] = []
+    cleanup: list[str] = []
     if target.exists() and any(target.iterdir()):
-        problems.append(f"target root already exists and is not empty: {target}")
+        if wipe_target_root:
+            try:
+                _assert_safe_target_wipe_path(target)
+                shutil.rmtree(target)
+                cleanup.append(f"target root removed: {target}")
+            except Exception as exc:
+                problems.append(f"target root cleanup failed: {exc}")
+        else:
+            problems.append(f"target root already exists and is not empty: {target}")
     if not _DB_IDENT_RE.match(str(target_db_name or "")):
         problems.append(f"invalid target database name: {target_db_name}")
     else:
         try:
             if _target_db_exists(str(target_db_name)):
-                problems.append(f"target database already exists: {target_db_name}")
+                if wipe_target_db:
+                    _mysql_exec(f"DROP DATABASE IF EXISTS {_quote_ident(str(target_db_name))}")
+                    cleanup.append(f"target database dropped: {target_db_name}")
+                else:
+                    problems.append(f"target database already exists: {target_db_name}")
         except Exception as exc:
             problems.append(f"target database preflight failed: {exc}")
     for cmd in ("tar", "gzip", "nginx", "php"):
@@ -370,6 +454,9 @@ def preflight_target_relay(*, target_root: str, target_db_name: str) -> dict[str
         "ok": not problems,
         "target_root": str(target),
         "target_db_name": str(target_db_name or ""),
+        "wipe_target_root": bool(wipe_target_root),
+        "wipe_target_db": bool(wipe_target_db),
+        "cleanup": cleanup,
         "problems": problems,
     }
 
@@ -448,11 +535,27 @@ def receive_target_files(*, target_root: str, input_stream: Any, wipe_target: bo
 
 
 def _letsencrypt_paths_for_domains(domains: list[str]) -> list[Path]:
-    root = Path("/etc/letsencrypt")
+    root = LETSENCRYPT_ROOT
+    wanted = {str(domain or "").strip().lower().rstrip(".") for domain in domains if str(domain or "").strip()}
     paths: list[Path] = []
     seen: set[str] = set()
+    live_names: list[str] = []
+
+    # Preserve the old direct-name lookup for certificates issued specifically
+    # for a migrated domain, then add every certificate whose SAN covers it.
     for domain in domains:
-        for rel in (Path("live") / domain, Path("archive") / domain, Path("renewal") / f"{domain}.conf"):
+        name = str(domain or "").strip().lower().rstrip(".")
+        if name and (root / "live" / name).exists():
+            live_names.append(name)
+    live_root = root / "live"
+    if live_root.is_dir():
+        for live_dir in sorted(live_root.iterdir(), key=lambda item: item.name):
+            if not live_dir.is_dir() or not wanted.intersection(_certificate_dns_names(live_dir / "fullchain.pem")):
+                continue
+            live_names.append(live_dir.name)
+
+    for name in live_names:
+        for rel in (Path("live") / name, Path("archive") / name, Path("renewal") / f"{name}.conf"):
             path = root / rel
             key = str(path)
             if key in seen or not path.exists():
@@ -460,6 +563,47 @@ def _letsencrypt_paths_for_domains(domains: list[str]) -> list[Path]:
             seen.add(key)
             paths.append(path)
     return paths
+
+
+def _certificate_dns_names(cert_path: Path) -> set[str]:
+    if not cert_path.exists():
+        return set()
+    rc, out = _run(["openssl", "x509", "-in", str(cert_path), "-noout", "-ext", "subjectAltName"], timeout_sec=20)
+    if rc != 0:
+        return set()
+    return {match.lower().rstrip(".") for match in re.findall(r"DNS:([^,\s]+)", out, flags=re.IGNORECASE)}
+
+
+def _certificate_is_current(cert_path: Path) -> bool:
+    if not cert_path.exists():
+        return False
+    rc, _out = _run(["openssl", "x509", "-in", str(cert_path), "-noout", "-checkend", "0"], timeout_sec=20)
+    return rc == 0
+
+
+def _matching_live_certificate(domains: list[str], *, require_current: bool) -> Path | None:
+    if not domains:
+        return None
+    primary = str(domains[0] or "").strip().lower().rstrip(".")
+    if not primary:
+        return None
+    live_root = LETSENCRYPT_ROOT / "live"
+    if not live_root.is_dir():
+        return None
+    candidates: list[Path] = []
+    direct = live_root / primary
+    if direct.is_dir():
+        candidates.append(direct)
+    candidates.extend(path for path in sorted(live_root.iterdir(), key=lambda item: item.name) if path.is_dir() and path != direct)
+    for live_dir in candidates:
+        cert_path = live_dir / "fullchain.pem"
+        key_path = live_dir / "privkey.pem"
+        if not key_path.exists() or primary not in _certificate_dns_names(cert_path):
+            continue
+        if require_current and not _certificate_is_current(cert_path):
+            continue
+        return live_dir
+    return None
 
 
 def stream_source_letsencrypt(*, domains_json: str, output: Any) -> int:
@@ -511,15 +655,17 @@ def stream_source_db(config: AgentConfig, *, selector: str | None, output: Any) 
             encoding="utf-8",
         )
         defaults.chmod(0o600)
+        dump_bin = shutil.which("mariadb-dump") or shutil.which("mysqldump")
+        if not dump_bin:
+            raise RuntimeError("mariadb-dump or mysqldump is required for source database stream")
         proc = subprocess.Popen(
             [
-                "mysqldump",
+                dump_bin,
                 f"--defaults-extra-file={defaults}",
                 "--single-transaction",
                 "--quick",
                 "--routines",
                 "--triggers",
-                "--events",
                 source_db.name,
             ],
             stdout=subprocess.PIPE,
@@ -538,6 +684,40 @@ def stream_source_db(config: AgentConfig, *, selector: str | None, output: Any) 
         return rc
 
 
+def _mysql_generated_date_format_replacement(column: str, fmt: str) -> str | None:
+    col = "`" + str(column).replace("`", "``") + "`"
+    if fmt == "%Y-%m-%d %H:00":
+        expr = f"timestamp(date({col}), maketime(hour({col}),0,0))"
+    elif fmt == "%Y-%m-%d":
+        expr = f"date({col})"
+    elif fmt == "%Y %U":
+        expr = f"concat(year({col}),' ',lpad(week({col},0),2,'0'))"
+    elif fmt == "%Y-%m":
+        expr = f"concat(year({col}),'-',lpad(month({col}),2,'0'))"
+    elif fmt == "%Y":
+        expr = f"year({col})"
+    else:
+        return None
+    return f"GENERATED ALWAYS AS ({expr})"
+
+
+def _rewrite_mysql_generated_date_format_sql_line(line: str) -> str:
+    def repl(match: re.Match[str]) -> str:
+        replacement = _mysql_generated_date_format_replacement(match.group("column"), match.group("fmt"))
+        return replacement or match.group(0)
+
+    return _MYSQL_DATE_FORMAT_GENERATED_RE.sub(repl, line)
+
+
+def _iter_mysql_generated_date_format_compat_sql(lines: Any) -> Any:
+    for raw in lines:
+        if isinstance(raw, bytes):
+            text = raw.decode("utf-8", errors="surrogateescape")
+            yield _rewrite_mysql_generated_date_format_sql_line(text).encode("utf-8", errors="surrogateescape")
+        else:
+            yield _rewrite_mysql_generated_date_format_sql_line(str(raw)).encode("utf-8", errors="surrogateescape")
+
+
 def import_target_db_stream(*, target_db_name: str, target_db_user: str, target_db_password: str, input_stream: Any) -> dict[str, Any]:
     target_db = _target_db_from_direct_values(name=target_db_name, user=target_db_user, password=target_db_password)
     _prepare_target_db(target_db)
@@ -545,7 +725,8 @@ def import_target_db_stream(*, target_db_name: str, target_db_user: str, target_
     assert proc.stdin is not None
     try:
         with gzip.GzipFile(fileobj=input_stream, mode="rb") as gz:
-            shutil.copyfileobj(gz, proc.stdin)
+            for chunk in _iter_mysql_generated_date_format_compat_sql(gz):
+                proc.stdin.write(chunk)
         proc.stdin.close()
         proc.stdin = None
         out_b, err_b = proc.communicate()
@@ -579,8 +760,16 @@ def finalize_target_relay(
     target = Path(target_root).resolve()
     domains = _json_domains(domains_json)
     target_db = _target_db_from_direct_values(name=target_db_name, user=target_db_user, password=target_db_password)
+    cert_live = _matching_live_certificate(domains, require_current=True)
+    if cert_live is None:
+        raise RuntimeError(
+            "target TLS certificate is missing, expired, or does not cover "
+            + str(domains[0] if domains else "the migrated domain")
+            + "; DNS cutover blocked"
+        )
     print("progress: 88 target web config")
     _patch_local_php_db(target, target_db)
+    _patch_local_php_instance_paths(target)
     site = _write_nginx_vhost(root=target, domains=domains, php_version=php_version or "")
     _run_checked(["chown", "-R", "www-data:www-data", str(target)], timeout_sec=1800)
     print("progress: 94 target healthcheck")
@@ -597,6 +786,7 @@ def finalize_target_relay(
         "target_db_name": target_db.name,
         "target_db_user": target_db.user,
         "nginx_vhost": site,
+        "tls_certificate": str(cert_live),
         "healthcheck_tail": health,
         "instances": instances,
     }
@@ -642,6 +832,10 @@ def _detect_php_version(raw: str | None = None) -> str:
     return ""
 
 
+def _php_fpm_socket(php_version: str) -> Path:
+    return Path(f"/run/php/php{php_version}-fpm.sock")
+
+
 def _nginx_web_root(root: Path) -> Path:
     for rel in ("docroot", "public"):
         candidate = root / rel
@@ -650,52 +844,54 @@ def _nginx_web_root(root: Path) -> Path:
     return root
 
 
+def _ensure_nginx_sites_layout() -> None:
+    baseline = ensure_nginx_baseline(reload_service=False)
+    if str(baseline.get("status") or "").strip().lower() == "error":
+        raise RuntimeError("nginx baseline failed: " + str(baseline.get("error") or baseline))
+    for path in (NGINX_SITES_AVAILABLE, NGINX_SITES_ENABLED):
+        if path.exists() and not path.is_dir():
+            raise RuntimeError(f"nginx sites path is not a directory: {path}")
+        path.mkdir(parents=True, exist_ok=True)
+
+
 def _write_nginx_vhost(*, root: Path, domains: list[str], php_version: str) -> str:
     if not domains:
         raise RuntimeError("at least one domain is required for nginx vhost")
+    _ensure_nginx_sites_layout()
     php = _detect_php_version(php_version)
     if not php:
         raise RuntimeError("target PHP-FPM version is not available")
-    sock = Path(f"/run/php/php{php}-fpm.sock")
+    sock = _php_fpm_socket(php)
     if not sock.exists():
         raise RuntimeError(f"target PHP-FPM socket is missing: {sock}")
     primary = domains[0]
     web_root = _nginx_web_root(root)
-    site = Path("/etc/nginx/sites-available") / f"{primary}.conf"
-    enabled = Path("/etc/nginx/sites-enabled") / f"{primary}.conf"
+    site = NGINX_SITES_AVAILABLE / f"{primary}.conf"
+    enabled = NGINX_SITES_ENABLED / f"{primary}.conf"
     server_names = " ".join(domains)
-    cert_live = Path("/etc/letsencrypt/live") / primary
+    cert_live = _matching_live_certificate(domains, require_current=True)
     ssl_block = ""
-    listen = "listen 80;\n    listen [::]:80;"
-    if (cert_live / "fullchain.pem").exists() and (cert_live / "privkey.pem").exists():
-        listen = "listen 80;\n    listen [::]:80;\n    listen 443 ssl http2;\n    listen [::]:443 ssl http2;"
+    listen = "listen 80;"
+    if cert_live is not None:
+        listen = "listen 80;\n    listen 443 ssl http2;"
         ssl_block = f"""
-    ssl_certificate /etc/letsencrypt/live/{primary}/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/{primary}/privkey.pem;
+    ssl_certificate {cert_live / "fullchain.pem"};
+    ssl_certificate_key {cert_live / "privkey.pem"};
 """
-    content = f"""server {{
-    {listen}
-    server_name {server_names};
-    root {web_root};
-    index index.php index.html index.htm;
-{ssl_block}
-    client_max_body_size 128m;
-
-    location / {{
-        try_files $uri /index.php$is_args$args;
-    }}
-
-    location ~ \\.php$ {{
-        include snippets/fastcgi-php.conf;
-        fastcgi_pass unix:{sock};
-        fastcgi_read_timeout 300;
-    }}
-
-    location ~* ^/(?:app|bin|config|vendor|var)/ {{
-        deny all;
-    }}
-}}
-"""
+    content = render_nginx_template(
+        "instance_migrate_vhost.conf",
+        LISTEN_DIRECTIVES=listen,
+        SERVER_NAMES=server_names,
+        WEB_ROOT=web_root,
+        SSL_BLOCK=ssl_block,
+        FASTCGI_SOCKET=sock,
+        FORM_EMBED_LOCATION="\n".join(
+            ("    " + line) if line else ""
+            for line in render_form_embed_location(fastcgi_pass=f"unix:{sock}").splitlines()
+        ),
+    )
+    content = ensure_mautic_public_app_asset_locations(content)
+    content = normalize_legacy_http2_listen(content, modern_http2=_nginx_supports_http2_directive())
     site.write_text(content, encoding="utf-8")
     enabled.parent.mkdir(parents=True, exist_ok=True)
     if enabled.exists() or enabled.is_symlink():
@@ -841,27 +1037,6 @@ def run_target_pull_migration(
             raise RuntimeError(f"target database already exists: {target_db.name}")
         result["target_db_name"] = target_db.name
         result["target_db_user"] = target_db.user
-        source_db_port = int(copied_source_db.port or 3306)
-
-        print("progress: 20 source DB tunnel")
-        tunnel, local_port = _open_source_db_tunnel(
-            source_ssh_user=source_ssh_user,
-            source_address=source_address,
-            source_ssh_port=source_ssh_port,
-            source_ssh_key_file=source_ssh_key_file,
-            source_db_port=source_db_port,
-        )
-        source_db = DBConfig(
-            host="127.0.0.1",
-            port=local_port,
-            name=copied_source_db.name,
-            user=copied_source_db.user,
-            password=copied_source_db.password,
-            table_prefix=copied_source_db.table_prefix,
-        )
-
-        print("progress: 30 initial database import")
-        result["steps"].append(_dump_source_into_target(config, local_source_db=source_db, target_db=target_db, label="initial"))
 
         print("progress: 60 source maintenance on")
         _remote_mcd(
@@ -885,10 +1060,31 @@ def run_target_pull_migration(
             delete=True,
             excludes=exclusions,
         )
-        _patch_local_php_db(target, target_db)
+        source_db_port = int(copied_source_db.port or 3306)
 
-        print("progress: 76 final database catch-up")
-        result["steps"].append(_dump_source_into_target(config, local_source_db=source_db, target_db=target_db, label="final"))
+        print("progress: 72 source DB tunnel")
+        tunnel, local_port = _open_source_db_tunnel(
+            source_ssh_user=source_ssh_user,
+            source_address=source_address,
+            source_ssh_port=source_ssh_port,
+            source_ssh_key_file=source_ssh_key_file,
+            source_db_port=source_db_port,
+        )
+        source_db = DBConfig(
+            host="127.0.0.1",
+            port=local_port,
+            name=copied_source_db.name,
+            user=copied_source_db.user,
+            password=copied_source_db.password,
+            table_prefix=copied_source_db.table_prefix,
+        )
+
+        print("progress: 76 database import")
+        result["steps"].append(_dump_source_into_target(config, local_source_db=source_db, target_db=target_db, label="single"))
+        _patch_local_php_db(target, target_db)
+        patched_paths = _patch_local_php_instance_paths(target)
+        if patched_paths:
+            result["steps"].append({"label": "local_paths", "keys": patched_paths})
 
         print("progress: 88 target web config")
         copied_certs = _copy_letsencrypt(
@@ -905,12 +1101,24 @@ def run_target_pull_migration(
         inv = InstanceInventory(config.state_db_path)
         instances = inv.rescan(config)
 
+        print("progress: 98 source maintenance off")
+        _remote_mcd(
+            source_ssh_user=source_ssh_user,
+            source_address=source_address,
+            source_ssh_port=source_ssh_port,
+            source_ssh_key_file=source_ssh_key_file,
+            args=["maintenance", "off", "--json"],
+            timeout_sec=120,
+        )
+        source_maintenance_on = False
+
         result.update(
             {
                 "ok": True,
                 "catchup_ok": True,
                 "completed_at_utc": _utc_now(),
-                "source_maintenance_active": source_maintenance_on,
+                "source_maintenance_active": False,
+                "source_maintenance_restored": True,
                 "nginx_vhost": site,
                 "letsencrypt_copied": copied_certs,
                 "healthcheck_tail": health,

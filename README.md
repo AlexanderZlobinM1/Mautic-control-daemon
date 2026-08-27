@@ -37,7 +37,9 @@ MCD (MauticControlDaemon) is a host-level service that can run in two modes:
   - import execution on pending import queue
   - optional periodic contacts cleanup (`{prefix}leads` rows with empty email+phone fields)
 - Segment whitelist policy during active campaigns
-- Runtime concurrency controls for campaigns and segments
+- Runtime concurrency controls for campaigns and segments; limits are worker
+  ceilings, while automatic scheduler dispatch claims at most one new queued
+  task per pass to avoid burst-starting all free workers at once
 - Round-robin segment scheduling so all eligible segments are processed over time
 - Priority/regular circles for both segments and campaigns with dynamic weights
 - Queue-based throttling using DB queue metrics (`message_queue` for Mautic 5+)
@@ -47,14 +49,23 @@ MCD (MauticControlDaemon) is a host-level service that can run in two modes:
 - Cron replacement workers:
   - use `[[jobs]]` in config for interval-based independent tasks
   - examples: `mautic:email:fetch` every 900 sec, `mautic:broadcasts:send` every 60 sec, `mautic:messages:send` every 60 sec
-- Viber stats worker:
-  - if an instance has a Viber plugin installed, active profiles run `viber:stats:update` through MCD every 600 sec by default
-  - MCC can override the interval per instance through `runtime.viber_stats_instance_settings`
-  - matching cron lines are commented while MCD manages tasks and restored when the host profile returns to `passive`
+- Catalog-driven plugin operations:
+  - MCC sends only the operations declared for bundles installed on each instance;
+  - MCD generically schedules `mautic_console` operations using typed per-instance values under `runtime.plugin_operation_instance_settings`;
+  - catalog rules can comment or remove matching legacy cron and migrate its cadence into the standard interval field;
+  - plugin titles, bundle IDs, commands, defaults, and cron match tokens live in the plugin catalog rather than the scheduler code;
+  - the full schema is documented in `control-plane/docs/spec/PLUGIN_INSTANCE_OPERATIONS_v1.md`.
 - Scheduler model:
   - single daemon loop
   - DB/config refresh on `poll_interval_sec`
-  - dispatcher refill on `dispatch_interval_sec` (keeps target parallelism continuously)
+  - dispatcher refill on `dispatch_interval_sec` (keeps target parallelism over
+    time, but starts automatic ring work one task at a time)
+  - dependent segment chains share one worker lane; unrelated chains may still
+    occupy other segment workers
+  - campaign-pressure segment throttling is threshold-based: queued or
+    short-running campaigns do not throttle segments by themselves; pressure
+    starts when `campaign_pressure_min_running_sec` or
+    `campaign_pressure_min_running_count` is reached
   - two circles for segments and campaigns (`priority` + `regular`) with separate parallel limits
   - `spawn-and-release`: daemon starts command and does not wait for completion
   - process status is tracked asynchronously by PID monitor
@@ -97,7 +108,7 @@ Set in config:
 - `name = "custom|tiny|mini|midi|maxi|hiload"`
 
 Preset rules:
-- `tiny`: single ring, no throttle, no whitelists, segments `1`; campaigns use one worker with actual trigger-due campaigns first and rebuild-due campaigns second, newest-first published list.
+- `tiny`: single ring, no throttle, no whitelists, segments `1`, periodic full segment scan every `60s`; campaigns use one worker with actual trigger-due campaigns first and rebuild-due campaigns second, newest-first published list.
 - `mini`: single ring, no throttle, no whitelists, segments `4`, campaign trigger `2`, campaign rebuild `1`, shared campaign cap `1`.
 - `midi`: dual ring, no throttle, whitelists enabled, priority size `10`, parallel `3+1` for segments, updates, triggers.
 - `maxi`: dual ring, throttle `200/5m`, whitelists enabled, segments `5+1`, triggers `3+1`, rebuilds `2+1`; during throttle only whitelist segments run in `1` stream.
@@ -108,6 +119,13 @@ Segment stale-priority rule (all non-passive profiles):
 - segments with `last_built_date` older than 24h (or missing) are force-added to priority ring;
 - this rule is independent from normal weight threshold/top-N ranking;
 - if regular ring is empty, its slot is reused by priority ring automatically until regular items appear.
+
+SQL segment auto-promotion:
+- when `segment_sql_ring_enabled` and `segment_sql_auto_enabled` are true, MCD can rebuild SQL-safe segments directly in DB and remove them from native Mautic segment rings;
+- repeated recent native segment failures/timeouts still promote SQL-safe segments into the regular SQL ring;
+- SQL-safe page-hit segments are promoted into a dedicated long SQL ring after a successful native `mautic:segments:update -i <id>` takes at least `segment_sql_auto_long_native_min_duration_sec` seconds within `segment_sql_auto_long_native_history_sec`, even when the regular due-segment query would not select them;
+- the long SQL ring runs before the regular SQL ring and is limited by `segment_sql_long_ring_max_per_tick`;
+- direct SQL rebuilds update `lead_lists_leads`, `lead_lists.last_built_date`, build time metadata, and Mautic's segment count cache so the Mautic UI sees the segment as rebuilt.
 
 ## Split Config
 Recommended layout:
@@ -187,13 +205,11 @@ Manual command behavior:
 - `python -m mcd_agent service-profile --config ./etc/mcd-agent.example.toml rescan --component apt`
 - `python -m mcd_agent zabbix --config ./etc/mcd-agent.example.toml status --json`
 - `python -m mcd_agent zabbix --config ./etc/mcd-agent.example.toml bootstrap-mysql-user`
-- `python -m mcd_agent zabbix --config ./etc/mcd-agent.example.toml refresh-mautic-version-cache`
-- `python -m mcd_agent zabbix --config ./etc/mcd-agent.example.toml install-mautic-version-cache`
 
 Notes:
 - `php_fpm` apply includes FPM pool/opcache/redis tuning. Global managed `98-mcd-php.ini` baseline is no longer used; legacy files are removed on apply if present.
 - APT profile includes one-time Zabbix DB monitor bootstrap (`zbx_monitor@127.0.0.1`) with marker tracking and manual override via `mcd-cli zabbix bootstrap-mysql-user --force`.
-- MCD writes each discovered Mautic version to `<instance-root>/.mcd/mautic.version`. The Zabbix `mautic.version[*]` helper installed by `install-mautic-version-cache` reads only that cache file and never runs `bin/console`.
+- Zabbix monitors host services and hardware only. It does not receive per-instance Mautic version cache files; MCD keeps its internal, non-migrated state cache under `/opt/mcd/generated/`.
 - APT profile includes modular one-time repo profiles with local markers (`/opt/mcd/var/apt-repo-profiles.json`):
   - `db_repo_profile` (auto-detect: MariaDB/Percona/MySQL families),
   - `ondrej_php_profile`,
@@ -215,6 +231,21 @@ Notes:
   - `scheduler_duplicate_task_keys`
   - `php_console_stuck`
   - `swap_pressure_level`
+- Cluster replica freshness checks:
+  - `runtime.cluster_replica_freshness_enabled = true` enables application-table
+    freshness checks on async replica nodes.
+  - `runtime.cluster_replica_freshness_max_age_sec` is the default allowed age
+    for the newest row in checked tables.
+  - `runtime.cluster_replica_freshness_checks` is a JSON list of checks with
+    `database`, `table`, `column`, optional `order_column` and optional
+    `max_age_sec`. Prefer `order_column = "id"` for large append-only metric
+    tables so the check uses the newest row by index instead of a full `MAX()`
+    scan.
+- Cluster Galera route/source eligibility is stricter than a TCP or systemd
+  health check. A Galera node is marked eligible only when it reports
+  `wsrep_cluster_status=Primary`, `wsrep_local_state_comment=Synced`,
+  `wsrep_connected=ON` and `wsrep_ready=ON`. Donor, joiner and non-Primary
+  states are reported as blocked even when MySQL is reachable.
 - `python -m mcd_agent runtime-overrides --config ./etc/mcd-agent.example.toml show`
 - `python -m mcd_agent runtime-overrides --config ./etc/mcd-agent.example.toml fetch --json`
 - `python -m mcd_agent runtime-overrides --config ./etc/mcd-agent.example.toml push --json`
@@ -317,6 +348,16 @@ Important:
 - Mautic timezone:
   - parsed from `local.php` (`default_timezone`/`timezone`) and stored in instance inventory
   - used for quiet-window jobs (contacts cleanup) so daemon behavior follows instance timezone.
+- Per-instance PHP runtime:
+  - Mautic and PHP CLI configuration remain the source of truth for timezone and limits; MCD does not override PHP values at command launch.
+  - `mcd-cli instance-runtime status --json` reports which nginx vhost files can be materialized.
+  - `mcd-cli instance-runtime apply` generates per-instance PHP-FPM pools in `/opt/mcd/generated/php/<version>/fpm/pools/`.
+  - MCD connects those pools through one FPM include file `/etc/php/<version>/fpm/pool.d/99-mcd.conf` containing `include=/etc/php/<version>/fpm/pool.d/mcd/*.conf`.
+  - `/etc/php/<version>/fpm/pool.d/mcd` is a symlink to the generated pools directory; individual pool files are not scattered in `/etc`.
+  - Matching nginx vhosts are rewritten from the shared socket (`/run/php/php<version>-fpm.sock`) to the instance socket (`/run/php/php<version>-fpm-mcd-<slug>.sock`).
+  - MCD runs every `bin/console` command through the configured host PHP binary (normally `/usr/bin/php`). It never creates `{instance}/.mcd`, a PHP wrapper, or CLI `-d` overrides.
+  - Global CLI `conf.d/*.ini` files are host-wide and are the only source for PHP CLI limits and timezone.
+  - Apply validates `php-fpm<version> -t` and `nginx -t` before reload and restores snapshots on validation failure.
 - Runtime execution user:
   - `runtime.mautic_run_as_user` (default `www-data`) is used for Mautic console commands.
 - Filesystem permissions watchdog:
@@ -334,15 +375,24 @@ Important:
 - Runtime tuning for large campaigns:
   - `runtime.campaign_limit` controls per-run trigger batch size.
   - `runtime.campaign_limit = 0` (or `off` / `unlimited` via MCC runtime override) omits `--campaign-limit`, so one trigger run can process the whole campaign.
-  - `runtime.campaign_trigger_audit_interval_sec` bounds the safety audit that
-    periodically enqueues published campaigns as explicit
-    `mautic:campaigns:trigger -i ID` runs. Set to `0` to disable.
+  - `runtime.campaign_pressure_min_running_sec` defaults to `120`; a single
+    running campaign must live at least this long before segment throttling is
+    treated as campaign pressure.
+  - `runtime.campaign_pressure_min_running_count` defaults to `2`; this many
+    simultaneous campaign workers trigger campaign pressure immediately. Set to
+    `0` to disable the count rule.
+  - Active MCD profiles run the campaign safety audit every 60 seconds. It
+    evaluates published campaigns against Mautic's due-work conditions and
+    runs `mautic:campaigns:trigger -i ID` only for eligible IDs; passive
+    profiles keep external cron ownership.
   - on weak hosts start lower (e.g. `1000`) so one long campaign does not block full daemon cycle for too long.
-- Runtime tuning for Viber stats:
-  - `runtime.viber_stats_enabled = true` enables the built-in `viber:stats:update` scheduler for instances where a Viber plugin is installed.
-  - `runtime.viber_stats_interval_sec = 600` is the default interval.
-  - `runtime.viber_stats_instance_settings` can override specific instances by `instance_uid`, root, name, or domain.
-  - when the active profile is not `passive`, MCD comments matching `viber:stats:update` cron lines to avoid duplicate execution.
+- Runtime tuning for catalog plugin operations:
+  - canonical per-instance values live under `runtime.plugin_operation_instance_settings`;
+  - periodic operations default to disabled and are enabled automatically only
+    when MCD migrates a matching catalog-declared legacy cron, or when an
+    operator explicitly enables the tile;
+  - old plugin-specific keys are read only through that plugin's catalog-owned
+    `legacy_runtime` mapping during migration.
 - Self-update safety:
   - `runtime.mcd_update_defer_during_campaigns = true` prevents MCD self-update while campaign trigger/rebuild/update console jobs are running.
   - daemon auto-update keeps a short cooldown after campaign console activity to avoid restarting between batch passes.
@@ -397,7 +447,9 @@ Important:
   - daemon also watches local mutable runtime section fingerprint and pushes to MCC immediately when it changes.
   - any mutating command that already does immediate state push updates observed runtime view in MCC without separate polling.
   - `runtime.tasks_compact_*` controls quiet-window compaction cadence (`DELETE` + optional `VACUUM`).
-  - systemd service uses `KillMode=process` and `TimeoutStopSec=15` so restart does not kill child Mautic commands.
+  - systemd service uses `KillMode=control-group` and `TimeoutStopSec=15` so a
+    restart cannot leave child Mautic commands orphaned while preserving the
+    normal per-task process-group timeout behavior.
 - Plugin interactive sync:
 - MCD reads `manifest.json` from MCC plugin repo
   - shows status table (`OK`, `UPDATE`, `MISSING`, `BROKEN`) plus local-only rows (`-`)
@@ -454,6 +506,22 @@ Important:
   - `mautic-upgrade apply` supports `zip|composer|auto`
   - optional `--backup` creates archive backup before upgrade
   - optional `--with-system-upgrade` runs php/nginx package-level migration steps
+  - guarded Composer Mautic 6 to 7 upgrades require an explicit target and
+    `--allow-major`; MCC runs a Storage Box instance backup first and starts the
+    upgrade only after that backup succeeds
+  - the Mautic 6 to 7 Composer path prepares Composer and Node 20, updates
+    `composer.json` to the selected Mautic 7 target, runs Composer with
+    dependencies, clears cache, finishes the Mautic updater, and reconciles
+    known Doctrine migration metadata drift before the final migration check
+  - `--with-system-upgrade` on the 6 to 7 flow installs PHP 8.4 packages,
+    migrates custom PHP ini files such as `60-custom.ini` and
+    `90-redis-sessions.ini`, rewrites nginx PHP-FPM socket references from
+    8.3 to 8.4, validates nginx, restarts services, and purges PHP 8.3 only
+    after all other discovered host instances are Mautic 7-compatible
+  - MCD repairs the Mautic 7 GrapesJS CKEditor GPL-license fallback on every
+    inventory cycle, including passive hosts, and reapplies it after plugin or
+    Mautic updates overwrite either the source or published builder artifact;
+    the scoped builder URL revision also invalidates previously cached broken JS
 - MCD self-version checks:
   - `runtime.mcd_update_notify = true` (default): show notice if MCC has newer MCD version
   - `runtime.mcd_auto_update_enabled = false` (default): auto-update disabled; notify-only
@@ -509,6 +577,15 @@ Important:
     after a matching contact is found and email DNC is present or inserted
   - `monitored_email_parser_whitelist = ["support@example.com"]` skips exact
     internal emails and removes existing email-DNC rows for those contacts
+- MCC-managed own-host mail uses `bounce@<instance>` as its return path and
+  accepts only `bounce@`, `fbl@` and `abuse@` on the instance MX. Delivery
+  reports and ARF complaints are parsed immediately into email DNC state for
+  that instance; no IMAP mailbox credentials are required. External SMTP,
+  Amazon SES and SendGrid profiles keep their Mautic return path unchanged,
+  including an intentionally empty value.
+- While at least one own-host domain is active, MCD maintains one exact,
+  comment-tagged TCP/25 firewall rule through `mcd-local-mail-firewall.service`.
+  Disabling the final own-host domain removes only that managed rule.
 
 ## Benchmark notes (current host)
 - Baseline standard command (scheduler paused):  

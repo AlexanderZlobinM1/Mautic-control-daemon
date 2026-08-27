@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from importlib import metadata
 import re
 from pathlib import Path
 from typing import Any
@@ -27,9 +28,19 @@ def installed_agent_version(source_dir: Path | str | None = None) -> str:
     return source_version(source_dir) or __version__
 
 
+def package_agent_version(distribution: str = "mcd-agent") -> str:
+    try:
+        return str(metadata.version(distribution) or "").strip()
+    except metadata.PackageNotFoundError:
+        return ""
+    except Exception:
+        return ""
+
+
 def agent_version_payload(source_dir: Path | str | None = None) -> dict[str, Any]:
     installed = installed_agent_version(source_dir)
     source = source_version(source_dir) or ""
+    package = package_agent_version()
     running = __version__
     return {
         # Legacy field consumed by MCC and older tooling. Keep it tied to the
@@ -38,5 +49,7 @@ def agent_version_payload(source_dir: Path | str | None = None) -> dict[str, Any
         "agent_running_version": running,
         "agent_installed_version": installed,
         "agent_source_version": source,
-        "agent_version_mismatch": bool(source and source != running),
+        "agent_package_version": package,
+        "agent_package_mismatch": bool(source and package and source != package),
+        "agent_version_mismatch": bool((source and source != running) or (source and package and source != package)),
     }

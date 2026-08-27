@@ -9,6 +9,16 @@ import phpserialize
 
 _SAFE_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _URL_LAST_DAYS_RE = re.compile(r"^(url|url_title)_in_last_(\d+)_days$", re.IGNORECASE)
+_ABS_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_ABS_DATETIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?)?$")
+_RELATIVE_INTERVAL_RE = re.compile(
+    r"^(?:today\s+)?(?P<sign>[+-])\s*(?P<count>\d+)\s*(?P<unit>day|days|week|weeks|month|months|year|years)$",
+    re.IGNORECASE,
+)
+_RELATIVE_AGO_RE = re.compile(
+    r"^(?P<count>\d+)\s*(?P<unit>day|days|week|weeks|month|months|year|years)\s+ago$",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -21,6 +31,8 @@ class DetectedSQLSegmentRule:
     has_page_hits: bool
     problem_count: int
     checked_out: bool
+    long_native_duration_sec: float = 0.0
+    long_native_success_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -113,6 +125,110 @@ def _compile_not_like_any(expr: str, null_expr: str, values: list[str]) -> str |
     return f"({null_expr} IS NULL OR (" + " AND ".join(parts) + "))"
 
 
+def _compile_eq_any(expr: str, values: list[str]) -> str | None:
+    uniq = list(dict.fromkeys([v for v in values if v]))
+    if not uniq:
+        return None
+    parts = [f"{expr} = {_sql_quote(value)}" for value in uniq]
+    if len(parts) == 1:
+        return parts[0]
+    return "(" + " OR ".join(parts) + ")"
+
+
+def _date_sql_expr(value: str) -> str | None:
+    raw = str(value or "").strip().lower()
+    raw = re.sub(r"\s+", " ", raw)
+    if not raw:
+        return None
+    if _ABS_DATE_RE.match(raw):
+        return f"DATE({_sql_quote(raw)})"
+    if raw == "today":
+        return "DATE('{now_local}')"
+    if raw == "yesterday":
+        return "DATE(DATE_SUB('{now_local}', INTERVAL 1 DAY))"
+    if raw == "tomorrow":
+        return "DATE(DATE_ADD('{now_local}', INTERVAL 1 DAY))"
+
+    match = _RELATIVE_AGO_RE.match(raw)
+    if match:
+        count = int(match.group("count"))
+        unit = match.group("unit").rstrip("s").upper()
+        return f"DATE(DATE_SUB('{{now_local}}', INTERVAL {count} {unit}))"
+
+    match = _RELATIVE_INTERVAL_RE.match(raw)
+    if not match:
+        return None
+    count = int(match.group("count"))
+    unit = match.group("unit").rstrip("s").upper()
+    direction = "DATE_ADD" if match.group("sign") == "+" else "DATE_SUB"
+    return f"DATE({direction}('{{now_local}}', INTERVAL {count} {unit}))"
+
+
+def _compile_date_clause(col_expr: str, operator: str, value: str) -> str | None:
+    date_expr = _date_sql_expr(value)
+    if date_expr is None:
+        return None
+    op_map = {
+        "eq": "=",
+        "=": "=",
+        "neq": "<>",
+        "!=": "<>",
+        "gt": ">",
+        ">": ">",
+        "gte": ">=",
+        ">=": ">=",
+        "lt": "<",
+        "<": "<",
+        "lte": "<=",
+        "<=": "<=",
+    }
+    sql_op = op_map.get(operator)
+    if not sql_op:
+        return None
+    return f"(DATE({col_expr}) {sql_op} {date_expr})"
+
+
+def _datetime_sql_expr(value: str) -> str | None:
+    raw = str(value or "").strip()
+    raw = re.sub(r"\s+", " ", raw.replace("T", " "))
+    if not raw:
+        return None
+    if _ABS_DATETIME_RE.match(raw):
+        if len(raw) == 10:
+            raw = f"{raw} 00:00:00"
+        elif len(raw) == 16:
+            raw = f"{raw}:00"
+        return _sql_quote(raw)
+    return None
+
+
+def _compile_datetime_clause(col_expr: str, operator: str, value: str) -> str | None:
+    op_map = {
+        "eq": "=",
+        "=": "=",
+        "neq": "<>",
+        "!=": "<>",
+        "gt": ">",
+        ">": ">",
+        "gte": ">=",
+        ">=": ">=",
+        "lt": "<",
+        "<": "<",
+        "lte": "<=",
+        "<=": "<=",
+    }
+    sql_op = op_map.get(operator)
+    if not sql_op:
+        return None
+    dt_expr = _datetime_sql_expr(value)
+    if dt_expr is not None:
+        return f"({col_expr} {sql_op} {dt_expr})"
+    date_expr = _date_sql_expr(value)
+    if date_expr is not None:
+        return f"(DATE({col_expr}) {sql_op} {date_expr})"
+    return None
+
+
 def _normalize_lead_columns(raw: set[str] | frozenset[str] | list[str] | tuple[str, ...] | None) -> set[str] | None:
     if raw is None:
         return None
@@ -155,6 +271,7 @@ def _compile_lead_clause(
 
     col_expr = f"l.`{field}`"
     cast_expr = f"CAST({col_expr} AS CHAR CHARACTER SET utf8mb4)"
+    field_type = str(clause.get("type") or "").strip().lower()
     if operator == "!empty":
         return _CompiledClause(
             sql=f"({col_expr} IS NOT NULL AND {cast_expr} <> '')",
@@ -165,6 +282,14 @@ def _compile_lead_clause(
             sql=f"({col_expr} IS NULL OR {cast_expr} = '')",
             has_page_hits=False,
         )
+    if field_type in {"date", "datetime"}:
+        values = _normalize_filter_values(_clause_filter_value(clause))
+        if len(values) != 1:
+            return None
+        date_sql = _compile_date_clause(col_expr, operator, values[0])
+        if date_sql is None:
+            return None
+        return _CompiledClause(sql=date_sql, has_page_hits=False)
     if operator in {"contains", "like"}:
         values = _normalize_filter_values(_clause_filter_value(clause))
         like_sql = _compile_like_any(cast_expr, values)
@@ -191,18 +316,33 @@ def _compile_lead_clause(
 def _compile_behavior_clause(clause: dict[str, object]) -> _CompiledClause | None:
     field = str(clause.get("field") or "").strip()
     operator = str(clause.get("operator") or "").strip().lower()
-    if operator not in {"contains", "like"}:
-        return None
     values = _normalize_filter_values(_clause_filter_value(clause))
     if not values:
         return None
+
+    if field == "hit_url_date":
+        if len(values) != 1:
+            return None
+        match_sql = _compile_datetime_clause("ph.date_hit", operator, values[0])
+        if not match_sql:
+            return None
+        return _CompiledClause(
+            sql=(
+                "EXISTS ("
+                "SELECT 1 FROM {prefix}page_hits ph "
+                "WHERE ph.lead_id = l.id AND " + match_sql +
+                ")"
+            ),
+            has_page_hits=True,
+            page_hit_sql="ph.lead_id IS NOT NULL AND " + match_sql,
+        )
 
     target_col = None
     days_expr = None
     match = _URL_LAST_DAYS_RE.match(field)
     if match:
         target_col = match.group(1).lower()
-        days_expr = f"ph.date_hit >= DATE_SUB('{{now_local}}', INTERVAL {int(match.group(2))} DAY)"
+        days_expr = f"ph.date_hit >= DATE(DATE_SUB('{{now_local}}', INTERVAL {int(match.group(2))} DAY))"
     elif field == "hit_url":
         target_col = "url"
     elif field == "url_title":
@@ -210,11 +350,17 @@ def _compile_behavior_clause(clause: dict[str, object]) -> _CompiledClause | Non
     if target_col is None:
         return None
 
-    like_sql = _compile_like_any(f"ph.`{target_col}`", values)
-    if not like_sql:
+    target_expr = f"ph.`{target_col}`"
+    if operator in {"contains", "like"}:
+        match_sql = _compile_like_any(target_expr, values)
+    elif operator in {"eq", "=", "in"}:
+        match_sql = _compile_eq_any(target_expr, values)
+    else:
         return None
-    where_parts = ["ph.lead_id = l.id", like_sql]
-    page_hit_where_parts = ["ph.lead_id IS NOT NULL", like_sql]
+    if not match_sql:
+        return None
+    where_parts = ["ph.lead_id = l.id", match_sql]
+    page_hit_where_parts = ["ph.lead_id IS NOT NULL", match_sql]
     if days_expr:
         where_parts.append(days_expr)
         page_hit_where_parts.append(days_expr)
@@ -287,23 +433,17 @@ def _lead_where_sql(parts: list[str]) -> str:
 
 
 def _page_hit_candidates_sql(ph_parts: list[str]) -> str:
-    subqueries = [
-        (
-            "SELECT DISTINCT ph.lead_id AS lead_id "
-            "FROM {prefix}page_hits ph "
-            f"WHERE {part}"
-        )
-        for part in ph_parts
-        if part
-    ]
-    if not subqueries:
+    parts = [part for part in ph_parts if part]
+    if not parts:
         return ""
-    if len(subqueries) == 1:
-        return subqueries[0]
-    sql = f"({subqueries[0]}) ph0"
-    for idx, subquery in enumerate(subqueries[1:], start=1):
-        sql += f" INNER JOIN ({subquery}) ph{idx} ON ph{idx}.lead_id = ph0.lead_id"
-    return f"SELECT DISTINCT ph0.lead_id AS lead_id FROM {sql}"
+    # Native Mautic applies AND-ed page-hit behavior filters against the same
+    # hit row for this segment shape. Keeping one page_hits alias is both closer
+    # to native semantics and avoids expensive self-joins on large hit tables.
+    return (
+        "SELECT DISTINCT ph.lead_id AS lead_id "
+        "FROM {prefix}page_hits ph "
+        "WHERE " + " AND ".join(f"({part})" for part in parts)
+    )
 
 
 def _build_select_sql(groups: list[list[_CompiledClause]]) -> str | None:
@@ -341,8 +481,14 @@ def detect_auto_sql_segment_rules(
     max_clauses: int,
     problem_threshold: int,
     lead_columns: set[str] | frozenset[str] | list[str] | tuple[str, ...] | None = None,
+    long_native_stats: dict[int, dict[str, object]] | None = None,
+    long_native_min_duration_sec: int = 1800,
+    long_native_min_successes: int = 1,
 ) -> dict[int, DetectedSQLSegmentRule]:
     normalized_lead_columns = _normalize_lead_columns(lead_columns)
+    long_stats = long_native_stats or {}
+    min_long_duration = max(60.0, float(long_native_min_duration_sec or 1800))
+    min_long_successes = max(1, int(long_native_min_successes or 1))
     out: dict[int, DetectedSQLSegmentRule] = {}
     for row in segment_rows:
         try:
@@ -361,7 +507,25 @@ def detect_auto_sql_segment_rules(
         groups, has_page_hits, clause_count = compiled
         checked_out = bool(row.get("checked_out"))
         problem_count = int(row.get("problem_count") or 0)
-        if not (has_page_hits or checked_out or problem_count >= max(1, problem_threshold)):
+        sid_long_stats = long_stats.get(sid, {})
+        try:
+            long_native_duration = max(
+                float(sid_long_stats.get("max_duration_sec") or 0.0),
+                float(sid_long_stats.get("last_duration_sec") or 0.0),
+            )
+        except Exception:
+            long_native_duration = 0.0
+        try:
+            long_native_success_count = int(sid_long_stats.get("success_count") or 0)
+        except Exception:
+            long_native_success_count = 0
+        long_native = (
+            has_page_hits
+            and long_native_duration >= min_long_duration
+            and long_native_success_count >= min_long_successes
+        )
+        problem_promoted = problem_count >= max(1, problem_threshold)
+        if not (checked_out or problem_promoted or long_native):
             continue
         select_sql = _build_select_sql(groups)
         if not select_sql:
@@ -369,9 +533,11 @@ def detect_auto_sql_segment_rules(
         reason_parts: list[str] = []
         if has_page_hits:
             reason_parts.append("page_hits")
+        if long_native:
+            reason_parts.append(f"long_native={long_native_duration:.0f}s")
         if checked_out:
             reason_parts.append("checked_out")
-        if problem_count >= max(1, problem_threshold):
+        if problem_promoted:
             reason_parts.append(f"problem_count={problem_count}")
         out[sid] = DetectedSQLSegmentRule(
             segment_id=sid,
@@ -382,5 +548,7 @@ def detect_auto_sql_segment_rules(
             has_page_hits=has_page_hits,
             problem_count=problem_count,
             checked_out=checked_out,
+            long_native_duration_sec=long_native_duration if long_native else 0.0,
+            long_native_success_count=long_native_success_count if long_native else 0,
         )
     return out

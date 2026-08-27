@@ -34,6 +34,14 @@ worker_watchdog_sec = 0
 segment_cycles_per_tick = 4
 # SQL ring for simple segments (direct DB rebuild; excluded from Mautic segment rings).
 segment_sql_ring_enabled = false
+# Auto-promote SQL-safe segments after repeated scheduler errors or slow native rebuilds.
+segment_sql_auto_enabled = true
+# Native segment rebuild duration that promotes a SQL-safe page_hits segment into the long SQL ring.
+segment_sql_auto_long_native_min_duration_sec = 600
+# Lookback window for slow native segment rebuild detection, sec.
+segment_sql_auto_long_native_history_sec = 604800
+# Max long SQL segment rebuilds per scheduler tick.
+segment_sql_long_ring_max_per_tick = 1
 # Max SQL segment rebuilds per scheduler tick.
 segment_sql_ring_max_per_tick = 1
 # Minimum time between starts of the same SQL-managed segment, sec.
@@ -47,7 +55,7 @@ segment_sql_orphan_policy = "reclaim_stale"
 # Consider running SQL-ring lock stale after this many seconds without heartbeat.
 segment_sql_orphan_after_sec = 900
 # Restrict page_hits-based SQL segments to quiet window only.
-segment_sql_page_hits_quiet_only = false
+segment_sql_page_hits_quiet_only = true
 # Quiet window start hour for page_hits-based SQL segments.
 segment_sql_page_hits_quiet_hour = 2
 # Quiet window length in minutes for page_hits-based SQL segments.
@@ -58,6 +66,10 @@ segment_sql_ring_rules = {}
 segment_kill_mode = "graceful"
 # Grace period in seconds before hard kill when graceful stop is used.
 segment_kill_grace_sec = 10
+# Safety ceiling for isolated priority native segment updates. This is
+# separate from command_timeout_sec, which remains unlimited for regular work.
+# 0 disables the ceiling.
+priority_segment_timeout_sec = 3600
 
 # SQLite file for task state / weight cache / inventory.
 state_db_path = "/opt/mcd/var/mcd-state.db"
@@ -108,6 +120,9 @@ host_pressure_php_stuck_pause_threshold = 8
 host_pressure_swap_level_pause_threshold = 2
 # Max concurrent generic jobs (from [[jobs]]).
 jobs_max_workers = 2
+# Host cap applied independently to segment/import and campaign command lanes.
+# 0 keeps both lanes unlimited; MCC hardware profiles set this value.
+scheduler_host_max_parallel = 0
 
 # Segment ids forced to priority ring.
 segment_whitelist = []
@@ -127,9 +142,9 @@ segment_batch_limit = 1000
 campaign_batch_limit = 1000
 # Campaign limit for trigger command. 0/off/unlimited omits --campaign-limit.
 campaign_limit = 0
-# Safety audit: periodically enqueue published campaigns as explicit
-# `mautic:campaigns:trigger -i ID` runs, bounded per campaign by this interval.
-campaign_trigger_audit_interval_sec = 300
+# Safety audit: every minute evaluate published campaigns against Mautic's
+# due-work conditions and run only eligible IDs. Active MCD profiles enforce 60.
+campaign_trigger_audit_interval_sec = 60
 # Limit for mautic:import.
 import_limit = 1000
 
@@ -218,11 +233,17 @@ mautic6_core_patch_apply_if_version_unknown = true
 pagehit_cascade_patch_policy = "off"
 
 # Enable campaign rebuild worker.
-enable_campaign_rebuild = false
+enable_campaign_rebuild = true
 # Rebuild planner interval, sec.
 campaign_rebuild_poll_interval_sec = 300
 # Max cycles per rebuild tick.
 campaign_rebuild_max_cycles_per_tick = 4
+
+# Native campaign safety fallback. When enabled, MCD runs the global Mautic
+# campaign update followed by trigger once per interval, after the regular
+# scheduler has been idle for this instance. The single result is reported to MCC.
+campaign_native_fallback_enabled = false
+campaign_native_fallback_interval_sec = 3600
 
 # Enable contacts cleanup task.
 enable_contacts_cleanup = false
@@ -366,7 +387,7 @@ segments_due = "SELECT ll.id FROM {prefix}lead_lists ll WHERE ll.is_published = 
 # rows; rebuild workers create missing event logs for newly eligible contacts.
 # Note: for Mautic 4 the agent auto-removes `c.deleted` predicate at runtime
 # because some M4 schemas do not have this column.
-campaigns_due = "SELECT DISTINCT c.id FROM {prefix}campaigns c WHERE c.is_published = 1 AND (c.deleted IS NULL) AND (c.publish_up IS NULL OR c.publish_up <= '{now_local}') AND EXISTS (  SELECT 1   FROM {prefix}campaign_lead_event_log el   WHERE el.campaign_id = c.id     AND el.date_triggered IS NULL     AND (      (el.trigger_date IS NOT NULL AND el.trigger_date >= '{window_start_utc_7d}' AND el.trigger_date <= '{now_utc}')       OR (el.is_scheduled = 1 AND el.trigger_date IS NULL)    )   LIMIT 1) ORDER BY c.id"
+campaigns_due = "SELECT DISTINCT c.id FROM {prefix}campaigns c WHERE c.is_published = 1 AND (c.deleted IS NULL) AND (c.publish_up IS NULL OR c.publish_up <= '{now_local}') AND EXISTS (  SELECT 1   FROM {prefix}campaign_lead_event_log el   WHERE el.campaign_id = c.id     AND el.is_scheduled = 1     AND (      (el.trigger_date IS NOT NULL AND (el.trigger_date <= '{now_utc}' OR el.trigger_date <= '{now_local}'))       OR el.trigger_date IS NULL    )   LIMIT 1) ORDER BY c.id"
 
 # Segment weight source rows.
 segment_weights = "SELECT ll.id, UNIX_TIMESTAMP(ll.date_added) AS created_ts, UNIX_TIMESTAMP(ll.date_modified) AS modified_ts, UNIX_TIMESTAMP(ll.last_built_date) AS built_ts, COALESCE(a.recent_cnt, 0) AS recent_activity FROM {prefix}lead_lists ll LEFT JOIN (SELECT leadlist_id, COUNT(*) AS recent_cnt FROM {prefix}lead_lists_leads WHERE manually_removed = 0 AND date_added >= '{window_start_utc_24h}' GROUP BY leadlist_id) a ON a.leadlist_id = ll.id WHERE ll.is_published = 1"

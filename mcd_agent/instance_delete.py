@@ -6,17 +6,23 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from typing import Any
 from urllib.parse import urlparse
 
 from mcd_agent.config import AgentConfig
 from mcd_agent.localphp import parse_local_php
+from mcd_agent.models import DBConfig
 
 
 _DOMAIN_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
 _DB_NAME_RE = re.compile(r"^[A-Za-z0-9_$-]{1,64}$")
 _LOCAL_DB_HOSTS = {"", "localhost", "127.0.0.1", "::1"}
 _NGINX_DIRS = (Path("/etc/nginx/sites-enabled"), Path("/etc/nginx/sites-available"))
+_VAR_WWW = Path("/var/www")
+_LETSENCRYPT_LIVE = Path("/etc/letsencrypt/live")
+_LETSENCRYPT_RENEWAL = Path("/etc/letsencrypt/renewal")
+_LETSENCRYPT_MCD = Path("/etc/letsencrypt/mcd")
 
 
 def _nginx_dir(name: str) -> Path:
@@ -101,6 +107,10 @@ def _mysql_exec(
 
 def _quote_ident(value: str) -> str:
     return "`" + str(value).replace("`", "``") + "`"
+
+
+def _quote_sql(value: str) -> str:
+    return "'" + str(value).replace("\\", "\\\\").replace("'", "\\'") + "'"
 
 
 def _clean_domain(raw: str) -> str:
@@ -211,19 +221,12 @@ def _nginx_candidates(root: Path, domains: list[str]) -> list[Path]:
     if not domain_set:
         return []
     enabled_root = _nginx_dir("sites-enabled")
-    enabled_dir = enabled_root.resolve(strict=False)
     for domain in sorted(domain_set):
         enabled = enabled_root / f"{domain}.conf"
         if (enabled.exists() or enabled.is_symlink()) and _nginx_matches_domain(enabled, domain_set):
             wanted.append(enabled)
 
     for base in _NGINX_DIRS:
-        try:
-            base_resolved = base.resolve(strict=False)
-        except Exception:
-            continue
-        if base_resolved != enabled_dir:
-            continue
         if not base.exists() or not base.is_dir():
             continue
         for item in base.iterdir():
@@ -238,30 +241,39 @@ def _disable_nginx_vhost(path: Path) -> tuple[bool, str]:
     if not (path.exists() or path.is_symlink()):
         return False, f"nginx vhost already absent: {path}"
     enabled_dir = _nginx_dir("sites-enabled").resolve(strict=False)
-    available_dir = _nginx_dir("sites-available")
+    available_dir = _nginx_dir("sites-available").resolve(strict=False)
     try:
         parent = path.parent.resolve(strict=False)
     except Exception:
         raise RuntimeError(f"unsafe nginx path: {path}")
-    if parent != enabled_dir:
-        return False, f"preserved non-enabled nginx config: {path}"
-    if path.is_symlink():
+    if parent not in {enabled_dir, available_dir}:
+        raise RuntimeError(f"unsafe nginx path: {path}")
+    if parent == enabled_dir:
         path.unlink()
-        return True, f"removed enabled symlink: {path}"
-
-    # Legacy guard: sites-enabled must contain symlinks only. If an older host
-    # has a regular file there, preserve the config in sites-available first and
-    # then disable the enabled copy.
-    available_dir.mkdir(parents=True, exist_ok=True)
-    target = available_dir / path.name
-    if not target.exists():
-        shutil.copy2(path, target)
+        return True, f"removed enabled nginx config: {path}"
     path.unlink()
-    return True, f"moved regular enabled config to sites-available and disabled: {path}"
+    return True, f"removed available nginx config: {path}"
+
+
+def _inventory_db_for_root(cfg: AgentConfig | None, root: Path) -> DBConfig | None:
+    state_db_path = str(getattr(cfg, "state_db_path", "") or "").strip()
+    if not state_db_path:
+        return None
+    try:
+        from mcd_agent.inventory import InstanceInventory
+
+        inventory = InstanceInventory(state_db_path)
+        for inst in inventory.list_instances():
+            if Path(inst.root).resolve(strict=False) == root and inst.db is not None:
+                return inst.db
+    except Exception:
+        return None
+    return None
 
 
 def build_delete_plan(
     *,
+    cfg: AgentConfig | None = None,
     root: str,
     domains: list[str] | None = None,
     db_name: str | None = None,
@@ -286,11 +298,13 @@ def build_delete_plan(
     if site_domain and site_domain not in seen_domains:
         cleaned_domains.append(site_domain)
 
-    final_db_name = str(db_name or local_cfg.get("db_name", "") or "").strip()
-    db_host = str(local_cfg.get("db_host", "") or "").strip().lower()
-    db_port = str(local_cfg.get("db_port", "") or "").strip()
-    db_user = str(local_cfg.get("db_user", "") or "").strip()
-    db_password = str(local_cfg.get("db_password", "") or "")
+    inventory_db = _inventory_db_for_root(cfg, target_root) if delete_db else None
+    explicit_db_name = str(db_name or "").strip()
+    final_db_name = str(explicit_db_name or local_cfg.get("db_name", "") or (inventory_db.name if inventory_db else "") or "").strip()
+    db_host = str(local_cfg.get("db_host", "") or (inventory_db.host if inventory_db else "") or "").strip().lower()
+    db_port = str(local_cfg.get("db_port", "") or (inventory_db.port if inventory_db else "") or "").strip()
+    db_user = str(local_cfg.get("db_user", "") or (inventory_db.user if inventory_db else "") or "").strip()
+    db_password = str(local_cfg.get("db_password", "") or (inventory_db.password if inventory_db else "") or "")
     if delete_db:
         if not final_db_name:
             raise RuntimeError("database name is unavailable; local.php is missing or incomplete")
@@ -298,7 +312,7 @@ def build_delete_plan(
             raise RuntimeError(f"unsafe database name: {final_db_name}")
         if db_host not in _LOCAL_DB_HOSTS:
             raise RuntimeError(f"refusing to drop non-local database host: {db_host}")
-        if not db_user:
+        if not db_user and not explicit_db_name:
             raise RuntimeError("database user is unavailable; local.php is missing or incomplete")
 
     nginx_paths = _nginx_candidates(target_root, cleaned_domains) if delete_vhost else []
@@ -334,6 +348,164 @@ def _plan_public(plan: InstanceDeletePlan) -> dict[str, Any]:
     }
 
 
+def _chmod_tree_for_delete(path: Path) -> None:
+    try:
+        os.chmod(path, 0o700)
+    except Exception:
+        pass
+    try:
+        walker = os.walk(path, topdown=False, onerror=lambda _exc: None)
+        for root, dirs, files in walker:
+            root_path = Path(root)
+            for name in files:
+                try:
+                    os.chmod(root_path / name, 0o600)
+                except Exception:
+                    pass
+            for name in dirs:
+                try:
+                    os.chmod(root_path / name, 0o700)
+                except Exception:
+                    pass
+            try:
+                os.chmod(root_path, 0o700)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def _remaining_tree_entries(path: Path, *, limit: int = 20) -> list[str]:
+    out: list[str] = []
+    try:
+        for child in path.rglob("*"):
+            try:
+                out.append(str(child.relative_to(path)))
+            except Exception:
+                out.append(str(child))
+            if len(out) >= limit:
+                break
+    except Exception:
+        return out
+    return out
+
+
+def _quarantine_instance_root(path: Path) -> Path:
+    stamp = time.strftime("%Y%m%d%H%M%S", time.gmtime())
+    base = path.parent / f".mcd-delete-{path.name}-{stamp}-{os.getpid()}"
+    for idx in range(100):
+        target = base if idx == 0 else path.parent / f"{base.name}-{idx}"
+        try:
+            path.rename(target)
+            return target
+        except FileExistsError:
+            continue
+    raise RuntimeError(f"failed to allocate delete quarantine path for {path}")
+
+
+def _remove_instance_root(path: Path, *, attempts: int = 6, sleep_sec: float = 0.2) -> None:
+    last_error: Exception | None = None
+    target = path
+    for attempt in range(max(1, int(attempts))):
+        if not path.exists() and not target.exists():
+            return
+        if target == path and path.exists():
+            _chmod_tree_for_delete(path)
+            try:
+                target = _quarantine_instance_root(path)
+            except FileNotFoundError:
+                return
+            except OSError as exc:
+                last_error = exc
+                target = path
+        try:
+            shutil.rmtree(target)
+        except FileNotFoundError:
+            if not path.exists():
+                return
+            target = path
+            continue
+        except OSError as exc:
+            last_error = exc
+            _chmod_tree_for_delete(target)
+            time.sleep(float(sleep_sec) * float(attempt + 1))
+            continue
+        if not target.exists() and not path.exists():
+            return
+        if not target.exists() and path.exists():
+            target = path
+            continue
+        last_error = OSError(f"directory still exists after rmtree: {target}")
+        _chmod_tree_for_delete(target)
+        time.sleep(float(sleep_sec) * float(attempt + 1))
+
+    remaining_root = target if target.exists() else path
+    remaining = _remaining_tree_entries(remaining_root)
+    detail = str(last_error or "directory still exists").strip()
+    if remaining:
+        detail += "; remaining entries: " + ", ".join(remaining)
+        if len(remaining) >= 20:
+            detail += ", ..."
+    raise RuntimeError(f"failed to remove instance root {path}: {detail}")
+
+
+def _remove_empty_instance_parent(path: Path) -> bool:
+    if path.name not in {"public_html", "docroot"}:
+        return False
+    parent = path.parent.resolve(strict=False)
+    if parent.parent != _VAR_WWW.resolve(strict=False):
+        return False
+    try:
+        parent.rmdir()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return False
+    return True
+
+
+def _managed_image_db_user(db_name: str, db_user: str) -> str:
+    clean_name = str(db_name or "").strip()
+    clean_user = str(db_user or "").strip()
+    if not clean_name.startswith("baza_"):
+        return ""
+    suffix = clean_name[len("baza_") :]
+    expected = f"korisnik_{suffix}"
+    if not suffix or len(expected) > 64 or not _DB_NAME_RE.match(expected):
+        return ""
+    if clean_user and clean_user != expected:
+        return ""
+    return expected
+
+
+def _remove_dedicated_certificate(domain: str) -> tuple[bool, str]:
+    cert_dir = _LETSENCRYPT_LIVE / domain
+    renewal = _LETSENCRYPT_RENEWAL / f"{domain}.conf"
+    if not cert_dir.exists() and not renewal.exists():
+        return False, f"certificate already absent: {domain}"
+    rc, out = _run(["certbot", "certificates", "--cert-name", domain], timeout_sec=60)
+    if rc != 0:
+        return False, f"certificate preserved; inspection failed for {domain}: {out}"
+    match = re.search(r"(?im)^\s*Domains:\s*(.+?)\s*$", out)
+    cert_domains = {value.strip().lower().rstrip(".") for value in (match.group(1).split() if match else [])}
+    if cert_domains != {domain}:
+        return False, f"certificate preserved; not dedicated to {domain}"
+    rc, out = _run(
+        ["certbot", "delete", "--cert-name", domain, "--non-interactive"],
+        timeout_sec=120,
+    )
+    if rc != 0:
+        return False, f"certificate cleanup failed for {domain}: {out}"
+    safe_domain = re.sub(r"[^a-z0-9_.-]+", "_", domain.lower()).strip("._-") or "domain"
+    credential = _LETSENCRYPT_MCD / f"dns-cloudflare-{safe_domain}.ini"
+    try:
+        if credential.exists():
+            credential.unlink()
+    except OSError as exc:
+        return True, f"certificate removed for {domain}; credential cleanup failed: {exc}"
+    return True, f"certificate removed for {domain}"
+
+
 def delete_instance_artifacts(
     cfg: AgentConfig,
     *,
@@ -349,6 +521,7 @@ def delete_instance_artifacts(
     if not (delete_files or delete_vhost or delete_db):
         raise RuntimeError("select at least one deletion target")
     plan = build_delete_plan(
+        cfg=cfg,
         root=root,
         domains=domains,
         db_name=db_name,
@@ -359,7 +532,15 @@ def delete_instance_artifacts(
     result: dict[str, Any] = {
         "status": "planned" if dry_run else "ok",
         "plan": _plan_public(plan),
-        "deleted": {"files": False, "vhost": [], "db": False},
+        "deleted": {
+            "files": False,
+            "parent": False,
+            "vhost": [],
+            "db": False,
+            "db_user": False,
+            "local_mail": [],
+            "certificates": [],
+        },
         "warnings": [],
     }
     if dry_run:
@@ -368,6 +549,22 @@ def delete_instance_artifacts(
         raise RuntimeError("--yes is required")
     if os.geteuid() != 0:
         raise RuntimeError("must run as root")
+
+    if plan.delete_vhost and plan.nginx_paths:
+        rc, out = _run(["nginx", "-t"], timeout_sec=30)
+        if rc != 0:
+            raise RuntimeError("nginx -t failed before vhost removal: " + out)
+
+    if plan.delete_vhost:
+        from mcd_agent.local_mail import disable_local_mail
+
+        for domain in plan.domains:
+            try:
+                mail_result = disable_local_mail(cfg, domain=domain)
+            except Exception as exc:
+                raise RuntimeError(f"failed to disable local mail for {domain}: {exc}") from exc
+            if not bool(mail_result.get("already_disabled", False)):
+                result["deleted"]["local_mail"].append(domain)
 
     if plan.delete_db:
         print(f"Dropping database {plan.db_name}")
@@ -380,6 +577,16 @@ def delete_instance_artifacts(
             password=plan.db_password,
         )
         result["deleted"]["db"] = True
+        managed_db_user = _managed_image_db_user(plan.db_name, plan.db_user)
+        if managed_db_user:
+            try:
+                _mysql_exec(
+                    f"DROP USER IF EXISTS {_quote_sql(managed_db_user)}@'localhost'",
+                    timeout_sec=120,
+                )
+                result["deleted"]["db_user"] = True
+            except Exception as exc:
+                result["warnings"].append(f"managed database user cleanup failed: {exc}")
 
     if plan.delete_vhost:
         print("Deleting nginx vhost")
@@ -393,6 +600,11 @@ def delete_instance_artifacts(
                     result["deleted"]["vhost"].append(str(path))
             except Exception as exc:
                 raise RuntimeError(f"failed to remove nginx path {path}: {exc}") from exc
+        for domain in plan.domains:
+            changed, message = _remove_dedicated_certificate(domain)
+            result["warnings"].append(message)
+            if changed:
+                result["deleted"]["certificates"].append(domain)
         if result["deleted"]["vhost"]:
             rc, out = _run(["nginx", "-t"], timeout_sec=30)
             if rc != 0:
@@ -405,9 +617,11 @@ def delete_instance_artifacts(
             raise RuntimeError(f"refusing to delete symlink root: {plan.root}")
         if not plan.root.exists():
             result["warnings"].append(f"root already absent: {plan.root}")
+            result["deleted"]["parent"] = _remove_empty_instance_parent(plan.root)
         else:
-            shutil.rmtree(plan.root)
+            _remove_instance_root(plan.root)
             result["deleted"]["files"] = True
+            result["deleted"]["parent"] = _remove_empty_instance_parent(plan.root)
 
     try:
         from mcd_agent.inventory import InstanceInventory

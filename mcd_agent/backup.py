@@ -30,6 +30,7 @@ from mcd_agent.secret_store import SecretStore
 
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_RETENTION_DIR_RE = re.compile(r"^(?:\d{4}-\d{2}-\d{2}|\d{8}-\d{6})$")
 _PROFILE_ROW_ID = 1
 _MYDUMPER_FLAG_CACHE: dict[tuple[str, str], bool] = {}
 _XTRABACKUP_FLAG_CACHE: dict[tuple[str, str], bool] = {}
@@ -70,6 +71,15 @@ _CLUSTER_FILE_RSYNC_EXCLUDES = (
     "/etc/shadow-",
     "/etc/ssh/ssh_host_*_key",
     "/var/lib/glusterd/***",
+)
+
+_BACKUP_TAR_RUNTIME_EXCLUDES = (
+    "--exclude=.mcd",
+    "--exclude=.mcd/*",
+    "--exclude=./.mcd",
+    "--exclude=./.mcd/*",
+    "--exclude=*/.mcd",
+    "--exclude=*/.mcd/*",
 )
 
 
@@ -197,6 +207,26 @@ def _format_remote_dir(root_dir: str, instance_name: str) -> str:
     return f"{base}/{name}"
 
 
+def _is_deleted_instances_remote_root(value: str | None) -> bool:
+    cleaned = str(value or "").strip().strip("/").lower()
+    parts = [part for part in cleaned.split("/") if part]
+    return "deleted-instances" in parts
+
+
+def _host_backup_remote_root_dir(cfg: AgentConfig) -> str:
+    root = str(cfg.backup_remote_root_dir or "backup").strip().strip("/")
+    if _is_deleted_instances_remote_root(root):
+        return "backup"
+    return root or "backup"
+
+
+def _instance_backup_retention_enabled(cfg: AgentConfig, remote_root_dir: str | None = None) -> bool:
+    root = str(
+        remote_root_dir if remote_root_dir is not None else cfg.backup_remote_root_dir or "backup"
+    ).strip().strip("/")
+    return not _is_deleted_instances_remote_root(root)
+
+
 def _write_marker(path: Path, payload: dict[str, Any]) -> None:
     _json_write(path / ".mcd-backup.json", payload)
 
@@ -317,6 +347,102 @@ def _write_storage_backup_manifest_and_index(
         return
 
 
+def _write_storage_index_entry(mount_path: Path, manifest_path: Path, manifest: dict[str, Any]) -> None:
+    manifest_rel = _path_rel_to(mount_path, manifest_path)
+    index_entry = dict(manifest)
+    index_entry["manifest_path"] = manifest_rel
+    index_entry["backup_dir"] = _path_rel_to(mount_path, manifest_path.parent)
+    digest = re.sub(r"[^A-Za-z0-9_.-]+", "-", index_entry["backup_dir"]).strip(".-")
+    if not digest:
+        digest = f"backup-{int(time.time())}"
+    index_dir = mount_path / "mcc-backups-index.d"
+    index_dir.mkdir(parents=True, exist_ok=True)
+    _json_write(index_dir / f"{digest[:160]}.json", index_entry)
+
+
+def _write_host_backup_instance_manifests(
+    *,
+    mount_path: Path,
+    backup_dir: Path,
+    marker: dict[str, Any],
+    instances: list[MauticInstall],
+) -> None:
+    if str(marker.get("method") or "").strip().lower() != "mydumper":
+        return
+    dumped_raw = marker.get("dumped_instances")
+    if not isinstance(dumped_raw, list) or not dumped_raw:
+        return
+    by_uid: dict[str, MauticInstall] = {}
+    by_name: dict[str, MauticInstall] = {}
+    by_db: dict[str, MauticInstall] = {}
+    for inst in instances:
+        if inst.instance_uid:
+            by_uid[str(inst.instance_uid)] = inst
+        if inst.name:
+            by_name[str(inst.name)] = inst
+        if inst.db and inst.db.name:
+            by_db[str(inst.db.name)] = inst
+    files_archive = backup_dir / "files.tar.gz"
+    if not files_archive.exists():
+        files_archive = backup_dir / str(marker.get("files_archive_path") or "").split("/")[-1]
+    host_backup_rel = _path_rel_to(mount_path, backup_dir)
+    for raw in dumped_raw:
+        if not isinstance(raw, dict):
+            continue
+        uid = str(raw.get("instance_uid") or "").strip()
+        name = str(raw.get("instance_name") or "").strip()
+        db_name = str(raw.get("database") or "").strip()
+        inst = by_uid.get(uid) or by_name.get(name) or by_db.get(db_name)
+        if inst is None:
+            continue
+        sidecar_dir = backup_dir.parent / "instances" / _instance_slug(inst) / backup_dir.name
+        sidecar_dir.mkdir(parents=True, exist_ok=True)
+        db_rel = str(raw.get("path") or "").strip()
+        if not db_rel and uid and db_name:
+            db_rel = f"databases/{uid}__{db_name}"
+        db_path = backup_dir / db_rel if db_rel else Path()
+        files_asset: dict[str, Any] = {}
+        if files_archive.exists() and files_archive.is_file():
+            files_asset = {
+                "path": _path_rel_to(sidecar_dir, files_archive),
+                "bytes": _asset_bytes(files_archive),
+                "type": "tar.gz",
+                "shared_host_archive": True,
+            }
+        db_asset: dict[str, Any] = {}
+        if db_path.exists():
+            db_asset = {
+                "path": _path_rel_to(sidecar_dir, db_path),
+                "bytes": _asset_bytes(db_path),
+                "type": "directory",
+            }
+        source_domain = inst.primary_domain or inst.name or name or uid
+        manifest = {
+            "schema": "mcc.backup.manifest.v1",
+            "kind": "mcc.instance_backup.from_host_mydumper",
+            "label": source_domain,
+            "created_at_utc": str(marker.get("ts_utc") or _utc_now_iso()),
+            "source_host": str(marker.get("host_name") or ""),
+            "source_domain": source_domain,
+            "source_webroot": str(inst.root or raw.get("root") or ""),
+            "source_database": db_name,
+            "source_instance_uid": uid,
+            "mautic_major": int(inst.mautic_major or marker.get("mautic_major") or 0),
+            "mautic_version": str(getattr(inst, "mautic_version", "") or marker.get("mautic_version") or ""),
+            "method": "mydumper",
+            "backup_path": _path_rel_to(mount_path, sidecar_dir),
+            "parent_backup_dir": host_backup_rel,
+            "bytes_written": int(raw.get("bytes") or 0),
+            "files_asset": files_asset,
+            "db_asset": db_asset,
+            "restore_scope": "instance",
+            "restorable_as_image": bool(files_asset.get("path") and db_asset.get("path")),
+        }
+        manifest_path = sidecar_dir / "mcc-backup-manifest.json"
+        _json_write(manifest_path, manifest)
+        _write_storage_index_entry(mount_path, manifest_path, manifest)
+
+
 def _verify_dump_dir(path: Path) -> tuple[bool, str, int]:
     if not path.exists() or not path.is_dir():
         return False, "dump directory missing", 0
@@ -363,7 +489,7 @@ def _archive_files(cfg: AgentConfig, out_dir: Path) -> None:
     if not src:
         return
     target = out_dir / cfg.backup_archive_name
-    cmd = ["tar", "-czf", str(target)] + src
+    cmd = ["tar", *_BACKUP_TAR_RUNTIME_EXCLUDES, "-czf", str(target)] + src
     _run(cmd, timeout_sec=cfg.backup_dump_timeout_sec, check=True)
 
 
@@ -374,6 +500,7 @@ def _archive_instance_files(cfg: AgentConfig, inst: MauticInstall, out_dir: Path
     target = out_dir / "files.tar.gz"
     cmd = [
         "tar",
+        *_BACKUP_TAR_RUNTIME_EXCLUDES,
         "--exclude=var/cache",
         "--exclude=var/logs",
         "--exclude=app/cache",
@@ -388,15 +515,84 @@ def _archive_instance_files(cfg: AgentConfig, inst: MauticInstall, out_dir: Path
     return target
 
 
-def _prune_by_copies(parent: Path, keep: int) -> list[str]:
+def _backup_retention_candidate_dirs(parent: Path) -> list[Path]:
+    if not parent.exists():
+        return []
+    candidates = [
+        x
+        for x in parent.iterdir()
+        if x.is_dir() and not x.is_symlink() and _RETENTION_DIR_RE.match(x.name)
+    ]
+    candidates.sort(key=lambda x: x.name, reverse=True)
+    return candidates
+
+
+def _prune_storage_index_entries(mount_path: Path | None, removed_dirs: list[Path]) -> int:
+    if not mount_path or not removed_dirs:
+        return 0
+    index_dir = mount_path / "mcc-backups-index.d"
+    if not index_dir.exists() or not index_dir.is_dir():
+        return 0
+    removed_rel: set[str] = set()
+    for path in removed_dirs:
+        try:
+            rel = _path_rel_to(mount_path, path)
+        except Exception:
+            continue
+        if rel and rel != ".":
+            removed_rel.add(rel.strip("/"))
+    if not removed_rel:
+        return 0
+    removed_count = 0
+    for index_file in index_dir.glob("*.json"):
+        try:
+            payload = json.loads(index_file.read_text(encoding="utf-8", errors="replace"))
+            if not isinstance(payload, dict):
+                continue
+            backup_dir = str(payload.get("backup_dir") or "").strip().lstrip("/")
+            manifest_path = str(payload.get("manifest_path") or "").strip().lstrip("/")
+            for rel in removed_rel:
+                prefix = rel.rstrip("/") + "/"
+                if backup_dir == rel or manifest_path == f"{prefix}mcc-backup-manifest.json" or manifest_path.startswith(prefix):
+                    index_file.unlink(missing_ok=True)
+                    removed_count += 1
+                    break
+        except Exception:
+            continue
+    return removed_count
+
+
+def _prune_by_copies(
+    parent: Path,
+    keep: int,
+    *,
+    protected: set[Path] | None = None,
+    mount_path: Path | None = None,
+) -> list[str]:
     removed: list[str] = []
     if keep <= 0 or not parent.exists():
         return removed
-    candidates = [x for x in parent.iterdir() if x.is_dir() and _DATE_RE.match(x.name)]
-    candidates.sort(key=lambda x: x.name, reverse=True)
-    for old in candidates[keep:]:
-        subprocess.run(["rm", "-rf", str(old)], check=False)
+    candidates = _backup_retention_candidate_dirs(parent)
+    protected_resolved = {p.resolve(strict=False) for p in (protected or set())}
+    protected_candidates = {
+        p
+        for p in candidates
+        if p.resolve(strict=False) in protected_resolved
+    }
+    unprotected_keep = max(0, int(keep) - len(protected_candidates))
+    removed_paths: list[Path] = []
+    for old in [p for p in candidates if p not in protected_candidates][unprotected_keep:]:
+        shutil.rmtree(old, ignore_errors=True)
         removed.append(old.name)
+        removed_paths.append(old)
+        sidecar_parent = parent / "instances"
+        if sidecar_parent.exists() and sidecar_parent.is_dir():
+            for inst_dir in sidecar_parent.iterdir():
+                sidecar = inst_dir / old.name
+                if sidecar.exists() and sidecar.is_dir() and not sidecar.is_symlink():
+                    shutil.rmtree(sidecar, ignore_errors=True)
+                    removed_paths.append(sidecar)
+    _prune_storage_index_entries(mount_path, removed_paths)
     return removed
 
 
@@ -440,6 +636,21 @@ def _cleanup_incomplete_dirs(
 def _dir_date(path: Path) -> datetime | None:
     try:
         return datetime.strptime(path.name, "%Y-%m-%d")
+    except Exception:
+        return None
+
+
+def _cluster_retention_dir_date(path: Path) -> datetime | None:
+    dt = _dir_date(path)
+    if dt is not None:
+        return dt
+    # Some legacy/automation temp names (for example .superseded-live-YYYY-MM-DD...)
+    # are operationally date-scoped and should still participate in retention.
+    m = re.search(r"(\d{4}-\d{2}-\d{2})", path.name)
+    if not m:
+        return None
+    try:
+        return datetime.strptime(m.group(1), "%Y-%m-%d")
     except Exception:
         return None
 
@@ -887,10 +1098,27 @@ def _profile_archive_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _profile_backup_payload(payload: dict[str, Any]) -> dict[str, Any]:
     out: dict[str, Any] = {}
+    if "enabled" in payload:
+        raw_enabled = payload.get("enabled")
+        if isinstance(raw_enabled, str):
+            out["enabled"] = raw_enabled.strip().lower() in {"1", "true", "yes", "on"}
+        else:
+            out["enabled"] = bool(raw_enabled)
+    if "method" in payload:
+        method = _normalize_backup_method(payload.get("method"))
+        if method:
+            out["method"] = method
     if "remote_root_dir" in payload:
         remote_root = str(payload.get("remote_root_dir") or "").strip().strip("/")
         if remote_root:
             out["remote_root_dir"] = remote_root
+    if "retention_copies" in payload:
+        try:
+            copies = int(payload.get("retention_copies"))
+            if copies > 0:
+                out["retention_copies"] = copies
+        except Exception:
+            pass
     return out
 
 
@@ -958,77 +1186,31 @@ def backup_profile_sync_from_config(cfg: AgentConfig) -> dict[str, Any]:
     merged = _deep_merge(current, from_cfg)
     if merged == current:
         return {"status": "ok", "changed": False, "keys": []}
-    backup_profile_set(cfg, from_cfg, merge=True, sync_config=False)
+    backup_profile_set(cfg, from_cfg, merge=True, sync_config=False, prepare_check=False)
     return {"status": "ok", "changed": True, "keys": sorted(from_cfg.keys())}
 
 
-def backup_profile_set(
-    cfg: AgentConfig,
-    payload: dict[str, Any],
-    *,
-    merge: bool = True,
-    sync_config: bool = True,
-) -> dict[str, Any]:
-    current = backup_profile_get(cfg) if merge else {}
-    merged = _deep_merge(current, payload)
-    token = _profile_crypto(cfg).encrypt(json.dumps(merged, ensure_ascii=True, separators=(",", ":")))
-    con = _profile_store_conn(cfg)
-    try:
-        con.execute(
-            """
-            INSERT INTO backup_profile(id, payload_enc, updated_at)
-            VALUES(?,?,?)
-            ON CONFLICT(id) DO UPDATE SET payload_enc=excluded.payload_enc, updated_at=excluded.updated_at
-            """,
-            (_PROFILE_ROW_ID, token, time.time()),
-        )
-        con.commit()
-    finally:
-        con.close()
-    if sync_config:
-        try:
-            _sync_profile_payload_to_config(cfg, merged)
-        except Exception:
-            # Non-fatal: profile DB is authoritative for backup runtime.
-            pass
-    return merged
-
-
-def _mask_value(v: str | None) -> str:
-    if not v:
-        return ""
-    if len(v) <= 3:
-        return "***"
-    return v[:1] + "***" + v[-1:]
-
-
-def backup_profile_masked(cfg: AgentConfig) -> dict[str, Any]:
-    p = backup_profile_get(cfg)
-    out = json.loads(json.dumps(p, ensure_ascii=True)) if p else {}
-    storage = out.get("storage")
-    if isinstance(storage, dict) and storage.get("password") is not None:
-        storage["password"] = _mask_value(str(storage.get("password") or ""))
-    mysql = out.get("mysql")
-    if isinstance(mysql, dict) and mysql.get("password") is not None:
-        mysql["password"] = _mask_value(str(mysql.get("password") or ""))
-    return out
-
-
-def _effective_cfg(cfg: AgentConfig) -> AgentConfig:
-    p = backup_profile_get(cfg)
-    if not p:
-        return cfg
-    storage = p.get("storage") if isinstance(p.get("storage"), dict) else {}
-    mysql = p.get("mysql") if isinstance(p.get("mysql"), dict) else {}
-    archive = p.get("archive") if isinstance(p.get("archive"), dict) else {}
-    backup = _profile_backup_payload(p)
+def _cfg_with_profile_payload(cfg: AgentConfig, payload: dict[str, Any]) -> AgentConfig:
+    storage = payload.get("storage") if isinstance(payload.get("storage"), dict) else {}
+    mysql = payload.get("mysql") if isinstance(payload.get("mysql"), dict) else {}
+    archive = payload.get("archive") if isinstance(payload.get("archive"), dict) else {}
+    backup = _profile_backup_payload(payload)
     out = cfg
     if backup:
         out = replace(
             out,
+            backup_enabled=bool(backup.get("enabled"))
+            if "enabled" in backup
+            else out.backup_enabled,
+            backup_method=str(backup.get("method")).strip()
+            if backup.get("method")
+            else out.backup_method,
             backup_remote_root_dir=str(backup.get("remote_root_dir")).strip()
             if backup.get("remote_root_dir")
             else out.backup_remote_root_dir,
+            backup_retention_copies=int(backup.get("retention_copies"))
+            if backup.get("retention_copies") is not None
+            else out.backup_retention_copies,
         )
     if storage:
         out = replace(
@@ -1061,6 +1243,133 @@ def _effective_cfg(cfg: AgentConfig) -> AgentConfig:
     return out
 
 
+def _backup_profile_prepare_check(cfg: AgentConfig, payload: dict[str, Any]) -> dict[str, Any]:
+    check_cfg = _cfg_with_profile_payload(cfg, payload)
+    _validate_cfg(check_cfg)
+    tool_state = _ensure_backup_tools(check_cfg)
+
+    instances = _list_instances(check_cfg)
+    db_instances = [x for x in instances if x.db]
+    method = _backup_method(check_cfg)
+    if method == "mydumper" and not db_instances:
+        raise RuntimeError("No instances with DB credentials found in inventory")
+    if method == "xtrabackup" and not db_instances and not (
+        check_cfg.backup_mysql_user and check_cfg.backup_mysql_password
+    ):
+        raise RuntimeError("No DB credentials found for xtrabackup ([backup.mysql] required when inventory has no DB)")
+
+    checked_dbs: list[str] = []
+    for inst in db_instances:
+        db = _effective_db_for_instance(check_cfg, inst)
+        _mysql_capture(check_cfg, db, "SELECT 1")
+        checked_dbs.append(db.name)
+
+    mount_path = Path(check_cfg.backup_mount_base_dir) / _host_slug(check_cfg)
+    lock_path = _lock_path(check_cfg)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_fh = lock_path.open("w", encoding="utf-8")
+    try:
+        try:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError("backup lock is busy; cannot verify backup profile now")
+        _mount(check_cfg, mount_path)
+        remote_parent = mount_path / _format_remote_dir(check_cfg.backup_remote_root_dir, _host_name(check_cfg))
+        remote_parent.mkdir(parents=True, exist_ok=True)
+        probe_path = remote_parent / f".mcd-profile-check-{int(time.time())}.tmp"
+        probe_path.write_text("ok\n", encoding="utf-8")
+        probe_path.unlink(missing_ok=True)
+    finally:
+        try:
+            _unmount(mount_path, check_cfg.backup_unmount_timeout_sec)
+        except Exception:
+            pass
+        try:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+        except Exception:
+            pass
+        try:
+            lock_fh.close()
+        except Exception:
+            pass
+
+    return {
+        "status": "ok",
+        "method": method,
+        "tools": tool_state,
+        "instances": len(instances),
+        "db_instances": len(db_instances),
+        "checked_databases": checked_dbs,
+    }
+
+
+def backup_profile_set(
+    cfg: AgentConfig,
+    payload: dict[str, Any],
+    *,
+    merge: bool = True,
+    sync_config: bool = True,
+    prepare_check: bool = True,
+) -> dict[str, Any]:
+    current = backup_profile_get(cfg) if merge else {}
+    merged = _deep_merge(current, payload)
+    if "remote_root_dir" not in payload and _is_deleted_instances_remote_root(str(merged.get("remote_root_dir") or "")):
+        merged["remote_root_dir"] = "backup"
+    prepare_result: dict[str, Any] | None = None
+    if prepare_check:
+        prepare_result = _backup_profile_prepare_check(cfg, merged)
+    token = _profile_crypto(cfg).encrypt(json.dumps(merged, ensure_ascii=True, separators=(",", ":")))
+    con = _profile_store_conn(cfg)
+    try:
+        con.execute(
+            """
+            INSERT INTO backup_profile(id, payload_enc, updated_at)
+            VALUES(?,?,?)
+            ON CONFLICT(id) DO UPDATE SET payload_enc=excluded.payload_enc, updated_at=excluded.updated_at
+            """,
+            (_PROFILE_ROW_ID, token, time.time()),
+        )
+        con.commit()
+    finally:
+        con.close()
+    if sync_config:
+        try:
+            _sync_profile_payload_to_config(cfg, merged)
+        except Exception:
+            # Non-fatal: profile DB is authoritative for backup runtime.
+            pass
+    if prepare_result is not None:
+        merged["_prepare_check"] = prepare_result
+    return merged
+
+
+def _mask_value(v: str | None) -> str:
+    if not v:
+        return ""
+    if len(v) <= 3:
+        return "***"
+    return v[:1] + "***" + v[-1:]
+
+
+def backup_profile_masked(cfg: AgentConfig) -> dict[str, Any]:
+    p = backup_profile_get(cfg)
+    out = json.loads(json.dumps(p, ensure_ascii=True)) if p else {}
+    storage = out.get("storage")
+    if isinstance(storage, dict) and storage.get("password") is not None:
+        storage["password"] = _mask_value(str(storage.get("password") or ""))
+    mysql = out.get("mysql")
+    if isinstance(mysql, dict) and mysql.get("password") is not None:
+        mysql["password"] = _mask_value(str(mysql.get("password") or ""))
+    return out
+
+
+def _effective_cfg(cfg: AgentConfig) -> AgentConfig:
+    p = backup_profile_get(cfg)
+    if not p:
+        return cfg
+    return _cfg_with_profile_payload(cfg, p)
+
+
 def _validate_cfg(cfg: AgentConfig) -> None:
     if not cfg.backup_enabled:
         raise RuntimeError("backup is disabled in config ([backup].enabled=false)")
@@ -1072,13 +1381,17 @@ def _validate_cfg(cfg: AgentConfig) -> None:
         raise RuntimeError("backup storage auth is not configured (key_file or password required)")
 
 
-def _backup_method(cfg: AgentConfig) -> str:
-    method = str(getattr(cfg, "backup_method", "mydumper") or "mydumper").strip().lower()
+def _normalize_backup_method(raw: Any) -> str:
+    method = str(raw or "mydumper").strip().lower()
     if method in {"logical", "dump", "mydump"}:
         return "mydumper"
     if method in {"physical", "xtra", "xtrabackup"}:
         return "xtrabackup"
     return method
+
+
+def _backup_method(cfg: AgentConfig) -> str:
+    return _normalize_backup_method(getattr(cfg, "backup_method", "mydumper"))
 
 
 def _apt_install_packages(packages: list[str]) -> None:
@@ -1089,7 +1402,7 @@ def _apt_install_packages(packages: list[str]) -> None:
         raise RuntimeError(f"missing required backup packages and apt-get is unavailable: {', '.join(wanted)}")
     env = dict(os.environ)
     env["DEBIAN_FRONTEND"] = "noninteractive"
-    _run(["apt-get", "update"], timeout_sec=900, env=env, check=True)
+    _run(["apt-get", "update", "--allow-releaseinfo-change"], timeout_sec=900, env=env, check=True)
     _run(["apt-get", "install", "-y", "--no-install-recommends"] + wanted, timeout_sec=1800, env=env, check=True)
 
 
@@ -1625,55 +1938,33 @@ def _cluster_offsite_mysql_root(cfg: AgentConfig) -> Path:
     return _cluster_db_root(cfg) / "offsite-mysql"
 
 
-def _clone_xtrabackup_for_offsite_prepare(cfg: AgentConfig, full_dir: Path) -> Path:
+def _xtrabackup_full_source_dir(full_dir: Path) -> Path:
     src = full_dir / "physical-xtrabackup"
     ok, msg, _ = _verify_xtrabackup_dir(src)
     if not ok:
         raise RuntimeError(f"local full xtrabackup is not usable for offsite source: {msg}")
-    root = _cluster_offsite_mysql_root(cfg)
-    root.mkdir(parents=True, exist_ok=True)
-    _cleanup_stale_prepared_mysql_processes(cfg)
-    active_prepared = {
-        item["datadir"].resolve(strict=False): int(item["pid"])
-        for item in _cluster_prepared_mysql_processes(cfg)
-        if isinstance(item.get("datadir"), Path)
-    }
-    for old in root.iterdir():
-        if old.is_dir() and old.name.startswith("prepared-"):
-            pid = active_prepared.get(old.resolve(strict=False))
-            if pid:
-                raise RuntimeError(f"refusing to remove prepared offsite mysql datadir still used by pid {pid}: {old}")
-            shutil.rmtree(old, ignore_errors=True)
-    clone_dir = root / f"prepared-{_fmt_local_ts()}"
-    if clone_dir.exists():
-        shutil.rmtree(clone_dir)
-    clone_dir.mkdir(parents=True, exist_ok=False)
-    try:
-        # This must be a reflink clone, not a full local copy: the cluster
-        # replica intentionally has no spare 1.4T cache area for another DB copy.
-        _run(
-            ["cp", "-a", "--reflink=always", f"{src}/.", str(clone_dir)],
-            timeout_sec=cfg.backup_dump_timeout_sec,
-            check=True,
-        )
-    except Exception as e:
-        shutil.rmtree(clone_dir, ignore_errors=True)
-        raise RuntimeError(f"failed to create reflink clone of local xtrabackup source: {e}") from e
-    return clone_dir
+    return src
 
 
-def _prepare_xtrabackup_clone_for_mysql(cfg: AgentConfig, clone_dir: Path) -> None:
-    checkpoint = _xtrabackup_checkpoint_text(clone_dir).lower()
+def _prepare_xtrabackup_full_for_mysql(cfg: AgentConfig, full_dir: Path) -> Path:
+    """Prepare the completed local full in place for the offsite read-only dump.
+
+    The local full is already the authoritative physical backup. Preparing it
+    in place is safe and avoids creating a second 1.7 TB staging datadir.
+    """
+    full_source = _xtrabackup_full_source_dir(full_dir)
+    checkpoint = _xtrabackup_checkpoint_text(full_source).lower()
     if "full-prepared" not in checkpoint:
         _run(
-            [cfg.backup_xtrabackup_bin, "--prepare", f"--target-dir={clone_dir}"],
+            [cfg.backup_xtrabackup_bin, "--prepare", f"--target-dir={full_source}"],
             timeout_sec=cfg.backup_dump_timeout_sec,
             check=True,
         )
     if shutil.which("chown"):
-        # MySQL refuses to run as root. Chowning the reflink clone changes
-        # metadata only and keeps the source xtrabackup snapshot untouched.
-        _run(["chown", "-R", "mysql:mysql", str(clone_dir)], timeout_sec=cfg.backup_dump_timeout_sec, check=True)
+        # MySQL refuses to run as root; the local full is no longer being
+        # written, so changing ownership is safe for the restore source.
+        _run(["chown", "-R", "mysql:mysql", str(full_source)], timeout_sec=cfg.backup_dump_timeout_sec, check=True)
+    return full_source
 
 
 def _mysqladmin_ping(socket_path: Path) -> bool:
@@ -1762,12 +2053,10 @@ def _run_mydumper_from_xtrabackup_full(
     full_dir: Path,
     output_dir: Path,
 ) -> dict[str, Any]:
-    clone_dir: Path | None = None
     runtime: _PreparedMysqlRuntime | None = None
     try:
-        clone_dir = _clone_xtrabackup_for_offsite_prepare(cfg, full_dir)
-        _prepare_xtrabackup_clone_for_mysql(cfg, clone_dir)
-        runtime = _start_prepared_xtrabackup_mysql(cfg, clone_dir)
+        full_source = _prepare_xtrabackup_full_for_mysql(cfg, full_dir)
+        runtime = _start_prepared_xtrabackup_mysql(cfg, full_source)
         temp_db = DBConfig(
             host="localhost",
             port=0,
@@ -1780,13 +2069,11 @@ def _run_mydumper_from_xtrabackup_full(
         return {
             "offsite_db_source": "xtrabackup",
             "offsite_xtrabackup_full_path": str(full_dir),
-            "offsite_temp_mysql": "prepared_reflink_clone",
+            "offsite_temp_mysql": "local_full_read_only",
         }
     finally:
         if runtime is not None:
             _stop_prepared_xtrabackup_mysql(runtime)
-        if clone_dir is not None:
-            shutil.rmtree(clone_dir, ignore_errors=True)
 
 
 def _run_mysql_sql(cfg: AgentConfig, db: DBConfig, sql: str) -> None:
@@ -2082,6 +2369,8 @@ def _cluster_offsite_processes(cfg: AgentConfig) -> list[int]:
 
 
 _MYSQL_DATADIR_ARG_RE = re.compile(r"(?:^|\s)--datadir=([^\s]+)")
+_MYSQL_SOCKET_ARG_RE = re.compile(r"(?:^|\s)--socket=([^\s]+)")
+_PREPARED_MYSQL_IDLE_GRACE_SEC = 300
 
 
 def _cluster_prepared_mysql_datadir_from_cmdline(cfg: AgentConfig, cmdline: str) -> Path | None:
@@ -2095,14 +2384,24 @@ def _cluster_prepared_mysql_datadir_from_cmdline(cfg: AgentConfig, cmdline: str)
     datadir = Path(match.group(1))
     if not datadir.is_absolute():
         return None
-    root = _cluster_offsite_mysql_root(cfg)
+    legacy_root = _cluster_offsite_mysql_root(cfg)
     try:
-        rel = datadir.resolve(strict=False).relative_to(root.resolve(strict=False))
+        rel = datadir.resolve(strict=False).relative_to(legacy_root.resolve(strict=False))
+    except ValueError:
+        rel = None
+    if rel is not None and rel.parts and rel.parts[0].startswith("prepared-"):
+        return datadir
+
+    # New offsite runs use the completed local full directly. Keep detecting
+    # this process shape so a daemon restart cannot start a duplicate dump.
+    local_db_root = _cluster_db_root(cfg)
+    try:
+        rel = datadir.resolve(strict=False).relative_to(local_db_root.resolve(strict=False))
     except ValueError:
         return None
-    if not rel.parts or not rel.parts[0].startswith("prepared-"):
-        return None
-    return datadir
+    if len(rel.parts) == 2 and rel.parts[0].startswith("full-") and rel.parts[1] == "physical-xtrabackup":
+        return datadir
+    return None
 
 
 def _cluster_prepared_mysql_processes(cfg: AgentConfig) -> list[dict[str, Any]]:
@@ -2119,9 +2418,70 @@ def _cluster_prepared_mysql_processes(cfg: AgentConfig) -> list[dict[str, Any]]:
         datadir = _cluster_prepared_mysql_datadir_from_cmdline(cfg, cmdline)
         if datadir is None:
             continue
-        matches.append({"pid": int(pid_dir.name), "datadir": datadir, "cmdline": cmdline})
+        matches.append(
+            {
+                "pid": int(pid_dir.name),
+                "datadir": datadir,
+                "cmdline": cmdline,
+                "age_sec": _proc_age_sec(pid_dir),
+            }
+        )
     matches.sort(key=lambda x: int(x["pid"]))
     return matches
+
+
+def _prepared_mysql_has_active_clients(item: dict[str, Any]) -> bool | None:
+    """Return whether a temporary offsite mysqld still has a dump client.
+
+    A prepared mysqld can survive the mydumper child after an MCD restart or
+    abrupt child exit. Do not infer liveness from mysqld age alone: a large
+    legitimate dump can run for many hours. The socket process list gives us
+    the safe distinction between an active dump and an orphaned server.
+    """
+    cmdline = str(item.get("cmdline") or "")
+    match = _MYSQL_SOCKET_ARG_RE.search(cmdline)
+    if not match:
+        return None
+    socket_path = match.group(1)
+    try:
+        proc = _run(
+            [
+                "mysql",
+                f"--socket={socket_path}",
+                "--protocol=socket",
+                "--user=root",
+                "--skip-password",
+                "-NBe",
+                "SELECT COUNT(*) FROM information_schema.processlist WHERE ID <> CONNECTION_ID()",
+            ],
+            timeout_sec=10,
+            check=False,
+        )
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        return int((proc.stdout or "").strip().splitlines()[-1]) > 0
+    except (IndexError, TypeError, ValueError):
+        return None
+
+
+def _proc_age_sec(pid_dir: Path) -> float | None:
+    try:
+        stat_text = (pid_dir / "stat").read_text(encoding="utf-8", errors="ignore")
+        after_comm = stat_text.rsplit(")", 1)[1].strip().split()
+        start_ticks = int(after_comm[19])
+        ticks_per_sec = os.sysconf(os.sysconf_names["SC_CLK_TCK"])
+        uptime_sec = float(Path("/proc/uptime").read_text(encoding="utf-8").split()[0])
+        return max(0.0, uptime_sec - (start_ticks / ticks_per_sec))
+    except Exception:
+        return None
+
+
+def _prepared_mysql_stale_age_limit_sec(cfg: AgentConfig) -> int:
+    dump_timeout = int(getattr(cfg, "backup_dump_timeout_sec", 0) or 0)
+    return max(3600, dump_timeout + 3600)
 
 
 def _pid_exists(pid: int) -> bool:
@@ -2159,11 +2519,20 @@ def _terminate_pid(pid: int, *, timeout_sec: int = 20) -> bool:
 
 def _cleanup_stale_prepared_mysql_processes(cfg: AgentConfig) -> list[int]:
     stopped: list[int] = []
+    stale_age_sec = _prepared_mysql_stale_age_limit_sec(cfg)
     for item in _cluster_prepared_mysql_processes(cfg):
         pid = int(item["pid"])
         datadir = item["datadir"]
-        if isinstance(datadir, Path) and datadir.exists():
-            continue
+        age = item.get("age_sec")
+        too_old = isinstance(age, (int, float)) and age >= stale_age_sec
+        if isinstance(datadir, Path) and datadir.exists() and not too_old:
+            # A just-started prepared server may not have its mydumper client
+            # connected yet. After the grace period, an idle socket means the
+            # dump child is gone and this server is safe to terminate.
+            if isinstance(age, (int, float)) and age < _PREPARED_MYSQL_IDLE_GRACE_SEC:
+                continue
+            if _prepared_mysql_has_active_clients(item) is not False:
+                continue
         if _terminate_pid(pid):
             stopped.append(pid)
     return stopped
@@ -2573,7 +2942,80 @@ def _cluster_prune_local_before_full(cfg: AgentConfig) -> list[str]:
     return removed
 
 
+def _cluster_full_required_free_bytes(cfg: AgentConfig, db: DBConfig) -> int:
+    """Return a conservative free-space requirement for a physical full.
+
+    The full backup is written beside the live database backups.  A generic
+    mount preflight only proves that the target is writable; it does not prove
+    that a physical copy can finish.  Size the guard from MySQL's logical data
+    plus a safety margin and retain the configured operational headroom.
+    """
+    schema = str(db.name or "").replace("'", "''")
+    raw = _mysql_capture(
+        cfg,
+        db,
+        "SELECT COALESCE(SUM(DATA_LENGTH + INDEX_LENGTH), 0) "
+        "FROM information_schema.TABLES "
+        f"WHERE TABLE_SCHEMA = '{schema}'",
+    )
+    try:
+        logical_bytes = max(0, int((raw or "0").splitlines()[0].strip()))
+    except (TypeError, ValueError, IndexError) as exc:
+        raise RuntimeError("unable to estimate database size for cluster full backup") from exc
+    # XtraBackup copies physical pages and metadata; 25% headroom avoids
+    # starting a job that can only fail after hours of disk writes.
+    estimated = int(logical_bytes * 1.25)
+    configured_headroom = int(getattr(cfg, "backup_cluster_incremental_min_free_bytes", 0) or 0)
+    return max(estimated, configured_headroom)
+
+
+def _cluster_storage_mode(cfg: AgentConfig) -> str:
+    mode = str(getattr(cfg, "backup_cluster_storage_mode", "local") or "local").strip().lower()
+    if mode not in {"local", "sshfs"}:
+        raise RuntimeError("backup.cluster.storage_mode must be 'local' or 'sshfs'")
+    return mode
+
+
+def _cluster_direct_storage_cfg(cfg: AgentConfig) -> tuple[AgentConfig, Path | None]:
+    """Mount StorageBox for cluster physical backups when direct mode is enabled."""
+    if _cluster_storage_mode(cfg) != "sshfs":
+        return cfg, None
+    _validate_cluster_cfg(cfg, remote=True)
+    _ensure_cluster_backup_authority(cfg)
+    _ensure_cluster_tools(cfg, {"sshfs"})
+    mount_path = Path(cfg.backup_mount_base_dir) / _host_slug(cfg)
+    try:
+        _mount(cfg, mount_path)
+        remote_root = _cluster_remote_parent(cfg, mount_path) / "local"
+        remote_root.mkdir(parents=True, exist_ok=True)
+        return replace(cfg, backup_cluster_local_root_dir=str(remote_root)), mount_path
+    except Exception:
+        if _mounted(mount_path):
+            try:
+                _unmount(mount_path, cfg.backup_unmount_timeout_sec)
+            except Exception:
+                pass
+        raise
+
+
+def _cluster_release_direct_storage(cfg: AgentConfig, mount_path: Path | None) -> None:
+    if mount_path is None:
+        return
+    try:
+        _unmount(mount_path, cfg.backup_unmount_timeout_sec)
+    except Exception:
+        pass
+
+
 def cluster_backup_local_full(config: AgentConfig) -> BackupResult:
+    cfg, mount_path = _cluster_direct_storage_cfg(_effective_cfg(config))
+    try:
+        return _cluster_backup_local_full_impl(cfg)
+    finally:
+        _cluster_release_direct_storage(cfg, mount_path)
+
+
+def _cluster_backup_local_full_impl(config: AgentConfig) -> BackupResult:
     cfg = _effective_cfg(config)
     state_path = _cluster_state_path(cfg)
     started_ts = _utc_now_iso()
@@ -2634,6 +3076,21 @@ def cluster_backup_local_full(config: AgentConfig) -> BackupResult:
         prepruned = _cluster_prune_local_before_full(cfg)
         if prepruned:
             _cluster_update_state(cfg, {"last_local_prepruned": prepruned})
+        usage = _storage_usage(db_root)
+        free_bytes = int(usage.get("free_bytes") or 0) if isinstance(usage, dict) else 0
+        required_free_bytes = _cluster_full_required_free_bytes(cfg, db)
+        if free_bytes < required_free_bytes:
+            raise RuntimeError(
+                "cluster local full skipped: insufficient free space "
+                f"({free_bytes} bytes free, need at least {required_free_bytes})"
+            )
+        _cluster_update_state(
+            cfg,
+            {
+                "last_full_free_bytes": free_bytes,
+                "last_full_required_free_bytes": required_free_bytes,
+            },
+        )
         if tmp_dir.exists():
             shutil.rmtree(tmp_dir)
         _run_xtrabackup(replace(cfg, backup_method="xtrabackup"), db, db_dir)
@@ -2731,6 +3188,14 @@ def cluster_backup_local_full(config: AgentConfig) -> BackupResult:
 
 
 def cluster_backup_local_incremental(config: AgentConfig) -> BackupResult:
+    cfg, mount_path = _cluster_direct_storage_cfg(_effective_cfg(config))
+    try:
+        return _cluster_backup_local_incremental_impl(cfg)
+    finally:
+        _cluster_release_direct_storage(cfg, mount_path)
+
+
+def _cluster_backup_local_incremental_impl(config: AgentConfig) -> BackupResult:
     cfg = _effective_cfg(config)
     state_path = _cluster_state_path(cfg)
     started_ts = _utc_now_iso()
@@ -3500,9 +3965,16 @@ def _cluster_offsite_state_from_marker(marker: dict[str, Any], backup_path: Path
     (local full, incremental, files assemble, offsite). Offsite file archive
     health must survive later local jobs, so it is stored under last_offsite_*.
     """
+    backup_dir = Path(backup_path)
     archive_path = str(marker.get("files_archive_path") or "").strip()
+    if archive_path:
+        archive_candidate = Path(archive_path)
+        if not archive_candidate.exists():
+            fallback = backup_dir / archive_candidate.name
+            if fallback.exists():
+                archive_path = str(fallback)
     out: dict[str, Any] = {
-        "last_offsite_backup_path": str(backup_path),
+        "last_offsite_backup_path": str(backup_dir),
         "last_offsite_backup_at": str(marker.get("ts_utc") or ""),
         "last_offsite_files_archive_path": archive_path,
         "last_offsite_files_bytes": int(marker.get("files_bytes") or 0),
@@ -3515,6 +3987,93 @@ def _cluster_offsite_state_from_marker(marker: dict[str, Any], backup_path: Path
     else:
         out["last_offsite_files_archive_ok"] = False
     return out
+
+
+def _parse_backup_iso_ts(value: object) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _cluster_latest_remote_offsite_marker(
+    cfg: AgentConfig,
+    mount_path: Path,
+) -> tuple[Path, dict[str, Any]] | None:
+    daily_parent = _cluster_remote_parent(cfg, mount_path) / "daily"
+    if not daily_parent.exists() or not daily_parent.is_dir():
+        return None
+    candidates: list[tuple[datetime, str, Path, dict[str, Any]]] = []
+    for item in daily_parent.iterdir():
+        if not item.is_dir() or not _DATE_RE.match(item.name):
+            continue
+        marker = _read_backup_marker(item)
+        if str(marker.get("status") or "").lower() != "ok":
+            continue
+        ts = _parse_backup_iso_ts(marker.get("ts_utc")) or datetime.min.replace(tzinfo=timezone.utc)
+        candidates.append((ts, item.name, item, marker))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: (x[0], x[1]))
+    _, _, path, marker = candidates[-1]
+    return path, marker
+
+
+def _cluster_recover_offsite_state_from_remote(
+    cfg: AgentConfig,
+    mount_path: Path,
+    state: dict[str, Any],
+    *,
+    offsite_mount_active: bool,
+) -> None:
+    if not offsite_mount_active:
+        return
+    try:
+        found = _cluster_latest_remote_offsite_marker(cfg, mount_path)
+    except Exception:
+        return
+    if found is None:
+        return
+    latest_path, marker = found
+    marker_ts = _parse_backup_iso_ts(marker.get("ts_utc"))
+    current_ts = _parse_backup_iso_ts(state.get("last_offsite_backup_at"))
+    if marker_ts is not None and current_ts is not None and marker_ts <= current_ts:
+        return
+    running_offsite = str(state.get("last_status") or "").lower() == "running" and str(state.get("job") or "") == "backup.cluster.offsite"
+    run_ts = _parse_backup_iso_ts(state.get("last_run_at"))
+    if running_offsite and marker_ts is not None and run_ts is not None and marker_ts < run_ts:
+        return
+
+    offsite_state = _cluster_offsite_state_from_marker(marker, latest_path)
+    updates: dict[str, Any] = {
+        "last_status": "ok",
+        "last_error": "",
+        "last_success_at": str(marker.get("ts_utc") or _utc_now_iso()),
+        "last_backup_path": str(latest_path),
+        "last_backup_kind": "cluster_offsite",
+        "last_bytes_written": int(marker.get("bytes_written") or 0),
+        **offsite_state,
+    }
+    if running_offsite and marker_ts is not None and run_ts is not None:
+        updates["last_duration_sec"] = max(0, int((marker_ts - run_ts).total_seconds()))
+    state.update(updates)
+    try:
+        _cluster_update_state(
+            cfg,
+            updates,
+            history_item={
+                "ts": _utc_now_iso(),
+                "status": "ok_recovered",
+                "job": "backup.cluster.offsite",
+                "backup_path": str(latest_path),
+                "bytes_written": int(marker.get("bytes_written") or 0),
+            },
+        )
+    except Exception:
+        pass
 
 
 def _cluster_backup_integrity_problem(state: dict[str, Any]) -> str:
@@ -3545,6 +4104,12 @@ def _cluster_is_protected_archive(path: Path) -> tuple[bool, str]:
     if any(tok in lname for tok in manual_tokens):
         return True, "protected_by_name"
     marker = _read_backup_marker(path)
+    if lname.startswith(".superseded-") and not (
+        marker.get("manual") or marker.get("manual_archive") or marker.get("protected")
+    ):
+        # Superseded backup wrappers are temporary artifacts and should be governed
+        # by retention unless explicitly marked as a manually protected backup.
+        marker = {}
     for key in ("manual", "manual_archive", "do_not_prune", "dont_touch", "protected"):
         if bool(marker.get(key)):
             return True, f"protected_by_marker:{key}"
@@ -3552,6 +4117,16 @@ def _cluster_is_protected_archive(path: Path) -> tuple[bool, str]:
     if kind in {"manual", "manual_archive"}:
         return True, "protected_by_marker_kind"
     return False, ""
+
+
+def _is_within_parent(parent: Path, candidate: Path) -> bool:
+    try:
+        parent_abs = parent.resolve()
+        candidate_abs = candidate.resolve()
+    except Exception:
+        parent_abs = parent.absolute()
+        candidate_abs = candidate.absolute()
+    return os.path.commonpath([str(candidate_abs), str(parent_abs)]) == str(parent_abs)
 
 
 def _cluster_remote_retention_plan_for_parent(
@@ -3597,7 +4172,7 @@ def _cluster_remote_retention_plan_for_parent(
             if protected:
                 plan["protected"].append({"path": rel(child), "reason": reason})
                 continue
-            dt = _dir_date(child)
+            dt = _cluster_retention_dir_date(child)
             if dt is None:
                 plan["problems"].append(
                     {
@@ -3619,7 +4194,7 @@ def _cluster_remote_retention_plan_for_parent(
             if protected:
                 plan["protected"].append({"path": rel(child), "reason": reason})
                 continue
-            dt = _dir_date(child)
+            dt = _cluster_retention_dir_date(child)
             if dt is not None:
                 candidates.append({"path": child, "rel": rel(child), "date": dt, "scope": "legacy"})
             else:
@@ -3648,6 +4223,14 @@ def _cluster_remote_retention_plan_for_parent(
     if apply and not plan["problems"]:
         for item in plan["delete_candidates"]:
             path = parent / str(item["path"])
+            if not _is_within_parent(parent, path):
+                plan["problems"].append(
+                    {
+                        "path": str(item["path"]),
+                        "reason": f"unsafe retention delete candidate outside parent ({parent})",
+                    }
+                )
+                continue
             try:
                 shutil.rmtree(path)
                 plan["removed"].append(dict(item))
@@ -3715,10 +4298,11 @@ def cluster_backup_offsite(config: AgentConfig) -> BackupResult:
         tool_state = _ensure_cluster_tools(cfg, {"sshfs", "mydumper"})
         db_instances = _cluster_db_instances(cfg)
         db = _backup_db_from_config_or_instances(cfg, db_instances)
+        offsite_source = str(getattr(cfg, "backup_cluster_offsite_source", "xtrabackup") or "xtrabackup").strip().lower()
         full_dir = _cluster_current_full_dir(cfg)
-        if full_dir is None:
+        if full_dir is None and offsite_source not in {"live", "live_replica", "replica"}:
             raise RuntimeError("offsite backup requires a completed local full backup")
-        full_marker = _read_backup_marker(full_dir)
+        full_marker = _read_backup_marker(full_dir) if full_dir is not None else {}
         files_snapshot = (
             _cluster_latest_files_snapshot(cfg)
             if bool(getattr(cfg, "backup_cluster_files_snapshot_enabled", True))
@@ -3833,7 +4417,6 @@ def cluster_backup_offsite(config: AgentConfig) -> BackupResult:
         db_dir = tmp_dir / "databases" / f"cluster__{db.name or 'all'}"
         db_dir.mkdir(parents=True, exist_ok=False)
         dump_cfg = _cluster_offsite_mydumper_cfg(cfg)
-        offsite_source = str(getattr(cfg, "backup_cluster_offsite_source", "xtrabackup") or "xtrabackup").strip().lower()
         if offsite_source in {"live", "live_replica", "replica"}:
             db_source_meta = {"offsite_db_source": "live_replica"}
             _run_mydumper(dump_cfg, db, db_dir)
@@ -3858,8 +4441,8 @@ def cluster_backup_offsite(config: AgentConfig) -> BackupResult:
             "bytes_written": bytes_written,
             "db_bytes": db_bytes,
             "files_bytes": files_bytes,
-            "local_full_path": str(full_dir),
-            "local_full_chain_id": str(full_marker.get("chain_id") or full_dir.name),
+            "local_full_path": str(full_dir) if full_dir is not None else "",
+            "local_full_chain_id": str(full_marker.get("chain_id") or (full_dir.name if full_dir is not None else "")),
             "files_snapshot_path": str(files_snapshot) if files_snapshot is not None else "",
             "files_archive_path": files_archive_path,
             "server_snapshot": _mysql_server_snapshot(cfg, db),
@@ -4001,9 +4584,9 @@ def cluster_backup_offsite_dry_run(config: AgentConfig) -> dict[str, Any]:
         result["mydumper_threads"] = dump_cfg.backup_mydumper_threads
         result["mydumper_extra_args"] = dump_cfg.backup_mydumper_extra_args
         full_dir = _cluster_current_full_dir(cfg)
-        if full_dir is None:
+        if full_dir is None and str(result["offsite_db_source"]) not in {"live", "live_replica", "replica"}:
             raise RuntimeError("offsite dry-run requires a completed local full backup")
-        result["local_full_path"] = str(full_dir)
+        result["local_full_path"] = str(full_dir) if full_dir is not None else ""
         if str(result["offsite_db_source"]) not in {"live", "live_replica", "replica"}:
             result["would_prepare_xtrabackup_mysql"] = True
         files_snapshot = None
@@ -4047,6 +4630,8 @@ def cluster_backup_status(config: AgentConfig) -> dict[str, Any]:
     state_path = _cluster_state_path(cfg)
     state = _json_read(state_path)
     root = _cluster_local_root(cfg)
+    mount_path = Path(cfg.backup_mount_base_dir) / _host_slug(cfg)
+    offsite_mount_active = _mounted(mount_path)
     current_full = _cluster_current_full_dir(cfg)
     latest_incr = None
     chain_id = ""
@@ -4055,6 +4640,8 @@ def cluster_backup_status(config: AgentConfig) -> dict[str, Any]:
         chain_id = str(marker.get("chain_id") or current_full.name)
         latest_incr = _cluster_latest_incremental_dir(cfg, chain_id)
     latest_files = _cluster_latest_files_snapshot(cfg)
+    live_offsite_pids = _cluster_offsite_processes(cfg)
+    offsite_lock_active = _lock_active(_cluster_lock_path(cfg, "offsite"))
     state.update(
         {
             "cluster_enabled": bool(getattr(cfg, "backup_cluster_enabled", False)),
@@ -4072,23 +4659,65 @@ def cluster_backup_status(config: AgentConfig) -> dict[str, Any]:
             "local_full_running": _lock_active(_cluster_lock_path(cfg, "local-full")),
             "local_incremental_running": _lock_active(_cluster_lock_path(cfg, "local-incremental")),
             "files_snapshot_running": _lock_active(_cluster_lock_path(cfg, "files")),
-            "offsite_running": _lock_active(_cluster_lock_path(cfg, "offsite")) or bool(_cluster_offsite_processes(cfg)),
+            "active_offsite_pids": live_offsite_pids,
+            "offsite_running": offsite_lock_active or bool(live_offsite_pids),
         }
     )
-    offsite_path_raw = str(state.get("last_offsite_backup_path") or "").strip()
-    if not offsite_path_raw and str(state.get("last_backup_kind") or "") == "cluster_offsite":
-        offsite_path_raw = str(state.get("last_backup_path") or "").strip()
-    if offsite_path_raw:
-        offsite_path = Path(offsite_path_raw)
-        marker = _read_backup_marker(offsite_path)
-        if marker:
-            offsite_state = _cluster_offsite_state_from_marker(marker, offsite_path)
-            archive_path = str(offsite_state.get("last_offsite_files_archive_path") or "").strip()
-            state.update(offsite_state)
-            state["last_files_archive_path"] = archive_path
-            state["last_files_bytes"] = int(offsite_state.get("last_offsite_files_bytes") or 0)
-        else:
-            state["last_offsite_files_archive_ok"] = False
+    offsite_active = offsite_lock_active or bool(live_offsite_pids)
+    if offsite_active:
+        # Do not walk or read the sshfs offsite tree while mydumper is writing
+        # it. The live process/lock is authoritative and this status call must
+        # stay non-invasive and quick during an active backup.
+        state["offsite_status_probe"] = "skipped_active_backup"
+    else:
+        _cluster_recover_offsite_state_from_remote(
+            cfg,
+            mount_path,
+            state,
+            offsite_mount_active=offsite_mount_active,
+        )
+        offsite_path_raw = str(state.get("last_offsite_backup_path") or "").strip()
+        if not offsite_path_raw and str(state.get("last_backup_kind") or "") == "cluster_offsite":
+            offsite_path_raw = str(state.get("last_backup_path") or "").strip()
+        if offsite_path_raw:
+            offsite_path = Path(offsite_path_raw)
+            offsite_under_mount = _path_is_under(offsite_path, mount_path)
+            if offsite_mount_active or not offsite_under_mount:
+                marker = _read_backup_marker(offsite_path)
+                if marker:
+                    offsite_state = _cluster_offsite_state_from_marker(marker, offsite_path)
+                    archive_path = str(offsite_state.get("last_offsite_files_archive_path") or "").strip()
+                    state.update(offsite_state)
+                    state["last_files_archive_path"] = archive_path
+                    state["last_files_bytes"] = int(offsite_state.get("last_offsite_files_bytes") or 0)
+                else:
+                    state["last_offsite_files_archive_ok"] = False
+            elif state.get("last_offsite_files_archive_ok") is None:
+                state["last_offsite_files_archive_ok"] = False
+    if (
+        str(state.get("last_status") or "").lower() == "running"
+        and str(state.get("job") or "") == "backup.cluster.offsite"
+        and not offsite_lock_active
+        and not live_offsite_pids
+    ):
+        run_ts = _parse_backup_iso_ts(state.get("last_run_at"))
+        run_age = (datetime.now(timezone.utc) - run_ts).total_seconds() if run_ts is not None else None
+        if run_age is None or run_age >= 120:
+            stale_error = "cluster offsite backup state was stale: no active lock or process"
+            state.update({"last_status": "failed", "last_error": stale_error, "active_offsite_pids": []})
+            try:
+                _cluster_update_state(
+                    cfg,
+                    {"last_status": "failed", "last_error": stale_error, "active_offsite_pids": []},
+                    history_item={
+                        "ts": _utc_now_iso(),
+                        "status": "failed_stale",
+                        "job": "backup.cluster.offsite",
+                        "error": stale_error,
+                    },
+                )
+            except Exception:
+                pass
     _apply_cluster_backup_integrity_status(state)
     return state
 
@@ -4119,8 +4748,15 @@ def _select_instance_for_backup(instances: list[MauticInstall], selector: str | 
     raise RuntimeError(f"instance not found for backup selector: {raw}")
 
 
-def _instance_remote_parent(cfg: AgentConfig, mount_path: Path, host_name: str, inst: MauticInstall) -> Path:
-    base = str(cfg.backup_remote_root_dir or "backup").strip().strip("/")
+def _instance_remote_parent(
+    cfg: AgentConfig,
+    mount_path: Path,
+    host_name: str,
+    inst: MauticInstall,
+    *,
+    remote_root_dir: str | None = None,
+) -> Path:
+    base = str(remote_root_dir or cfg.backup_remote_root_dir or "backup").strip().strip("/")
     parts = [p for p in [base, host_name, "instances", _instance_slug(inst)] if p]
     current = mount_path
     for part in parts:
@@ -4128,7 +4764,12 @@ def _instance_remote_parent(cfg: AgentConfig, mount_path: Path, host_name: str, 
     return current
 
 
-def backup_instance_run(config: AgentConfig, root: str | None = None) -> BackupResult:
+def backup_instance_run(
+    config: AgentConfig,
+    root: str | None = None,
+    *,
+    remote_root_dir: str | None = None,
+) -> BackupResult:
     cfg = _effective_cfg(replace(config, backup_method="mydumper"))
     state_path = _state_path(cfg)
     state = _json_read(state_path)
@@ -4159,7 +4800,7 @@ def backup_instance_run(config: AgentConfig, root: str | None = None) -> BackupR
         if not inst.db:
             raise RuntimeError(f"instance has no DB credentials: {inst.name}")
         effective_db = _effective_db_for_instance(cfg, inst)
-        remote_parent = _instance_remote_parent(cfg, mount_path, host_name, inst)
+        remote_parent = _instance_remote_parent(cfg, mount_path, host_name, inst, remote_root_dir=remote_root_dir)
         backup_name = _fmt_local_ts()
         tmp_dir = remote_parent / f".incomplete-{backup_name}"
         final_dir = remote_parent / backup_name
@@ -4200,6 +4841,17 @@ def backup_instance_run(config: AgentConfig, root: str | None = None) -> BackupR
         bytes_written = int(db_bytes) + int(file_bytes)
         os.replace(tmp_dir, final_dir)
         tmp_dir = None
+        retention_removed: list[str] = []
+        retention_skipped_reason = ""
+        if _instance_backup_retention_enabled(cfg, remote_root_dir):
+            retention_removed = _prune_by_copies(
+                remote_parent,
+                cfg.backup_retention_copies,
+                protected={final_dir},
+                mount_path=mount_path,
+            )
+        else:
+            retention_skipped_reason = "deleted_instances_manual_delete_only"
         storage_usage = _storage_usage(mount_path)
         marker = {
             "status": "ok",
@@ -4227,6 +4879,10 @@ def backup_instance_run(config: AgentConfig, root: str | None = None) -> BackupR
             "files_archive_path": str(final_dir / files_archive.name),
             "restorable_as_image": True,
         }
+        if retention_removed:
+            marker["retention_removed"] = retention_removed
+        if retention_skipped_reason:
+            marker["retention_skipped_reason"] = retention_skipped_reason
         if inst.mautic_major:
             marker["mautic_major"] = int(inst.mautic_major)
         if isinstance(storage_usage, dict):
@@ -4257,6 +4913,7 @@ def backup_instance_run(config: AgentConfig, root: str | None = None) -> BackupR
                 "last_duration_sec": duration,
                 "last_backup_path": str(final_dir),
                 "last_bytes_written": bytes_written,
+                "last_retention_removed": retention_removed,
                 "history": [
                     {
                         "ts": _utc_now_iso(),
@@ -4266,6 +4923,8 @@ def backup_instance_run(config: AgentConfig, root: str | None = None) -> BackupR
                         "bytes_written": bytes_written,
                         "instances_with_db": 1,
                         "instance": inst.name,
+                        "retention_removed": retention_removed,
+                        "retention_skipped_reason": retention_skipped_reason,
                     }
                 ]
                 + history[:19],
@@ -4381,7 +5040,7 @@ def backup_run(config: AgentConfig, root: str | None = None) -> BackupResult:
     lock_path = _lock_path(cfg)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     mount_path = Path(cfg.backup_mount_base_dir) / _host_slug(cfg)
-    remote_parent = mount_path / _format_remote_dir(cfg.backup_remote_root_dir, host_name)
+    remote_parent = mount_path / _format_remote_dir(_host_backup_remote_root_dir(cfg), host_name)
     date_dir = _fmt_local_date()
     tmp_dir = remote_parent / f".incomplete-{date_dir}-{_fmt_local_ts()}"
     final_dir = remote_parent / date_dir
@@ -4429,10 +5088,23 @@ def backup_run(config: AgentConfig, root: str | None = None) -> BackupResult:
                 + ", ".join(sorted(failed_incomplete))
             )
         if method != "xtrabackup":
-            _prune_by_copies(remote_parent, cfg.backup_retention_copies)
+            _prune_by_copies(remote_parent, cfg.backup_retention_copies, mount_path=mount_path)
         if final_dir.exists():
             marker = _read_backup_marker(final_dir)
             if str(marker.get("status") or "").strip().lower() == "ok":
+                _write_storage_backup_manifest_and_index(
+                    mount_path=mount_path,
+                    backup_dir=final_dir,
+                    marker=marker,
+                    kind=f"mcc.host_backup.{method}",
+                )
+                if method == "mydumper":
+                    _write_host_backup_instance_manifests(
+                        mount_path=mount_path,
+                        backup_dir=final_dir,
+                        marker=marker,
+                        instances=instances,
+                    )
                 duration = int(time.monotonic() - start_monotonic)
                 storage_usage = _storage_usage(mount_path)
                 existing_bytes: int | None
@@ -4562,6 +5234,7 @@ def backup_run(config: AgentConfig, root: str | None = None) -> BackupResult:
                         "database": effective_db.name,
                         "method": "mydumper",
                         "bytes": one_bytes,
+                        "path": _path_rel_to(tmp_dir, db_dir),
                     }
                 )
         bytes_written = total_bytes
@@ -4628,12 +5301,29 @@ def backup_run(config: AgentConfig, root: str | None = None) -> BackupResult:
             if retention_removed:
                 marker["retention_removed"] = retention_removed
                 _write_marker(final_dir, marker)
+        else:
+            retention_removed = _prune_by_copies(
+                remote_parent,
+                cfg.backup_retention_copies,
+                protected={final_dir},
+                mount_path=mount_path,
+            )
+            if retention_removed:
+                marker["retention_removed"] = retention_removed
+                _write_marker(final_dir, marker)
         _write_storage_backup_manifest_and_index(
             mount_path=mount_path,
             backup_dir=final_dir,
             marker=marker,
             kind=f"mcc.host_backup.{method}",
         )
+        if method == "mydumper":
+            _write_host_backup_instance_manifests(
+                mount_path=mount_path,
+                backup_dir=final_dir,
+                marker=marker,
+                instances=instances,
+            )
 
         duration = int(time.monotonic() - start_monotonic)
         success_state = dict(run_state)
@@ -4650,6 +5340,8 @@ def backup_run(config: AgentConfig, root: str | None = None) -> BackupResult:
             hist_item["chain_id"] = xtrabackup_chain_id
             hist_item["base_backup_path"] = xtrabackup_base_path
             hist_item["space_pruned"] = xtrabackup_space_removed
+            hist_item["retention_removed"] = retention_removed
+        elif retention_removed:
             hist_item["retention_removed"] = retention_removed
         history = [hist_item] + history[:19]
         success_state.update(
@@ -4668,6 +5360,8 @@ def backup_run(config: AgentConfig, root: str | None = None) -> BackupResult:
             success_state["last_chain_id"] = xtrabackup_chain_id
             success_state["last_base_backup_path"] = xtrabackup_base_path
             success_state["last_space_pruned"] = xtrabackup_space_removed
+            success_state["last_retention_removed"] = retention_removed
+        elif retention_removed:
             success_state["last_retention_removed"] = retention_removed
         if isinstance(storage_usage, dict):
             success_state["last_storage_total_bytes"] = int(storage_usage.get("total_bytes") or 0)
@@ -4751,7 +5445,7 @@ def backup_preflight(config: AgentConfig, root: str | None = None) -> BackupResu
 
         host_name = _host_name(cfg)
         mount_path = Path(cfg.backup_mount_base_dir) / _host_slug(cfg)
-        remote_parent = mount_path / _format_remote_dir(cfg.backup_remote_root_dir, host_name)
+        remote_parent = mount_path / _format_remote_dir(_host_backup_remote_root_dir(cfg), host_name)
         probe_dir = remote_parent / f".preflight-{_fmt_local_ts()}"
         _mount(cfg, mount_path)
         try:
@@ -4817,7 +5511,7 @@ def backup_restore(
     state = _json_read(state_path)
     host_name = _host_name(cfg)
     mount_path = Path(cfg.backup_mount_base_dir) / _host_slug(cfg)
-    remote_parent = mount_path / _format_remote_dir(cfg.backup_remote_root_dir, host_name)
+    remote_parent = mount_path / _format_remote_dir(_host_backup_remote_root_dir(cfg), host_name)
     start_monotonic = time.monotonic()
 
     lock_fh = lock_path.open("w", encoding="utf-8")
@@ -5119,7 +5813,7 @@ def backup_prune(config: AgentConfig, root: str | None = None) -> BackupResult:
     cfg = _effective_cfg(config)
     _validate_cfg(cfg)
     mount_path = Path(cfg.backup_mount_base_dir) / _host_slug(cfg)
-    remote_parent = mount_path / _format_remote_dir(cfg.backup_remote_root_dir, _host_name(cfg))
+    remote_parent = mount_path / _format_remote_dir(_host_backup_remote_root_dir(cfg), _host_name(cfg))
     removed: list[str] = []
     try:
         _mount(cfg, mount_path)
@@ -5127,7 +5821,7 @@ def backup_prune(config: AgentConfig, root: str | None = None) -> BackupResult:
         if _backup_method(cfg) == "xtrabackup":
             removed = _prune_xtrabackup_retention(remote_parent, cfg)
         else:
-            removed = _prune_by_copies(remote_parent, cfg.backup_retention_copies)
+            removed = _prune_by_copies(remote_parent, cfg.backup_retention_copies, mount_path=mount_path)
         return BackupResult(
             ok=True,
             message=f"prune done, removed={len(removed)}",

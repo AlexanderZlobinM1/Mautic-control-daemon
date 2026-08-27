@@ -15,6 +15,7 @@ from mcd_agent import __version__
 from mcd_agent.config import AgentConfig
 from mcd_agent.host_identity import resolve_agent_identity
 from mcd_agent.mautic_db_indexes import apply_mautic_db_indexes
+from mcd_agent.wazuh_profile import apply_wazuh_profile
 
 
 _SYSCTL_PATH = Path("/etc/sysctl.d/99-mcd-hw.conf")
@@ -65,7 +66,7 @@ def fetch_service_profile(cfg: AgentConfig, component: str) -> dict[str, Any]:
     if not base:
         return {"status": "disabled", "reason": "mcc_url_not_set"}
     comp = (component or "").strip().lower().replace("-", "_")
-    if comp not in {"php_fpm", "mysql", "apt", "mautic_db_indexes", "db_indexes"}:
+    if comp not in {"php_fpm", "mysql", "apt", "wazuh", "mautic_db_indexes", "db_indexes"}:
         return {"status": "error", "reason": f"unsupported component: {component}"}
     ident = resolve_agent_identity(cfg)
     payload = {
@@ -98,6 +99,19 @@ def fetch_mysql_profile(cfg: AgentConfig) -> dict[str, Any]:
 
 def fetch_apt_profile(cfg: AgentConfig) -> dict[str, Any]:
     return fetch_service_profile(cfg, "apt")
+
+
+def fetch_wazuh_profile(cfg: AgentConfig) -> dict[str, Any]:
+    return fetch_service_profile(cfg, "wazuh")
+
+
+def _service_profile_apply_outcome(applied: dict[str, Any]) -> tuple[str, str | None]:
+    status = str(applied.get("status") or "").strip().lower()
+    if status in {"applied", "planned", "noop", "disabled", "ok", "already_present"}:
+        return "ok", None
+    if status in {"skipped", "deferred"}:
+        return "skipped", str(applied.get("reason") or status or "skipped")
+    return "error", str(applied.get("reason") or status or "apply_failed")
 
 
 def _detect_php_version() -> str:
@@ -264,6 +278,26 @@ def _build_opcache_override(profile: dict[str, Any]) -> str:
     )
 
 
+def _build_cli_opcache_override(profile: dict[str, Any]) -> str:
+    opcache_mem = int(profile.get("opcache_memory_mb", 128) or 128)
+    php_profile = profile.get("php")
+    if not isinstance(php_profile, dict):
+        php_profile = {}
+    realpath_cache_size_kb = int(php_profile.get("realpath_cache_size_kb", 16384) or 16384)
+    realpath_cache_ttl_sec = int(php_profile.get("realpath_cache_ttl_sec", 600) or 600)
+    return (
+        "; managed by mcd service profile (php-cli hardware-safe tuning)\n"
+        "opcache.enable=1\n"
+        f"opcache.memory_consumption={opcache_mem}\n"
+        "opcache.interned_strings_buffer=16\n"
+        "opcache.max_accelerated_files=20000\n"
+        "opcache.revalidate_freq=2\n"
+        "opcache.validate_timestamps=1\n"
+        f"realpath_cache_size={realpath_cache_size_kb}K\n"
+        f"realpath_cache_ttl={realpath_cache_ttl_sec}\n"
+    )
+
+
 def _build_redis_sessions_override(profile: dict[str, Any]) -> str:
     save_handler = str(profile.get("redis_session_save_handler", "redis")).strip() or "redis"
     save_path = str(profile.get("redis_session_save_path", "tcp://127.0.0.1:6379?database=10")).strip() or "tcp://127.0.0.1:6379?database=10"
@@ -386,8 +420,9 @@ def _sanitize_cluster_mysql_profile(profile: dict[str, Any]) -> dict[str, Any]:
     Keep Galera/PXC service-profile writes inside the proven safe envelope.
 
     Cluster nodes are not standalone MySQL boxes. A too-aggressive profile can
-    amplify certification stalls across every node, so even a profile explicitly
-    marked cluster-safe is bounded here before any file or dynamic SET GLOBAL is
+    amplify certification stalls across every node, while a too-low connection
+    ceiling can starve WSREP internal sessions. Even profiles explicitly marked
+    cluster-safe are normalized here before any file or dynamic SET GLOBAL is
     attempted.
     """
     out = dict(profile)
@@ -396,14 +431,19 @@ def _sanitize_cluster_mysql_profile(profile: dict[str, Any]) -> dict[str, Any]:
         "innodb_redo_log_capacity_mb": 4_096,
         "innodb_io_capacity": 12_000,
         "innodb_io_capacity_max": 24_000,
-        "max_connections": 600,
-        "thread_cache_size": 128,
+        "max_connections": 2_000,
+        "thread_cache_size": 256,
         "table_open_cache": 8_000,
         "table_definition_cache": 4_000,
-        "open_files_limit": 65_535,
+        "open_files_limit": 262_144,
         "tmp_table_size_mb": 256,
         "max_heap_table_size_mb": 256,
         "max_allowed_packet_mb": 64,
+    }
+    floors = {
+        "max_connections": 2_000,
+        "thread_cache_size": 256,
+        "open_files_limit": 262_144,
     }
     for key, cap in caps.items():
         raw = out.get(key)
@@ -415,6 +455,9 @@ def _sanitize_cluster_mysql_profile(profile: dict[str, Any]) -> dict[str, Any]:
             continue
         if val > cap:
             out[key] = cap
+        floor = floors.get(key)
+        if floor is not None and val < floor:
+            out[key] = floor
     out["cluster_safe"] = True
     out["scope"] = str(out.get("scope") or "pxc").strip() or "pxc"
     return out
@@ -553,6 +596,7 @@ def _build_mysql_override(profile: dict[str, Any], *, engine: str) -> str:
         "innodb_io_capacity",
         "innodb_io_capacity_max",
         "max_connections",
+        "max_user_connections",
         "thread_cache_size",
         "table_open_cache",
         "table_definition_cache",
@@ -636,6 +680,7 @@ def _apply_mysql_dynamic_profile(profile: dict[str, Any], *, engine: str, timeou
         "innodb_io_capacity",
         "innodb_io_capacity_max",
         "max_connections",
+        "max_user_connections",
         "thread_cache_size",
         "table_open_cache",
         "table_definition_cache",
@@ -697,6 +742,7 @@ def apply_php_fpm_profile(cfg: AgentConfig, profile: dict[str, Any], *, dry_run:
 
     pool_content = _build_pool_override(profile)
     opcache_content = _build_opcache_override(profile)
+    cli_opcache_content = _build_cli_opcache_override(profile)
     redis_sessions_enabled = bool(profile.get("redis_sessions_enabled", True))
     redis_content = _build_redis_sessions_override(profile)
     sysctl_content = _build_sysctl_override(profile)
@@ -732,7 +778,7 @@ def apply_php_fpm_profile(cfg: AgentConfig, profile: dict[str, Any], *, dry_run:
             changed.append(str(pool_override))
         if _write_file(opcache_fpm, opcache_content):
             changed.append(str(opcache_fpm))
-        if _write_file(opcache_cli, opcache_content):
+        if _write_file(opcache_cli, cli_opcache_content):
             changed.append(str(opcache_cli))
         if redis_sessions_enabled:
             if _write_file(redis_fpm, redis_content):
@@ -898,7 +944,7 @@ def service_profiles_apply_once(
     allow_cluster_db_maintenance: bool = False,
 ) -> dict[str, Any]:
     comp = (component or "php_fpm").strip().lower().replace("-", "_")
-    if comp not in {"php_fpm", "mysql", "apt", "mautic_db_indexes", "db_indexes"}:
+    if comp not in {"php_fpm", "mysql", "apt", "wazuh", "mautic_db_indexes", "db_indexes"}:
         return {"status": "skipped", "reason": f"unsupported component: {component}"}
     guard = _cluster_db_maintenance_guard(
         cfg,
@@ -926,6 +972,8 @@ def service_profiles_apply_once(
         applied = apply_php_fpm_profile(cfg, profile, dry_run=dry_run)
     elif comp == "mysql":
         applied = apply_mysql_profile(cfg, profile, dry_run=dry_run)
+    elif comp == "wazuh":
+        applied = apply_wazuh_profile(profile, cfg, dry_run=dry_run)
     else:
         if os.geteuid() != 0:
             raise RuntimeError("service-profile apply requires root")
@@ -933,6 +981,11 @@ def service_profiles_apply_once(
             profile,
             dry_run=dry_run,
             cfg=cfg,
+            force_zabbix_bootstrap=not bool(dry_run),
             force_repo_rescan=bool(force_apt_repo_rescan),
         )
-    return {"status": "ok", "fetch": fetched, "apply": applied}
+    result_status, reason = _service_profile_apply_outcome(applied)
+    out = {"status": result_status, "fetch": fetched, "apply": applied}
+    if reason:
+        out["reason"] = reason
+    return out

@@ -3,6 +3,7 @@ from __future__ import annotations
 import configparser
 from datetime import datetime, timezone
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -13,7 +14,13 @@ import tempfile
 from typing import Any
 from urllib import request as urlrequest
 
-from mcd_agent.nginx_baseline import ensure_nginx_baseline, nginx_baseline_satisfied
+from mcd_agent.nginx_baseline import (
+    cloudflare_real_ip_profile_present,
+    cloudflare_real_ip_state,
+    ensure_cloudflare_real_ip,
+    ensure_nginx_baseline,
+    nginx_baseline_satisfied,
+)
 
 
 def _run(cmd: list[str], *, timeout_sec: int = 120) -> subprocess.CompletedProcess[str]:
@@ -48,6 +55,387 @@ def _int(value: Any, default: int, min_v: int = 0, max_v: int = 86400) -> int:
     if out > max_v:
         out = max_v
     return out
+
+
+def _primary_ipv4(timeout_sec: int = 5) -> str:
+    proc = _run(["sh", "-c", "hostname -I 2>/dev/null | tr ' ' '\\n' | grep -E '^[0-9]+(\\.[0-9]+){3}$' | grep -v '^127\\.' | head -n1"], timeout_sec=timeout_sec)
+    value = (proc.stdout or "").strip().splitlines()
+    if value:
+        return value[0].strip()
+    proc2 = _run(["sh", "-c", "ip -4 route get 1.1.1.1 2>/dev/null | awk '/src/ {for(i=1;i<=NF;i++) if($i==\"src\") {print $(i+1); exit}}'"], timeout_sec=timeout_sec)
+    value2 = (proc2.stdout or "").strip().splitlines()
+    return value2[0].strip() if value2 else ""
+
+
+def _desired_hosts_with_local_fqdn(text: str, *, ip: str, hostname: str, suffix: str = "localdomain") -> tuple[str, str]:
+    short = str(hostname or "").strip().split(".", 1)[0]
+    clean_suffix = re.sub(r"[^A-Za-z0-9.-]+", "", str(suffix or "localdomain").strip()).strip(".") or "localdomain"
+    if not short or not ip or "." in str(hostname or "").strip():
+        return text, ""
+    fqdn = f"{short}.{clean_suffix}"
+    desired = f"{ip} {fqdn} {short}"
+    lines = str(text or "").splitlines()
+    out: list[str] = []
+    done = False
+    changed = False
+    for raw in lines:
+        parts = raw.split()
+        if not done and parts and parts[0] == ip:
+            out.append(desired)
+            done = True
+            if raw.strip() != desired:
+                changed = True
+            continue
+        if short in parts[1:] or fqdn in parts[1:]:
+            changed = True
+            continue
+        out.append(raw)
+    if not done:
+        out.append(desired)
+        changed = True
+    if not changed:
+        return text, ""
+    return "\n".join(out).rstrip("\n") + "\n", fqdn
+
+
+def ensure_local_fqdn_hosts_entry(*, suffix: str = "localdomain") -> tuple[bool, str]:
+    proc = _run(["hostname"], timeout_sec=5)
+    hostname = (proc.stdout or "").strip().splitlines()[0].strip() if (proc.stdout or "").strip() else ""
+    if not hostname or "." in hostname:
+        return False, "hosts_fqdn:skipped"
+    ip = _primary_ipv4(timeout_sec=5)
+    if not ip:
+        return False, "hosts_fqdn:no_primary_ipv4"
+    hosts_path = Path("/etc/hosts")
+    try:
+        current = hosts_path.read_text(encoding="utf-8", errors="ignore")
+    except Exception as e:
+        return False, f"hosts_fqdn:read_failed:{e}"
+    desired, fqdn = _desired_hosts_with_local_fqdn(current, ip=ip, hostname=hostname, suffix=suffix)
+    if not fqdn:
+        return False, "hosts_fqdn:already_ok"
+    try:
+        backup = hosts_path.with_name(f"hosts.mcd-pre-fqdn-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}")
+        shutil.copy2(hosts_path, backup)
+        hosts_path.write_text(desired, encoding="utf-8")
+        hosts_path.chmod(0o644)
+    except Exception as e:
+        return False, f"hosts_fqdn:write_failed:{e}"
+    return True, f"hosts_fqdn:{fqdn}"
+
+
+def _services_for_present_packages(packages: list[str]) -> list[str]:
+    mapping: dict[str, list[str]] = {
+        "nginx": ["nginx"],
+        "redis": ["redis-server"],
+        "redis-server": ["redis-server"],
+        "sendmail": ["sendmail"],
+        "mariadb-server": ["mariadb"],
+        "mariadb-client": [],
+        "mysql-server": ["mysql"],
+        "percona-server-server": ["mysql"],
+        "percona-xtradb-cluster-server": ["mysql"],
+        "zabbix-agent2": ["zabbix-agent2"],
+    }
+    out: list[str] = []
+    for raw in packages:
+        name = str(raw or "").strip().lower()
+        if not name:
+            continue
+        if name.startswith("php") and name.endswith("-fpm"):
+            out.append(name)
+            continue
+        if name.startswith("php") and re.match(r"^php\d+\.\d+-fpm$", name):
+            out.append(name)
+            continue
+        out.extend(mapping.get(name, []))
+    dedup: list[str] = []
+    seen: set[str] = set()
+    for svc in out:
+        if svc in seen:
+            continue
+        seen.add(svc)
+        dedup.append(svc)
+    return dedup
+
+
+def _enable_start_services(services: list[str], *, timeout_sec: int = 45) -> tuple[list[str], list[str]]:
+    actions: list[str] = []
+    errors: list[str] = []
+    for raw in services:
+        service = str(raw or "").strip()
+        if not service:
+            continue
+        p = _run(["systemctl", "enable", "--now", service], timeout_sec=timeout_sec)
+        if p.returncode == 0:
+            actions.append(f"service_started:{service}")
+            continue
+        msg = (p.stderr or p.stdout or "").strip()
+        if "does not exist" in msg or "not found" in msg or "not be found" in msg:
+            actions.append(f"service_missing:{service}")
+            continue
+        errors.append(f"service_start_failed:{service}:{msg or p.returncode}")
+    return actions, errors
+
+
+def _unit_exists(service: str, *, timeout_sec: int = 8) -> bool:
+    p = _run(["systemctl", "list-unit-files", f"{service}.service", "--no-legend"], timeout_sec=timeout_sec)
+    return p.returncode == 0 and f"{service}.service" in str(p.stdout or "")
+
+
+def _php_fpm_services(*, timeout_sec: int = 8) -> list[str]:
+    p = _run(
+        ["systemctl", "list-unit-files", "php*-fpm.service", "--type=service", "--no-legend"],
+        timeout_sec=timeout_sec,
+    )
+    if p.returncode != 0:
+        return []
+    out: list[str] = []
+    for raw in (p.stdout or "").splitlines():
+        name = raw.strip().split(None, 1)[0].strip()
+        if name.endswith(".service"):
+            out.append(name.removesuffix(".service"))
+    return sorted(set(out))
+
+
+def _service_enable_and_start(service: str, *, timeout_sec: int = 45) -> tuple[bool, list[str]]:
+    actions: list[str] = []
+    enabled = _run(["systemctl", "is-enabled", service], timeout_sec=timeout_sec)
+    enabled_state = (enabled.stdout or enabled.stderr or "").strip()
+    allowed_enabled_states = {"enabled", "enabled-runtime", "static", "alias", "indirect", "generated"}
+    if enabled.returncode != 0 or enabled_state not in allowed_enabled_states:
+        en = _run(["systemctl", "enable", service], timeout_sec=timeout_sec)
+        if en.returncode != 0:
+            msg = (en.stderr or en.stdout or "").strip()
+            return False, [f"service_postcheck_enable_failed:{service}:{msg or en.returncode}"]
+        actions.append(f"service_postcheck_enabled:{service}")
+
+    active = _run(["systemctl", "is-active", service], timeout_sec=timeout_sec)
+    active_state = (active.stdout or active.stderr or "").strip()
+    if active.returncode == 0 and active_state == "active":
+        actions.append(f"service_postcheck_active:{service}")
+        return True, actions
+
+    st = _run(["systemctl", "start", service], timeout_sec=timeout_sec)
+    if st.returncode != 0:
+        msg = (st.stderr or st.stdout or "").strip()
+        return False, [*actions, f"service_postcheck_start_failed:{service}:{msg or st.returncode}"]
+    active = _run(["systemctl", "is-active", service], timeout_sec=timeout_sec)
+    active_state = (active.stdout or active.stderr or "").strip()
+    if active.returncode != 0 or active_state != "active":
+        return False, [*actions, f"service_postcheck_not_active:{service}:{active_state or 'inactive'}"]
+    actions.append(f"service_postcheck_started:{service}")
+    return True, actions
+
+
+def _apt_upgrade_service_postcheck(*, timeout_sec: int = 90) -> tuple[list[str], list[str]]:
+    actions: list[str] = []
+    errors: list[str] = []
+
+    if _unit_exists("nginx", timeout_sec=timeout_sec):
+        ok, service_actions = _service_enable_and_start("nginx", timeout_sec=timeout_sec)
+        actions.extend(service_actions)
+        if not ok:
+            errors.extend(service_actions)
+        else:
+            baseline = ensure_nginx_baseline(reload_service=True)
+            baseline_actions = baseline.get("actions") if isinstance(baseline, dict) else []
+            if isinstance(baseline_actions, list):
+                actions.extend(f"nginx_baseline:{str(x)}" for x in baseline_actions)
+            if str(baseline.get("status", "") if isinstance(baseline, dict) else "").lower() == "error":
+                errors.append(f"nginx_baseline_failed:{baseline.get('error', 'unknown error')}")
+            test = _run(["nginx", "-t"], timeout_sec=timeout_sec)
+            if test.returncode == 0:
+                actions.append("nginx_config_test:ok")
+            else:
+                msg = (test.stderr or test.stdout or "").strip()
+                errors.append(f"nginx_config_test_failed:{msg or test.returncode}")
+    else:
+        actions.append("service_postcheck_missing:nginx")
+
+    db_service = "mariadb" if _unit_exists("mariadb", timeout_sec=timeout_sec) else ("mysql" if _unit_exists("mysql", timeout_sec=timeout_sec) else "")
+    if db_service:
+        ok, service_actions = _service_enable_and_start(db_service, timeout_sec=timeout_sec)
+        actions.extend(service_actions)
+        if not ok:
+            errors.extend(service_actions)
+    else:
+        actions.append("service_postcheck_missing:mysql")
+
+    if _unit_exists("cron", timeout_sec=timeout_sec):
+        ok, service_actions = _service_enable_and_start("cron", timeout_sec=timeout_sec)
+        actions.extend(service_actions)
+        if not ok:
+            errors.extend(service_actions)
+    else:
+        actions.append("service_postcheck_missing:cron")
+
+    php_services = _php_fpm_services(timeout_sec=timeout_sec)
+    if php_services:
+        php_ok = False
+        for service in php_services:
+            ok, service_actions = _service_enable_and_start(service, timeout_sec=timeout_sec)
+            actions.extend(service_actions)
+            if ok:
+                php_ok = True
+            else:
+                errors.extend(service_actions)
+        if not php_ok:
+            errors.append("php_fpm_postcheck_no_active_service")
+    else:
+        actions.append("service_postcheck_missing:php-fpm")
+
+    return actions, errors
+
+
+def _version_tuple(raw: str) -> tuple[int, int, int]:
+    nums = [int(x) for x in re.findall(r"\d+", str(raw or ""))[:3]]
+    while len(nums) < 3:
+        nums.append(0)
+    return int(nums[0]), int(nums[1]), int(nums[2])
+
+
+def _cmd_first_line(cmd: list[str], *, timeout_sec: int = 10) -> tuple[int, str]:
+    p = _run(cmd, timeout_sec=timeout_sec)
+    line = (p.stdout or p.stderr or "").strip().splitlines()
+    return int(p.returncode), line[0].strip() if line else ""
+
+
+def _nodejs20_satisfied() -> tuple[bool, str]:
+    node = shutil.which("node")
+    npm = shutil.which("npm")
+    if not node or not npm:
+        return False, "node_or_npm_missing"
+    rc, line = _cmd_first_line([node, "--version"], timeout_sec=8)
+    if rc != 0:
+        return False, "node_version_failed"
+    if _version_tuple(line) < (20, 0, 0):
+        return False, f"node_too_old:{line or '-'}"
+    npm_rc, npm_line = _cmd_first_line([npm, "--version"], timeout_sec=8)
+    if npm_rc != 0:
+        return False, "npm_version_failed"
+    return True, f"nodejs20:{line or '-'} npm:{npm_line or '-'}"
+
+
+def _ensure_nodejs20(*, timeout_sec: int) -> tuple[bool, list[str], list[str]]:
+    ok, reason = _nodejs20_satisfied()
+    if ok:
+        return False, ["nodejs20:already_ok:" + reason], []
+    actions = [f"nodejs20:prepare:{reason}"]
+    errors: list[str] = []
+    script = (
+        "set -euo pipefail; "
+        "export DEBIAN_FRONTEND=noninteractive; "
+        "apt-get purge -y nodejs libnode-dev nodejs-doc npm >/dev/null 2>&1 || true; "
+        "curl -fsSL https://deb.nodesource.com/setup_20.x | bash -; "
+        "apt-get install -y nodejs"
+    )
+    p = subprocess.run(
+        ["bash", "-lc", script],
+        capture_output=True,
+        text=True,
+        timeout=max(60, int(timeout_sec)),
+        env={**os.environ, "DEBIAN_FRONTEND": "noninteractive", "LC_ALL": "C", "LANG": "C"},
+    )
+    if p.returncode != 0:
+        errors.append((p.stderr or p.stdout or "nodejs20 install failed").strip())
+        return False, actions, errors
+    ok_after, reason_after = _nodejs20_satisfied()
+    if not ok_after:
+        errors.append(f"nodejs20 validation failed:{reason_after}")
+        return False, actions, errors
+    actions.append("nodejs20:installed:" + reason_after)
+    return True, actions, []
+
+
+def _composer_global_satisfied() -> tuple[bool, str]:
+    composer = shutil.which("composer")
+    if not composer:
+        return False, "composer_missing"
+    rc, line = _cmd_first_line([composer, "--version"], timeout_sec=10)
+    if rc != 0:
+        return False, "composer_version_failed"
+    if Path(composer) != Path("/usr/local/bin/composer"):
+        return False, f"composer_not_global:{composer}"
+    www_data = shutil.which("runuser")
+    if www_data:
+        p = _run(["runuser", "-u", "www-data", "--", composer, "--version"], timeout_sec=20)
+        if p.returncode != 0:
+            return False, "composer_www_data_check_failed"
+    return True, f"{composer}:{line or '-'}"
+
+
+def _ensure_composer_global(*, timeout_sec: int) -> tuple[bool, list[str], list[str]]:
+    ok, reason = _composer_global_satisfied()
+    if ok:
+        return False, ["composer_global:already_ok:" + reason], []
+    if not shutil.which("php"):
+        return False, ["composer_global:prepare:" + reason], ["composer_global:php_cli_missing"]
+    actions = [f"composer_global:prepare:{reason}"]
+    errors: list[str] = []
+    try:
+        with urlrequest.urlopen("https://composer.github.io/installer.sig", timeout=20) as resp:
+            expected_sig = resp.read().decode("ascii", errors="ignore").strip()
+        with urlrequest.urlopen("https://getcomposer.org/installer", timeout=45) as resp:
+            installer = resp.read()
+    except Exception as e:
+        return False, actions, [f"composer_global:download_failed:{e}"]
+    got_sig = hashlib.sha384(installer).hexdigest()
+    if not expected_sig or got_sig.lower() != expected_sig.lower():
+        return False, actions, ["composer_global:installer_signature_mismatch"]
+    with tempfile.NamedTemporaryFile(prefix="composer-setup-", suffix=".php", delete=False) as tmp:
+        tmp.write(installer)
+        setup_path = Path(tmp.name)
+    try:
+        p = _run(["php", str(setup_path), "--install-dir=/usr/local/bin", "--filename=composer"], timeout_sec=max(45, int(timeout_sec)))
+        if p.returncode != 0:
+            errors.append((p.stderr or p.stdout or "composer install failed").strip())
+            return False, actions, errors
+        Path("/usr/local/bin/composer").chmod(0o755)
+    finally:
+        try:
+            setup_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+    ok_after, reason_after = _composer_global_satisfied()
+    if not ok_after:
+        errors.append(f"composer_global validation failed:{reason_after}")
+        return False, actions, errors
+    actions.append("composer_global:installed:" + reason_after)
+    return True, actions, []
+
+
+def _ensure_var_www() -> tuple[bool, str, list[str]]:
+    path = Path("/var/www")
+    changed = False
+    errors: list[str] = []
+    try:
+        if not path.exists():
+            path.mkdir(parents=True, exist_ok=True)
+            changed = True
+        if not path.is_dir():
+            return changed, "var_www:not_directory", ["var_www:not_directory"]
+        try:
+            import grp
+            import pwd
+
+            uid = pwd.getpwnam("www-data").pw_uid
+            gid = grp.getgrnam("www-data").gr_gid
+            st = path.stat()
+            if st.st_uid != uid or st.st_gid != gid:
+                os.chown(path, uid, gid)
+                changed = True
+        except Exception as e:
+            errors.append(f"var_www:chown_failed:{e}")
+        mode = path.stat().st_mode & 0o777
+        if mode != 0o755:
+            path.chmod(0o755)
+            changed = True
+    except Exception as e:
+        return changed, f"var_www:failed:{e}", [f"var_www:failed:{e}"]
+    if errors:
+        return changed, "var_www:warning", errors
+    return changed, "var_www:ok", []
 
 
 def _normalize_source_line(line: str) -> str:
@@ -382,6 +770,129 @@ _NGINX_OFFICIAL_KEY_URL = "https://nginx.org/keys/nginx_signing.key"
 _NGINX_OFFICIAL_KEYRING = Path("/usr/share/keyrings/nginx-archive-keyring.gpg")
 _NGINX_OFFICIAL_SOURCE = Path("/etc/apt/sources.list.d/nginx.list")
 _NGINX_OFFICIAL_FINGERPRINT = "573BFD6B3D8FBC641079A6ABABF5BD827BD9BF62"
+_ZABBIX_AGENT_DROPIN = Path("/etc/zabbix/zabbix_agent2.d/99-mcd-server.conf")
+_ZABBIX_AGENT_BASE_CONF = Path("/etc/zabbix/zabbix_agent2.conf")
+_ZABBIX_DISK_HEALTH_SCRIPT = Path("/usr/local/bin/zbx_smart_health_worst.sh")
+_ZABBIX_DISK_HEALTH_DROPIN = Path("/etc/zabbix/zabbix_agent2.d/disk_health.conf")
+_ZABBIX_DISK_HEALTH_SUDOERS = Path("/etc/sudoers.d/zabbix-smart")
+_ZABBIX_DISK_HEALTH_SCRIPT_TEXT = r'''#!/usr/bin/env bash
+# Output: one integer, 1..5, for the worst physical disk or md array.
+# 5=GOOD, 4=OK, 3=ATTENTION, 2=BAD, 1=ALARM.
+set -euo pipefail
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+score_min=5
+score_min_func() {
+  local cur="$1"
+  if [ "$cur" -lt "$score_min" ]; then score_min="$cur"; fi
+}
+
+score_mdraid() {
+  local s=5
+  if [ -r /proc/mdstat ]; then
+    if awk '
+      /\[[0-9]+\/[0-9]+\]/ {
+        match($0, /\[([0-9]+)\/([0-9]+)\]/, a);
+        if (a[1] != a[2]) { print "DEG"; exit }
+      }
+      /\[[U_]+\]/ { if ($0 ~ /_/) { print "DEG"; exit } }
+    ' /proc/mdstat | grep -q DEG; then
+      s=1
+    fi
+  fi
+  echo "$s"
+}
+
+score_nvme_temperature() {
+  local temperature="$1" warning="$2" critical="$3" s=5
+  [[ "$temperature" =~ ^[0-9]+$ ]] || { echo "$s"; return; }
+
+  # WCTEMP/CCTEMP come from the NVMe controller and are expressed in Kelvin.
+  # Use those model-specific limits instead of a generic NVMe temperature
+  # ladder. Older controllers without limits retain the conservative fallback.
+  if ! [[ "$warning" =~ ^[0-9]+$ ]] || [ "$warning" -le 273 ]; then warning=343; fi
+  if ! [[ "$critical" =~ ^[0-9]+$ ]] || [ "$critical" -le "$warning" ]; then critical=$((warning + 10)); fi
+  warning=$((warning - 273))
+  critical=$((critical - 273))
+  local attention=$((warning - 10)) elevated=$((warning - 20))
+  [ "$elevated" -lt 50 ] && elevated=50
+
+  if [ "$temperature" -ge "$critical" ]; then s=1
+  elif [ "$temperature" -ge "$warning" ]; then s=2
+  elif [ "$temperature" -ge "$attention" ]; then s=3
+  elif [ "$temperature" -ge "$elevated" ]; then s=4; fi
+  echo "$s"
+}
+
+score_nvme() {
+  local dev="$1" s=5 out identity
+  if ! out=$(sudo nvme smart-log "$dev" 2>/dev/null); then echo; return; fi
+  local cw me pu t
+  cw=$(echo "$out" | awk -F: '/critical_warning/{gsub(/ /,"",$2); print $2; exit}' || echo 0)
+  [ -z "$cw" ] && cw=0
+  if [ "$cw" != "0" ]; then s=1; fi
+  me=$(echo "$out" | awk -F: '/media_errors/{gsub(/ /,"",$2); print $2; exit}' || echo 0)
+  [ -z "$me" ] && me=0
+  if [ "$me" -gt 0 ] && [ "$s" -gt 2 ]; then s=2; fi
+  pu=$(echo "$out" | awk -F: '/percentage_used/{gsub(/ /,"",$2); print $2; exit}' || true)
+  if [[ "${pu:-}" =~ ^[0-9]+$ ]]; then
+    if [ "$pu" -ge 95 ] && [ "$s" -gt 2 ]; then s=2
+    elif [ "$pu" -ge 80 ] && [ "$s" -gt 3 ]; then s=3
+    elif [ "$pu" -ge 60 ] && [ "$s" -gt 4 ]; then s=4; fi
+  fi
+  t=$(echo "$out" | awk -F'[ :]' '/^temperature/{for(i=1;i<=NF;i++) if ($i ~ /^[0-9]+$/){print $i; exit}}' || echo '')
+  if [[ "$t" =~ ^[0-9]+$ ]]; then
+    identity=$(sudo nvme id-ctrl "$dev" 2>/dev/null || true)
+    local wt ct ts
+    wt=$(echo "$identity" | awk -F: '/^wctemp/{gsub(/ /,"",$2); print $2; exit}' || true)
+    ct=$(echo "$identity" | awk -F: '/^cctemp/{gsub(/ /,"",$2); print $2; exit}' || true)
+    ts=$(score_nvme_temperature "$t" "$wt" "$ct")
+    if [[ "$ts" =~ ^[1-5]$ ]] && [ "$ts" -lt "$s" ]; then s="$ts"; fi
+  fi
+  echo "$s"
+}
+
+score_sata() {
+  local dev="$1" s=5 H A
+  H=$(sudo smartctl -H "$dev" 2>/dev/null || true)
+  A=$(sudo smartctl -A "$dev" 2>/dev/null || true)
+  echo "$H" | grep -qi 'SMART overall-health self-assessment test result: PASSED' || s=1
+  get_raw() { echo "$A" | awk -v id="$1" '$1==id {print $10; exit}'; }
+  local realloc pending uncor crc temp
+  realloc=$(get_raw 5); realloc=${realloc:-0}
+  pending=$(get_raw 197); pending=${pending:-0}
+  uncor=$(get_raw 198); uncor=${uncor:-0}
+  crc=$(get_raw 199); crc=${crc:-0}
+  if [ "$pending" -gt 0 ] || [ "$uncor" -gt 0 ]; then s=1; fi
+  if [ "$realloc" -gt 0 ] && [ "$s" -gt 2 ]; then s=2; fi
+  if [ "$crc" -gt 0 ] && [ "$s" -gt 3 ]; then s=3; fi
+  temp=$(get_raw 194)
+  if [[ "$temp" =~ ^[0-9]+$ ]]; then
+    if [ "$temp" -ge 80 ]; then s=1
+    elif [ "$temp" -ge 70 ] && [ "$s" -gt 2 ]; then s=2
+    elif [ "$temp" -ge 60 ] && [ "$s" -gt 3 ]; then s=3
+    elif [ "$temp" -ge 50 ] && [ "$s" -gt 4 ]; then s=4; fi
+  fi
+  echo "$s"
+}
+
+md_sc=$(score_mdraid || echo 5)
+[[ "$md_sc" =~ ^[1-5]$ ]] && score_min_func "$md_sc"
+for d in $(ls /dev/nvme*n1 2>/dev/null || true); do
+  sc=$(score_nvme "$d" || echo 5)
+  [[ "$sc" =~ ^[1-5]$ ]] && score_min_func "$sc"
+done
+for d in $(ls /dev/sd[a-z] 2>/dev/null || true); do
+  sc=$(score_sata "$d" || echo 5)
+  [[ "$sc" =~ ^[1-5]$ ]] && score_min_func "$sc"
+done
+echo "${score_min:-5}"
+'''
+_ZABBIX_DISK_HEALTH_DROPIN_TEXT = "UserParameter=smart.health.worst,/usr/local/bin/zbx_smart_health_worst.sh\n"
+_ZABBIX_DISK_HEALTH_SUDOERS_TEXT = """Defaults:zabbix !requiretty
+Cmnd_Alias ZBX_SMART = /usr/sbin/smartctl *, /usr/sbin/nvme *, /usr/bin/nvme *
+zabbix ALL=(root) NOPASSWD: ZBX_SMART
+"""
 
 
 def _ubuntu_codename() -> str:
@@ -399,6 +910,24 @@ def _ubuntu_codename() -> str:
     except Exception:
         pass
     raise RuntimeError("ubuntu codename not detected")
+
+
+def _os_release_value(key: str) -> str:
+    wanted = str(key or "").strip()
+    if not wanted:
+        return ""
+    try:
+        for raw in Path("/etc/os-release").read_text(encoding="utf-8", errors="ignore").splitlines():
+            if not raw.startswith(f"{wanted}="):
+                continue
+            return raw.split("=", 1)[1].strip().strip('"').strip("'")
+    except Exception:
+        return ""
+    return ""
+
+
+def _ubuntu_version_id() -> str:
+    return _os_release_value("VERSION_ID") or "24.04"
 
 
 def _gpg_keyring_has_fingerprint(path: Path, fingerprint: str) -> bool:
@@ -610,7 +1139,16 @@ def _run_mariadb_repo_setup(version: str, *, timeout_sec: int) -> tuple[bool, st
 
 def _run_percona_repo_setup(target: str, *, timeout_sec: int) -> tuple[bool, str]:
     ch = str(target or "").strip().lower()
-    if ch not in {"ps80", "pxc80"}:
+    aliases = {
+        "ps84": "ps-84-lts",
+        "ps-84": "ps-84-lts",
+        "ps84lts": "ps-84-lts",
+        "pxc84": "pxc-84-lts",
+        "pxc-84": "pxc-84-lts",
+        "pxc84lts": "pxc-84-lts",
+    }
+    ch = aliases.get(ch, ch)
+    if ch not in {"ps80", "pxc80", "ps-84-lts", "pxc-84-lts"}:
         return False, f"percona_repo_setup:unsupported_target:{ch or '-'}"
     script = (
         "set -euo pipefail; "
@@ -621,7 +1159,7 @@ def _run_percona_repo_setup(target: str, *, timeout_sec: int) -> tuple[bool, str
         "dpkg -i \"$deb\" >/dev/null 2>&1 || apt-get install -y \"$deb\" >/dev/null 2>&1; "
         "fi; "
         "percona-release disable all >/dev/null 2>&1 || true; "
-        f"percona-release setup -y {ch}"
+        f"percona-release setup -y {ch} --scheme https"
     )
     p = subprocess.run(
         ["bash", "-lc", script],
@@ -660,6 +1198,43 @@ def _run_mysql84_repo_setup(*, timeout_sec: int) -> tuple[bool, str]:
         return True, "mysql_repo_setup:8.4"
     msg = (p.stderr or p.stdout or "").strip()
     return False, msg or "mysql_repo_setup:8.4 failed"
+
+
+def _zabbix_agent_repo_present(version: str) -> bool:
+    v = str(version or "").strip() or "7.0"
+    txt = _all_sources_text_lower()
+    return "repo.zabbix.com" in txt and f"/zabbix/{v}/" in txt
+
+
+def _ensure_zabbix_agent_repo(version: str, *, timeout_sec: int) -> tuple[bool, str]:
+    v = re.sub(r"[^0-9.]", "", str(version or "").strip()) or "7.0"
+    ubuntu_version = _ubuntu_version_id()
+    deb_name = f"zabbix-release_latest_{v}+ubuntu{ubuntu_version}_all.deb"
+    url = f"https://repo.zabbix.com/zabbix/{v}/ubuntu/pool/main/z/zabbix-release/{deb_name}"
+    with tempfile.NamedTemporaryFile(prefix="zabbix-release-", suffix=".deb", delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+    try:
+        try:
+            with urlrequest.urlopen(url, timeout=max(20, min(int(timeout_sec), 90))) as resp:
+                tmp_path.write_bytes(resp.read())
+        except Exception as e:
+            return False, f"zabbix_repo_download_failed:{e}"
+        if tmp_path.stat().st_size <= 0:
+            return False, "zabbix_repo_download_empty"
+        p = _run(["dpkg", "-i", str(tmp_path)], timeout_sec=max(30, int(timeout_sec)))
+        if p.returncode != 0:
+            p2 = _run(["apt-get", "install", "-y", str(tmp_path)], timeout_sec=max(30, int(timeout_sec)))
+            if p2.returncode != 0:
+                msg = (p2.stderr or p2.stdout or p.stderr or p.stdout or "").strip()
+                return False, msg or "zabbix_repo_install_failed"
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+    if not _zabbix_agent_repo_present(v):
+        return False, "zabbix_repo_source_not_detected_after_install"
+    return True, f"zabbix_agent_repo:{v}"
 
 
 def _now_utc_iso() -> str:
@@ -797,6 +1372,8 @@ def _detect_db_repo_target(*, timeout_sec: int = 20) -> dict[str, str]:
     for pkg, ver in installed.items():
         if pkg.startswith("percona-xtradb-cluster-server"):
             mm = _version_mm(ver)
+            if mm == "8.4":
+                return {"profile": "percona_cluster_8_4", "action": "ensure", "reason": "detected_percona_cluster", "package": pkg, "version": ver}
             if mm == "8.0" or not mm:
                 return {"profile": "percona_cluster_8_0", "action": "ensure", "reason": "detected_percona_cluster", "package": pkg, "version": ver}
             return {"profile": "none", "action": "none", "reason": f"unsupported_percona_cluster_{mm or 'unknown'}", "package": pkg, "version": ver}
@@ -804,6 +1381,8 @@ def _detect_db_repo_target(*, timeout_sec: int = 20) -> dict[str, str]:
     for pkg, ver in installed.items():
         if pkg.startswith("percona-server-server"):
             mm = _version_mm(ver)
+            if mm == "8.4":
+                return {"profile": "percona_server_8_4", "action": "ensure", "reason": "detected_percona_server", "package": pkg, "version": ver}
             if mm == "8.0" or not mm:
                 return {"profile": "percona_server_8_0", "action": "ensure", "reason": "detected_percona_server", "package": pkg, "version": ver}
             return {"profile": "none", "action": "none", "reason": f"unsupported_percona_server_{mm or 'unknown'}", "package": pkg, "version": ver}
@@ -844,6 +1423,10 @@ def _repo_profile_present(profile_key: str) -> bool:
         return ("repo.percona.com" in txt) and ("ps80" in txt or "ps-80" in txt)
     if key == "percona_cluster_8_0":
         return ("repo.percona.com" in txt) and ("pxc80" in txt or "pxc-80" in txt)
+    if key == "percona_server_8_4":
+        return ("repo.percona.com" in txt) and ("ps-84-lts" in txt or "ps84" in txt)
+    if key == "percona_cluster_8_4":
+        return ("repo.percona.com" in txt) and ("pxc-84-lts" in txt or "pxc84" in txt)
     if key == "mysql_8_4":
         return ("repo.mysql.com" in txt) and ("mysql-8.4" in txt or "mysql-8.4-lts" in txt)
     if key == "mysql_8_0":
@@ -907,7 +1490,22 @@ def _apply_repo_profiles(
     elif db_once and bool(db_row.get("applied", False)) and db_same_profile and not force_rescan:
         actions.append("db_repo_profile:skip_once")
     else:
-        detected = _detect_db_repo_target(timeout_sec=max(10, int(timeout_sec)))
+        explicit_db_target = str(profile.get("db_repo_profile_target", "") or "").strip().lower()
+        if explicit_db_target in {
+            "mariadb_11_4",
+            "mysql_8_4",
+            "percona_server_8_4",
+            "percona_cluster_8_4",
+            "percona_server_8_0",
+            "percona_cluster_8_0",
+        }:
+            detected = {
+                "profile": explicit_db_target,
+                "action": "ensure",
+                "reason": "explicit_db_repo_profile_target",
+            }
+        else:
+            detected = _detect_db_repo_target(timeout_sec=max(10, int(timeout_sec)))
         det_profile = str(detected.get("profile", "none") or "none")
         det_action = str(detected.get("action", "none") or "none")
         if det_action in {"none", "skip"}:
@@ -925,8 +1523,12 @@ def _apply_repo_profiles(
                         str(profile.get("mariadb_repo_setup_version", "mariadb-11.4")),
                         timeout_sec=max(30, int(timeout_sec)),
                     )
+                elif det_profile == "percona_server_8_4":
+                    ok, msg = _run_percona_repo_setup("ps-84-lts", timeout_sec=max(30, int(timeout_sec)))
                 elif det_profile == "percona_server_8_0":
                     ok, msg = _run_percona_repo_setup("ps80", timeout_sec=max(30, int(timeout_sec)))
+                elif det_profile == "percona_cluster_8_4":
+                    ok, msg = _run_percona_repo_setup("pxc-84-lts", timeout_sec=max(30, int(timeout_sec)))
                 elif det_profile == "percona_cluster_8_0":
                     ok, msg = _run_percona_repo_setup("pxc80", timeout_sec=max(30, int(timeout_sec)))
                 elif det_profile == "mysql_8_4":
@@ -1028,6 +1630,37 @@ def _apply_repo_profiles(
             else:
                 _mark("ondrej_nginx", status="error", applied=False, reason=msg, attempted_once=False)
                 errors.append(f"ondrej_nginx_profile:{msg}")
+
+    zbx_agent_enabled = _bool(profile.get("zabbix_agent_enabled"), False)
+    zbx_repo_enabled = _bool(profile.get("zabbix_agent_repo_enabled"), zbx_agent_enabled)
+    zbx_repo_once = _bool(profile.get("zabbix_agent_repo_apply_once"), True)
+    zbx_repo_version = re.sub(r"[^0-9.]", "", str(profile.get("zabbix_agent_repo_version", "7.0") or "7.0")) or "7.0"
+    zbx_row = profiles.get("zabbix_agent_repo") if isinstance(profiles.get("zabbix_agent_repo"), dict) else {}
+    zbx_same_profile = str(zbx_row.get("profile_hash", "") or "") == profile_hash
+    if not zbx_agent_enabled:
+        actions.append("zabbix_agent_repo:disabled")
+    elif not zbx_repo_enabled:
+        actions.append("zabbix_agent_repo:repo_disabled")
+    elif (
+        zbx_repo_once
+        and bool(zbx_row.get("applied", False))
+        and zbx_same_profile
+        and _zabbix_agent_repo_present(zbx_repo_version)
+        and not force_rescan
+    ):
+        actions.append("zabbix_agent_repo:skip_once")
+    else:
+        if _zabbix_agent_repo_present(zbx_repo_version):
+            _mark("zabbix_agent_repo", status="already_present", applied=True)
+            actions.append(f"zabbix_agent_repo:already_present:{zbx_repo_version}")
+        else:
+            ok, msg = _ensure_zabbix_agent_repo(zbx_repo_version, timeout_sec=max(30, int(timeout_sec)))
+            if ok:
+                _mark("zabbix_agent_repo", status="applied", applied=True)
+                actions.append(msg)
+            else:
+                _mark("zabbix_agent_repo", status="error", applied=False, reason=msg, attempted_once=False)
+                errors.append(f"zabbix_agent_repo:{msg}")
 
     marker["updated_at_utc"] = now
     _write_json(marker_path, marker)
@@ -1672,10 +2305,350 @@ def ensure_zabbix_mysql_monitor_user(
     }
 
 
+def _normalize_ip_networks(raw: Any) -> list[str]:
+    items = raw if isinstance(raw, list) else [raw]
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        value = str(item or "").strip()
+        if not value:
+            continue
+        try:
+            network = str(ipaddress.ip_network(value, strict=False))
+        except Exception:
+            try:
+                network = str(ipaddress.ip_address(value))
+            except Exception:
+                continue
+        if network in seen:
+            continue
+        seen.add(network)
+        out.append(network)
+    return out
+
+
+def _read_key_value_file(path: Path) -> dict[str, str]:
+    out: dict[str, str] = {}
+    try:
+        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except Exception:
+        return out
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        out[key.strip()] = value.strip()
+    return out
+
+
+def _zabbix_agent_include_present(text: str) -> bool:
+    for raw in str(text or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.lower().startswith("include=") and "zabbix_agent2.d" in line:
+            return True
+    return False
+
+
+def _desired_zabbix_agent_dropin(profile: dict[str, Any]) -> dict[str, str]:
+    server = str(profile.get("zabbix_agent_server", "") or "").strip()
+    active = str(profile.get("zabbix_agent_server_active", "") or "").strip() or server
+    hostname = str(profile.get("zabbix_agent_hostname", "") or "").strip()
+    port = str(_int(profile.get("zabbix_agent_port"), 10050, 1, 65535))
+    out = {
+        "Server": server,
+        "ServerActive": active,
+        "ListenPort": port,
+    }
+    if hostname:
+        out["Hostname"] = hostname
+    return out
+
+
+def _write_zabbix_agent_dropin(profile: dict[str, Any]) -> tuple[bool, list[str], list[str]]:
+    actions: list[str] = []
+    errors: list[str] = []
+    desired = _desired_zabbix_agent_dropin(profile)
+    if not desired.get("Server"):
+        return False, actions, ["zabbix_agent_server_missing"]
+
+    if _ZABBIX_AGENT_BASE_CONF.exists():
+        try:
+            base = _ZABBIX_AGENT_BASE_CONF.read_text(encoding="utf-8", errors="ignore")
+        except Exception as e:
+            return False, actions, [f"zabbix_agent_base_conf_read_failed:{e}"]
+        if not _zabbix_agent_include_present(base):
+            try:
+                _ZABBIX_AGENT_BASE_CONF.write_text(
+                    base.rstrip("\n")
+                    + "\n\n# managed by mcd service profile\n"
+                    + "Include=/etc/zabbix/zabbix_agent2.d/*.conf\n",
+                    encoding="utf-8",
+                )
+                actions.append(f"zabbix_agent_include_added:{_ZABBIX_AGENT_BASE_CONF}")
+            except Exception as e:
+                return False, actions, [f"zabbix_agent_base_conf_write_failed:{e}"]
+
+    lines = ["# managed by mcd service profile (zabbix agent endpoint)"]
+    for key in ("Server", "ServerActive", "Hostname", "ListenPort"):
+        value = desired.get(key)
+        if value:
+            lines.append(f"{key}={value}")
+    content = "\n".join(lines).rstrip("\n") + "\n"
+    try:
+        changed = _write_if_changed(_ZABBIX_AGENT_DROPIN, content)
+        _ZABBIX_AGENT_DROPIN.chmod(0o644)
+    except Exception as e:
+        return False, actions, [f"zabbix_agent_dropin_write_failed:{e}"]
+    actions.append(f"zabbix_agent_dropin:{'changed' if changed else 'already_ok'}")
+    return bool(changed), actions, errors
+
+
+def _service_active(name: str, *, timeout_sec: int = 5) -> bool:
+    p = _run(["systemctl", "is-active", name], timeout_sec=timeout_sec)
+    return p.returncode == 0 and (p.stdout or "").strip() == "active"
+
+
+def _service_enabled(name: str, *, timeout_sec: int = 5) -> bool:
+    p = _run(["systemctl", "is-enabled", name], timeout_sec=timeout_sec)
+    return p.returncode == 0 and (p.stdout or "").strip() in {"enabled", "enabled-runtime"}
+
+
+def _tcp_port_listening(port: int, *, timeout_sec: int = 5) -> bool:
+    ss = shutil.which("ss")
+    if not ss:
+        return False
+    p = _run([ss, "-ltn"], timeout_sec=timeout_sec)
+    if p.returncode != 0:
+        return False
+    needle = f":{int(port)}"
+    for raw in (p.stdout or "").splitlines():
+        line = raw.strip()
+        if needle in line:
+            return True
+    return False
+
+
+def _ufw_active() -> bool:
+    if not shutil.which("ufw"):
+        return False
+    p = _run(["ufw", "status"], timeout_sec=8)
+    first = (p.stdout or p.stderr or "").strip().splitlines()
+    return p.returncode == 0 and bool(first) and first[0].strip().lower() == "status: active"
+
+
+def _ensure_zabbix_agent_firewall(profile: dict[str, Any]) -> tuple[list[str], list[str]]:
+    if not _bool(profile.get("zabbix_agent_firewall_enabled"), True):
+        return ["zabbix_agent_firewall:disabled"], []
+    port = _int(profile.get("zabbix_agent_port"), 10050, 1, 65535)
+    sources = _normalize_ip_networks(profile.get("zabbix_agent_firewall_sources"))
+    if not sources:
+        return ["zabbix_agent_firewall:no_sources"], []
+    actions: list[str] = []
+    errors: list[str] = []
+
+    if _ufw_active():
+        for src in sources:
+            p = _run(
+                ["ufw", "allow", "proto", "tcp", "from", src, "to", "any", "port", str(port), "comment", "mcd zabbix agent"],
+                timeout_sec=20,
+            )
+            if p.returncode == 0:
+                actions.append(f"zabbix_agent_firewall_ufw:{src}:{port}")
+            else:
+                errors.append(f"zabbix_agent_firewall_ufw:{src}:{(p.stderr or p.stdout or p.returncode)}")
+        return actions, errors
+
+    iptables = shutil.which("iptables")
+    iptables_save = shutil.which("iptables-save")
+    if not iptables:
+        return ["zabbix_agent_firewall:iptables_missing"], []
+    for src in sources:
+        check = _run([iptables, "-w", "-C", "INPUT", "-p", "tcp", "-s", src, "--dport", str(port), "-j", "ACCEPT"], timeout_sec=10)
+        if check.returncode == 0:
+            actions.append(f"zabbix_agent_firewall_iptables:already_present:{src}:{port}")
+            continue
+        add = _run([iptables, "-w", "-I", "INPUT", "1", "-p", "tcp", "-s", src, "--dport", str(port), "-j", "ACCEPT"], timeout_sec=10)
+        if add.returncode == 0:
+            actions.append(f"zabbix_agent_firewall_iptables:added:{src}:{port}")
+        else:
+            errors.append(f"zabbix_agent_firewall_iptables:{src}:{(add.stderr or add.stdout or add.returncode)}")
+    rules_path = Path("/etc/iptables/rules.v4")
+    if iptables_save and rules_path.parent.exists() and not errors:
+        save = _run([iptables_save], timeout_sec=15)
+        if save.returncode == 0:
+            try:
+                rules_path.write_text(save.stdout or "", encoding="utf-8")
+                actions.append(f"zabbix_agent_firewall_saved:{rules_path}")
+            except Exception as e:
+                errors.append(f"zabbix_agent_firewall_save_failed:{e}")
+    return actions, errors
+
+
+def collect_zabbix_agent_state(profile: dict[str, Any] | None = None) -> dict[str, Any]:
+    prof = profile if isinstance(profile, dict) else {}
+    enabled = _bool(prof.get("zabbix_agent_enabled"), False)
+    desired = _desired_zabbix_agent_dropin(prof)
+    installed = _dpkg_installed_versions(timeout_sec=12).get("zabbix-agent2", "")
+    dropin_values = _read_key_value_file(_ZABBIX_AGENT_DROPIN)
+    port = _int(prof.get("zabbix_agent_port"), 10050, 1, 65535)
+    active = _service_active("zabbix-agent2", timeout_sec=4)
+    service_enabled = _service_enabled("zabbix-agent2", timeout_sec=4)
+    listening = _tcp_port_listening(port, timeout_sec=4)
+    config_matches = True
+    mismatches: list[str] = []
+    for key, wanted in desired.items():
+        if not wanted:
+            continue
+        got = str(dropin_values.get(key, "") or "").strip()
+        if got != str(wanted):
+            config_matches = False
+            mismatches.append(key)
+    if not enabled:
+        status = "disabled"
+        message = "disabled by MCC profile"
+    elif not installed:
+        status = "missing"
+        message = "zabbix-agent2 package is not installed"
+    elif desired.get("Server") and not config_matches:
+        status = "config_mismatch"
+        message = "managed drop-in does not match MCC Zabbix settings"
+    elif not active:
+        status = "inactive"
+        message = "zabbix-agent2 service is not active"
+    elif not listening:
+        status = "not_listening"
+        message = f"zabbix-agent2 is not listening on tcp/{port}"
+    else:
+        status = "ok"
+        message = f"zabbix-agent2 {installed}, active"
+    return {
+        "status": status,
+        "message": message,
+        "enabled": bool(enabled),
+        "installed": bool(installed),
+        "version": str(installed or ""),
+        "service": {"active": bool(active), "enabled": bool(service_enabled)},
+        "dropin": {
+            "path": str(_ZABBIX_AGENT_DROPIN),
+            "present": bool(_ZABBIX_AGENT_DROPIN.exists()),
+            "values": dropin_values,
+            "matches": bool(config_matches),
+            "mismatches": mismatches,
+        },
+        "desired": desired,
+        "listen_port": int(port),
+        "listening": bool(listening),
+        "firewall_sources": _normalize_ip_networks(prof.get("zabbix_agent_firewall_sources")),
+    }
+
+
+def ensure_zabbix_disk_health(profile: dict[str, Any]) -> dict[str, Any]:
+    if not _bool(profile.get("zabbix_disk_health_enabled"), False):
+        return {"status": "disabled", "reason": "zabbix_disk_health_disabled", "actions": []}
+    installed = _dpkg_installed_versions(timeout_sec=12)
+    missing = [name for name in ("smartmontools", "nvme-cli") if not installed.get(name)]
+    if missing:
+        return {"status": "error", "reason": f"missing packages: {', '.join(missing)}", "actions": []}
+
+    actions: list[str] = []
+    errors: list[str] = []
+    try:
+        if _write_if_changed(_ZABBIX_DISK_HEALTH_SCRIPT, _ZABBIX_DISK_HEALTH_SCRIPT_TEXT):
+            actions.append(f"zabbix_disk_health_script:written:{_ZABBIX_DISK_HEALTH_SCRIPT}")
+        _ZABBIX_DISK_HEALTH_SCRIPT.chmod(0o755)
+        if _write_if_changed(_ZABBIX_DISK_HEALTH_DROPIN, _ZABBIX_DISK_HEALTH_DROPIN_TEXT):
+            actions.append(f"zabbix_disk_health_dropin:written:{_ZABBIX_DISK_HEALTH_DROPIN}")
+        _ZABBIX_DISK_HEALTH_DROPIN.chmod(0o644)
+        if _write_if_changed(_ZABBIX_DISK_HEALTH_SUDOERS, _ZABBIX_DISK_HEALTH_SUDOERS_TEXT):
+            actions.append(f"zabbix_disk_health_sudoers:written:{_ZABBIX_DISK_HEALTH_SUDOERS}")
+        _ZABBIX_DISK_HEALTH_SUDOERS.chmod(0o440)
+    except Exception as exc:
+        errors.append(f"write_failed:{exc}")
+
+    if not errors:
+        visudo = shutil.which("visudo")
+        if not visudo:
+            errors.append("visudo_not_found")
+        else:
+            checked = _run([visudo, "-cf", str(_ZABBIX_DISK_HEALTH_SUDOERS)], timeout_sec=15)
+            if checked.returncode != 0:
+                errors.append(f"sudoers_invalid:{(checked.stderr or checked.stdout or checked.returncode)}")
+
+    if errors:
+        return {"status": "error", "reason": "; ".join(errors[:5]), "actions": actions}
+    return {"status": "applied", "actions": actions}
+
+
+def ensure_zabbix_agent(profile: dict[str, Any], *, timeout_sec: int = 90) -> dict[str, Any]:
+    if not _bool(profile.get("zabbix_agent_enabled"), False):
+        return {"status": "disabled", "reason": "zabbix_agent_disabled"}
+    if not str(profile.get("zabbix_agent_server", "") or "").strip():
+        return {"status": "error", "reason": "zabbix_agent_server_missing"}
+    installed = _dpkg_installed_versions(timeout_sec=12).get("zabbix-agent2", "")
+    if not installed:
+        return {"status": "error", "reason": "zabbix-agent2 package missing after package install"}
+    actions: list[str] = []
+    errors: list[str] = []
+    disk_health = ensure_zabbix_disk_health(profile)
+    disk_status = str(disk_health.get("status") or "").strip().lower()
+    actions.extend([str(x) for x in list(disk_health.get("actions") or [])])
+    if disk_status == "error":
+        errors.append(f"zabbix_disk_health:{disk_health.get('reason') or 'unknown_error'}")
+    else:
+        actions.append(f"zabbix_disk_health:{disk_status or 'unknown'}")
+    _, cfg_actions, cfg_errors = _write_zabbix_agent_dropin(profile)
+    actions.extend(cfg_actions)
+    errors.extend(cfg_errors)
+    fw_actions, fw_errors = _ensure_zabbix_agent_firewall(profile)
+    actions.extend(fw_actions)
+    errors.extend(fw_errors)
+    if not errors:
+        p = _run(["systemctl", "enable", "--now", "zabbix-agent2"], timeout_sec=max(30, int(timeout_sec)))
+        if p.returncode == 0:
+            actions.append("zabbix_agent_service:enabled_started")
+        else:
+            errors.append(f"zabbix_agent_service_start_failed:{(p.stderr or p.stdout or p.returncode)}")
+        p2 = _run(["systemctl", "restart", "zabbix-agent2"], timeout_sec=max(30, int(timeout_sec)))
+        if p2.returncode == 0:
+            actions.append("zabbix_agent_service:restarted")
+        else:
+            errors.append(f"zabbix_agent_service_restart_failed:{(p2.stderr or p2.stdout or p2.returncode)}")
+    state = collect_zabbix_agent_state(profile)
+    if errors:
+        return {"status": "error", "reason": "; ".join(str(x) for x in errors[:5]), "actions": actions, "state": state}
+    if str(state.get("status", "")) != "ok":
+        return {"status": "error", "reason": str(state.get("message") or state.get("status") or "zabbix_agent_not_ok"), "actions": actions, "state": state}
+    return {"status": "applied", "actions": actions, "state": state}
+
+
+def _collect_wazuh_agent_state_for_push() -> dict[str, Any]:
+    try:
+        from mcd_agent.wazuh_profile import collect_wazuh_agent_state
+
+        state = collect_wazuh_agent_state()
+    except Exception as exc:
+        return {
+            "installed": False,
+            "version": "",
+            "error": str(exc)[:500],
+        }
+    if isinstance(state, dict):
+        return state
+    return {
+        "installed": False,
+        "version": "",
+        "error": "invalid_wazuh_agent_state",
+    }
+
+
 def collect_apt_state(
     *,
     timeout_sec: int = 45,
     cfg: Any | None = None,
+    profile: dict[str, Any] | None = None,
     auto_bootstrap_zabbix: bool = True,
 ) -> dict[str, Any]:
     pending_info, pending_err = _pending_updates(timeout_sec=max(10, int(timeout_sec)))
@@ -1708,6 +2681,7 @@ def collect_apt_state(
         if bool(auto_bootstrap_zabbix)
         else collect_zabbix_mysql_monitor_state(cfg=cfg)
     )
+    zbx_agent_payload = collect_zabbix_agent_state(profile=profile)
     return {
         "status": status,
         "level": level,
@@ -1723,7 +2697,10 @@ def collect_apt_state(
         "phasing_packages": list(pending_info.get("phasing_packages", []) or [])[:200],
         "held_packages": list(pending_info.get("held_packages", []) or [])[:200],
         "checked_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "zabbix_agent": zbx_agent_payload,
         "zabbix_mysql_monitor": zbx_payload,
+        "cloudflare_real_ip": cloudflare_real_ip_state(profile),
+        "wazuh_agent": _collect_wazuh_agent_state_for_push(),
         "repo_profiles": collect_apt_repo_profiles_state(cfg=cfg),
         "unattended_upgrade": collect_unattended_upgrade_state(),
     }
@@ -1740,7 +2717,7 @@ def apply_apt_profile(
     if profile is None:
         profile = {}
     if dry_run:
-        current = collect_apt_state(timeout_sec=25, cfg=cfg, auto_bootstrap_zabbix=False)
+        current = collect_apt_state(timeout_sec=25, cfg=cfg, profile=profile, auto_bootstrap_zabbix=False)
         return {
             "status": "planned",
             "actions": [
@@ -1751,7 +2728,16 @@ def apply_apt_profile(
                 "unattended_upgrades",
                 "repair_repos_on_error",
                 "apt_update",
+                "ensure_local_fqdn_hosts",
                 "optional_package_ops",
+                "ensure_package_services_started",
+                "ensure_nodejs20",
+                "ensure_composer_global",
+                "ensure_var_www",
+                "cloudflare_real_ip",
+                "zabbix_agent_repo",
+                "zabbix_agent_config",
+                "zabbix_agent_firewall",
                 "zabbix_mysql_monitor_bootstrap",
             ],
             "current": current,
@@ -1778,6 +2764,12 @@ def apply_apt_profile(
         profile.get("nginx_official_stable_profile_enabled", profile.get("ensure_nginx_official_stable_repo")),
         False,
     )
+    ensure_local_fqdn_hosts = _bool(profile.get("ensure_local_fqdn_hosts"), True)
+    local_fqdn_suffix = str(profile.get("local_fqdn_suffix", "localdomain") or "localdomain")
+    ensure_package_services_started = _bool(profile.get("ensure_package_services_started"), True)
+    ensure_nodejs20 = _bool(profile.get("ensure_nodejs20"), False)
+    ensure_composer_global = _bool(profile.get("ensure_composer_global"), False)
+    ensure_var_www = _bool(profile.get("ensure_var_www"), False)
     upgrade_mode = str(profile.get("upgrade_mode", "none")).strip().lower() or "none"
     packages_present = [str(x).strip() for x in list(profile.get("packages_present", []) or []) if str(x).strip()]
     packages_absent = [str(x).strip() for x in list(profile.get("packages_absent", []) or []) if str(x).strip()]
@@ -1815,7 +2807,7 @@ def apply_apt_profile(
     def _run_update() -> list[str]:
         if not refresh_cache:
             return []
-        p = _run(["apt-get", "update"], timeout_sec=refresh_timeout_sec)
+        p = _run(["apt-get", "update", "--allow-releaseinfo-change"], timeout_sec=refresh_timeout_sec)
         merged = f"{p.stdout or ''}\n{p.stderr or ''}"
         errs = _apt_update_errors(merged)
         if p.returncode != 0 and not errs:
@@ -1872,13 +2864,85 @@ def apply_apt_profile(
             if not retry_errors:
                 actions.append("apt_update_repair_ok")
 
+    if ensure_local_fqdn_hosts:
+        changed_hosts, hosts_msg = ensure_local_fqdn_hosts_entry(suffix=local_fqdn_suffix)
+        actions.append(hosts_msg)
+        if changed_hosts:
+            changed.append("/etc/hosts")
+    else:
+        actions.append("hosts_fqdn:disabled")
+
     if packages_present:
         cmd = ["apt-get", "install", "-y"] + packages_present
         p = _run(cmd, timeout_sec=refresh_timeout_sec)
         if p.returncode == 0:
             actions.append(f"packages_present:{len(packages_present)}")
+            if ensure_package_services_started:
+                svc_actions, svc_errors = _enable_start_services(
+                    _services_for_present_packages(packages_present),
+                    timeout_sec=max(45, min(int(refresh_timeout_sec), 180)),
+                )
+                actions.extend(svc_actions)
+                errors.extend(svc_errors)
+            else:
+                actions.append("package_services_start:disabled")
         else:
             errors.append((p.stderr or p.stdout or "apt install failed").strip())
+
+    zbx_agent_result = ensure_zabbix_agent(profile, timeout_sec=max(45, int(refresh_timeout_sec)))
+    zbx_agent_status = str(zbx_agent_result.get("status", "") or "").strip().lower()
+    if zbx_agent_status in {"applied", "disabled"}:
+        actions.append(f"zabbix_agent:{zbx_agent_status}")
+        for act in list(zbx_agent_result.get("actions", []) or []):
+            actions.append(str(act))
+    elif zbx_agent_status == "error":
+        errors.append(f"zabbix_agent:{str(zbx_agent_result.get('reason', 'unknown_error'))}")
+        for act in list(zbx_agent_result.get("actions", []) or []):
+            actions.append(str(act))
+    else:
+        actions.append(f"zabbix_agent:{zbx_agent_status or 'unknown'}")
+
+    if ensure_nodejs20:
+        node_changed, node_actions, node_errors = _ensure_nodejs20(timeout_sec=max(90, int(refresh_timeout_sec)))
+        actions.extend(node_actions)
+        errors.extend(node_errors)
+        if node_changed:
+            changed.append("/usr/bin/node")
+    else:
+        actions.append("nodejs20:disabled")
+
+    if ensure_composer_global:
+        composer_changed, composer_actions, composer_errors = _ensure_composer_global(timeout_sec=max(90, int(refresh_timeout_sec)))
+        actions.extend(composer_actions)
+        errors.extend(composer_errors)
+        if composer_changed:
+            changed.append("/usr/local/bin/composer")
+    else:
+        actions.append("composer_global:disabled")
+
+    if ensure_var_www:
+        var_changed, var_msg, var_errors = _ensure_var_www()
+        actions.append(var_msg)
+        errors.extend(var_errors)
+        if var_changed:
+            changed.append("/var/www")
+    else:
+        actions.append("var_www:disabled")
+
+    if cloudflare_real_ip_profile_present(profile):
+        cf_result = ensure_cloudflare_real_ip(profile, reload_service=True)
+        cf_status = str(cf_result.get("status", "") or "").strip().lower()
+        for act in list(cf_result.get("actions", []) or []):
+            actions.append(str(act))
+        for changed_file in list(cf_result.get("changed_files", []) or []):
+            changed.append(str(changed_file))
+        if cf_status in {"error"}:
+            errors.append(f"cloudflare_real_ip:{str(cf_result.get('reason', 'unknown_error'))}")
+        elif cf_status:
+            actions.append(f"cloudflare_real_ip:{cf_status}")
+    else:
+        actions.append("cloudflare_real_ip:unmanaged")
+
     if packages_absent:
         cmd = ["apt-get", "purge", "-y"] + packages_absent
         p = _run(cmd, timeout_sec=refresh_timeout_sec)
@@ -1891,12 +2955,24 @@ def apply_apt_profile(
         p = _run(["apt-get", "upgrade", "-y"], timeout_sec=refresh_timeout_sec)
         if p.returncode == 0:
             actions.append("upgrade:upgrade")
+            if ensure_package_services_started:
+                svc_actions, svc_errors = _apt_upgrade_service_postcheck(timeout_sec=max(45, min(int(refresh_timeout_sec), 180)))
+                actions.extend(svc_actions)
+                errors.extend(svc_errors)
+            else:
+                actions.append("upgrade_service_postcheck:disabled")
         else:
             errors.append((p.stderr or p.stdout or "apt upgrade failed").strip())
     elif upgrade_mode in {"full", "dist", "dist-upgrade"}:
         p = _run(["apt-get", "dist-upgrade", "-y"], timeout_sec=refresh_timeout_sec)
         if p.returncode == 0:
             actions.append("upgrade:dist-upgrade")
+            if ensure_package_services_started:
+                svc_actions, svc_errors = _apt_upgrade_service_postcheck(timeout_sec=max(45, min(int(refresh_timeout_sec), 180)))
+                actions.extend(svc_actions)
+                errors.extend(svc_errors)
+            else:
+                actions.append("upgrade_service_postcheck:disabled")
         else:
             errors.append((p.stderr or p.stdout or "apt dist-upgrade failed").strip())
 
@@ -1914,7 +2990,9 @@ def apply_apt_profile(
     else:
         actions.append(f"zabbix_mysql_monitor:{zbx_status or 'unknown'}")
 
-    state = collect_apt_state(timeout_sec=45, cfg=cfg, auto_bootstrap_zabbix=False)
+    state = collect_apt_state(timeout_sec=45, cfg=cfg, profile=profile, auto_bootstrap_zabbix=False)
+    if isinstance(zbx_agent_result.get("state"), dict):
+        state["zabbix_agent"] = zbx_agent_result.get("state")
     state["zabbix_mysql_monitor"] = zbx_result
     if errors:
         # Preserve explicit action errors together with state-derived errors.

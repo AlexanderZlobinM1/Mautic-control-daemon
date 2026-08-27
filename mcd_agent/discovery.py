@@ -12,6 +12,7 @@ from mcd_agent.models import DBConfig, MauticInstall
 
 
 _TEMPLATE_DOMAIN_RE = re.compile(r"^default[0-9a-z-]*\.sales-snap\.(com|ru)$", flags=re.IGNORECASE)
+RETIRED_INSTANCE_MARKER = ".mcd-retired-after-composer-move"
 
 
 def _is_template_domain(host: str | None) -> bool:
@@ -265,6 +266,13 @@ def _detect_mautic_local_php(root: str) -> str | None:
     return None
 
 
+def _is_retired_instance_root(root: str) -> bool:
+    try:
+        return (Path(root) / RETIRED_INSTANCE_MARKER).exists()
+    except OSError:
+        return False
+
+
 def _resolve_discovery_paths(vhost_root: str) -> tuple[str, str | None, str | None, list[str]]:
     """
     Resolve effective Mautic install root for autodiscovery.
@@ -327,6 +335,8 @@ def discover_mautic(
         if not local_php:
             continue
         if not console_path:
+            continue
+        if _is_retired_instance_root(resolved_root):
             continue
         marker = "bin/console" if console_path.endswith("bin/console") else "app/console"
         major = _detect_mautic_major(resolved_root, local_php)

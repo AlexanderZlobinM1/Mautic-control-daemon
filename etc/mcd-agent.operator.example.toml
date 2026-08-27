@@ -57,6 +57,14 @@ segment_priority_parallel_throttled = 0
 segment_regular_parallel_throttled = 1
 # SQL ring for simple segments (direct DB rebuild; excluded from regular/priority rings).
 segment_sql_ring_enabled = false
+# Auto-promote SQL-safe segments after repeated scheduler errors or slow native rebuilds.
+segment_sql_auto_enabled = true
+# Native segment rebuild duration that promotes a SQL-safe page_hits segment into the long SQL ring.
+segment_sql_auto_long_native_min_duration_sec = 600
+# Lookback window for slow native segment rebuild detection, sec.
+segment_sql_auto_long_native_history_sec = 604800
+# Max long SQL segment rebuilds per scheduler tick.
+segment_sql_long_ring_max_per_tick = 1
 # Max SQL segment rebuilds per scheduler tick.
 segment_sql_ring_max_per_tick = 1
 # Minimum time between starts of the same SQL-managed segment, sec.
@@ -70,7 +78,7 @@ segment_sql_orphan_policy = "reclaim_stale"
 # Consider SQL-ring lock stale after this many seconds without heartbeat.
 segment_sql_orphan_after_sec = 900
 # Allow page_hits-based SQL segments only in quiet window.
-segment_sql_page_hits_quiet_only = false
+segment_sql_page_hits_quiet_only = true
 # Quiet window start hour for page_hits-based SQL segments.
 segment_sql_page_hits_quiet_hour = 2
 # Quiet window length in minutes for page_hits-based SQL segments.
@@ -120,6 +128,12 @@ monitored_email_parser_instance_settings = {}
 # Rule format (must return `lead_id` column):
 # segment_sql_ring_rules = { "188" = { select_sql = "SELECT l.id AS lead_id FROM {prefix}leads l WHERE l.email IS NOT NULL AND l.email <> ''", depends_on = [] } }
 segment_sql_ring_rules = {}
+# Let heavy campaign activity throttle segment dispatch.
+segment_throttle_during_campaigns = true
+# A single running campaign becomes heavy after this many seconds.
+campaign_pressure_min_running_sec = 120
+# This many simultaneous campaign workers become heavy immediately (0 disables).
+campaign_pressure_min_running_count = 2
 # During throttle run only whitelist segments.
 segment_throttle_whitelist_only = false
 # Allowed whitelist segment parallel slots during whitelist-only throttle.
@@ -158,6 +172,12 @@ host_template = false
 # Auto-promote clone to normal host when local OS hostname differs from configured [mcc].host_name.
 # When true, cloned host self-registers as new host in MCC and clears template role for the clone.
 template_autopromote_on_clone = true
+
+# Async replica data freshness checks. Keep disabled unless this host is a
+# reporting replica and MCC supplies instance-specific table checks.
+cluster_replica_freshness_enabled = false
+cluster_replica_freshness_max_age_sec = 172800
+cluster_replica_freshness_checks = "[]"
 
 # Mautic 6 core patch policy for PluginUpdateEvent metadata bug.
 # - required : keep host auto-patched by daemon

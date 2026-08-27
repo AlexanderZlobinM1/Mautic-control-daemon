@@ -6,10 +6,18 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
 from mcd_agent.config import AgentConfig
+
+
+_SCHEDULER_MONITOR_PLAN_PREFIX = "scheduler_monitor_plan:"
+
+
+def _empty_scheduler_shadow() -> dict[str, Any]:
+    return {"tracked_total": 0, "duplicate_task_keys": 0, "by_type": {}, "sample": [], "recent": [], "planned": []}
 
 
 def _run_journal(args: list[str], timeout_sec: int = 4) -> str:
@@ -112,6 +120,11 @@ def _ps_console_processes(timeout_sec: int = 4) -> list[dict[str, Any]]:
             continue
         args = str(parts[2] or "").strip()
         lower = args.lower()
+        # MCD launches Mautic under sudo. `ps` exposes both the launcher and
+        # the PHP child; only the child is a console worker.
+        executable = Path(args.split(None, 1)[0]).name.lower() if args else ""
+        if executable == "sudo":
+            continue
         if "php" not in lower or "console" not in lower:
             continue
         if "mautic:" not in lower and "messenger:" not in lower and "pagehit:" not in lower:
@@ -121,15 +134,60 @@ def _ps_console_processes(timeout_sec: int = 4) -> list[dict[str, Any]]:
     return out
 
 
-def _shadow_running_tasks(cfg: AgentConfig | None) -> dict[str, Any]:
+def _scheduler_task_identity(root: object, task_type: object, entity_id: object) -> tuple[str, str, int | None]:
+    normalized_root = str(root or "").strip()
+    raw_type = str(task_type or "").strip().lower()
+    if raw_type in {"segment", "segment_update", "segment_sql"}:
+        normalized_type = "segment"
+    elif raw_type in {"campaign_rebuild", "campaigns_rebuild", "campaign_rebuild_sql"}:
+        normalized_type = "campaign_rebuild"
+    elif raw_type in {"campaign_trigger", "campaigns_trigger"}:
+        normalized_type = "campaign_trigger"
+    elif raw_type in {"import", "import_run"}:
+        normalized_type = "import"
+    else:
+        normalized_type = raw_type
+    try:
+        normalized_entity = int(entity_id) if entity_id is not None else None
+    except Exception:
+        normalized_entity = None
+    return normalized_root, normalized_type, normalized_entity
+
+
+def _console_task_identity(args: object) -> tuple[str, str, int | None] | None:
+    command = str(args or "").strip()
+    root_match = re.search(r"(?P<root>[^\s]+)/(?:(?:bin)|(?:app))/console\b", command)
+    if not root_match:
+        return None
+    lower = command.lower()
+    if "mautic:segments:update" in lower:
+        task_type = "segment"
+    elif "mautic:campaigns:rebuild" in lower:
+        task_type = "campaign_rebuild"
+    elif "mautic:campaigns:trigger" in lower:
+        task_type = "campaign_trigger"
+    elif "mautic:import" in lower:
+        task_type = "import"
+    else:
+        return None
+    entity_match = re.search(r"(?:\s-i\s+|\s--id=)(\d+)\b", command)
+    entity_id = int(entity_match.group(1)) if entity_match else None
+    return _scheduler_task_identity(root_match.group("root"), task_type, entity_id)
+
+
+def _shadow_running_tasks(
+    cfg: AgentConfig | None,
+    *,
+    live_console_rows: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     if cfg is None:
-        return {"tracked_total": 0, "duplicate_task_keys": 0, "by_type": {}, "sample": []}
+        return _empty_scheduler_shadow()
     db_path = str(getattr(cfg, "state_db_path", "") or "").strip()
     if not db_path:
-        return {"tracked_total": 0, "duplicate_task_keys": 0, "by_type": {}, "sample": []}
+        return _empty_scheduler_shadow()
     path = Path(db_path)
     if not path.exists():
-        return {"tracked_total": 0, "duplicate_task_keys": 0, "by_type": {}, "sample": []}
+        return _empty_scheduler_shadow()
     try:
         conn = sqlite3.connect(str(path), timeout=2)
         conn.row_factory = sqlite3.Row
@@ -141,18 +199,59 @@ def _shadow_running_tasks(cfg: AgentConfig | None) -> dict[str, Any]:
             ORDER BY id ASC
             """
         ).fetchall()
+        recent_cutoff = time.time() - 600
+        recent_rows = conn.execute(
+            """
+            SELECT id, root, task_key, task_type, entity_id, pid, command_str, started_at, finished_at, state, rc
+            FROM tasks
+            WHERE state IN ('done', 'failed', 'timeout')
+              AND finished_at IS NOT NULL
+              AND finished_at >= ?
+            ORDER BY finished_at DESC, id DESC
+            LIMIT 40
+            """,
+            (recent_cutoff,),
+        ).fetchall()
     except Exception:
-        return {"tracked_total": 0, "duplicate_task_keys": 0, "by_type": {}, "sample": []}
+        return _empty_scheduler_shadow()
+    planned_rows: list[sqlite3.Row] = []
+    try:
+        planned_rows = conn.execute(
+            """
+            SELECT payload_json, updated_at
+            FROM runtime_sync
+            WHERE key LIKE ?
+            ORDER BY updated_at DESC
+            LIMIT 200
+            """,
+            (_SCHEDULER_MONITOR_PLAN_PREFIX + "%",),
+        ).fetchall()
+    except Exception:
+        planned_rows = []
     finally:
         try:
             conn.close()
         except Exception:
             pass
+    live_by_identity: dict[tuple[str, str, int | None], dict[str, Any]] = {}
+    if live_console_rows is not None:
+        for console_row in live_console_rows:
+            identity = _console_task_identity(console_row.get("args"))
+            if identity is not None:
+                live_by_identity[identity] = console_row
+
     by_type: dict[str, int] = {}
     key_counts: dict[str, int] = {}
     sample: list[dict[str, Any]] = []
     for row in rows:
         task_type = str(row["task_type"] or "").strip() or "unknown"
+        live_row: dict[str, Any] | None = None
+        if live_console_rows is not None:
+            live_row = live_by_identity.get(_scheduler_task_identity(row["root"], task_type, row["entity_id"]))
+            if live_row is None:
+                # State DB rows may survive until the daemon's next loop. A
+                # live process snapshot is authoritative for monitoring.
+                continue
         by_type[task_type] = int(by_type.get(task_type, 0) or 0) + 1
         task_key = str(row["task_key"] or "").strip()
         if task_key:
@@ -164,9 +263,79 @@ def _shadow_running_tasks(cfg: AgentConfig | None) -> dict[str, Any]:
                     "root": str(row["root"] or "").strip(),
                     "task_type": task_type,
                     "entity_id": int(row["entity_id"]) if row["entity_id"] is not None else None,
-                    "pid": int(row["pid"] or 0),
+                    "pid": int((live_row or row)["pid"] or 0),
                     "started_at": float(row["started_at"] or 0.0),
                 }
+            )
+    recent: list[dict[str, Any]] = []
+    for row in recent_rows:
+        state = str(row["state"] or "").strip() or "done"
+        recent.append(
+            {
+                "id": int(row["id"] or 0),
+                "root": str(row["root"] or "").strip(),
+                "task_type": str(row["task_type"] or "").strip() or "unknown",
+                "entity_id": int(row["entity_id"]) if row["entity_id"] is not None else None,
+                "pid": int(row["pid"] or 0),
+                "started_at": float(row["started_at"] or 0.0),
+                "finished_at": float(row["finished_at"] or 0.0),
+                "state": state,
+                "rc": int(row["rc"]) if row["rc"] is not None else None,
+            }
+        )
+    planned: list[dict[str, Any]] = []
+    for row in planned_rows:
+        raw = str(row["payload_json"] or "").strip()
+        if not raw:
+            continue
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        root = str(payload.get("root", "") or "").strip()
+        cycles = payload.get("cycles") if isinstance(payload.get("cycles"), list) else []
+        for cycle in cycles:
+            if not isinstance(cycle, dict):
+                continue
+            task_type = str(cycle.get("task_type", "") or "").strip()
+            if not task_type:
+                continue
+            raw_variants = cycle.get("item_variants") if isinstance(cycle.get("item_variants"), dict) else {}
+            item_variants: dict[str, list[int]] = {}
+            for variant, ids in raw_variants.items():
+                key = str(variant or "").strip().lower()
+                if not key:
+                    continue
+                values = [int(x) for x in list(ids or []) if str(x).strip().isdigit()]
+                if values:
+                    item_variants[key] = values[:200]
+            item = {
+                "root": root,
+                "task_type": task_type,
+                "queued": [int(x) for x in list(cycle.get("queued") or []) if str(x).strip().isdigit()],
+                "done": [int(x) for x in list(cycle.get("done") or []) if str(x).strip().isdigit()],
+                "running": [int(x) for x in list(cycle.get("running") or []) if str(x).strip().isdigit()],
+                "total": int(cycle.get("total", 0) or 0),
+                "updated_at": float(payload.get("updated_at", row["updated_at"] or 0.0) or 0.0),
+            }
+            if item_variants:
+                item["item_variants"] = item_variants
+            raw_statuses = cycle.get("item_statuses") if isinstance(cycle.get("item_statuses"), dict) else {}
+            item_statuses: dict[str, str] = {}
+            for raw_id, raw_status in raw_statuses.items():
+                try:
+                    item_id = int(raw_id)
+                except Exception:
+                    continue
+                status = str(raw_status or "").strip().lower()
+                if item_id > 0 and status:
+                    item_statuses[str(item_id)] = status
+            if item_statuses:
+                item["item_statuses"] = item_statuses
+            planned.append(
+                item
             )
     duplicate_task_keys = sum(1 for count in key_counts.values() if int(count or 0) > 1)
     return {
@@ -174,6 +343,8 @@ def _shadow_running_tasks(cfg: AgentConfig | None) -> dict[str, Any]:
         "duplicate_task_keys": duplicate_task_keys,
         "by_type": by_type,
         "sample": sample,
+        "recent": recent,
+        "planned": planned,
     }
 
 
@@ -198,9 +369,15 @@ def _read_meminfo_kib() -> dict[str, int]:
 
 def _swap_signal() -> dict[str, Any]:
     mem = _read_meminfo_kib()
+    mem_total_kib = int(mem.get("MemTotal", 0) or 0)
+    mem_available_kib = int(mem.get("MemAvailable", 0) or 0)
     total_kib = int(mem.get("SwapTotal", 0) or 0)
     free_kib = int(mem.get("SwapFree", 0) or 0)
     used_kib = max(0, total_kib - free_kib)
+    mem_available_mb = int(mem_available_kib // 1024)
+    mem_available_pct = 0.0
+    if mem_total_kib > 0:
+        mem_available_pct = (float(mem_available_kib) / float(mem_total_kib)) * 100.0
     total_mb = int(total_kib // 1024)
     used_mb = int(used_kib // 1024)
     used_pct = 0.0
@@ -208,7 +385,13 @@ def _swap_signal() -> dict[str, Any]:
         used_pct = (float(used_kib) / float(total_kib)) * 100.0
     level = 0
     if total_mb > 0:
-        if used_pct >= 80.0 or used_mb >= 12_288:
+        low_available = (
+            mem_total_kib <= 0
+            or mem_available_kib <= 0
+            or mem_available_pct < 10.0
+            or mem_available_mb < 2048
+        )
+        if (used_pct >= 80.0 or used_mb >= 12_288) and low_available:
             level = 2
         elif used_pct >= 50.0 or used_mb >= 4_096:
             level = 1
@@ -217,6 +400,8 @@ def _swap_signal() -> dict[str, Any]:
         "used_mb": used_mb,
         "total_mb": total_mb,
         "used_pct": round(used_pct, 2),
+        "mem_available_mb": mem_available_mb,
+        "mem_available_pct": round(mem_available_pct, 2),
     }
 
 
@@ -345,7 +530,7 @@ def collect_signals(window_min: int = 15, cfg: AgentConfig | None = None) -> dic
     console_rows = _ps_console_processes()
     php_stuck_sec = max(60, int(getattr(cfg, "php_console_stuck_sec", 1800) or 1800))
     console_stuck = [row for row in console_rows if int(row.get("elapsed_sec", 0) or 0) >= php_stuck_sec]
-    scheduler_shadow = _shadow_running_tasks(cfg)
+    scheduler_shadow = _shadow_running_tasks(cfg, live_console_rows=console_rows)
     tracked_total = int(scheduler_shadow.get("tracked_total", 0) or 0)
     duplicate_task_keys = int(scheduler_shadow.get("duplicate_task_keys", 0) or 0)
     live_console_total = len(console_rows)
@@ -460,12 +645,48 @@ def collect_signals(window_min: int = 15, cfg: AgentConfig | None = None) -> dic
             "duplicate_task_keys": duplicate_task_keys,
             "by_type": scheduler_shadow.get("by_type", {}),
             "sample": scheduler_shadow.get("sample", []),
+            "recent": scheduler_shadow.get("recent", []),
+            "planned": scheduler_shadow.get("planned", []),
         },
         "php_console_recent": console_rows[:20],
         "swap": swap_state,
         "filesystems": fs_state.get("filesystems", {}),
     }
     return payload
+
+
+def collect_monitor_signals(
+    cfg: AgentConfig | None = None,
+    *,
+    mail_queue_metrics: dict[str, dict[str, object]] | None = None,
+) -> dict[str, object]:
+    console_rows = _ps_console_processes()
+    scheduler_shadow = _shadow_running_tasks(cfg, live_console_rows=console_rows)
+    details: dict[str, object] = {
+        "scheduler": {
+            "tracked_total": int(scheduler_shadow.get("tracked_total", 0) or 0),
+            "duplicate_task_keys": int(scheduler_shadow.get("duplicate_task_keys", 0) or 0),
+            "by_type": scheduler_shadow.get("by_type", {}),
+            "sample": scheduler_shadow.get("sample", []),
+            "recent": scheduler_shadow.get("recent", []),
+            "planned": scheduler_shadow.get("planned", []),
+        },
+        "php_console_recent": console_rows[:20],
+    }
+    if isinstance(mail_queue_metrics, dict):
+        details["mail_queue"] = {
+            "instances": {
+                str(root): dict(metrics)
+                for root, metrics in mail_queue_metrics.items()
+                if isinstance(metrics, dict)
+            },
+            "updated_at_ts": time.time(),
+        }
+    return {
+        "monitor_only": True,
+        "collected_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "details": details,
+    }
 
 
 def format_signals_text(payload: dict[str, object]) -> str:

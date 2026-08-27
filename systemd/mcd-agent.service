@@ -9,7 +9,9 @@ WorkingDirectory=/opt/mcd-agent
 ExecStart=/usr/bin/python3 -m mcd_agent run --config /etc/mcd-agent.toml
 Restart=always
 RestartSec=3
-KillMode=process
+# Stop the daemon's flock/sudo/PHP children with it; leaving them behind can
+# retain task locks and keep PHP-FPM/HTTP under pressure after a restart.
+KillMode=control-group
 TimeoutStopSec=15
 
 [Install]

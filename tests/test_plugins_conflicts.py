@@ -10,6 +10,7 @@ import mcd_agent.state_backend as state_backend
 from mcd_agent.plugins import (
     _auto_remove_conflicting_installed_bundles,
     _apply_plugin_file_changes,
+    _cleanup_conflicting_plugin_rows,
     _cluster_plugin_cache_clear_all,
     _cluster_pre_sql_is_dangerous,
     _cluster_plugin_note_node,
@@ -23,12 +24,36 @@ from mcd_agent.plugins import (
     _protected_plugin_path_names,
     _remove_plugin_path,
     _apply_plugin_config_metadata_patch,
+    _plugin_config_metadata_paths,
+    _prealign_metadataless_plugin_versions,
     _run_manifest_sql_fixes,
     _exclusive_counterparts,
+    _plugin_status,
 )
 
 
 class PluginConflictPathTests(unittest.TestCase):
+    def test_plugin_status_treats_custom_patch_version_as_current(self) -> None:
+        with TemporaryDirectory() as tmp:
+            plugins_dir = Path(tmp)
+            cfg = plugins_dir / "AmazonSesBundle" / "Config"
+            cfg.mkdir(parents=True)
+            (cfg / "config.php").write_text(
+                "<?php\nreturn ['version' => '1.0.36.1'];\n",
+                encoding="utf-8",
+            )
+
+            status, reason, installed = _plugin_status(
+                plugins_dir,
+                {"bundle": "AmazonSesUpstreamBundle", "version": "1.0.36", "install_bundle": "AmazonSesBundle"},
+                ".mcd-plugin-state.json",
+                install_bundle="AmazonSesBundle",
+            )
+
+            self.assertEqual(status, "OK")
+            self.assertEqual(installed, "1.0.36.1")
+            self.assertIn("installed newer", reason)
+
     def test_selected_install_bundle_is_protected_from_conflict_aliases(self) -> None:
         selected = [
             {
@@ -75,13 +100,118 @@ class PluginConflictPathTests(unittest.TestCase):
             self.assertEqual(removed, [])
             self.assertTrue(selected_path.is_dir())
 
-    def test_amazon_ses_conflicts_with_sns_callback_implementations(self) -> None:
+    def test_dependency_matrix_can_make_enhanced_variant_displace_callback_plugins(self) -> None:
         self.assertEqual(
-            _exclusive_counterparts("AmazonSesBundle"),
-            {"AmazonSesBundleDev", "AmazonSnsCallbackBundle", "MauticAmazonSesBundle"},
+            _exclusive_counterparts(
+                "AmazonSesManagedBundle",
+                {
+                    "dependency_matrix": [
+                        {
+                            "phase": ["selection"],
+                            "selection_conflicts": ["AmazonSnsCallbackBundle", "MauticAmazonSesBundle"],
+                        }
+                    ],
+                },
+            ),
+            {"AmazonSnsCallbackBundle", "MauticAmazonSesBundle"},
         )
-        self.assertIn("AmazonSesBundle", _exclusive_counterparts("AmazonSnsCallbackBundle"))
-        self.assertIn("AmazonSesBundle", _exclusive_counterparts("MauticAmazonSesBundle"))
+        self.assertEqual(_exclusive_counterparts("AmazonSesBundle"), {"AmazonSesBundleDev"})
+        self.assertEqual(
+            _exclusive_counterparts("AmazonSnsCallbackBundle"),
+            {"MauticAmazonSesBundle"},
+        )
+        self.assertEqual(
+            _exclusive_counterparts("MauticAmazonSesBundle"),
+            {"AmazonSnsCallbackBundle"},
+        )
+
+    def test_dependency_matrix_can_remove_enhanced_runtime_when_callback_is_selected(self) -> None:
+        selected = [
+            {
+                "bundle": "AmazonSnsCallbackBundle",
+                "install_bundle": "AmazonSnsCallbackBundle",
+                "item": {
+                    "bundle": "AmazonSnsCallbackBundle",
+                    "dependency_matrix": [
+                        {
+                            "phase": ["selection"],
+                            "when": {
+                                "version_rules": [
+                                    {"bundle": "AmazonSesBundle", "equals": "1.0.36.1"},
+                                ]
+                            },
+                            "selection_conflicts": ["AmazonSesBundle"],
+                        }
+                    ],
+                },
+            }
+        ]
+
+        with TemporaryDirectory() as tmp:
+            plugins_dir = Path(tmp)
+            managed = plugins_dir / "AmazonSesBundle"
+            (managed / "Config").mkdir(parents=True)
+            (managed / "Config" / "config.php").write_text(
+                "<?php\nreturn ['version' => '1.0.36.1'];\n",
+                encoding="utf-8",
+            )
+
+            removed = _auto_remove_conflicting_installed_bundles(
+                selected,
+                plugins_dir,
+                context={
+                    "sender_type": "mautic+ses+api",
+                    "installed_plugins": {
+                        "AmazonSesBundle": "1.0.36.1",
+                    },
+                },
+            )
+
+        self.assertEqual(removed, ["AmazonSesBundle"])
+
+    def test_dependency_matrix_can_allow_mainstream_runtime_to_coexist(self) -> None:
+        selected = [
+            {
+                "bundle": "AmazonSnsCallbackBundle",
+                "install_bundle": "AmazonSnsCallbackBundle",
+                "item": {
+                    "bundle": "AmazonSnsCallbackBundle",
+                    "dependency_matrix": [
+                        {
+                            "phase": ["selection"],
+                            "when": {
+                                "version_rules": [
+                                    {"bundle": "AmazonSesBundle", "equals": "1.0.36.1"},
+                                ]
+                            },
+                            "selection_conflicts": ["AmazonSesBundle"],
+                        }
+                    ],
+                },
+            }
+        ]
+
+        with TemporaryDirectory() as tmp:
+            plugins_dir = Path(tmp)
+            upstream = plugins_dir / "AmazonSesBundle"
+            (upstream / "Config").mkdir(parents=True)
+            (upstream / "Config" / "config.php").write_text(
+                "<?php\nreturn ['version' => '1.0.36'];\n",
+                encoding="utf-8",
+            )
+
+            removed = _auto_remove_conflicting_installed_bundles(
+                selected,
+                plugins_dir,
+                context={
+                    "sender_type": "mautic+ses+api",
+                    "installed_plugins": {
+                        "AmazonSesBundle": "1.0.36",
+                    },
+                },
+            )
+
+        self.assertEqual(removed, [])
 
     def test_cluster_plugin_reference_is_first_cache_host(self) -> None:
         cfg = SimpleNamespace(
@@ -213,6 +343,35 @@ class PluginConflictPathTests(unittest.TestCase):
 
         db.execute_sql_template.assert_called_once_with("UPDATE ss_plugins SET is_published = 1")
 
+    def test_conflict_db_cleanup_protects_selected_install_bundle_alias(self) -> None:
+        install = SimpleNamespace(root="/var/www/ss/public_html", db={"driver": "pdo_mysql"})
+        rows = [
+            {
+                "bundle": "AmazonSesManagedBundle",
+                "install_bundle": "AmazonSesBundle",
+                "item": {
+                    "bundle": "AmazonSesManagedBundle",
+                    "install_bundle": "AmazonSesBundle",
+                    "replaces": [
+                        "AmazonSesBundle",
+                        "AmazonSesBundleDev",
+                        "AmazonSesUpstreamBundle",
+                        "AmazonSnsCallbackBundle",
+                        "MauticAmazonSesBundle",
+                    ],
+                },
+            }
+        ]
+        db = SimpleNamespace(execute_sql_template=Mock(return_value=1))
+
+        with patch("mcd_agent.plugins.MauticDB", return_value=db):
+            _cleanup_conflicting_plugin_rows(install, rows, extra_conflicts=["AmazonSnsCallbackBundle", "MauticAmazonSesBundle"])
+
+        sql = db.execute_sql_template.call_args.args[0]
+        self.assertNotIn("'AmazonSesBundle'", sql)
+        self.assertIn("'AmazonSnsCallbackBundle'", sql)
+        self.assertIn("'MauticAmazonSesBundle'", sql)
+
     def test_plugin_metadata_repair_skips_when_column_is_absent(self) -> None:
         cfg = SimpleNamespace()
         install = SimpleNamespace(root="/var/www/ss/public_html", db={"driver": "pdo_mysql"})
@@ -251,6 +410,148 @@ class PluginConflictPathTests(unittest.TestCase):
             text = config.read_text(encoding="utf-8")
             self.assertIn('"metadata"    => []', text)
             self.assertFalse((root / "app" / "bundles" / "PluginBundle" / "Helper" / "ReloadHelper.php").exists())
+
+    def test_plugin_config_metadata_patch_covers_all_installed_plugins(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for bundle in ("DemoBundle", "OtherBundle"):
+                config = root / "plugins" / bundle / "Config" / "config.php"
+                config.parent.mkdir(parents=True)
+                config.write_text(
+                    "<?php\nreturn [\n"
+                    f"    \"name\"        => \"{bundle}\",\n"
+                    "    \"version\"     => \"1.0.0\",\n"
+                    "    \"author\"      => \"Test\",\n"
+                    "];\n",
+                    encoding="utf-8",
+                )
+            install = SimpleNamespace(root=str(root))
+            selected = [{"bundle": "DemoBundle", "install_bundle": "DemoBundle", "item": {}}]
+
+            changed = _apply_plugin_config_metadata_patch(install, selected)
+
+            self.assertTrue(changed)
+            for bundle in ("DemoBundle", "OtherBundle"):
+                text = (root / "plugins" / bundle / "Config" / "config.php").read_text(encoding="utf-8")
+                self.assertIn('"metadata"    => []', text)
+
+    def test_plugin_config_metadata_paths_ignores_non_bundle_directories(self) -> None:
+        with TemporaryDirectory() as tmp:
+            plugins_dir = Path(tmp)
+            (plugins_dir / "DemoBundle").mkdir()
+            (plugins_dir / "node_modules").mkdir()
+            rows = [{"bundle": "SelectedBundle", "install_bundle": "SelectedBundle", "item": {}}]
+
+            names = [name for name, _ in _plugin_config_metadata_paths(plugins_dir, rows)]
+
+            self.assertEqual(names, ["SelectedBundle", "DemoBundle"])
+
+    def test_m6_metadataless_plugin_version_prealign_updates_db_row(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "plugins" / "DemoBundle" / "Config" / "config.php"
+            config.parent.mkdir(parents=True)
+            config.write_text(
+                "<?php\nreturn [\n"
+                "    'name'    => 'Demo',\n"
+                "    'version' => '1.2.3',\n"
+                "];\n",
+                encoding="utf-8",
+            )
+            install = SimpleNamespace(root=str(root), mautic_major=6, db={"driver": "pdo_mysql"})
+            selected = [{"bundle": "DemoBundle", "install_bundle": "DemoBundle", "item": {}}]
+            db = SimpleNamespace(align_plugin_version=Mock(return_value=1))
+
+            with patch("mcd_agent.plugins.MauticDB", return_value=db):
+                changed = _prealign_metadataless_plugin_versions(install, selected)
+
+            self.assertTrue(changed)
+            db.align_plugin_version.assert_called_once_with("DemoBundle", "1.2.3")
+
+    def test_m6_plugin_version_prealign_covers_installed_metadataless_plugins(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for bundle, version in (("DemoBundle", "1.2.3"), ("OtherBundle", "2.0.1")):
+                config = root / "plugins" / bundle / "Config" / "config.php"
+                config.parent.mkdir(parents=True)
+                config.write_text(f"<?php\nreturn ['version' => '{version}'];\n", encoding="utf-8")
+            install = SimpleNamespace(root=str(root), mautic_major=6, db={"driver": "pdo_mysql"})
+            selected = [{"bundle": "DemoBundle", "install_bundle": "DemoBundle", "item": {}}]
+            db = SimpleNamespace(align_plugin_version=Mock(side_effect=[1, 1]))
+
+            with patch("mcd_agent.plugins.MauticDB", return_value=db):
+                changed = _prealign_metadataless_plugin_versions(install, selected)
+
+            self.assertTrue(changed)
+            db.align_plugin_version.assert_any_call("DemoBundle", "1.2.3")
+            db.align_plugin_version.assert_any_call("OtherBundle", "2.0.1")
+            self.assertEqual(db.align_plugin_version.call_count, 2)
+
+    def test_m6_plugin_version_prealign_skips_entity_plugins(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bundle_dir = root / "plugins" / "DemoBundle"
+            config = bundle_dir / "Config" / "config.php"
+            config.parent.mkdir(parents=True)
+            config.write_text("<?php\nreturn ['version' => '1.2.3'];\n", encoding="utf-8")
+            entity = bundle_dir / "Entity" / "Demo.php"
+            entity.parent.mkdir(parents=True)
+            entity.write_text("<?php\nclass Demo {}\n", encoding="utf-8")
+            install = SimpleNamespace(root=str(root), mautic_major=6, db={"driver": "pdo_mysql"})
+            selected = [{"bundle": "DemoBundle", "install_bundle": "DemoBundle", "item": {}}]
+
+            with patch("mcd_agent.plugins.MauticDB") as db_cls:
+                changed = _prealign_metadataless_plugin_versions(install, selected)
+
+            self.assertFalse(changed)
+            db_cls.assert_not_called()
+
+    def test_m6_plugin_version_prealign_skips_other_mautic_majors(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "plugins" / "DemoBundle" / "Config" / "config.php"
+            config.parent.mkdir(parents=True)
+            config.write_text("<?php\nreturn ['version' => '1.2.3'];\n", encoding="utf-8")
+            install = SimpleNamespace(root=str(root), mautic_major=7, db={"driver": "pdo_mysql"})
+            selected = [{"bundle": "DemoBundle", "install_bundle": "DemoBundle", "item": {}}]
+
+            with patch("mcd_agent.plugins.MauticDB") as db_cls:
+                changed = _prealign_metadataless_plugin_versions(install, selected)
+
+            self.assertFalse(changed)
+            db_cls.assert_not_called()
+
+    def test_previous_failed_plugin_update_runs_reload_after_version_prealign(self) -> None:
+        cfg = SimpleNamespace(plugins_post_cache_clear=True, plugins_post_install=True)
+        install = SimpleNamespace(root="/tmp/missing-root", db=None, mautic_major=6)
+        selected = [
+            {
+                "bundle": "DemoBundle",
+                "install_bundle": "DemoBundle",
+                "item": {"bundle": "DemoBundle", "version": "1.2.3"},
+                "package": "DemoBundle.zip",
+                "status": "OK",
+            }
+        ]
+
+        with patch("mcd_agent.plugins._prealign_metadataless_plugin_versions", return_value=True) as prealign, \
+             patch("mcd_agent.plugins._run_post_steps") as post_steps:
+            changed = _apply_plugin_file_changes(
+                config=cfg,
+                install=install,
+                install_root=install.root,
+                manifest_dir="https://mcc.example/plugins/",
+                fallback_ip=None,
+                action="update",
+                selected=selected,
+                auto_remove_bundles=[],
+                rows_by_bundle={},
+                run_post_steps=True,
+            )
+
+        self.assertTrue(changed)
+        prealign.assert_called_once_with(install, selected)
+        post_steps.assert_called_once_with(cfg, install)
 
     def test_cluster_node_status_is_written_to_node_scoped_runtime_row(self) -> None:
         calls = []

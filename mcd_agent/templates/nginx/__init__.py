@@ -1,0 +1,1 @@
+"""Nginx vhost templates."""

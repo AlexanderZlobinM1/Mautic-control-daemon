@@ -115,10 +115,12 @@ class SelfUpdateVersionReportingTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             cfg = _cfg(tmp)
             old_installed = self_update.installed_agent_version
+            old_pkg_sync = self_update._agent_package_sync_needed
             old_release = self_update.release_session
             old_restart = self_update._restart_service_async
             try:
                 self_update.installed_agent_version = lambda: "9.9.9"
+                self_update._agent_package_sync_needed = lambda *_args, **_kw: False
                 self_update.release_session = lambda _cfg, session_id, **kw: releases.append(
                     {"session_id": session_id, **{k: str(v) for k, v in kw.items()}}
                 )
@@ -134,6 +136,7 @@ class SelfUpdateVersionReportingTests(unittest.TestCase):
                 )
             finally:
                 self_update.installed_agent_version = old_installed
+                self_update._agent_package_sync_needed = old_pkg_sync
                 self_update.release_session = old_release
                 self_update._restart_service_async = old_restart
 
@@ -146,6 +149,38 @@ class SelfUpdateVersionReportingTests(unittest.TestCase):
         self.assertEqual(releases[0]["result_status"], "success")
         self.assertEqual(releases[0]["new_version"], "9.9.9")
         self.assertEqual(state["last_status"], "version_mismatch_restart")
+
+    def test_apply_update_defers_manual_restart_while_backup_lock_is_active(self) -> None:
+        with TemporaryDirectory() as tmp:
+            cfg = _cfg(tmp)
+            cfg.backup_enabled = True
+            restarts: list[bool] = []
+            old_installed = self_update.installed_agent_version
+            old_lock = self_update.backup_lock_active
+            old_restart = self_update._restart_service_async
+            try:
+                self_update.installed_agent_version = lambda: "0.9.252"
+                self_update.backup_lock_active = lambda _cfg: True
+                self_update._restart_service_async = lambda: restarts.append(True)
+                ok, msg = self_update.apply_update(
+                    cfg,
+                    {
+                        "status": "update",
+                        "target": "0.9.253",
+                        "package_url": "https://mcc.invalid/mcd-agent-0.9.253.tar.gz",
+                    },
+                )
+            finally:
+                self_update.installed_agent_version = old_installed
+                self_update.backup_lock_active = old_lock
+                self_update._restart_service_async = old_restart
+
+            state = json.loads((Path(tmp) / "mcd-self-update.json").read_text(encoding="utf-8"))
+
+        self.assertFalse(ok)
+        self.assertEqual(msg, "MCD update deferred: backup lock is active")
+        self.assertEqual(state["last_status"], "deferred_backup_lock")
+        self.assertEqual(restarts, [])
 
     def test_apply_update_refreshes_cluster_result_message(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -179,6 +214,7 @@ class SelfUpdateVersionReportingTests(unittest.TestCase):
             old_ensure_archive = self_update._ensure_update_archive
             old_extract = self_update._extract_archive_to_dir
             old_install_reqs = self_update._install_requirements_for_staged_source
+            old_install_pkg = self_update._install_agent_package_for_source
             old_smoke = self_update._pre_switch_smoke_check
             old_restart = self_update._restart_service_async
             old_cleanup = self_update._cleanup_update_artifacts
@@ -193,6 +229,7 @@ class SelfUpdateVersionReportingTests(unittest.TestCase):
                 self_update._ensure_update_archive = lambda _cfg, _plan: Path(tmp) / "archive.tar.gz"
                 self_update._extract_archive_to_dir = lambda _archive, dst: dst.mkdir(parents=True, exist_ok=True)
                 self_update._install_requirements_for_staged_source = lambda *_args, **_kw: None
+                self_update._install_agent_package_for_source = lambda *_args, **_kw: None
                 self_update._pre_switch_smoke_check = lambda *_args, **_kw: None
                 self_update._restart_service_async = lambda: None
                 self_update._cleanup_update_artifacts = lambda *_args, **_kw: {
@@ -219,6 +256,7 @@ class SelfUpdateVersionReportingTests(unittest.TestCase):
                 self_update._ensure_update_archive = old_ensure_archive
                 self_update._extract_archive_to_dir = old_extract
                 self_update._install_requirements_for_staged_source = old_install_reqs
+                self_update._install_agent_package_for_source = old_install_pkg
                 self_update._pre_switch_smoke_check = old_smoke
                 self_update._restart_service_async = old_restart
                 self_update._cleanup_update_artifacts = old_cleanup
@@ -232,6 +270,52 @@ class SelfUpdateVersionReportingTests(unittest.TestCase):
             "update applied -> 0.9.97; source switched, service restart scheduled",
         )
         self.assertNotIn("active_campaign_processes", state)
+
+    def test_apply_update_repairs_stale_venv_package_when_source_is_current(self) -> None:
+        repairs: list[tuple[str, str]] = []
+        restarts: list[bool] = []
+        releases: list[dict[str, str]] = []
+        with TemporaryDirectory() as tmp:
+            cfg = _cfg(tmp)
+            cfg.mcd_install_dir = str(Path(tmp) / "mcd")
+            src = Path(cfg.mcd_install_dir) / "src"
+            src.mkdir(parents=True)
+            old_installed = self_update.installed_agent_version
+            old_pkg_sync = self_update._agent_package_sync_needed
+            old_install_pkg = self_update._install_agent_package_for_source
+            old_release = self_update.release_session
+            old_restart = self_update._restart_service_async
+            try:
+                self_update.installed_agent_version = lambda: "0.9.153"
+                self_update._agent_package_sync_needed = lambda *_args, **_kw: True
+                self_update._install_agent_package_for_source = lambda install_dir, source_dir: repairs.append(
+                    (str(install_dir), str(source_dir))
+                )
+                self_update.release_session = lambda _cfg, session_id, **kw: releases.append(
+                    {"session_id": session_id, **{k: str(v) for k, v in kw.items()}}
+                )
+                self_update._restart_service_async = lambda: restarts.append(True)
+                ok, msg = self_update.apply_update(
+                    cfg,
+                    {
+                        "status": "update",
+                        "target": "0.9.153",
+                        "package_url": "https://mcc.invalid/mcd-agent-0.9.153.tar.gz",
+                        "session_id": "sess-2",
+                    },
+                )
+            finally:
+                self_update.installed_agent_version = old_installed
+                self_update._agent_package_sync_needed = old_pkg_sync
+                self_update._install_agent_package_for_source = old_install_pkg
+                self_update.release_session = old_release
+                self_update._restart_service_async = old_restart
+
+        self.assertTrue(ok)
+        self.assertIn("agent package sync repaired", msg)
+        self.assertEqual(repairs, [(str(Path(cfg.mcd_install_dir)), str(src))])
+        self.assertEqual(restarts, [True])
+        self.assertEqual(releases[0]["result_status"], "success")
 
     def test_update_cleanup_defaults_remove_old_agent_artifacts(self) -> None:
         with TemporaryDirectory() as tmp:

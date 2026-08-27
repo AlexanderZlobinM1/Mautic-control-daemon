@@ -9,6 +9,7 @@ from typing import Any
 
 from mcd_agent.config import AgentConfig
 from mcd_agent.db import MauticDB
+from mcd_agent.install_type import plugin_dir_candidates
 from mcd_agent.inventory import InstanceInventory, ensure_seeded
 from mcd_agent.models import MauticInstall
 
@@ -156,14 +157,10 @@ def _resolve_hostnet_bundle_dir(root: str) -> str | None:
     base = str(root or "").strip()
     if not base:
         return None
-    candidates = [
-        os.path.join(base, "plugins", "HostnetAuthBundle"),
-        os.path.join(base, "docroot", "plugins", "HostnetAuthBundle"),
-        os.path.join(base, "public", "plugins", "HostnetAuthBundle"),
-    ]
-    for path in candidates:
-        if os.path.isfile(os.path.join(path, "HostnetAuthBundle.php")):
-            return path
+    for plugins_dir in plugin_dir_candidates(base):
+        path = plugins_dir / "HostnetAuthBundle"
+        if (path / "HostnetAuthBundle.php").is_file():
+            return str(path)
     return None
 
 

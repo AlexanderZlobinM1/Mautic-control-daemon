@@ -68,14 +68,20 @@ class MauticDB:
             seen.add(key)
             out.append(kwargs)
 
-        _add({**base, "host": host_raw or "localhost", "port": port})
         if self._is_local_host(host_raw):
-            # Prefer unix socket on local DBs because many hosts have grants
-            # only for user@localhost and reject user@127.0.0.1.
+            explicit_tcp = host_raw.lower() in {"127.0.0.1", "::1"}
+            if explicit_tcp:
+                _add({**base, "host": host_raw, "port": port})
+            # Prefer unix socket on implicit local DBs because many hosts have
+            # grants only for user@localhost and reject TCP loopback users.
             for sock in self._socket_candidates():
                 _add({**base, "unix_socket": sock})
+            if not explicit_tcp:
+                _add({**base, "host": host_raw or "localhost", "port": port})
             _add({**base, "host": "localhost", "port": port})
             _add({**base, "host": "127.0.0.1", "port": port})
+        else:
+            _add({**base, "host": host_raw, "port": port})
         return out
 
     def _connect(self) -> pymysql.connections.Connection:
@@ -92,6 +98,29 @@ class MauticDB:
         if last_error is not None:
             raise last_error
         raise RuntimeError("mysql_connection_failed")
+
+    def try_acquire_orphan_page_hits_cleanup_lock(self) -> pymysql.connections.Connection | None:
+        conn = self._connect()
+        lock_name = f"mcd:page_hits_orphan:{self.cfg.name}"[:64]
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT GET_LOCK(%s, 0) AS acquired", (lock_name,))
+                row = cur.fetchone()
+            if isinstance(row, dict) and int(row.get("acquired") or 0) == 1:
+                return conn
+        except Exception:
+            conn.close()
+            raise
+        conn.close()
+        return None
+
+    @staticmethod
+    def release_orphan_page_hits_cleanup_lock(conn: pymysql.connections.Connection | None) -> None:
+        if conn is None:
+            return
+        # MariaDB releases every named lock owned by a connection when that
+        # connection closes. Closing also avoids a separate RELEASE_LOCK race.
+        conn.close()
 
     @staticmethod
     def _safe_column(name: str) -> str:
@@ -219,6 +248,84 @@ class MauticDB:
                 out.append(row)
         return out
 
+    def fetch_all_segment_filters(self) -> list[dict[str, Any]]:
+        prefix = str(self.cfg.table_prefix or "")
+        table_segments = self._safe_table(f"{prefix}lead_lists")
+        query = (
+            f"SELECT id, name, description, is_published, filters, checked_out, "
+            f"date_modified, last_built_date "
+            f"FROM `{table_segments}` "
+            f"ORDER BY id ASC"
+        )
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query)
+                rows = cur.fetchall()
+        return [dict(row) for row in rows if isinstance(row, dict)]
+
+    def disable_segments(
+        self,
+        segment_ids: list[int],
+        *,
+        issue_id: str,
+        reason: str,
+        actor: str,
+    ) -> dict[str, Any]:
+        ids = list(dict.fromkeys(int(x) for x in segment_ids if int(x) > 0))
+        if not ids:
+            raise ValueError("no segment IDs supplied")
+        prefix = str(self.cfg.table_prefix or "")
+        table_segments = self._safe_table(f"{prefix}lead_lists")
+        placeholders = ",".join(["%s"] * len(ids))
+        marker = (
+            "[MCD safety {ts}; issue={issue}; actor={actor}] {reason}"
+        ).format(
+            ts=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+            issue=str(issue_id or "logical_issue")[:255],
+            actor=str(actor or "Emmy Starwell")[:120],
+            reason=str(reason or "logical issue")[:1500],
+        )
+        conn = self._connect()
+        try:
+            conn.begin()
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT id,name,description,is_published,date_modified "
+                    f"FROM `{table_segments}` WHERE id IN ({placeholders}) FOR UPDATE",
+                    tuple(ids),
+                )
+                before = [dict(row) for row in (cur.fetchall() or []) if isinstance(row, dict)]
+                found = {int(row.get("id") or 0) for row in before}
+                missing = sorted(set(ids) - found)
+                if missing:
+                    raise ValueError("segments disappeared before remediation: " + ",".join(map(str, missing)))
+                for row in before:
+                    segment_id = int(row.get("id") or 0)
+                    if int(row.get("is_published") or 0) == 0:
+                        continue
+                    description = str(row.get("description") or "").rstrip()
+                    if marker not in description:
+                        description = (description + "\n\n" + marker).strip()
+                    cur.execute(
+                        f"UPDATE `{table_segments}` "
+                        f"SET is_published=0,description=%s,date_modified=UTC_TIMESTAMP() "
+                        f"WHERE id=%s AND is_published=1",
+                        (description, segment_id),
+                    )
+                cur.execute(
+                    f"SELECT id,name,description,is_published,date_modified "
+                    f"FROM `{table_segments}` WHERE id IN ({placeholders}) ORDER BY id ASC",
+                    tuple(ids),
+                )
+                after = [dict(row) for row in (cur.fetchall() or []) if isinstance(row, dict)]
+            conn.commit()
+            return {"before": before, "after": after, "marker": marker}
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     def fetch_lead_columns(self) -> set[str]:
         prefix = str(self.cfg.table_prefix or "")
         table_leads = f"{prefix}leads"
@@ -266,6 +373,117 @@ class MauticDB:
         with self._connect() as conn:
             with conn.cursor() as cur:
                 affected = cur.execute(query)
+        try:
+            return int(affected)
+        except (TypeError, ValueError):
+            return 0
+
+    def recover_orphaned_imports(self, import_dir: str, grace_sec: int = 60, limit: int = 20) -> int:
+        """
+        Requeue background imports left IN_PROGRESS without a live CLI worker.
+
+        Mautic 4/5/6/7 use numeric import statuses consistently:
+        2 = IN_PROGRESS and 7 = DELAYED. Core ghost cleanup waits two hours and
+        marks rows failed while deleting files, which is too destructive for
+        short-lived CLI crashes. MCD only calls this after proving no
+        mautic:import process is alive for the instance.
+        """
+        try:
+            grace = max(30, int(grace_sec or 0))
+        except (TypeError, ValueError):
+            grace = 60
+        try:
+            max_rows = max(1, min(100, int(limit or 20)))
+        except (TypeError, ValueError):
+            max_rows = 20
+        table = self._safe_table(f"{self.cfg.table_prefix}imports")
+        base_dir = Path(str(import_dir or "")).resolve()
+        if not base_dir.exists() or not base_dir.is_dir():
+            return 0
+
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT `id`, `file`, `line_count`,
+                           CAST(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(`properties`, '$.line')), '0') AS UNSIGNED) AS `last_line`
+                    FROM `{table}`
+                    WHERE `is_published` = 1
+                      AND `status` = 2
+                      AND `date_ended` IS NULL
+                      AND `date_modified` < DATE_SUB(UTC_TIMESTAMP(), INTERVAL %s SECOND)
+                    ORDER BY `date_modified` ASC, `id` ASC
+                    LIMIT %s
+                    """,
+                    (grace, max_rows),
+                )
+                rows = cur.fetchall() or []
+                recovered = 0
+                for row in rows:
+                    try:
+                        import_id = int(row.get("id") or 0)
+                        line_count = int(row.get("line_count") or 0)
+                        last_line = int(row.get("last_line") or 0)
+                    except Exception:
+                        continue
+                    file_name = Path(str(row.get("file") or "")).name
+                    if import_id <= 0 or not file_name:
+                        continue
+                    if line_count > 0 and last_line >= line_count:
+                        continue
+                    path = (base_dir / file_name).resolve()
+                    try:
+                        if path.parent != base_dir or not path.is_file():
+                            continue
+                    except Exception:
+                        continue
+                    affected = cur.execute(
+                        f"""
+                        UPDATE `{table}`
+                        SET `status` = 7,
+                            `date_ended` = NULL,
+                            `date_modified` = UTC_TIMESTAMP()
+                        WHERE `id` = %s
+                          AND `status` = 2
+                          AND `date_ended` IS NULL
+                        """,
+                        (import_id,),
+                    )
+                    if affected:
+                        recovered += 1
+        return recovered
+
+    def align_plugin_version(self, bundle: str, version: str) -> int:
+        """
+        Align one Mautic plugin DB row to the installed bundle version.
+
+        This is used as a narrow installer-side workaround for Mautic 6 reloads
+        where plugins without Doctrine entity metadata can crash core update
+        handling before reload completes.
+        """
+        bundle_clean = str(bundle or "").strip()
+        version_clean = str(version or "").strip()
+        if not bundle_clean or not version_clean:
+            return 0
+        table = self._safe_table(f"{self.cfg.table_prefix}plugins")
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                columns = self._table_columns(cur, table)
+                if "version" not in columns:
+                    return 0
+                if "bundle" in columns:
+                    match_column = "bundle"
+                elif "name" in columns:
+                    match_column = "name"
+                else:
+                    return 0
+                affected = cur.execute(
+                    f"UPDATE `{table}` "
+                    f"SET `version`=%s "
+                    f"WHERE `{match_column}`=%s "
+                    "AND (`version` IS NULL OR `version`<>%s)",
+                    (version_clean, bundle_clean, version_clean),
+                )
         try:
             return int(affected)
         except (TypeError, ValueError):
@@ -348,9 +566,12 @@ class MauticDB:
                     cur.execute(
                         "INSERT INTO `{tbl}` "
                         "(`leadlist_id`,`lead_id`,`date_added`,`manually_removed`,`manually_added`) "
-                        "SELECT %s, t.lead_id, NOW(), 0, 0 FROM `{tmp}` t".format(
+                        "SELECT %s, t.lead_id, NOW(), 0, 0 "
+                        "FROM `{tmp}` t "
+                        "INNER JOIN `{leads}` l ON l.`id`=t.`lead_id`".format(
                             tbl=table_segment_links,
                             tmp=temp_table,
+                            leads=self._safe_table(f"{prefix}leads"),
                         ),
                         (sid,),
                     )
@@ -557,6 +778,10 @@ class MauticDB:
         if self._table_has_index(table, "idx_mcd_ph_lead_date"):
             return "FORCE INDEX (`idx_mcd_ph_lead_date`)"
         return ""
+
+    def orphan_page_hits_cleanup_index_ready(self) -> bool:
+        table = self._safe_table(f"{self.cfg.table_prefix}page_hits")
+        return self._table_has_index(table, "idx_mcd_ph_lead_date")
 
     def _existing_table_columns(self, table: str) -> set[str] | None:
         try:

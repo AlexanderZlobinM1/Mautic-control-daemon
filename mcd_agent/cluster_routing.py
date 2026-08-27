@@ -96,7 +96,14 @@ def cluster_route_for_task_type(task_type: str) -> str:
 
 def cluster_route_for_command(command: str) -> str:
     cmd = str(command or "").strip()
-    if cmd in {"segments:update", "campaign:trigger", "campaign:rebuild", "campaigns:update", "campaigns:trigger"}:
+    if cmd in {
+        "segments:update",
+        "campaign:trigger",
+        "campaign:rebuild",
+        "campaigns:rebuild",
+        "campaigns:update",
+        "campaigns:trigger",
+    }:
         return "cron"
     if cmd == "import":
         return "import"

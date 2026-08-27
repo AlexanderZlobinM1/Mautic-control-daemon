@@ -10,7 +10,7 @@ import tempfile
 import urllib.request
 
 from mcd_agent.config import AgentConfig
-from mcd_agent.install_type import detect_install_type
+from mcd_agent.install_type import detect_install_type, plugin_dir_candidates
 
 
 AMAZON_MAILER_REQUIRED_BUNDLES: set[str] = {
@@ -30,6 +30,7 @@ SENDGRID_MAILER_REQUIRED_BUNDLES: set[str] = {
 }
 
 AMAZON_MAILER_PACKAGE = "symfony/amazon-mailer"
+HTTP_CLIENT_PACKAGE = "symfony/http-client"
 SENDGRID_MAILER_PACKAGE = "symfony/sendgrid-mailer:*"
 
 _MAUTIC_COMPOSER_REQUIRE_MARKERS = {
@@ -292,7 +293,7 @@ def _required_mailer_packages_from_bundles(bundles: set[str]) -> set[str]:
         if not b:
             continue
         if b in AMAZON_MAILER_REQUIRED_BUNDLES:
-            out.add(AMAZON_MAILER_PACKAGE)
+            out.update({AMAZON_MAILER_PACKAGE, HTTP_CLIENT_PACKAGE})
         if _bundle_requires_sendgrid_mailer(b):
             out.add(SENDGRID_MAILER_PACKAGE)
     return out
@@ -300,12 +301,7 @@ def _required_mailer_packages_from_bundles(bundles: set[str]) -> set[str]:
 
 def installed_required_bundles(root: str) -> set[str]:
     out: set[str] = set()
-    candidates = [
-        Path(root) / "plugins",
-        Path(root) / "docroot" / "plugins",
-        Path(root) / "public" / "plugins",
-    ]
-    for base in candidates:
+    for base in plugin_dir_candidates(root):
         if not base.exists() or not base.is_dir():
             continue
         for name in AMAZON_MAILER_REQUIRED_BUNDLES | SENDGRID_MAILER_REQUIRED_BUNDLES:
@@ -416,7 +412,7 @@ def ensure_amazon_mailer_for_bundles(
         config=config,
         root=root,
         console_path=console_path,
-        required={AMAZON_MAILER_PACKAGE},
+        required={AMAZON_MAILER_PACKAGE, HTTP_CLIENT_PACKAGE},
         reason=reason,
         ensure_node=False,
     )
@@ -440,4 +436,21 @@ def ensure_mailer_packages_for_sender_config(
         required=required,
         reason=reason,
         ensure_node=SENDGRID_MAILER_PACKAGE in required,
+    )
+
+
+def ensure_mailer_packages(
+    *,
+    config: AgentConfig,
+    root: str,
+    packages: set[str],
+    reason: str,
+) -> bool:
+    return _ensure_mailer_packages(
+        config=config,
+        root=root,
+        console_path=str(Path(root) / "bin" / "console"),
+        required=set(packages),
+        reason=reason,
+        ensure_node=SENDGRID_MAILER_PACKAGE in packages,
     )

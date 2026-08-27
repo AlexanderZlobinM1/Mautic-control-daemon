@@ -12,12 +12,18 @@ import time
 from typing import Any
 from dataclasses import dataclass
 from urllib import error as urlerror
+from urllib.parse import urlparse, urlsplit, urlunsplit
 import urllib.request
 
 from mcd_agent.config import AgentConfig
 from mcd_agent.discovery import discover_mautic
 from mcd_agent.install_type import detect_install_type
-from mcd_agent.maintenance_mode import cron_marker_path, restore_cron_service_if_needed, stop_cron_service
+from mcd_agent.maintenance_mode import (
+    cron_marker_path,
+    restore_cron_service_if_needed,
+    stop_cron_service,
+    stop_running_tasks_for_maintenance,
+)
 from mcd_agent.models import MauticInstall
 from mcd_agent.amazon_mailer_dep import (
     ensure_amazon_mailer_for_bundles,
@@ -28,6 +34,7 @@ from mcd_agent.amazon_mailer_dep import (
 )
 from mcd_agent.fs_permissions import ensure_instance_permissions
 from mcd_agent.localphp import parse_local_php
+from mcd_agent.mautic_version_cache import write_mautic_version_cache
 
 
 CORE_PLUGIN_BUNDLES = {
@@ -54,7 +61,29 @@ FALLBACK_BRANCH_TARGETS: dict[str, str] = {
     "7.1": "7.1.2",
 }
 
-_VERSION_CACHE_REL = Path(".mcd") / "mautic.version"
+PHP84_PACKAGE_SUFFIXES = [
+    "apcu",
+    "fpm",
+    "cli",
+    "curl",
+    "mysql",
+    "mailparse",
+    "gd",
+    "mbstring",
+    "imagick",
+    "bcmath",
+    "zip",
+    "tidy",
+    "soap",
+    "intl",
+    "xml",
+    "imap",
+    "redis",
+    "opcache",
+]
+
+PHP_CUSTOM_INI_NAMES = {"60-custom.ini", "90-redis-sessions.ini"}
+PHP_CUSTOM_INI_HINTS = ("custom", "mcd", "sales-snap", "redis-session", "redis_sessions")
 
 
 @dataclass(slots=True)
@@ -69,6 +98,8 @@ class UpgradeMaintenanceGuard:
     pause_flag: Path
     owned_pause_flag: bool
     owned_cron_stop: bool
+    stopped_tasks: int = 0
+    stop_failed: int = 0
 
 
 def _pick_install_record(config: AgentConfig, root: str | None) -> MauticInstall:
@@ -118,14 +149,9 @@ def _write_upgrade_version_cache(root: str, version: str) -> int:
         if key in seen or key == "/" or not base.exists() or not base.is_dir():
             continue
         seen.add(key)
-        target = base / _VERSION_CACHE_REL
         try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            tmp = target.with_name(f".{target.name}.tmp.{os.getpid()}")
-            tmp.write_text(safe + "\n", encoding="utf-8")
-            os.chmod(tmp, 0o644)
-            os.replace(tmp, target)
-            written += 1
+            if write_mautic_version_cache(base, safe):
+                written += 1
         except OSError:
             continue
     return written
@@ -164,10 +190,43 @@ def _enter_upgrade_maintenance(config: AgentConfig) -> UpgradeMaintenanceGuard:
         was_active = str(bool(cron_stop.get("was_active", False))).lower()
         print(f"Maintenance guard: cron stopped unit={unit} was_active={was_active}")
 
+    stop_result = stop_running_tasks_for_maintenance(config, grace_sec=30, kill_orphans=True)
+    stopped_tasks = int(stop_result.get("stopped") or 0)
+    stop_failed = int(stop_result.get("stop_failed") or 0)
+    print(
+        "Maintenance guard: running tasks stopped={stopped} failed={failed} "
+        "managed_remaining={managed} console_remaining={consoles}".format(
+            stopped=stopped_tasks,
+            failed=stop_failed,
+            managed=int(stop_result.get("managed_running") or 0),
+            consoles=int(stop_result.get("mautic_console_total") or 0),
+        )
+    )
+    # A stop attempt can race with a short-lived console process: the kill
+    # helper may report a failure even though the final process snapshot is
+    # already clean. Only live processes make the maintenance guard unsafe.
+    managed_remaining = int(stop_result.get("managed_running") or 0)
+    console_remaining = int(stop_result.get("mautic_console_total") or 0)
+    if managed_remaining > 0 or console_remaining > 0:
+        if owned_cron_stop:
+            try:
+                restore_cron_service_if_needed(config)
+            except Exception:
+                pass
+        if owned_pause_flag and pause_flag.exists():
+            pause_flag.unlink()
+        raise RuntimeError(
+            "Maintenance guard failed: unable to stop all running Mautic tasks "
+            f"(stop_failed={stop_failed} managed_remaining={managed_remaining} "
+            f"console_remaining={console_remaining})"
+        )
+
     return UpgradeMaintenanceGuard(
         pause_flag=pause_flag,
         owned_pause_flag=owned_pause_flag,
         owned_cron_stop=owned_cron_stop,
+        stopped_tasks=stopped_tasks,
+        stop_failed=stop_failed,
     )
 
 
@@ -335,7 +394,19 @@ def _latest_same_branch(config: AgentConfig, version: str) -> str | None:
     return latest if _parse_semver(latest) > v else None
 
 
-def _upgrade_target_relation(current: str, target: str, *, allow_minor: bool = False) -> str:
+def _is_supported_major_upgrade(current: str, target: str) -> bool:
+    current_sv = _parse_semver(current)
+    target_sv = _parse_semver(target)
+    return current_sv[0] == 6 and target_sv[0] == 7 and target_sv > current_sv
+
+
+def _upgrade_target_relation(
+    current: str,
+    target: str,
+    *,
+    allow_minor: bool = False,
+    allow_major: bool = False,
+) -> str:
     current_sv = _parse_semver(current)
     target_sv = _parse_semver(target)
     if current_sv == (0, 0, 0) or target_sv == (0, 0, 0):
@@ -343,6 +414,8 @@ def _upgrade_target_relation(current: str, target: str, *, allow_minor: bool = F
     if target_sv <= current_sv:
         return "none"
     if target_sv[0] != current_sv[0]:
+        if allow_major and _is_supported_major_upgrade(current, target):
+            return "allowed"
         return "blocked_major"
     if target_sv[1] == current_sv[1]:
         return "allowed"
@@ -351,8 +424,14 @@ def _upgrade_target_relation(current: str, target: str, *, allow_minor: bool = F
     return "blocked_minor"
 
 
-def _ensure_upgrade_target_allowed(current: str, target: str, *, allow_minor: bool = False) -> bool:
-    relation = _upgrade_target_relation(current, target, allow_minor=allow_minor)
+def _ensure_upgrade_target_allowed(
+    current: str,
+    target: str,
+    *,
+    allow_minor: bool = False,
+    allow_major: bool = False,
+) -> bool:
+    relation = _upgrade_target_relation(current, target, allow_minor=allow_minor, allow_major=allow_major)
     if relation == "allowed":
         return True
     if relation == "none":
@@ -360,7 +439,8 @@ def _ensure_upgrade_target_allowed(current: str, target: str, *, allow_minor: bo
     if relation == "blocked_major":
         raise RuntimeError(
             f"Major upgrade is disabled in current flow: {current} -> {target}. "
-            "Only patch updates are allowed by default; one-step minor updates require --allow-minor."
+            "Only patch updates are allowed by default; one-step minor updates require --allow-minor, "
+            "and the Composer Mautic 6 -> 7 flow requires --allow-major."
         )
     if relation == "blocked_minor":
         raise RuntimeError(
@@ -465,6 +545,105 @@ def _clear_prod_cache_with_fallback(project_root: str, console_path: str, php_bi
     _run([php_bin, console_path, "cache:clear"], cwd=project_root, as_www_data=True)
 
 
+def _safe_mautic7_loopback_redis_dsn(dsn: str) -> str:
+    raw = str(dsn or "").strip()
+    if not raw.lower().startswith("redis://"):
+        return raw
+    try:
+        parsed = urlsplit(raw)
+    except Exception:
+        return raw
+    host = str(parsed.hostname or "").strip().lower().rstrip(".")
+    if host not in {"127.0.0.1", "localhost"}:
+        return raw
+    netloc = parsed.netloc
+    idx = netloc.lower().rfind(host)
+    if idx < 0:
+        return raw
+    # Mautic 7's Redis helper resolves 127.0.0.1/localhost into an endpoint
+    # array, which Predis 3 treats as an aggregate connection and rejects. The
+    # hex loopback form still connects locally but remains a scalar DSN.
+    netloc = netloc[:idx] + "0x7f000001" + netloc[idx + len(host) :]
+    return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+
+
+def _normalize_mautic7_loopback_redis_cache(project_root: str, target: str) -> bool:
+    if _parse_semver(target)[0] != 7:
+        return False
+    local_php = Path(project_root) / "config" / "local.php"
+    if not local_php.exists() or not local_php.is_file():
+        return False
+    text = local_php.read_text(encoding="utf-8", errors="ignore")
+    if "cache_adapter_redis" not in text or "mautic.cache.adapter.redis" not in text:
+        return False
+    changed = False
+
+    def repl(match: re.Match[str]) -> str:
+        nonlocal changed
+        dsn = match.group("dsn")
+        updated = _safe_mautic7_loopback_redis_dsn(dsn)
+        if updated == dsn:
+            return match.group(0)
+        changed = True
+        return f"{match.group('prefix')}{match.group('quote')}{updated}{match.group('quote')}"
+
+    updated = re.sub(
+        r"(?P<prefix>['\"]dsn['\"]\s*=>\s*)(?P<quote>['\"])(?P<dsn>redis://[^'\"]+)(?P=quote)",
+        repl,
+        text,
+        count=1,
+    )
+    if not changed or updated == text:
+        return False
+    backup = local_php.with_name(local_php.name + f".mcd-pre-m7-redis-dsn-{int(time.time())}.bak")
+    if not backup.exists():
+        shutil.copy2(local_php, backup)
+    local_php.write_text(updated, encoding="utf-8")
+    print("Mautic 7 Redis cache DSN normalized for Predis 3 loopback compatibility")
+    return True
+
+
+def _normalize_mautic7_composer_constraints(text: str, target: str) -> tuple[str, int]:
+    if _parse_semver(target)[0] != 7:
+        return text, 0
+    try:
+        data = json.loads(text)
+    except Exception:
+        return text, 0
+    if not isinstance(data, dict):
+        return text, 0
+    require = data.get("require")
+    if not isinstance(require, dict):
+        return text, 0
+
+    changes = 0
+    current = str(require.get("composer/installers", "") or "").strip()
+    if current and current != "^2.0":
+        require["composer/installers"] = "^2.0"
+        changes += 1
+    if changes <= 0:
+        return text, 0
+    return json.dumps(data, ensure_ascii=False, indent=2) + "\n", changes
+
+
+def _composer_update_args(*, dry_run: bool = False) -> list[str]:
+    args = ["update", "--with-all-dependencies"]
+    if dry_run:
+        args.append("--dry-run")
+    return args
+
+
+def _command_version_line(cmd: list[str], *, cwd: str, as_www_data: bool = False) -> str:
+    proc = _run_capture(cmd, cwd=cwd, as_www_data=as_www_data)
+    if proc.returncode != 0:
+        full = _command_with_user(cmd, as_www_data=as_www_data)
+        raise RuntimeError(
+            f"Version preflight failed ({proc.returncode}): {' '.join(full)}\n{proc.stdout}\n{proc.stderr}"
+        )
+    out = (proc.stdout or proc.stderr or "").strip()
+    return out.splitlines()[0].strip() if out else "ok"
+
+
 def _backup_install(root: str) -> Path:
     backups = Path("/opt/mcd/backups")
     backups.mkdir(parents=True, exist_ok=True)
@@ -494,7 +673,169 @@ def _prepare_plugins_for_major_jump(root: str, from_ver: str, to_ver: str) -> No
         shutil.rmtree(d)
 
 
-def _apply_system_upgrade(from_ver: str, to_ver: str) -> None:
+def _same_install_root(a: str, b: str) -> bool:
+    try:
+        return os.path.abspath(a) == os.path.abspath(b)
+    except Exception:
+        return str(a or "").rstrip("/") == str(b or "").rstrip("/")
+
+
+def _instance_label(inst: MauticInstall) -> str:
+    for value in (inst.primary_domain, inst.name, inst.instance_uid, inst.root):
+        text = str(value or "").strip()
+        if text:
+            return text
+    return "unknown instance"
+
+
+def _assert_php84_host_safe(config: AgentConfig, upgraded_root: str) -> None:
+    blockers: list[str] = []
+    installs = discover_mautic(
+        config.discovery_roots,
+        config.exclude_path_contains,
+        config.supported_mautic_majors,
+        config.custom_instances,
+    )
+    for inst in installs:
+        if _same_install_root(inst.root, upgraded_root):
+            continue
+        major = inst.mautic_major
+        if major is None:
+            try:
+                detected = _read_current_version(inst.root, inst.console_path, config.php_bin, config.mautic_run_as_user)
+                parsed = _parse_semver(detected)
+                if parsed != (0, 0, 0):
+                    major = parsed[0]
+            except Exception:
+                major = None
+        if major is None:
+            blockers.append(f"{_instance_label(inst)} (unknown Mautic version)")
+        elif int(major) < 7:
+            blockers.append(f"{_instance_label(inst)} (Mautic {major})")
+    if blockers:
+        raise RuntimeError(
+            "PHP 8.4 system upgrade is blocked because this host still has instance(s) "
+            "that may not support PHP 8.4: "
+            + "; ".join(blockers)
+        )
+
+
+def _php84_package_names() -> list[str]:
+    return [f"php8.4-{suffix}" for suffix in PHP84_PACKAGE_SUFFIXES]
+
+
+def _install_php84_packages() -> None:
+    env = dict(os.environ)
+    env["DEBIAN_FRONTEND"] = "noninteractive"
+    subprocess.run(["apt-get", "update", "--allow-releaseinfo-change"], check=True, env=env)
+    subprocess.run(["apt-get", "install", "-y", *_php84_package_names()], check=True, env=env)
+
+
+def _is_custom_php_ini(path: Path) -> bool:
+    name = path.name
+    low = name.lower()
+    if name in PHP_CUSTOM_INI_NAMES:
+        return True
+    if not low.endswith(".ini"):
+        return False
+    return any(hint in low for hint in PHP_CUSTOM_INI_HINTS)
+
+
+def _migrate_php_custom_ini(
+    *,
+    from_version: str = "8.3",
+    to_version: str = "8.4",
+    php_etc_root: Path = Path("/etc/php"),
+) -> list[str]:
+    moved: list[str] = []
+    for sapi in ("cli", "fpm"):
+        src_dir = php_etc_root / from_version / sapi / "conf.d"
+        dst_dir = php_etc_root / to_version / sapi / "conf.d"
+        if not src_dir.exists() or not src_dir.is_dir():
+            continue
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        for src in sorted(src_dir.iterdir(), key=lambda p: p.name):
+            if not _is_custom_php_ini(src):
+                continue
+            dst = dst_dir / src.name
+            if dst.exists() or dst.is_symlink():
+                moved.append(f"skip existing {dst}")
+                continue
+            shutil.copy2(str(src), str(dst), follow_symlinks=False)
+            moved.append(f"{src} -> {dst}")
+    return moved
+
+
+def _rewrite_nginx_php_fpm_references(
+    *,
+    from_version: str = "8.3",
+    to_version: str = "8.4",
+    nginx_roots: tuple[Path, ...] = (Path("/etc/nginx/sites-enabled"), Path("/etc/nginx/sites-available")),
+) -> list[str]:
+    changed: list[str] = []
+    old = f"php{from_version}-fpm"
+    new = f"php{to_version}-fpm"
+    for root in nginx_roots:
+        if not root.exists() or not root.is_dir():
+            continue
+        for path in sorted(root.iterdir(), key=lambda p: p.name):
+            if path.is_dir():
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except Exception:
+                continue
+            if old not in text:
+                continue
+            path.write_text(text.replace(old, new), encoding="utf-8")
+            changed.append(str(path))
+    return changed
+
+
+def _enable_php84_and_restart_nginx() -> None:
+    subprocess.run(["systemctl", "enable", "--now", "php8.4-fpm"], check=True)
+    test = subprocess.run(["nginx", "-t"], capture_output=True, text=True)
+    if test.returncode != 0:
+        raise RuntimeError(f"nginx -t failed after PHP 8.4 switch: {(test.stderr or test.stdout or '').strip()}")
+    subprocess.run(["systemctl", "restart", "nginx"], check=True)
+    subprocess.run(["systemctl", "restart", "php8.4-fpm"], check=False)
+
+
+def _purge_php83_packages() -> None:
+    env = dict(os.environ)
+    env["DEBIAN_FRONTEND"] = "noninteractive"
+    subprocess.run(["bash", "-lc", "apt-get purge -y 'php8.3*'"], check=True, env=env)
+
+
+def _apply_php84_system_upgrade(config: AgentConfig, upgraded_root: str) -> None:
+    _assert_php84_host_safe(config, upgraded_root)
+    print("PHP 8.4 preflight ok: all discovered host instances are Mautic 7-compatible")
+    _install_php84_packages()
+    moved = _migrate_php_custom_ini()
+    if moved:
+        print("PHP 8.4 custom ini migration:")
+        for item in moved:
+            print(f"  {item}")
+    changed = _rewrite_nginx_php_fpm_references()
+    if changed:
+        print("PHP 8.4 nginx references updated: " + ", ".join(changed))
+    _enable_php84_and_restart_nginx()
+    _purge_php83_packages()
+    print("PHP 8.4 system upgrade completed")
+
+
+def _apply_system_upgrade(
+    from_ver: str,
+    to_ver: str,
+    *,
+    config: AgentConfig | None = None,
+    upgraded_root: str | None = None,
+) -> None:
+    if _parse_semver(from_ver)[0] == 6 and _parse_semver(to_ver)[0] == 7:
+        if config is None or not upgraded_root:
+            raise RuntimeError("PHP 8.4 system upgrade requires config and upgraded root")
+        _apply_php84_system_upgrade(config, upgraded_root)
+        return
     if from_ver == "4.4.13" and to_ver == "5.1.1":
         subprocess.run(
             [
@@ -548,33 +889,6 @@ def _apply_system_upgrade(from_ver: str, to_ver: str) -> None:
                 "php8.3-imap",
                 "php8.3-redis",
                 "php8.3-opcache",
-                "-y",
-            ],
-            check=True,
-        )
-    if to_ver == "7.0.0":
-        subprocess.run(
-            [
-                "apt",
-                "install",
-                "php8.4-apcu",
-                "php8.4-fpm",
-                "php8.4-cli",
-                "php8.4-curl",
-                "php8.4-mysql",
-                "php8.4-mailparse",
-                "php8.4-gd",
-                "php8.4-mbstring",
-                "php8.4-imagick",
-                "php8.4-bcmath",
-                "php8.4-zip",
-                "php8.4-tidy",
-                "php8.4-soap",
-                "php8.4-intl",
-                "php8.4-xml",
-                "php8.4-imap",
-                "php8.4-redis",
-                "php8.4-opcache",
                 "-y",
             ],
             check=True,
@@ -882,6 +1196,57 @@ def _verify_or_reconcile_doctrine_migrations(project_root: str, console_path: st
     raise RuntimeError("Post-migration up-to-date check failed\n" + output)
 
 
+def _mautic_core_file_candidates(root: str, relpath: Path) -> list[Path]:
+    base = Path(root)
+    candidates = [
+        base / relpath,
+        base / "docroot" / relpath,
+        base / "public" / relpath,
+    ]
+    if base.name.lower() in {"public", "docroot", "public_html"}:
+        candidates.append(base.parent / relpath)
+        candidates.append(base.parent / "docroot" / relpath)
+        candidates.append(base.parent / "public" / relpath)
+    out: list[Path] = []
+    seen: set[str] = set()
+    for item in candidates:
+        key = str(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+    return out
+
+
+def _apply_mautic7_twig_include_hotfix(root: str, target: str) -> bool:
+    if _parse_semver(target)[0] != 7:
+        return False
+    rel = Path("app") / "bundles" / "CoreBundle" / "Twig" / "Extension" / "OverrideIncludeExtension.php"
+    changed_any = False
+    for path in _mautic_core_file_candidates(root, rel):
+        if not path.exists() or not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        if "function includeWithEvent(" not in text or "CoreExtension::include(" not in text:
+            continue
+        updated, count = re.subn(
+            r"return\s+(?!\(string\)\s*)CoreExtension::include\(",
+            "return (string) CoreExtension::include(",
+            text,
+        )
+        if count <= 0 or updated == text:
+            if "(string) CoreExtension::include(" in text:
+                print(f"Mautic 7 Twig include hotfix already present: {path}")
+            continue
+        backup = path.with_name(path.name + ".mcd-pre-twig-include-hotfix.bak")
+        if not backup.exists():
+            shutil.copy2(path, backup)
+        path.write_text(updated, encoding="utf-8")
+        print(f"Mautic 7 Twig include hotfix applied: {path}")
+        changed_any = True
+    return changed_any
+
+
 def _apply_composer(root: str, console_path: str, php_bin: str, current: str, target: str) -> None:
     project_root = _resolve_composer_project_root(root)
     cjson = Path(project_root) / "composer.json"
@@ -890,16 +1255,30 @@ def _apply_composer(root: str, console_path: str, php_bin: str, current: str, ta
     composer_bin = _resolve_composer_bin()
     _ensure_node20()
     _ensure_www_data_composer_cache()
-    print(f"Composer preflight ok: {composer_bin}")
-    node_version = subprocess.run(["node", "-v"], capture_output=True, text=True, timeout=20, check=False)
-    if node_version.returncode == 0 and (node_version.stdout or "").strip():
-        print(f"Node.js preflight ok: {(node_version.stdout or '').strip()}")
+    composer_version = _command_version_line(
+        [composer_bin, "-V", "--no-interaction", "--no-ansi"],
+        cwd=project_root,
+        as_www_data=True,
+    )
+    node_version = _command_version_line(["node", "-v"], cwd=project_root)
+    npm_version = _command_version_line(["npm", "-v"], cwd=project_root)
+    print(f"Composer preflight ok: {composer_version} ({composer_bin})")
+    print(f"Node.js preflight ok: {node_version}")
+    print(f"npm preflight ok: {npm_version}")
     text = cjson.read_text(encoding="utf-8")
     updated, changes = _replace_version_tokens(text, current, target)
+    updated, constraint_changes = _normalize_mautic7_composer_constraints(updated, target)
+    changes += constraint_changes
     if changes > 0 and updated != text:
         cjson.write_text(updated, encoding="utf-8")
-    _run([composer_bin, "update", "--with-dependencies"], cwd=project_root, as_www_data=True)
+    _run([composer_bin, *_composer_update_args(dry_run=True)], cwd=project_root, as_www_data=True)
+    print("Composer dependency dry-run ok")
+    _run([composer_bin, *_composer_update_args()], cwd=project_root, as_www_data=True)
+    patched = _apply_mautic7_twig_include_hotfix(project_root, target)
+    _normalize_mautic7_loopback_redis_cache(project_root, target)
     _clear_prod_cache_with_fallback(project_root, console_path, php_bin)
+    if patched:
+        print("Mautic 7 Twig include hotfix cache refresh completed")
     _run([php_bin, console_path, "mautic:update:apply", "--finish"], cwd=project_root, as_www_data=True)
     migration_cmd = _doctrine_migrate_command(project_root, console_path, php_bin)
     _run_doctrine_migrate_with_reconcile(project_root, console_path, php_bin, migration_cmd)
@@ -1025,7 +1404,47 @@ def _best_probe_domain(inst: MauticInstall) -> str:
         domain = str(value or "").strip()
         if domain and domain not in candidates:
             candidates.append(domain)
+    fallback = _site_url_domain_from_install(inst)
+    if fallback and fallback not in candidates:
+        candidates.append(fallback)
     return candidates[0] if candidates else ""
+
+
+def _domain_from_site_url(site_url: str | None) -> str:
+    value = str(site_url or "").strip()
+    if not value:
+        return ""
+    try:
+        parsed = urlparse(value if "://" in value else f"https://{value}")
+    except Exception:
+        return ""
+    host = str(parsed.hostname or "").strip().lower()
+    if not host or host in {"localhost", "_"} or "*" in host:
+        return ""
+    return host
+
+
+def _site_url_domain_from_install(inst: MauticInstall) -> str:
+    candidates: list[Path] = []
+    if str(inst.local_php_path or "").strip():
+        candidates.append(Path(str(inst.local_php_path)))
+    root = Path(str(inst.root or ""))
+    candidates.extend([root / "config" / "local.php", root / "app" / "config" / "local.php"])
+    if root.name.lower() in {"public", "docroot", "public_html"}:
+        candidates.extend([root.parent / "config" / "local.php", root.parent / "app" / "config" / "local.php"])
+    seen: set[str] = set()
+    for path in candidates:
+        key = str(path)
+        if key in seen or not path.exists():
+            continue
+        seen.add(key)
+        try:
+            domain = _domain_from_site_url(parse_local_php(str(path)).get("site_url", ""))
+        except Exception:
+            domain = ""
+        if domain:
+            return domain
+    return ""
 
 
 def _post_upgrade_verify(config: AgentConfig, inst: MauticInstall) -> None:
@@ -1073,6 +1492,7 @@ def run_upgrade_apply(
     with_system_upgrade: bool,
     target_override: str | None = None,
     allow_minor: bool = False,
+    allow_major: bool = False,
 ) -> int:
     inst = _pick_install_record(config, root)
     install_root, console = inst.root, inst.console_path
@@ -1081,11 +1501,20 @@ def run_upgrade_apply(
     if not target:
         print(f"No upgrade target for current version {current}")
         return 0
-    if not _ensure_upgrade_target_allowed(current, target, allow_minor=allow_minor):
+    if not _ensure_upgrade_target_allowed(current, target, allow_minor=allow_minor, allow_major=allow_major):
         print(f"No upgrade target for current version {current}")
         return 0
 
-    print(f"Upgrade plan: {current} -> {target} (mode={mode})")
+    chosen_mode = mode
+    if chosen_mode == "auto":
+        chosen_mode = detect_install_type(install_root)
+    if _parse_semver(current)[0] != _parse_semver(target)[0]:
+        if not (allow_major and _is_supported_major_upgrade(current, target) and chosen_mode == "composer"):
+            raise RuntimeError(
+                "Major upgrade is supported only for Composer Mautic 6 -> 7 with --allow-major"
+            )
+
+    print(f"Upgrade plan: {current} -> {target} (mode={chosen_mode})")
     if not yes:
         ans = input("Proceed? [y/N]: ").strip().lower()
         if ans not in {"y", "yes"}:
@@ -1101,10 +1530,6 @@ def run_upgrade_apply(
             b = _backup_install(install_root)
             print(f"Backup created: {b}")
 
-        chosen_mode = mode
-        if chosen_mode == "auto":
-            chosen_mode = detect_install_type(install_root)
-
         if chosen_mode == "zip":
             _apply_zip(config, install_root, console, config.php_bin, target)
         elif chosen_mode == "composer":
@@ -1113,7 +1538,7 @@ def run_upgrade_apply(
             raise RuntimeError(f"Unsupported mode: {mode}")
 
         if with_system_upgrade:
-            _apply_system_upgrade(current, target)
+            _apply_system_upgrade(current, target, config=config, upgraded_root=install_root)
 
         # Restore transport dependencies for API senders after upgrade
         # (especially relevant for zip installs where update flow may drop composer deps).
