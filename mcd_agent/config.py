@@ -842,6 +842,7 @@ class AgentConfig:
     mautic6_core_patch_apply_if_version_unknown: bool
     pagehit_cascade_patch_policy: str
     profile_name: str
+    hardware_profile_name: str
     ring_mode: str
     disable_throttle: bool
     disable_whitelist: bool
@@ -2701,8 +2702,12 @@ def _load_config_inner(path: str) -> AgentConfig:
     backup_secrets = backup.get("secrets", {}) if isinstance(backup, dict) else {}
     cluster_cfg = data.get("cluster", {}) if isinstance(data.get("cluster", {}), dict) else {}
     profile = data.get("profile", {})
+    hardware = data.get("hardware", {}) if isinstance(data.get("hardware", {}), dict) else {}
 
     profile_name = str(profile.get("name", runtime.get("profile", "custom"))).strip().lower() or "custom"
+    hardware_profile_name = str(
+        hardware.get("profile", hardware.get("profile_name", runtime.get("hardware_profile", "auto")))
+    ).strip().lower() or "auto"
     state_backend = str(runtime.get("state_backend", state.get("backend", "sqlite"))).strip().lower() or "sqlite"
     if state_backend in {"mysql", "mariadb", "hybrid"}:
         state_backend = "mysql_hybrid"
@@ -3596,6 +3601,7 @@ def _load_config_inner(path: str) -> AgentConfig:
         mautic6_core_patch_apply_if_version_unknown=m6_patch_unknown,
         pagehit_cascade_patch_policy=pagehit_patch_policy,
         profile_name=profile_name,
+        hardware_profile_name=hardware_profile_name,
         ring_mode=ring_mode,
         disable_throttle=disable_throttle,
         disable_whitelist=disable_whitelist,

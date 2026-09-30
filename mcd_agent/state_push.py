@@ -2233,6 +2233,10 @@ class MCCStatePusher:
                 "source_host_name": str(identity.get("source_host_name") or ""),
             },
             "profile": (profile_name or "").strip().lower(),
+            "hardware_service_profile": {
+                "name": str(getattr(self.cfg, "hardware_profile_name", "auto") or "auto").strip().lower(),
+                "scope": "php_fpm_mysql_nginx_redis_os",
+            },
             "runtime_overrides": _runtime_overrides_for_state_push(self.cfg),
             "maintenance_state": collect_maintenance_state(self.cfg),
             "config_state": {

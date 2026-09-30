@@ -12,6 +12,7 @@ from mcd_agent.hardware_profile import (
     write_profile_selection,
 )
 from mcd_agent.mode import _read_profile_name
+from mcd_agent.hardware_profile import _read_hardware_profile_name
 
 
 class HardwareProfileTests(unittest.TestCase):
@@ -41,7 +42,7 @@ class HardwareProfileTests(unittest.TestCase):
             root = Path(temp)
             install = root / "install"
             config = root / "mcd.toml"
-            config.write_text('[profile]\nname = "farm"\n', encoding="utf-8")
+            config.write_text('[profile]\nname = "midi"\n[hardware]\nprofile = "farm"\n', encoding="utf-8")
             write_profile_selection(
                 str(install),
                 mode="manual",
@@ -59,7 +60,8 @@ class HardwareProfileTests(unittest.TestCase):
 
             self.assertTrue(result.changed)
             self.assertEqual(result.profile, "farm-midi")
-            self.assertEqual(_read_profile_name(str(config)), "farm-midi")
+            self.assertEqual(_read_profile_name(str(config)), "midi")
+            self.assertEqual(_read_hardware_profile_name(str(config)), "farm-midi")
             self.assertEqual(read_profile_selection(str(install))["profile"], "farm-midi")
             self.assertEqual(read_profile_selection(str(install))["mode"], "manual")
 
@@ -68,7 +70,7 @@ class HardwareProfileTests(unittest.TestCase):
             root = Path(temp)
             config = root / "mcd.toml"
             config.write_text(
-                '[profile]\nname = "passive"\n\n[runtime]\ncampaign_total_parallel = 99\n',
+                '[profile]\nname = "passive"\n\n[hardware]\nprofile = "auto"\n\n[runtime]\ncampaign_total_parallel = 99\n',
                 encoding="utf-8",
             )
 
@@ -82,7 +84,8 @@ class HardwareProfileTests(unittest.TestCase):
             self.assertTrue(result.changed)
             self.assertEqual(result.mode, "auto")
             self.assertEqual(result.profile, "mini")
-            self.assertEqual(_read_profile_name(str(config)), "mini")
+            self.assertEqual(_read_profile_name(str(config)), "passive")
+            self.assertEqual(_read_hardware_profile_name(str(config)), "mini")
             self.assertEqual(read_profile_selection(str(root / "install"))["mode"], "auto")
             self.assertNotIn("campaign_total_parallel", config.read_text(encoding="utf-8"))
 
@@ -90,7 +93,7 @@ class HardwareProfileTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             config = root / "mcd.toml"
-            config.write_text('[profile]\nname = "tiny"\n', encoding="utf-8")
+            config.write_text('[profile]\nname = "tiny"\n[hardware]\nprofile = "mini"\n', encoding="utf-8")
 
             result = reconcile_hardware_profile(
                 config_path=str(config),
@@ -102,6 +105,7 @@ class HardwareProfileTests(unittest.TestCase):
             self.assertFalse(result.changed)
             self.assertEqual(result.mode, "manual")
             self.assertEqual(_read_profile_name(str(config)), "tiny")
+            self.assertEqual(_read_hardware_profile_name(str(config)), "mini")
             self.assertEqual(read_profile_selection(str(root / "install"))["mode"], "manual")
 
     def test_manual_mode_never_changes_profile(self) -> None:
@@ -109,7 +113,7 @@ class HardwareProfileTests(unittest.TestCase):
             root = Path(temp)
             install = root / "install"
             config = root / "mcd.toml"
-            config.write_text('[profile]\nname = "mini"\n', encoding="utf-8")
+            config.write_text('[profile]\nname = "midi"\n[hardware]\nprofile = "mini"\n', encoding="utf-8")
             write_profile_selection(str(install), mode="manual", profile="mini", cpu_count=16, memory_kib=0)
 
             result = reconcile_hardware_profile(
@@ -121,14 +125,15 @@ class HardwareProfileTests(unittest.TestCase):
 
             self.assertFalse(result.changed)
             self.assertEqual(result.mode, "manual")
-            self.assertEqual(_read_profile_name(str(config)), "mini")
+            self.assertEqual(_read_profile_name(str(config)), "midi")
+            self.assertEqual(_read_hardware_profile_name(str(config)), "mini")
 
     def test_direct_edit_while_auto_locks_manual_mode(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             install = root / "install"
             config = root / "mcd.toml"
-            config.write_text('[profile]\nname = "midi"\n', encoding="utf-8")
+            config.write_text('[profile]\nname = "midi"\n[hardware]\nprofile = "midi"\n', encoding="utf-8")
             write_profile_selection(str(install), mode="auto", profile="mini", cpu_count=2, memory_kib=0)
 
             result = reconcile_hardware_profile(
@@ -141,6 +146,7 @@ class HardwareProfileTests(unittest.TestCase):
             self.assertFalse(result.changed)
             self.assertEqual(result.mode, "manual")
             self.assertEqual(_read_profile_name(str(config)), "midi")
+            self.assertEqual(_read_hardware_profile_name(str(config)), "midi")
             self.assertEqual(read_profile_selection(str(install))["mode"], "manual")
 
     def test_auto_mode_tracks_a_hardware_class_change(self) -> None:
@@ -148,7 +154,7 @@ class HardwareProfileTests(unittest.TestCase):
             root = Path(temp)
             install = root / "install"
             config = root / "mcd.toml"
-            config.write_text('[profile]\nname = "mini"\n', encoding="utf-8")
+            config.write_text('[profile]\nname = "midi"\n[hardware]\nprofile = "mini"\n', encoding="utf-8")
             write_profile_selection(str(install), mode="auto", profile="mini", cpu_count=2, memory_kib=0)
 
             result = reconcile_hardware_profile(
@@ -161,6 +167,7 @@ class HardwareProfileTests(unittest.TestCase):
             self.assertTrue(result.changed)
             self.assertEqual(result.mode, "auto")
             self.assertEqual(_read_profile_name(str(config)), "midi")
+            self.assertEqual(_read_hardware_profile_name(str(config)), "midi")
             self.assertEqual(read_profile_selection(str(install))["profile"], "midi")
 
 
