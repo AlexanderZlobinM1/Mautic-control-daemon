@@ -58,6 +58,24 @@
 Эта архитектура — критерий v2 и направление для отдельных поручений. Она не
 разрешает сейчас чинить старый путь или запускать исторические переходы.
 
+### Доводка MCC Assets перед реализацией
+
+Проверка текущего MCC-каталога 2026-09-30: уже есть source/target,
+`install_types`, `operator_enabled`, статусы, требования, упорядоченные typed
+steps и запрет произвольного shell. До реализации v2 в schema/Assets должны
+появиться:
+
+1. `execution_mode=managed` и capability/provider contract для MCC или
+   совместимого провайдера подписки;
+2. идентифицированный артефакт: тип, origin, source revision, digest и точная
+   Composer manifest/lock/dependency archive или ZIP target artifact;
+3. идентичность, revision и digest plugin/patch matrices для каждого scenario
+   edge, а не только boolean `plugin_matrix_required`;
+4. опубликованный registry допустимых primitive steps и явный запрет shell
+   текста в контракте Assets;
+5. UI-представление режима, источника артефакта, matrix evidence и immutable
+   provenance перед запуском.
+
 ## Рабочая карта
 
 | Возможность | Реализовано сейчас | Standalone / MCC | Запланировано / требует доводки |
