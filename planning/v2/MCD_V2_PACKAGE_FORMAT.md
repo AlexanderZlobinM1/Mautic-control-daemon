@@ -9,6 +9,9 @@
 [Решения по сценариям](MCD_V2_SCENARIO_PACKAGES.md) ·
 [Общая карта](MCD_V2_CAPABILITY_BOUNDARIES.md) · [Обновления](MCD_V2_UPDATES.md)
 
+Отдельная необязательная модель: [защищённая доставка материалов сервиса](MCD_V2_PRIVATE_PACKAGE_DELIVERY.md).
+Не вводит подписочный gate для пользовательских/community пакетов.
+
 ## Назначение
 
 Один пакет описывает операции над файлами инстанса и его БД, разрешённые
@@ -507,3 +510,30 @@ MCC/другим менеджером. Техническая schema/integrity/c
 
 Это acceptance локального installed registry, а не новый catalog MCC и не
 новая инфраструктура. Package files остаются source of truth.
+
+## Optional confidential resource provider extension
+
+Confidential resources are an optional future provider extension, not a
+minimum requirement of `mcd-operation-package/v1` and not a global licence or
+MCC gate. Open/community packages remain valid without it. The detailed design
+is in `MCD_V2_PRIVATE_PACKAGE_DELIVERY.md`.
+
+The shared resource contract may declare an optional provider delivery such as
+`resource.stream-decrypt-v1` with encrypted-origin identity, envelope identity,
+content digest and the required in-memory/stream capability. The provider
+returns content-key material through an authenticated API for the selected
+revision/resource. An API credential is never used directly as a cipher key;
+key material is not written to package files, SQL, argv, logs or disk cache.
+
+MCD opens only the selected resource in memory and passes it through a
+compatible scoped driver. A driver that requires a plaintext pathname and has
+no in-memory/stream mode returns `capability_required`; it must not silently
+create a plaintext temporary file. This is not a DRM promise: a host
+administrator may inspect process memory, and applied Mautic files, DB effects
+and ordinary runtime artifacts remain visible by design. Confidential delivery
+can stop new key/resource issuance, but cannot retract content already exposed
+by the client.
+
+The extension requires its own provider/driver and sandbox review. It does not
+change package selection, applicability, grants or the first runtime scope,
+and it must never make public package execution depend on a commercial service.
