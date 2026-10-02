@@ -295,7 +295,7 @@ class NativeComparator:
         if end <= start:
             raise ComparatorError("window_invalid")
         objects = list(dict.fromkeys(_object_id(item) for item in allowlist))
-        if not objects or len(objects) > _MAX_OBJECTS:
+        if len(objects) > _MAX_OBJECTS:
             raise ComparatorError("allowlist_invalid")
         if (pause_start is None) != (pause_end is None):
             raise ComparatorError("pause_window_invalid")
@@ -329,7 +329,7 @@ class NativeComparator:
         return cycle_id
 
     def preflight(self, cycle_id: str, observations: list[Mapping[str, Any]]) -> str:
-        if not isinstance(observations, list) or not observations or len(observations) > _MAX_OBJECTS:
+        if not isinstance(observations, list) or len(observations) > _MAX_OBJECTS:
             raise ComparatorError("preflight_observations_invalid")
         rows = [_normalise_pre(item) for item in observations]
         ids = [row["object_id"] for row in rows]

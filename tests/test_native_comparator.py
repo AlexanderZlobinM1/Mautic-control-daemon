@@ -240,6 +240,18 @@ class NativeComparatorTests(unittest.TestCase):
             result = subprocess.run(command, cwd="/tmp", capture_output=True, timeout=5)
             self.assertEqual(result.returncode, _TASK_LOCK_BUSY_RC)
 
+    def test_empty_native_scope_records_a_bounded_noop_receipt(self):
+        now = time.time()
+        self.comparator.begin_cycle(cycle_id="empty", instance_uid="instance-1", root="/tmp", operation="campaign_trigger", window_start=now - 10, window_end=now + 100, allowlist=[])
+        self.comparator.preflight("empty", [])
+        receipt = execute_native_comparator_cycle(
+            comparator=self.comparator, cycle_id="empty", root="/tmp", command=["/bin/sh", "-c", "exit 0"],
+            observations=[], after_observer=lambda: [], outcome_observer=lambda object_id: {},
+            quiescence_probe=lambda: True, instance_uid="instance-1", operation="campaign_trigger",
+        )
+        self.assertEqual(receipt["objects"], [])
+        self.assertEqual(receipt["status"], "complete")
+
 
 if __name__ == "__main__":
     unittest.main()

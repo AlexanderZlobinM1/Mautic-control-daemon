@@ -335,6 +335,7 @@ def execute_native_comparator_cycle(
     quiescence_probe: Callable[[], bool],
     instance_uid: str,
     operation: str,
+    pid_observer: Callable[[int], int] | None = None,
     timeout_sec: int = 300,
 ) -> dict[str, Any]:
     """Run one externally scheduled native cycle through the real process path.
@@ -365,10 +366,13 @@ def execute_native_comparator_cycle(
                     stderr=subprocess.STDOUT,
                     start_new_session=True,
                 )
+                observed_pid = int(pid_observer(int(process.pid))) if pid_observer is not None else int(process.pid)
+                if observed_pid <= 0:
+                    raise ValueError("native observed pid is invalid")
                 for row in observations:
                     comparator.record_start(
-                        cycle_id, str(row["object_id"]), run_id=f"native:{cycle_id}:{process.pid}",
-                        pid=int(process.pid), lock_path=lease.lock_path, started_at=started_at,
+                        cycle_id, str(row["object_id"]), run_id=f"native:{cycle_id}:{observed_pid}",
+                        pid=observed_pid, lock_path=lease.lock_path, started_at=started_at,
                         input_generation=str(row["input_generation"]), input_fingerprint=str(row["input_fingerprint"]),
                     )
                 try:
