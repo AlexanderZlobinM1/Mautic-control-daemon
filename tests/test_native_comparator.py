@@ -252,6 +252,21 @@ class NativeComparatorTests(unittest.TestCase):
         self.assertEqual(receipt["objects"], [])
         self.assertEqual(receipt["status"], "complete")
 
+    def test_completed_mcd_path_is_explicit_for_all_operation_kinds(self):
+        for index, operation in enumerate(("segment_update", "campaign_rebuild", "campaign_trigger"), start=1):
+            cycle_id = f"mcd-complete-{index}"
+            row = self.pre(decision="completed")
+            row["mcd_start_generation"] = row["input_generation"]
+            row["mcd_result_generation"] = row["input_generation"]
+            row["mcd_result_fingerprint"] = row["input_fingerprint"]
+            self.comparator.begin_cycle(cycle_id=cycle_id, instance_uid="instance-1", root="/tmp", operation=operation, window_start=100, window_end=200, allowlist=["42"], eligible_denominator=1, capture_limit=1, coverage="complete")
+            self.comparator.preflight(cycle_id, [row])
+            with self.comparator.native_window(cycle_id, lambda: True) as lease:
+                self.comparator.record_start(cycle_id, "42", run_id=f"mcd-{index}", pid=1000 + index, lock_path=lease.lock_path, started_at=120, input_generation="g1", input_fingerprint="a" * 64)
+                self.comparator.record_result(cycle_id, "42", status="ok", return_code=0, processed_input_generation="g1", processed_input_fingerprint="a" * 64, effect_evidence={"processed_object_id":"42","observed":True,"artifact_ref":"local://mcd","artifact_sha256":"f" * 64}, finished_at=130, outcome="mcd_completed")
+            receipt = self.comparator.finalize(cycle_id, [self.after()])
+            self.assertEqual(receipt["objects"][0]["classification"], "mcd_handled")
+
 
 if __name__ == "__main__":
     unittest.main()
