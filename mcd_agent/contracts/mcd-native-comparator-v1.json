@@ -1,0 +1,15 @@
+{
+  "schema": "mcd-native-comparator-receipt-v1",
+  "capability": "mcd-native-comparator-v1",
+  "status": "source_contract_not_advertised",
+  "operations": ["segment_update", "campaign_rebuild", "campaign_trigger"],
+  "alias": {"campaign_update": "campaign_rebuild"},
+  "identity": ["cycle_id", "instance_uid", "root", "operation"],
+  "requirements": {
+    "preflight": "exact allowlist, eligibility, due state, input generation, watermark, fingerprint, MCD decision and bounded event IDs",
+    "execution": "exclusive per-instance operation lock, quiescence probe, run ID, PID, lock path, processed input generation and fingerprint proof, plus bounded native effect evidence for successful processing",
+    "completion": "exact post-state for every allowlisted object with source input identity separated from output fingerprint; UNKNOWN on missing or contradictory evidence",
+    "retention": "immutable receipt digest plus bounded preimage and execution evidence retained in the local SQLite store"
+  },
+  "transport": "producer-owned local receipt; MCC ingestion is out of scope for this source change"
+}

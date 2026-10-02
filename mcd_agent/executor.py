@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 import re
 import shlex
+import signal
 import subprocess
+import tempfile
+import time
+from typing import Any, Callable, Mapping, Sequence
 
 from mcd_agent.fs_permissions import ensure_instance_permissions
 from mcd_agent.runtime_descriptor import descriptor_for_root
+from mcd_agent.native_comparator import NativeComparator
 
 SUPPORTED_COMMANDS = {
     "campaign:trigger": "mautic:campaigns:trigger",
@@ -315,3 +321,85 @@ def _template_command_name(rendered_template: str) -> str:
 def _combine_output(*parts: str) -> str:
     out = [str(x).strip() for x in parts if str(x).strip()]
     return "\n".join(out).strip()
+
+
+def execute_native_comparator_cycle(
+    *,
+    comparator: NativeComparator,
+    cycle_id: str,
+    root: str,
+    command: Sequence[str],
+    observations: list[Mapping[str, Any]],
+    after_observer: Callable[[], list[Mapping[str, Any]]],
+    outcome_observer: Callable[[str], Mapping[str, Any]],
+    quiescence_probe: Callable[[], bool],
+    instance_uid: str,
+    operation: str,
+    timeout_sec: int = 300,
+) -> dict[str, Any]:
+    """Run one externally scheduled native cycle through the real process path.
+
+    The caller owns cycle creation/preflight and supplies producer-collected
+    evidence.  This helper deliberately does not schedule work or use the
+    combined campaign fallback; it binds the actual subprocess PID, lock and
+    return code into the durable comparator receipt.
+    """
+    command_args = [str(part) for part in command]
+    if not command_args:
+        raise ValueError("native comparator command is empty")
+    context = comparator.cycle_context(cycle_id)
+    if context["root"] != str(root) or context["instance_uid"] != str(instance_uid) or context["operation"] != str(operation):
+        raise ValueError("native comparator execution context mismatch")
+    if timeout_sec <= 0:
+        raise ValueError("native comparator timeout must be positive")
+    with comparator.native_window(cycle_id, quiescence_probe) as lease:
+        started_at = time.time()
+        process: subprocess.Popen[bytes] | None = None
+        try:
+            with tempfile.TemporaryFile() as output:
+                process = subprocess.Popen(
+                    command_args,
+                    cwd=root,
+                    stdin=subprocess.DEVNULL,
+                    stdout=output,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+                for row in observations:
+                    comparator.record_start(
+                        cycle_id, str(row["object_id"]), run_id=f"native:{cycle_id}:{process.pid}",
+                        pid=int(process.pid), lock_path=lease.lock_path, started_at=started_at,
+                        input_generation=str(row["input_generation"]), input_fingerprint=str(row["input_fingerprint"]),
+                    )
+                try:
+                    process.wait(timeout=timeout_sec)
+                except subprocess.TimeoutExpired:
+                    os.killpg(process.pid, signal.SIGTERM)
+                    try:
+                        process.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(process.pid, signal.SIGKILL)
+                        process.wait()
+                return_code = int(process.returncode if process.returncode is not None else 124)
+                output.seek(0)
+                output.read(64 * 1024)
+            finished_at = time.time()
+            status = "ok" if return_code == 0 else "error"
+            for row in observations:
+                object_id = str(row["object_id"])
+                outcome = dict(outcome_observer(object_id)) if return_code == 0 else {}
+                comparator.record_result(
+                    cycle_id, object_id, status=status, return_code=return_code,
+                    processed_input_generation=outcome.get("processed_input_generation"),
+                    processed_input_fingerprint=outcome.get("processed_input_fingerprint"),
+                    effect_evidence=dict(outcome.get("effect_evidence") or {}),
+                    finished_at=finished_at, outcome=str(outcome.get("outcome") or ("native_completed" if return_code == 0 else "native_failed")),
+                )
+            after = after_observer()
+            return comparator.finalize(cycle_id, after, finished_at=finished_at)
+        except Exception as exc:
+            if process is not None and process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait()
+            comparator.abort_cycle(cycle_id, f"executor_failure:{type(exc).__name__}")
+            raise

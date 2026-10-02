@@ -60,6 +60,7 @@ from mcd_agent.db import MauticDB
 from mcd_agent.db_watchdog import collect_db_watchdog_snapshot, effective_db_watchdog_config
 from mcd_agent.email_counters import repair_campaign_email_counters
 from mcd_agent.executor import render_mautic_command
+from mcd_agent.native_comparator import shared_root_fence_path
 from mcd_agent.fail2ban_guard import ensure_nginx_4xx_scan_safety
 from mcd_agent.security_blocklist import sync_security_blocklist_once
 from mcd_agent.web_ingress_firewall import ensure_managed_web_firewall_loopback
@@ -6249,6 +6250,8 @@ def _task_locked_args(
     flock_bin = Path("/usr/bin/flock")
     if not flock_bin.is_file():
         return list(args)
+    if not str(root or "").strip():
+        return list(args)
     lock_dir = Path("/run/lock/mcd-tasks")
     try:
         lock_dir.mkdir(parents=True, exist_ok=True)
@@ -6265,9 +6268,13 @@ def _task_locked_args(
         *args,
     ]
     if task_type not in _CAMPAIGN_EXACT_TASK_TYPES and task_type != "campaign_native_fallback":
-        return locked_args
+        root_lock = shared_root_fence_path(root)
+        return [
+            str(flock_bin), "--shared", "--nonblock", "--conflict-exit-code", str(_TASK_LOCK_BUSY_RC),
+            str(root_lock), *locked_args,
+        ]
     root_digest = hashlib.sha256(f"{root}|campaign-root".encode("utf-8")).hexdigest()
-    return [
+    campaign_locked_args = [
         str(flock_bin),
         "--shared" if task_type in _CAMPAIGN_EXACT_TASK_TYPES else "--exclusive",
         "--nonblock",
@@ -6276,6 +6283,7 @@ def _task_locked_args(
         str(lock_dir / f"{root_digest}.lock"),
         *locked_args,
     ]
+    return campaign_locked_args
 
 
 class _PriorityTaskExecutor:
