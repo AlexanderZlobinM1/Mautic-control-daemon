@@ -228,6 +228,7 @@ class NativeComparator:
                   state TEXT NOT NULL,
                   created_at REAL NOT NULL,
                   preflight_sha256 TEXT,
+                  selection_json TEXT,
                   receipt_json TEXT,
                   receipt_sha256 TEXT
                 );
@@ -244,6 +245,9 @@ class NativeComparator:
                 );
                 """
             )
+            columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(native_comparator_cycles)").fetchall()}
+            if "selection_json" not in columns:
+                conn.execute("ALTER TABLE native_comparator_cycles ADD COLUMN selection_json TEXT")
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.database, timeout=5)
@@ -283,6 +287,10 @@ class NativeComparator:
         window_start: float,
         window_end: float,
         allowlist: list[str],
+        eligible_denominator: int | None = None,
+        capture_limit: int | None = None,
+        truncated: bool = False,
+        coverage: str = "unknown",
         pause_start: float | None = None,
         pause_end: float | None = None,
     ) -> str:
@@ -297,6 +305,15 @@ class NativeComparator:
         objects = list(dict.fromkeys(_object_id(item) for item in allowlist))
         if len(objects) > _MAX_OBJECTS:
             raise ComparatorError("allowlist_invalid")
+        denominator = len(objects) if eligible_denominator is None else int(eligible_denominator)
+        cap = len(objects) if capture_limit is None else int(capture_limit)
+        if denominator < len(objects) or denominator < 0 or cap < 0 or len(objects) > cap:
+            raise ComparatorError("selection_bounds_invalid")
+        if coverage not in {"complete", "partial", "unknown"}:
+            raise ComparatorError("coverage_invalid")
+        if bool(truncated) and coverage != "partial":
+            raise ComparatorError("truncation_coverage_invalid")
+        selection = {"eligible_denominator": denominator, "captured_count": len(objects), "capture_limit": cap, "truncated": bool(truncated), "coverage": coverage}
         if (pause_start is None) != (pause_end is None):
             raise ComparatorError("pause_window_invalid")
         if pause_start is not None:
@@ -321,10 +338,10 @@ class NativeComparator:
             conn.execute(
                 """INSERT INTO native_comparator_cycles
                    (cycle_id,instance_uid,root,operation,window_start,window_end,
-                    pause_start,pause_end,allowlist_sha256,state,created_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                    pause_start,pause_end,allowlist_sha256,state,created_at,selection_json)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (cycle_id, instance_uid, root, operation, start, end, pause_start,
-                 pause_end, allowlist_sha, "created", now),
+                 pause_end, allowlist_sha, "created", now, _canonical(selection).decode("utf-8")),
             )
         return cycle_id
 
@@ -548,6 +565,7 @@ class NativeComparator:
                 "operation": cycle["operation"], "window_start": cycle["window_start"],
                 "window_end": cycle["window_end"], "preflight_sha256": cycle["preflight_sha256"],
                 "pause_start": cycle["pause_start"], "pause_end": cycle["pause_end"],
+                "selection": json.loads(cycle["selection_json"] or "{}"),
                 "status": "complete", "finished_at": _timestamp(finished_at or time.time(), "finished_at"),
                 "objects": output,
             }
@@ -615,7 +633,9 @@ def missing_cycle_receipt(*, cycle_id: str, instance_uid: str, root: str, operat
         "schema": SCHEMA, "cycle_id": cycle_id, "instance_uid": _text(instance_uid, "instance_uid"),
         "root": _root(root), "operation": _operation(operation),
         "window_start": _timestamp(window_start, "window_start"), "window_end": _timestamp(window_end, "window_end"),
-        "status": "failed_audit", "reason": "comparator_cycle_missing", "objects": [],
+        "status": "failed_audit", "reason": "comparator_cycle_missing",
+        "selection": {"eligible_denominator": 0, "captured_count": 0, "capture_limit": 0, "truncated": False, "coverage": "unknown"},
+        "objects": [],
     }
     if receipt["window_end"] <= receipt["window_start"]:
         raise ComparatorError("window_invalid")
