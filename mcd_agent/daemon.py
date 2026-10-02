@@ -6250,8 +6250,6 @@ def _task_locked_args(
     flock_bin = Path("/usr/bin/flock")
     if not flock_bin.is_file():
         return list(args)
-    if not str(root or "").strip():
-        return list(args)
     lock_dir = Path("/run/lock/mcd-tasks")
     try:
         lock_dir.mkdir(parents=True, exist_ok=True)
@@ -6267,6 +6265,8 @@ def _task_locked_args(
         str(lock_dir / f"{digest}.lock"),
         *args,
     ]
+    if not str(root or "").strip():
+        return locked_args
     if task_type not in _CAMPAIGN_EXACT_TASK_TYPES and task_type != "campaign_native_fallback":
         root_lock = shared_root_fence_path(root)
         return [
