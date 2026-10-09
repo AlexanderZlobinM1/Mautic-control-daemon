@@ -1,3 +1,470 @@
+## 1.5.64 - 2026-10-09
+
+- Finalize the image-install bootstrap and cache-clear correction for the
+  versioned Publish MCD candidate; preserve MCC-owned image admission and
+  selected-PHP execution paths.
+
+## 1.5.63 - 2026-10-09
+
+- Keep the MCC Mautic compatibility matrix as the sole image-admission
+  authority. The installer consumes the selected archive and performs only
+  deployment lifecycle work; it no longer requires a serialized artifact or
+  per-image compatibility payload, rewrites Composer guards, or blocks the
+  install on a redundant post-extract bootstrap probe.
+
+## 1.5.62 - 2026-10-09
+
+- Collapse image admission to one MCC-owned Mautic compatibility matrix receipt:
+  image identity/version/install type plus fresh host PHP/database facts. Remove
+  the superseded MCD image-requirements v1-v3 evaluators and capability adverts.
+- Keep artifact SHA-256 only as download integrity evidence. When an admitted
+  image contains a disagreeing Composer-generated `platform_check.php`, replace
+  only that derived guard and require a real Mautic bootstrap with the selected
+  PHP before nginx, certificate, mail, or durable instance state can succeed.
+- Use the selected per-install PHP executable throughout mail profile package,
+  cache and test-message steps instead of the host-global PHP default.
+
+## 1.5.61 - 2026-10-09
+
+- Refine image compatibility into immutable v3 universal manifest semantics:
+  the requirements envelope must declare at least one real constraint, while
+  PHP, database, disk and resource categories are independently optional.
+- Evaluate only explicitly declared image constraints. An unavailable fact for
+  a declared constraint fails closed; an undeclared category adds no inferred
+  requirement and never causes fabricated CPU, memory or disk policy.
+
+## 1.5.60 - 2026-10-09
+
+- Replace the image-compatibility v1 minima-only evaluator with an immutable
+  v2 manifest-driven contract supporting PHP and MySQL/MariaDB lower/upper
+  ranges, required PHP extensions, and disk/memory/CPU resource minima.
+- Fail closed for missing, empty, invalid or unobservable image requirements;
+  arbitrary future image names and versions are evaluated only from their
+  declared requirements and fresh host facts, without Mautic-version policy.
+
+## 1.5.59 - 2026-10-09
+
+- Advertise the exact image-compatibility capability in both the top-level MCD
+  host state and the preserved install-readiness envelope, so normal MCC state
+  ingestion can retain the command, schemas, contract digest and probe policy.
+
+## 1.5.58 - 2026-10-09
+
+- Accept both canonical catalog digest representations in image compatibility
+  requests: lowercase SHA-256 hex and `sha256:`-prefixed lowercase SHA-256.
+  Responses retain the exact immutable digest references supplied by MCC.
+
+## 1.5.57 - 2026-10-09
+
+- Add the production host-side `image-compatibility` endpoint for MCC image
+  candidates, with strict request validation, exact digest-bound responses and
+  an advertised read-only capability in normal host state.
+- Probe active PHP-FPM, authenticated MySQL/MariaDB server version, target free
+  space and required host tools freshly for each request. Unknown or failed
+  observations never produce `compatible=true`.
+
+## 1.5.56 - 2026-10-09
+
+- Add an explicit `tasks-lifecycle purge-failed` operator action. Without
+  `--yes` it is an exact-ID dry-run; with `--yes` it transactionally deletes
+  only unreferenced `state=failed` rows without creating an archive or receipt.
+- Preserve timeout, lost/dead-letter, running and every non-failed state, and
+  fail closed for live processes, runtime/active-plan or admission-lock
+  references, an unreadable lock directory, a changed candidate set, or a
+  changed deletion count.
+
+## 1.5.55 - 2026-10-09
+
+- Add a supported `tasks-lifecycle` dry-run/apply workflow that reports exact
+  candidate IDs, writes a compact content-addressed terminal receipt archive
+  and manifest, and deletes only the archived failed/timeout generation.
+- Retain lost rows as dead-letter evidence and protect running, live-process,
+  and runtime-referenced rows from lifecycle pruning.
+- Reconcile stale admission metadata only after task/reference checks, with
+  atomic identity validation and protected active PIDs; automatic compaction
+  no longer removes lost, failed, or timeout evidence through its legacy path.
+
+## 1.5.54 - 2026-10-08
+
+- Treat the canonical special-ring loop as unready until its first
+  authoritative startup snapshot, so an empty snapshot cannot consume the
+  first aligned deadline.
+- Publish the startup snapshot immediately after runtime authority sync and
+  lazily load dependency metadata only for configured instances, independently
+  of the slower all-instance planning pass.
+- If authority becomes ready just after a boundary, perform one bounded
+  catch-up and then resume the aligned minute schedule without backlog.
+
+## 1.5.53 - 2026-10-08
+
+- Fixed a process-level startup/replanning crash where ordinary segment lane
+  locals could be read before binding, or leak from the previous instance,
+  when a segment scan was skipped while restoring a persisted cycle.
+- Isolated ordinary ring bindings per instance before all planning branches;
+  this is host-, instance-, and segment-ID agnostic.
+- Made the canonical special-ring minute loop survive and report unexpected
+  tick exceptions instead of silently losing all future aligned ticks.
+
+## 1.5.52 - 2026-10-08
+
+- Prevent frequent scheduler snapshot notifications from starving the
+  canonical special-ring minute loop: a wake at or after the aligned boundary
+  now runs the due tick before scheduling the next boundary.
+- Add a boundary regression proving pre-tick wakes only refresh state while a
+  wake exactly at, or after, the minute boundary cannot skip dispatch.
+
+## 1.5.51 - 2026-10-08
+
+- Supersede the non-acceptable 1.5.50 release identity after two concurrent
+  publication workflows produced different package bytes at the same URL.
+  Runtime source is unchanged from the tested hot special-ring reconciliation
+  fix; 1.5.51 restores one-version/one-artifact immutable provenance.
+
+## 1.5.50 - 2026-10-08
+
+- Reconcile a newly configured canonical special-ring closure out of every
+  persisted and in-memory ordinary, SQL, follow-up and frozen-cycle structure
+  before dispatch, preserving the remaining ordinary cursor and order.
+- Prevent durable full-scan pending state from reintroducing special roots or
+  covered dependencies after the planner has excluded them.
+- Add the hot configuration-revision regression: special ownership arrives
+  after an ordinary cycle was frozen, removes only that closure, and leaves
+  independent ordinary members running without duplicate special launches.
+
+## 1.5.49 - 2026-10-08
+
+- Consume MCC's canonical per-instance `segment_special_rings_v1` contract as
+  independent minute-tick Priority and Super-priority lanes, including typed
+  ID/slot validation and legacy fallback without duplicate dispatch.
+- Exclude configured roots and their complete dependency closures from
+  ordinary and SQL rings. Priority remains profile/throttle bounded;
+  Super-priority uses its fixed operator slot override.
+- Deduplicate selected dependency roots into execution units. Mautic 7 uses a
+  single native entry only when it covers every requested root and fails
+  closed for unsafe overlapping siblings; Mautic 6 and older execute one
+  deduplicated topological sequence per connected unit.
+- Publish durable start/terminal/error observations for canonical special
+  rings. Live Adonis metadata proves the current units are `{58}` and
+  `{57,59}`; with one Super-priority slot they execute serially and segment 57
+  is rebuilt only inside the native segment 59 invocation.
+
+## 1.5.48 - 2026-10-08
+
+- Serialize all operations on TaskStore's shared SQLite connection so task
+  completion callbacks cannot race scheduler runtime-state writes and crash
+  the daemon with `sqlite3.InterfaceError`.
+
+## 1.5.47 - 2026-10-08
+
+- Consume the durable cross-root fairness turn when a persisted ordinary
+  segment is launched through the throttled whitelist branch, preventing one
+  throttled root from retaining the reservation for its entire cycle.
+
+## 1.5.46 - 2026-10-08
+
+- Make one segment root admission own its complete dependency closure: Mautic 7
+  uses one native cascade command, while Mautic 6 and older run one sequential
+  MCD-built topological chain in a single worker and slot.
+- Suppress separately scheduled dependency members, serialize intersecting
+  ordinary and recurring-priority closures, and retain parallel capacity for
+  independent closures.
+- Apply successful completion state to every member covered by the root
+  closure so durable cycles and admission generations reflect native work.
+
+## 1.5.45 - 2026-10-08
+
+- Preserve already-running segment jobs when campaign pressure or queue throttle
+  becomes active. Throttle still limits new segment admissions according to the
+  selected profile, but no longer crosses lane boundaries to kill work.
+- Remove the forbidden `segment_throttle_kill_non_whitelist` runtime/profile
+  setting so custom configuration cannot restore the old behavior.
+
+## 1.5.44 - 2026-10-08
+
+- Keep each segment failure history row bound to the attempt that actually failed while exposing the next retry attempt separately.
+
+## 1.5.43 - 2026-10-08
+
+- Scope segment dead-letter admission to its failed generation and profile cooldown instead of permanently blacklisting the entity.
+- Persist bounded, redacted per-attempt segment failure evidence with timing, retry policy, output hash, and truncation state.
+
+## 1.5.42 - 2026-10-08
+
+- Align the canonical runtime-admission policy with Mautic 7 native initial admission, related running-closure serialization, and downstream-versus-MCD retry ownership.
+
+## 1.5.41 - 2026-10-08
+
+- Serialize runtime execution of related segment dependency chains on Mautic 7 while retaining native-cascade initial admission, preventing concurrent commands from writing the same membership rows.
+
+## 1.5.40 - 2026-10-08
+
+- Remove explicit special IDs from legacy ordinary cycles while preserving cursor state, and eliminate all remaining cycle members from the priority lane.
+- Log per-plan lane membership with an explicit overlap receipt.
+
+## 1.5.39 - 2026-10-08
+
+- Replace the regular dispatch ring with the exact persisted ordinary-cycle projection while a cycle is incomplete, preventing fresh scan IDs from preceding its cursor.
+
+## 1.5.38 - 2026-10-08
+
+- Persist a bounded `attempted_no_launch` ordinary fairness turn when a reserved regular ring has no verified cycle-member launch, allowing rotation on the next tick.
+
+## 1.5.37 - 2026-10-08
+
+- Persist and restore ordinary fairness rotation state, consuming a turn only for a verified persisted regular-cycle launch.
+
+## 1.5.36 - 2026-10-08
+
+- Rotate promoted ordinary segment reservations after each actual persisted-cycle launch and prevent priority work from bypassing another root's turn.
+
+## 1.5.35 - 2026-10-08
+
+- Restore durable incomplete ordinary-cycle fairness age after draining generic lane claims so priority, SQL, and import progress cannot reset it.
+
+## 1.5.34 - 2026-10-08
+
+- Emit persisted ordinary-head receipts before scheduler pause, backup guard, database dispatch pause, and disabled cluster-route early exits.
+
+## 1.5.33 - 2026-10-08
+
+- Expose profile authority containment diagnostics in CLI profile status and state push while preserving the existing profile runtime readback transport.
+
+## 1.5.32 - 2026-10-08
+
+- Reserve aged ordinary segment capacity ahead of import, SQL, immediate never-built, and static-priority work while allowing other lanes when the ordinary head is ineligible.
+- Emit bounded concrete pending-head denial receipts and contain incomplete profile authority keys without overriding custom profiles.
+
+## 1.5.31 - 2026-10-08
+
+- Reconcile the immediate never-built queue against authoritative candidates, preserving FIFO age while removing built or duplicate entries.
+- Document the canonical twelve-invariant segment lifecycle state machine.
+
+## 1.5.30 - 2026-10-08
+
+- Defer import targets and changed existing segments to the next terminal-boundary ordinary snapshot.
+- Keep immediate dispatch only for positively identified never-built segments created during an incomplete cycle, with aged ordinary work retaining precedence.
+
+## 1.5.29 - 2026-10-08
+
+- Migrate and persist missing legacy ordinary-cycle age in the pre-fairness path, including preserve-only scheduler ticks.
+
+## 1.5.28 - 2026-10-08
+
+- Migrate incomplete legacy segment cycles without `pending_since` into durable fairness aging exactly once.
+- Persist the migrated timestamp until terminal completion or assignment of a new ordinary cycle.
+
+## 1.5.27 - 2026-10-08
+
+- Trigger a standard segment rescan only at a terminal-cycle transition or for one unconsumed dirty generation.
+- Prevent completed empty cycles from rescanning on every scheduler tick while preserving dirty IDs 58/59 rebuild admission.
+
+## 1.5.26 - 2026-10-08
+
+- Seed scheduler lane aging from the durable incomplete ordinary-cycle timestamp before running the fairness watchdog.
+- Expose durable ordinary-cycle ages in fairness state so follow-up, throttle, and unrelated launches cannot reset reservation eligibility.
+
+## 1.5.25 - 2026-10-08
+
+- Persist the ordinary-cycle fairness age in `SegmentLaneCycle` snapshots and restore it across daemon restart and ring reconciliation.
+- Preserve the age through follow-up, throttle, and terminal progress, resetting it only when a new ordinary cycle is assigned.
+
+## 1.5.24 - 2026-10-08
+
+- Reserve the shared segment slot for pending ordinary work only after its profile-configured bounded-aging wait threshold is reached; zero disables the reservation.
+- Keep normal import-follow-up priority before the threshold and expose the active reservation wait reason without changing host caps.
+
+## 1.5.23 - 2026-10-08
+
+- Persist bounded scheduler mail-throttle observability with queue metric source, threshold, window, transition state, and timestamp.
+- Emit structured transition and ordinary-dispatch branch logs that distinguish mail throttle from campaign pressure without changing scheduling policy.
+
+## 1.5.22 - 2026-10-08
+
+- Merge pending members of an incomplete persisted ordinary cycle back into the regular ring after scan reconciliation.
+- Prevent a scan with an empty regular result from erasing cursor-ordered work while throttled, without resetting the frozen cycle.
+
+## 1.5.21 - 2026-10-08
+
+- Restore an incomplete persisted ordinary segment cycle into empty in-memory rings after restart without rescanning or resetting its snapshot.
+- Reconstruct pending work in persisted cursor order while excluding active and terminal members.
+
+## 1.5.20 - 2026-10-08
+
+- Restore terminal-boundary segment planning: a new ordinary scan requires `segment_scan_pending` and no incomplete ordinary cycle.
+- Keep scheduler ticks observation/dispatch-only during an active frozen cycle, and limit follow-up enqueue to the incomplete-cycle path.
+
+## 1.5.19 - 2026-10-08
+
+- Allow a segment that is terminal in an older frozen ordinary snapshot to enter the FIFO follow-up lane when a later input generation marks it dirty again.
+- Retain active-task exclusion and follow-up deduplication to prevent concurrent duplicate dispatch.
+
+## 1.5.18 - 2026-10-08
+
+- Enqueue newly dirty segment IDs into the deduplicated FIFO follow-up lane independently of whether the restored ordinary cycle was complete or incomplete.
+- Preserve the frozen ordinary snapshot while ensuring dirty input is not skipped after a complete-cycle assignment.
+
+## 1.5.17 - 2026-10-08
+
+- Re-enqueue dirty segment IDs immediately after restoring or assigning an incomplete frozen cycle during the first post-restart scan.
+- Avoid waiting for a second input-state interval while preserving the ordinary assignment, cursor, and terminal state.
+
+## 1.5.16 - 2026-10-08
+
+- Run segment input-state scans on the configured external interval even when `segment_scan_pending` was cleared by an earlier ordinary-cycle scan.
+- Preserve the frozen ordinary assignment while allowing newly dirty input to enter the existing FIFO follow-up lane.
+
+## 1.5.15 - 2026-10-07
+
+- Run the periodic segment input-state scan while an ordinary frozen cycle remains active, so newly dirty input is observed without rebuilding that cycle.
+- Queue dirty IDs discovered during an active cycle into the existing FIFO follow-up lane, preserving the ordinary assigned order and cursor.
+
+## 1.5.14 - 2026-10-07
+
+- Replace mutable ordinary segment pending state with a frozen, persisted `SegmentLaneCycle` ordered as never-built, dirty/changed, then stale work.
+- Preserve assigned-cycle order across scheduler ticks, retries, terminal handling, and restart recovery; only create the next snapshot after cycle exhaustion.
+- Keep static priority and super-priority chains outside the ordinary cycle, and dispatch import follow-ups through a separate FIFO lane using free segment capacity.
+
+## 1.5.13 - 2026-10-07
+
+- Reconcile priority-ring promotion from durable admission state on every plan, so dirty IDs remain ahead of older queued work across recurring non-empty ring updates.
+- Add the live-shaped fairness regression for a large existing priority ring with dirty IDs behind older entries.
+
+## 1.5.12 - 2026-10-07
+
+- Preserve dirty-ID promotion when a segment ring is recreated, preventing changed segments from returning behind older queued IDs.
+- Keep a scan blocked until every ID assigned to the current ring has launched or been explicitly removed; one terminal worker cannot close the cycle.
+- Add regression coverage for dirty promotion from an empty ring and queued-ring lifecycle.
+
+## 1.5.11 - 2026-10-07
+
+- Allow the minute-aligned post-terminal segment scan to reconsider durable queued IDs instead of treating them as active ring work forever.
+- Preserve active native/SQL/recurring overlap guards and add regression coverage for queued fairness after ring terminal.
+
+## 1.5.5 - 2026-10-07
+
+- Add durable per-segment observed/applied input generations without retaining history.
+- Promote never-built, changed-since-last-success, and stale segments through separate priority tiers.
+- Scan input state at a configurable interval with a minimum of 60 seconds and preserve dirty state across restart/re-adoption.
+- Keep a segment dirty when its input generation changes during a long build; prune state for unpublished segments.
+
+## 1.5.4 - 2026-10-06
+
+- Preserve raw MCC `profile_runtime` source and values in active runtime status instead of replacing it with an empty manifest-derived snapshot.
+- Make `mcd-cli profile status` read the live MCC profile payload when local manifest/status data is absent.
+- Keep canonical stale-age consumption unchanged at `segment_priority_stale_age_sec`.
+
+## 1.5.3 - 2026-10-06
+
+- Consume canonical MCC `profile_runtime.values` during runtime sync instead of silently falling back when the value is absent from legacy runtime overrides.
+- Persist profile readback for local status diagnostics and retain source metadata such as `mcc_host_profile`.
+- Add regression coverage for canonical profile-runtime value extraction.
+
+## 1.5.2 - 2026-10-06
+
+- Correct scheduler telemetry and follow-up wait reason to describe any eligible priority segment tier, including stale-over-threshold work, not only never-built work.
+- Preserve the two-level priority behavior and return-to-regular behavior after a successful build.
+
+## 1.5.1 - 2026-10-06
+
+- Accept the canonical MCC profile key `segment_priority_stale_age_sec` while retaining the MCD runtime alias.
+- Expose both names through effective runtime mapping to keep profile synchronization and local compatibility intact.
+
+## 1.5.0 - 2026-10-06
+
+- Add configurable segment stale-priority policy with ordered tiers: never-built, built beyond the configured age, then fresh/ordinary work.
+- Default the policy threshold to 86400 seconds through runtime/MCC settings, without host-specific constants.
+- Add regressions for tier ordering and policy-driven stale threshold under priority admission.
+
+## 1.4.4 - 2026-10-06
+
+- Classify an adopted segment worker as completed when its Mautic `last_built_date` confirms completion after restart.
+- Keep real PID loss and command mismatch as `lost`, preventing false loss reports for workers that survived daemon restart.
+- Add regression coverage for DB-confirmed completion of an adopted segment task.
+
+## 1.4.3 - 2026-10-06
+
+- Hold known import-followup segment dispatch while an admissible never-built priority segment is pending.
+- Preserve import execution, active-target blocking, capacity limits, and Mautic 6 runtime dependency guards.
+- Add the causal ordering fix after natural Farm-02 acceptance showed follow-up work starting before new segments.
+
+## 1.4.2 - 2026-10-06
+
+- Make the segment priority lane exclusive to published segments with no recorded `last_built_date`.
+- Keep already processed, stale, weighted, whitelisted, and follow-up segments in the regular lane unless independently admitted by another explicit priority mechanism.
+- Add regression coverage for never-built versus already-known segments under saturation.
+
+## 1.4.1 - 2026-10-06
+
+- Prevent fairness reservations from consuming the emergency host slot assigned to an actual priority segment dispatch.
+- Stop applying MCD dependency runtime serialization to Mautic 7 native segment execution; retain active import-target blocking and older-Mautic guards.
+- Correct priority-lane propagation so only priority segment rings, not regular spill, can use the reserved slot.
+
+## 1.4.0 - 2026-10-06
+
+- Let the actual priority segment dispatch claim the emergency host slot without depending on a stale pre-ring pending-root snapshot.
+- Preserve pending-root reservation for ordinary per-instance background work and keep host maxima unchanged.
+- Add regression coverage for a priority lane arriving after the pending-root snapshot.
+
+## 1.3.9 - 2026-10-06
+
+- Pass priority-lane admission through the actual priority segment dispatch paths, not resume or mixed baseline paths.
+- Keep the emergency host and per-instance reserve inaccessible to import follow-ups and ordinary segment dispatch.
+- Add the release correction after Farm-02 acceptance showed priority segments still receiving `host_capacity` under saturation.
+
+## 1.3.8 - 2026-10-06
+
+- Allow an explicitly scheduled priority segment lane to claim the emergency host and per-instance slot reserved for priority work.
+- Keep import follow-ups and regular background tasks out of that reserved capacity while preserving configured host and instance maxima.
+- Register pending priority segment rings in shared scheduler admission state and add saturated-host starvation regression coverage.
+
+## 1.3.7 - 2026-10-06
+
+- Stop applying legacy MCD dependency admission to Mautic 7 terminal segment plans; native Mautic 7 cascade must be allowed to start the first priority task.
+- Preserve dependency admission for Mautic 6 and older, active import-target blocking, runtime dependency conflicts, and host/instance/task capacity gates.
+- Record the concrete per-ID blocked reason for import targets, dependency, invalid-filter, failure-cooldown, logical-issue, and recurring-priority cases.
+- Add regressions for Mautic 7 priority admission and independent priority dispatch beside a blocked import target.
+
+## 1.3.6 - 2026-10-06
+
+- Allow the versioned MCD self-update to proceed while independent Mautic console workers are running; retain their observation and rely on TaskStore re-adoption after the agent restart.
+- Keep backup, source-operation, update, and task locks as the update safety boundary instead of blocking on any live Mautic console PID.
+- Add regression coverage for self-update with an active segment console process.
+
+## 1.3.5 - 2026-10-06
+
+- Reserve the configured priority segment lane before import-followup dispatch so pending priority full scans cannot be indefinitely starved by import work.
+- Emit deduplicated per-entity scheduler admission and rejection reasons for lock, dependency, repeat-guard, capacity, and baseline decisions.
+- Add regression coverage for seven pending priority segments competing with import-followup work.
+
+## 1.3.4 - 2026-10-06
+
+- Expose read-only MCC profile readback through the existing profile status path: selected profile, revision/version, full and short SHA-256, source, effective runtime values, sync verdict, and atomic replacement receipt.
+- Recover status readback from the existing MCC runtime-sync state when the active cache file is unavailable, without changing settings or execution sources.
+
+## 1.3.3 - 2026-10-06
+
+- Treat a fully verified MCC host-profile document with the same version and a new SHA-256 as authoritative and atomically replace the local document.
+- Reserve rejection for unavailable/invalid fetches and preserve the last-good document on verification failure or local-newer revisions.
+
+## 1.3.2 - 2026-10-06
+
+- Keep MCC profile synchronization available without an Ed25519/KMS/HSM dependency in the current contract.
+- Treat manifest signature fields as optional future authentication metadata; when a configured key is present, supplied signatures are still verified.
+- Preserve authenticated transport, schema/version/hash validation, atomic cache replacement, and last-good same-profile recovery.
+
+## 1.3.1 - 2026-10-06
+
+- Align MCC profile manifest verification with the signed v1 contract: Ed25519 envelope signature, explicit selection mode, and complete mandatory MCD runtime key set.
+- Apply the selected host/custom document as one source, expose exact effective readback, and reject missing, unsigned, stale, incomplete, or hash-invalid manifests without synthesizing values.
+- Add `ring_count` and manifest public-key configuration for signed MCC profile delivery.
+
+## 1.3.0 - 2026-10-06
+
+- Make MCC profile manifests the authoritative source for provider-scoped host profiles and MCD runtime capacity.
+- Verify manifest schema, identity, canonical document hash, and monotonic version before atomic cache replacement.
+- Preserve last-good profile state, expose manifest apply/readback status, and keep operator custom state from being overwritten.
+- Keep the packaged profile catalog only as a standalone migration fallback when MCC profile synchronization is unavailable.
+
 ## 1.2.92 - 2026-09-29
 
 - Enforce the shared per-instance campaign capacity for priority/liveness
@@ -6390,3 +6857,54 @@
 - Added: uninstall command with cron rollback support.
 - Fixed: instance inventory collision when multiple installs had same folder name (`public_html`) by switching uniqueness to `root`.
 - Added: version update check settings (`mcd_update_notify`, `mcd_auto_update_enabled`, `mcd_update_check_interval_sec`, `mcd_update_channel`, `mcc.mcd_manifest_url`) with notify-only default behavior.
+## 1.2.110
+
+- Fixed profile apply/runtime convergence: named profile capacity is loaded from
+  the packaged profile catalog, stale legacy runtime keys cannot replace the
+  effective profile snapshot, and profile status/state push expose source and
+  precedence diagnostics. Hardware recommendation rules are read from the same
+  catalog without changing the selected hardware service profile.
+## 1.5.6 - 2026-10-07
+
+- Gate the minimum 60-second segment scan behind terminal completion of the
+  current ring; the heartbeat observes liveness and does not start a second
+  scan while native, SQL or dependency work remains.
+- Persist finite segment retry state and dead-letter exhausted failures without
+  blocking completion of independent ring work.
+## 1.5.7 - 2026-10-07
+
+- Separate explicit priority and super-priority segment lanes from ordinary
+  and SQL queues, with deduplicated dependency-chain exclusion.
+- Keep Mautic 7 special work root-only for native cascade and execute implicit
+  upstream chains in MCD for Mautic 6 and older.
+- Keep priority capacity profile/throttling-driven while super-priority
+  automation remains fixed one-at-a-time and throttle-immune.
+## 1.5.10 - 2026-10-07
+
+- Promote already-present dirty segment IDs to the front of their active ring
+  before dispatch, preventing global-watermark fan-out work from starving
+  behind an old ring order.
+
+## 1.5.9 - 2026-10-07
+
+- Preserve explicit special priority membership when a custom or legacy host
+  uses a single base ring; zero priority capacity keeps the special work
+  queued instead of demoting it into the ordinary ring.
+
+## 1.5.8 - 2026-10-07
+
+- Make profile-manifest validation forward-compatible with future MCC runtime
+  keys: known values remain strict, unknown values are ignored for execution
+  and preserved in readback.
+- Apply `max_segment_retries` and `segment_priority_stale_age_sec` directly
+  from the MCC manifest without legacy fallback or hardcoded replacement.
+## 1.5.64 - 2026-10-09
+
+- Keep ready image archives self-contained: image deployment no longer performs
+  mail preflight, Mautic cache/bootstrap validation, Composer work, or platform
+  checks while installing a new instance.
+- Preserve runtime mail configuration/wiring and report cache failures with the
+  exact selected PHP command and stderr when runtime validation is explicitly
+  requested outside the ready-image install path.
+- Add regressions proving the image install flow does not invoke Composer,
+  platform checks, mail preflight, or `cache:clear`.

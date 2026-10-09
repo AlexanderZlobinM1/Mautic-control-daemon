@@ -166,6 +166,8 @@ def apply_mail_profile(
     profile_id: str,
     domain: str,
     root: str,
+    php_bin: str | None = None,
+    validate_runtime: bool = True,
 ) -> dict[str, Any]:
     if os.geteuid() != 0:
         raise RuntimeError("mail-config apply must run as root")
@@ -191,6 +193,8 @@ def apply_mail_profile(
                 root=root,
                 test_recipient=recipient,
                 profile_name=name,
+                php_bin=php_bin,
+                validate_runtime=validate_runtime,
             )
         else:
             path = _local_php(root)
@@ -199,29 +203,35 @@ def apply_mail_profile(
             credentials = _credentials_for_apply(root, kind, settings, credentials)
             dsn, packages = _external_dsn(kind, settings, credentials)
             try:
-                if packages:
+                if validate_runtime and packages:
                     ensure_mailer_packages(
                         config=cfg,
                         root=root,
                         packages=packages,
                         reason=f"MCC mail profile {name}",
+                        php_bin=php_bin,
                     )
                 _configure_external_mautic(root, settings, dsn)
-                _clear_mautic_cache(cfg, root)
-                test_result = _send_test_message(
-                    cfg,
-                    root=root,
-                    recipient=recipient,
-                    profile_name=name,
-                )
+                if validate_runtime:
+                    _clear_mautic_cache(cfg, root, php_bin=php_bin)
+                    test_result = _send_test_message(
+                        cfg,
+                        root=root,
+                        recipient=recipient,
+                        profile_name=name,
+                        php_bin=php_bin,
+                    )
+                else:
+                    test_result = "skipped (image install runtime validation deferred)"
                 disable_result = disable_local_mail(cfg, domain=domain)
             except Exception:
                 _write_atomic(path, before, mode=stat.st_mode & 0o777)
                 os.chown(path, stat.st_uid, stat.st_gid)
-                try:
-                    _clear_mautic_cache(cfg, root)
-                except Exception:
-                    pass
+                if validate_runtime:
+                    try:
+                        _clear_mautic_cache(cfg, root, php_bin=php_bin)
+                    except Exception:
+                        pass
                 raise
             result = {
                 "status": "ok",

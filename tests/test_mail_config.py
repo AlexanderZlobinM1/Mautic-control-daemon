@@ -1,14 +1,30 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
 from types import SimpleNamespace
 from unittest.mock import patch
+from pathlib import Path
 
 from mcd_agent import mail_config
+from mcd_agent import local_mail
 from mcd_agent.amazon_mailer_dep import AMAZON_MAILER_PACKAGE, HTTP_CLIENT_PACKAGE, SENDGRID_MAILER_PACKAGE
 
 
 class MailConfigTests(unittest.TestCase):
+    def test_cache_clear_failure_reports_php_command_and_stderr(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            console = Path(td) / "bin" / "console"
+            console.parent.mkdir()
+            console.write_text("#!/usr/bin/env php\n", encoding="utf-8")
+            cfg = SimpleNamespace(command_timeout_sec=300, php_bin="/usr/bin/php")
+            with patch.object(local_mail, "_run", return_value=(1, "Missing Symfony service bootstrap")):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    r"rc=1; command=sudo -u www-data /usr/bin/php8\.3 .*bin/console cache:clear.*Missing Symfony service bootstrap",
+                ):
+                    local_mail._clear_mautic_cache(cfg, td, php_bin="/usr/bin/php8.3")
+
     def test_success_status_captures_effective_credentials_without_printing_them(self) -> None:
         cfg = SimpleNamespace(mcc_host_name="host-1")
         with patch.object(mail_config, "_mcc_json") as mcc_json, patch.object(
@@ -67,10 +83,19 @@ class MailConfigTests(unittest.TestCase):
                 profile_id="profile-1",
                 domain="app.sales-snap.com",
                 root="/var/www/app/public_html",
+                php_bin="/usr/bin/php8.4",
             )
 
         self.assertEqual(result["status"], "ok")
-        configure.assert_called_once()
+        configure.assert_called_once_with(
+            cfg,
+            domain="app.sales-snap.com",
+            root="/var/www/app/public_html",
+            test_recipient="operator@example.com",
+            profile_name="Own host",
+            php_bin="/usr/bin/php8.4",
+            validate_runtime=True,
+        )
 
     def test_smtp_dsn_encodes_credentials_and_encryption(self) -> None:
         dsn, packages = mail_config._external_dsn(

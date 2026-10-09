@@ -2098,6 +2098,15 @@ def _build_parser() -> argparse.ArgumentParser:
     sdb.add_argument("--admin-password-stdin", action="store_true")
     sdb.add_argument("--json", action="store_true")
 
+    lifecycle = sub.add_parser("tasks-lifecycle", help="Safely archive terminal task receipts and reconcile admission metadata")
+    lifecycle.add_argument("--config", default=default_cfg)
+    lifecycle.add_argument("op", choices=["dry-run", "apply", "purge-failed"], nargs="?", default="dry-run")
+    lifecycle.add_argument("--min-age-sec", type=int)
+    lifecycle.add_argument("--archive-dir")
+    lifecycle.add_argument("--admission-dir", default="/run/lock/mcd-tasks")
+    lifecycle.add_argument("--yes", action="store_true", help="Required for apply")
+    lifecycle.add_argument("--json", action="store_true")
+
     maintenance = sub.add_parser("maintenance", help="Temporary maintenance mode (no profile switch)")
     maintenance.add_argument("--config", default=default_cfg)
     maintenance.add_argument("op", choices=["on", "off", "status"])
@@ -3873,6 +3882,58 @@ def main() -> int:
         if ok:
             _push_state_after_change(cfg, "apt-upgrade")
         return 0 if ok else 1
+
+    if args.cmd == "tasks-lifecycle":
+        cfg = load_config(args.config)
+        if args.op == "apply" and not bool(args.yes):
+            parser.error("tasks-lifecycle apply requires --yes")
+        store = TaskStore(cfg.state_db_path, cfg)
+        try:
+            if args.op == "purge-failed":
+                preview = store.purge_failed_tasks(
+                    admission_dir=str(args.admission_dir),
+                    dry_run=True,
+                )
+                if bool(args.yes):
+                    result = store.purge_failed_tasks(
+                        admission_dir=str(args.admission_dir),
+                        dry_run=False,
+                        expected_candidate_ids=preview.get("candidate_ids", []),
+                    )
+                    result["preflight_candidate_ids"] = preview.get("candidate_ids", [])
+                else:
+                    result = preview
+            else:
+                result = store.task_lifecycle(
+                    now_ts=time.time(),
+                    min_age_sec=(
+                        int(args.min_age_sec)
+                        if args.min_age_sec is not None
+                        else max(3600, int(cfg.tasks_history_keep_days) * 86400)
+                    ),
+                    archive_dir=str(args.archive_dir or cfg.tasks_archive_dir),
+                    admission_dir=str(args.admission_dir),
+                    dry_run=args.op != "apply",
+                )
+        finally:
+            store.close()
+        if args.json:
+            print(json.dumps(result, ensure_ascii=True, indent=2))
+        else:
+            print(
+                "phase={phase} candidates={candidates} deleted={deleted} protected={protected} "
+                "dead_letter={dead_letter} running={running} archive={archive}".format(
+                    phase=result.get("phase", "-"),
+                    candidates=len(result.get("candidate_ids", [])),
+                    deleted=len(result.get("deleted_ids", [])),
+                    protected=len(result.get("protected_ids", [])),
+                    dead_letter=len(result.get("dead_letter_ids", result.get("preserved_by_state", {}).get("lost", []))),
+                    running=len(result.get("running_ids", result.get("preserved_by_state", {}).get("running", []))),
+                    archive=result.get("archive_path", "-"),
+                )
+            )
+            print("candidate_ids=" + ",".join(str(x) for x in result.get("candidate_ids", [])))
+        return 0
 
     if args.cmd == "state-db":
         cfg = load_config(args.config)

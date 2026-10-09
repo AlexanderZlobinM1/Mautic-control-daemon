@@ -5,6 +5,7 @@ import sys
 import tarfile
 import types
 import unittest
+import inspect
 from io import BytesIO
 from importlib import resources
 from pathlib import Path
@@ -28,6 +29,17 @@ if sys.modules.get("mcd_agent.inventory") is inventory_stub:
 
 
 class MauticImageInstallNginxTests(unittest.TestCase):
+    def test_image_install_flow_does_not_invoke_composer(self) -> None:
+        flow = inspect.getsource(image_install.install_from_image).lower()
+
+        self.assertNotIn("composer install", flow)
+        self.assertNotIn("composer update", flow)
+        self.assertNotIn("dump-autoload", flow)
+        self.assertNotIn("platform_check", flow)
+        self.assertNotIn("_preflight_requested_mail", flow)
+        self.assertNotIn("_clear_mautic_cache", flow)
+        self.assertNotIn("cache:clear", flow)
+
     def test_prepare_instance_parent_accepts_existing_empty_directory(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             parent = Path(td) / "shop"
@@ -148,29 +160,6 @@ class MauticImageInstallNginxTests(unittest.TestCase):
         self.assertEqual(run.call_count, 2)
         sleep.assert_called_once_with(image_install._CERTBOT_LOCK_RETRY_SEC)
 
-    def test_mail_identity_preflight_runs_before_image_download(self) -> None:
-        cfg = SimpleNamespace(mcc_token="agent-token")
-        with (
-            patch.object(image_install, "_preflight", return_value=[]),
-            patch.object(
-                image_install,
-                "_preflight_requested_mail",
-                side_effect=RuntimeError("PTR mismatch"),
-            ),
-            patch.object(image_install, "_download") as download,
-        ):
-            with self.assertRaisesRegex(RuntimeError, "PTR mismatch"):
-                image_install.install_from_image(
-                    cfg,
-                    image_ref="default7",
-                    domain="vida.sales-snap.com",
-                    php_version="8.4",
-                    yes=True,
-                    mail_profile_id="profile-1",
-                )
-
-        download.assert_not_called()
-
     def test_package_install_accepts_apt_releaseinfo_changes(self) -> None:
         calls: list[list[str]] = []
 
@@ -237,7 +226,6 @@ class MauticImageInstallNginxTests(unittest.TestCase):
             with tarfile.open(archive, "r:gz") as tf:
                 with self.assertRaisesRegex(RuntimeError, "unsafe link"):
                     _safe_extract(tf, target)
-
 
 class MauticImageInstallMysqlCredentialTests(unittest.TestCase):
     def tearDown(self) -> None:

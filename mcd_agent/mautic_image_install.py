@@ -179,13 +179,19 @@ def build_plan(*, image_ref: str, domain: str, php_version: str) -> ImageInstall
     )
 
 
+def _selected_php_bin(plan: ImageInstallPlan) -> str:
+    return f"/usr/bin/php{plan.php_version}"
+
+
 def _preflight(plan: ImageInstallPlan) -> list[str]:
     problems: list[str] = []
     if os.geteuid() != 0:
         problems.append("must run as root")
     if not re.match(r"^[0-9]+\.[0-9]+$", plan.php_version):
         problems.append("invalid php version")
-    for cmd in ("tar", "gzip", "certbot", "nginx", "php", "composer", "node", "npm"):
+    elif not Path(_selected_php_bin(plan)).is_file():
+        problems.append(f"missing selected PHP CLI: {_selected_php_bin(plan)}")
+    for cmd in ("tar", "gzip", "nginx", "php"):
         if not shutil.which(cmd):
             problems.append(f"missing command: {cmd}")
     php_sock = Path(f"/run/php/php{plan.php_version}-fpm.sock")
@@ -892,29 +898,6 @@ def _safe_extract(tar: tarfile.TarFile, dst: Path) -> None:
     tar.extractall(dst, members=members)
 
 
-def _preflight_requested_mail(
-    cfg: AgentConfig,
-    plan: ImageInstallPlan,
-    *,
-    own_mail: bool,
-    mail_profile_id: str | None,
-) -> dict[str, Any]:
-    if mail_profile_id:
-        from mcd_agent.mail_config import fetch_mail_profile
-
-        profile = fetch_mail_profile(cfg, str(mail_profile_id))
-        if str(profile.get("instance_domain") or "").strip().lower() != plan.domain:
-            raise RuntimeError("mail profile belongs to another instance")
-        if str(profile.get("transport_type") or "").strip().lower() != "own_host":
-            return {"status": "ok", "transport_type": str(profile.get("transport_type") or "")}
-    elif not own_mail:
-        return {"status": "skipped"}
-
-    from mcd_agent.local_mail import preflight_local_mail
-
-    return preflight_local_mail(cfg, domain=plan.domain)
-
-
 def install_from_image(
     cfg: AgentConfig,
     *,
@@ -939,15 +922,6 @@ def install_from_image(
         for p in problems:
             print(f"preflight_error: {p}")
         raise RuntimeError("preflight failed")
-
-    if mail_profile_id or own_mail:
-        print("Preflight: validating requested mail transport")
-        _preflight_requested_mail(
-            cfg,
-            plan,
-            own_mail=own_mail,
-            mail_profile_id=mail_profile_id,
-        )
 
     with tempfile.TemporaryDirectory(prefix="mcd-image-install-") as td:
         tmp = Path(td)
@@ -1026,12 +1000,20 @@ def install_from_image(
                     profile_id=str(mail_profile_id),
                     domain=plan.domain,
                     root=str(plan.webroot),
+                    php_bin=_selected_php_bin(plan),
+                    validate_runtime=False,
                 )
             elif own_mail:
                 print("Configuring per-instance own-host mail")
                 from mcd_agent.local_mail import configure_local_mail
 
-                configure_local_mail(cfg, domain=plan.domain, root=str(plan.webroot))
+                configure_local_mail(
+                    cfg,
+                    domain=plan.domain,
+                    root=str(plan.webroot),
+                    php_bin=_selected_php_bin(plan),
+                    validate_runtime=False,
+                )
         except Exception as exc:
             rollback_errors = _rollback_failed_install(
                 cfg,

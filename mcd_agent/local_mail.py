@@ -987,19 +987,31 @@ def _configure_mautic(root: str, domain: str, settings: dict[str, Any] | None = 
     os.chown(path, stat.st_uid, stat.st_gid)
 
 
-def _clear_mautic_cache(cfg: AgentConfig, root: str) -> None:
+def _clear_mautic_cache(cfg: AgentConfig, root: str, *, php_bin: str | None = None) -> None:
     console = Path(root) / "bin" / "console"
     if not console.exists():
         raise RuntimeError("Mautic bin/console not found")
     rc, out = _run(
-        ["sudo", "-u", "www-data", str(cfg.php_bin or "/usr/bin/php"), str(console), "cache:clear"],
+        ["sudo", "-u", "www-data", str(php_bin or cfg.php_bin or "/usr/bin/php"), str(console), "cache:clear"],
         timeout_sec=max(600, int(cfg.command_timeout_sec or 300)),
     )
     if rc != 0:
-        raise RuntimeError("Mautic cache clear failed after mail configuration: " + out)
+        command = " ".join(
+            ["sudo", "-u", "www-data", str(php_bin or cfg.php_bin or "/usr/bin/php"), str(console), "cache:clear"]
+        )
+        raise RuntimeError(
+            f"Mautic cache clear failed after mail configuration (rc={rc}; command={command}): {out}"
+        )
 
 
-def _send_test_message(cfg: AgentConfig, *, root: str, recipient: str, profile_name: str) -> str:
+def _send_test_message(
+    cfg: AgentConfig,
+    *,
+    root: str,
+    recipient: str,
+    profile_name: str,
+    php_bin: str | None = None,
+) -> str:
     target = str(recipient or "").strip().lower()
     if not re.match(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", target):
         raise RuntimeError("valid MCC user email is required for the mail configuration test")
@@ -1019,7 +1031,7 @@ def _send_test_message(cfg: AgentConfig, *, root: str, recipient: str, profile_n
                 "sudo",
                 "-u",
                 "www-data",
-                str(cfg.php_bin or "/usr/bin/php"),
+                str(php_bin or cfg.php_bin or "/usr/bin/php"),
                 str(script_path),
                 str(local_php),
                 str(autoload),
@@ -1204,6 +1216,8 @@ def configure_local_mail(
     root: str,
     test_recipient: str = "",
     profile_name: str = "Own host",
+    php_bin: str | None = None,
+    validate_runtime: bool = True,
 ) -> dict[str, Any]:
     if os.geteuid() != 0:
         raise RuntimeError("local-mail configure must run as root")
@@ -1252,7 +1266,8 @@ def configure_local_mail(
         _configure_smtp_firewall()
         sender_settings = material.get("settings") if isinstance(material.get("settings"), dict) else {}
         _configure_mautic(root, clean, sender_settings)
-        _clear_mautic_cache(cfg, root)
+        if validate_runtime:
+            _clear_mautic_cache(cfg, root, php_bin=php_bin)
         services = ["opendkim", _delivery_service(mta)]
         if mta == "sendmail":
             services.append("sendmail")
@@ -1292,12 +1307,13 @@ def configure_local_mail(
         if dkim_error:
             raise RuntimeError("DKIM validation failed: " + dkim_error)
         test_result = ""
-        if str(test_recipient or "").strip():
+        if validate_runtime and str(test_recipient or "").strip():
             test_result = _send_test_message(
                 cfg,
                 root=root,
                 recipient=test_recipient,
                 profile_name=profile_name,
+                php_bin=php_bin,
             )
         _push_status(cfg, clean, status="ok")
     except Exception as exc:
@@ -1305,7 +1321,8 @@ def configure_local_mail(
         try:
             _write_atomic(local_php_path, local_php_before, mode=local_php_stat.st_mode & 0o777)
             os.chown(local_php_path, local_php_stat.st_uid, local_php_stat.st_gid)
-            _clear_mautic_cache(cfg, root)
+            if validate_runtime:
+                _clear_mautic_cache(cfg, root, php_bin=php_bin)
             _save_domains(payload_before)
             previous_domains = payload_before.get("domains") if isinstance(payload_before.get("domains"), dict) else {}
             if first_activation:
