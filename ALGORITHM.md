@@ -4,7 +4,9 @@
 фактическую схему после исправления admission и должен обновляться вместе с
 кодом, тестами и runtime receipt. Документ не является разрешением на
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.76 (прямой follow-up от 1.5.75).
+Актуальная редакция этого канона — MCD 1.5.80 (immutable release поверх
+принятого e910f67b; прямой follow-up от 1.5.79 без дополнительного изменения
+execution behavior).
 
 Для instance-scoped desired state локальный inventory UID является стабильной
 основой, но transport запрашивает также динамически полученный
@@ -33,6 +35,12 @@ event: сначала сравнивается `updated_at`, при отсутс
 в config MCD. Отсутствие поля в старом/неполном snapshot не удаляет значение;
 удаление действительно только при явном более новом tombstone. Accepted merge
 сохраняет metadata и следующий poll не создаёт ping-pong или duplicate push.
+
+Перед отправкой `desired` envelope MCD проецирует host- и instance-runtime
+только через canonical authority contract `runtime_remote_allowed_keys()`.
+Local-only/bootstrap значения и будущие неизвестные ключи не записываются в
+MCC desired state; observed telemetry envelope остаётся отдельным потоком.
+Это contract-level правило, а не список исключений по именам ключей.
 
 Bootstrap после approved update сначала восстанавливает отсутствующие
 instance-rows из durable baseline, затем создаёт ровно один pending delta до
@@ -300,6 +308,7 @@ cycle без ручного `segments:update`, profile/capacity/data changes. Ad
 | host/instance slots и rotation | `mcd_agent/daemon.py` | `tests/test_campaign_ring_dispatch.py` |
 | profile retry budget, three starts and bounded orphan expiry | `mcd_agent/config.py`, `mcd_agent/daemon.py` | `tests/test_segment_admission.py` |
 | monitor queued/running/done/error receipt | `mcd_agent/daemon.py` | `tests/test_scheduler_monitor_cycle.py`, `tests/test_signals_scheduler_history.py` |
+| authority-safe desired runtime projection | `mcd_agent/config.py`, `mcd_agent/runtime_overrides.py` | `tests/test_runtime_override_direction.py`, `tests/test_runtime_stable_keys.py`, `tests/test_runtime_migration_adapter.py` |
 | natural b2bss/Adonis evidence | runtime TaskStore/MCC receipts | rollout acceptance (после package/install) |
 
 Любое расхождение между этой схемой, source, тестом и runtime receipt

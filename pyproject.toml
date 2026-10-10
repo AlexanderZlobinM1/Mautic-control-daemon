@@ -1,6 +1,6 @@
 [project]
 name = "mcd-agent"
-version = "1.5.79"
+version = "1.5.80"
 description = "MauticControlDaemon host agent"
 requires-python = ">=3.10"
 readme = "README.md"

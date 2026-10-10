@@ -18,15 +18,15 @@ class UpdateBootstrapTests(unittest.TestCase):
             (source_dir / "mcd_agent").mkdir()
             (source_dir / "pyproject.toml").write_text("[project]\nname='mcd-agent'\n", encoding="utf-8")
             (source_dir / "sitecustomize.py").write_bytes(Path(__file__).parents[1].joinpath("sitecustomize.py").read_bytes())
-            (source_dir / "mcd_agent" / "__init__.py").write_text('__version__ = "1.5.79"\n', encoding="utf-8")
+            (source_dir / "mcd_agent" / "__init__.py").write_text('__version__ = "1.5.80"\n', encoding="utf-8")
 
             installed_package = site_dir / "mcd_agent"
             installed_package.mkdir(parents=True)
-            (installed_package / "__init__.py").write_text('__version__ = "1.5.79"\n', encoding="utf-8")
-            dist_info = site_dir / "mcd_agent-1.5.79.dist-info"
+            (installed_package / "__init__.py").write_text('__version__ = "1.5.80"\n', encoding="utf-8")
+            dist_info = site_dir / "mcd_agent-1.5.80.dist-info"
             dist_info.mkdir(parents=True)
             (dist_info / "METADATA").write_text(
-                "Metadata-Version: 2.1\nName: mcd-agent\nVersion: 1.5.79\n",
+                "Metadata-Version: 2.1\nName: mcd-agent\nVersion: 1.5.80\n",
                 encoding="utf-8",
             )
             (site_dir / "__editable__.mcd_agent-1.5.75.pth").write_text(
@@ -57,7 +57,7 @@ class UpdateBootstrapTests(unittest.TestCase):
 
             self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
             result = json.loads(proc.stdout)
-            self.assertEqual(result["package"], "1.5.79")
+            self.assertEqual(result["package"], "1.5.80")
             self.assertEqual(Path(result["imported"]).resolve(), (installed_package / "__init__.py").resolve())
             self.assertFalse((site_dir / "__editable__.mcd_agent-1.5.75.pth").exists())
             self.assertFalse((site_dir / "__editable___mcd_agent_1_5_75_finder.py").exists())

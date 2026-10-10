@@ -1,3 +1,11 @@
+## 1.5.80 - 2026-10-11
+
+- Release the accepted e910f67b runtime-authority projection as the next
+  immutable source/package identity. Desired host and instance runtime
+  envelopes use the canonical remote-authority contract, while local-only and
+  unknown keys stay out of MCC desired state. No additional execution behavior
+  is introduced beyond the accepted e910 source.
+
 ## 1.5.79 - 2026-10-10
 
 - Add a managed-venv bootstrap so the legacy 1.5.75 updater can verify a
