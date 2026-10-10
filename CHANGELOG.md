@@ -1,3 +1,8 @@
+## 1.5.77 - 2026-10-10
+
+- Repackage the verified 1.5.76 scheduler fix as the next immutable release
+  candidate after the complete M6/M7 sandbox acceptance matrix.
+
 ## 1.5.76 - 2026-10-10
 
 - Bound segment orphan reconciliation to the last independently confirmed
