@@ -177,6 +177,27 @@ claim-ит следующий eligible item текущей очереди; ож�
 TaskStore task key и OS execution lock остаются последней защитой от duplicate
 claim, включая restart и concurrent workers.
 
+Для ordinary cycle есть два разных решения, которые нельзя смешивать:
+`admission` добавляет новые IDs в persisted cycle, а `dispatch` запускает уже
+сохранённые pending IDs. Campaign/queue pressure блокирует только первое:
+при active pressure новый snapshot не расширяет active cycle, но его уже
+сохранённый pending cursor продолжает dispatch. Если обычный ring временно
+получил нулевой throttled limit, для такого cursor сохраняется один shared
+slot при его фактической доступности.
+
+Глобальный пятисекундный baseline cadence относится к новым baseline
+admissions. Pending item, который существовал до текущего plan refresh,
+атомарно проходит `claim -> start` на следующем dispatch без ожидания чужого
+root/instance baseline. Этот запуск не продвигает global baseline timestamp:
+следующий новый admission не теряет свою собственную cadence. При этом
+persisted cycle claim, dependency/conflict, host/instance capacity, TaskStore
+duplicate, repeat interval и OS execution lock остаются обязательными.
+
+Host fairness работает поверх этого правила: каждый root с persisted pending
+работой получает свободный baseline/shared slot, а terminal callback закрывает
+item до начала следующего cycle. Ни один active cycle с `pending > 0` и
+`running = 0` не может оставаться только из-за порядка dispatch или pressure.
+
 Ручной MCC `segments:update -i <id>` не является четвёртой линией. До spawn
 MCD фиксирует observed fingerprint/generation цели и dependency closure,
 атомарно claim-ит существующий элемент ordinary/priority/super, если он есть,

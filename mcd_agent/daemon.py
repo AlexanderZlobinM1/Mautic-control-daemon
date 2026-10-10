@@ -151,6 +151,7 @@ from mcd_agent.segment_admission import (
     manual_terminal as _segment_cycle_manual_terminal_state,
     never_built_ids as _never_built_segment_ids,
     ordinary_snapshot_order as _ordinary_segment_snapshot_order,
+    normalize_ids as _normalize_segment_ids,
     release_claim as _segment_cycle_release_claim,
     source_baseline as _ordinary_segment_source_baseline,
     sync_cycle as _segment_cycle_sync_state,
@@ -2175,6 +2176,53 @@ def _segment_cycle_sync(
         )
         store.put_runtime_sync(key, state)
     return state, added, started_new
+
+
+def _segment_cycle_pending_ids(state: Mapping[str, object] | None) -> set[int]:
+    """Return unclaimed, unfinished items from an active persisted cycle.
+
+    The scheduler must distinguish work that was already admitted into the
+    durable ordinary cycle from IDs discovered by the current plan refresh.
+    The former may bypass the global baseline admission cadence when it is
+    waiting; the latter must still respect new-admission pressure and the
+    cadence.  Keeping this projection pure also makes restart/fairness tests
+    exercise the same definition as the dispatcher.
+    """
+
+    if not isinstance(state, Mapping):
+        return set()
+    if str(state.get("status") or "active").strip().lower() != "active":
+        return set()
+    items = set(_normalize_segment_ids(state.get("items")))
+    finished = set(_normalize_segment_ids(state.get("done"))) | set(
+        _normalize_segment_ids(state.get("errors"))
+    )
+    active = set(_normalize_segment_ids(state.get("claimed"))) | set(
+        _normalize_segment_ids(state.get("running"))
+    )
+    return items - finished - active
+
+
+def _segment_cycle_admission_inputs(
+    state: Mapping[str, object] | None,
+    planned_ids: list[int] | tuple[int, ...] | set[int],
+    never_built_ids: list[int] | tuple[int, ...] | set[int],
+    *,
+    pressure: bool,
+) -> tuple[list[int], list[int]]:
+    """Hold only new ordinary admissions while pressure is active."""
+
+    planned = _normalize_segment_ids(planned_ids)
+    never_built = _normalize_segment_ids(never_built_ids)
+    if not pressure or not isinstance(state, Mapping):
+        return planned, never_built
+    if str(state.get("status") or "active").strip().lower() != "active":
+        return [], []
+    existing = set(_normalize_segment_ids(state.get("items")))
+    return (
+        [sid for sid in planned if sid in existing],
+        [sid for sid in never_built if sid in existing],
+    )
 
 
 def _segment_cycle_claim(
@@ -6306,6 +6354,7 @@ def _fill_from_ring(
     admission_claim=None,
     admission_release=None,
     admission_running=None,
+    bypass_baseline_admission: bool = False,
     max_launches: int = 1,
 ) -> int:
     if task_type == "segment" and admission_claim is None:
@@ -6376,6 +6425,7 @@ def _fill_from_ring(
             max_parallel_for_type=max(1, total_limit),
             popens=popens,
             bypass_repeat_guard=bypass_repeat_guard,
+            bypass_baseline_admission=bypass_baseline_admission,
         )
         if launched:
             if admission_running is not None and claimed:
@@ -10055,6 +10105,7 @@ def _submit_if_slot(
     ignore_limit: bool = False,
     manual_request_id: int | None = None,
     bypass_repeat_guard: bool = False,
+    bypass_baseline_admission: bool = False,
     stdout_path: str = "",
     stderr_path: str = "",
 ) -> bool:
@@ -10075,6 +10126,7 @@ def _submit_if_slot(
             ignore_limit=ignore_limit,
             manual_request_id=manual_request_id,
             bypass_repeat_guard=bypass_repeat_guard,
+            bypass_baseline_admission=bypass_baseline_admission,
             stdout_path=stdout_path,
             stderr_path=stderr_path,
         )
@@ -10109,6 +10161,7 @@ def _submit_if_slot_uncoordinated(
     ignore_limit: bool = False,
     manual_request_id: int | None = None,
     bypass_repeat_guard: bool = False,
+    bypass_baseline_admission: bool = False,
     stdout_path: str = "",
     stderr_path: str = "",
 ) -> bool:
@@ -10130,7 +10183,11 @@ def _submit_if_slot_uncoordinated(
         baseline_lane is not None
         and _scheduler_root_lane_running_count(running, root, baseline_lane) <= 0
     )
-    if baseline_admission and not _scheduler_baseline_launch_due(str(baseline_lane)):
+    if (
+        baseline_admission
+        and not bypass_baseline_admission
+        and not _scheduler_baseline_launch_due(str(baseline_lane))
+    ):
         return False
     host_slots = _scheduler_host_slots_available(config, running, task_type, root=root)
     if not ignore_limit and host_slots is not None and host_slots <= 0:
@@ -10178,7 +10235,7 @@ def _submit_if_slot_uncoordinated(
     task.row_id = store.add_running(task)
     _segment_runtime_marker_write(store, task, status="running", now_ts=task.started_at)
     running[key] = task
-    if baseline_admission:
+    if baseline_admission and not bypass_baseline_admission:
         _mark_scheduler_baseline_launch(str(baseline_lane), task.started_at)
     _mark_scheduler_fairness_claim(root, task_type)
     if popens is not None:
@@ -11357,6 +11414,8 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
     segment_last_full_scan_ts: dict[str, float] = {}
     segment_full_scan_pending: dict[str, set[int]] = {}
     segment_force_full_scan_until: dict[str, float] = {}
+    segment_persisted_pending_ids: dict[str, set[int]] = {}
+    campaign_pressure_at_plan: dict[str, bool] = {}
     last_cleanup_ts: dict[str, float] = {}
     last_mautic_lock_cleanup_ts: dict[str, float] = {}
     last_page_hits_orphan_cleanup_ts: dict[str, float] = {}
@@ -13241,6 +13300,16 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                 segment_ids: list[int] | None = None
                 campaign_trigger_ids: list[int] | None = None
                 campaign_rebuild_ids: list[int] | None = None
+                campaign_pressure_at_plan[root] = _campaign_pressure_active(
+                    config,
+                    running,
+                    root,
+                    trigger_prio_ring=campaign_trigger_prio_rings.setdefault(root, deque()),
+                    trigger_reg_ring=campaign_trigger_reg_rings.setdefault(root, deque()),
+                    rebuild_prio_ring=campaign_rebuild_prio_rings.setdefault(root, deque()),
+                    rebuild_reg_ring=campaign_rebuild_reg_rings.setdefault(root, deque()),
+                    now_ts=now,
+                )
                 if _running_count(running, root, "import") > 0:
                     last_import_activity_ts[root] = now
                 import_settling = _import_in_settle(root, now)
@@ -13454,6 +13523,10 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                     source_snapshot: Mapping[object, object] | None = None
                     static_excluded_ids = set(segment_static_ids_for_inst)
                     previous_cycle_payload = store.get_runtime_sync(_segment_cycle_key(root)) or {}
+                    if not isinstance(previous_cycle_payload, Mapping):
+                        previous_cycle_payload = {}
+                    previous_cycle_items = set(_normalize_segment_ids(previous_cycle_payload.get("items")))
+                    previous_cycle_pending_ids = _segment_cycle_pending_ids(previous_cycle_payload)
                     # Bootstrap is fail-open: without a completed baseline,
                     # every observed built candidate is eligible for the
                     # nearest ordinary cycle. The baseline is persisted only
@@ -13557,11 +13630,27 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                     standard_segment_ids = [
                         sid for sid in standard_segment_ids if sid not in static_excluded_ids
                     ]
+                    cycle_planned_ids, cycle_never_built_ids = _segment_cycle_admission_inputs(
+                        previous_cycle_payload,
+                        standard_segment_ids,
+                        never_built_segment_ids,
+                        pressure=campaign_pressure_at_plan.get(root, False),
+                    )
+                    if campaign_pressure_at_plan.get(root, False) and (
+                        len(cycle_planned_ids) != len(standard_segment_ids)
+                        or len(cycle_never_built_ids) != len(never_built_segment_ids)
+                    ):
+                        logging.info(
+                            "[%s] campaign pressure held new ordinary admissions existing_cycle_items=%s planned=%s",
+                            root,
+                            len(previous_cycle_items),
+                            len(cycle_planned_ids),
+                        )
                     cycle_state, cycle_added_ids, cycle_started_new = _segment_cycle_sync(
                         store,
                         root=root,
-                        planned_ids=standard_segment_ids,
-                        never_built_ids=never_built_segment_ids,
+                        planned_ids=cycle_planned_ids,
+                        never_built_ids=cycle_never_built_ids,
                         running_ids=[
                             int(task.entity_id)
                             for task in running.values()
@@ -13574,6 +13663,9 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                         ],
                         now_ts=float(now),
                         source_snapshot=source_snapshot,
+                    )
+                    segment_persisted_pending_ids[root] = (
+                        previous_cycle_pending_ids & _segment_cycle_pending_ids(cycle_state)
                     )
                     if cycle_added_ids:
                         logging.info(
@@ -14757,6 +14849,12 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
             dependency_parents_for_root = segment_parents_by_root.get(root, {})
             dependency_children_for_root = segment_dependencies_by_root.get(root, {})
             segment_cycle_payload = store.get_runtime_sync(_segment_cycle_key(root)) or {}
+            if not isinstance(segment_cycle_payload, Mapping):
+                segment_cycle_payload = {}
+            persisted_pending_cycle_ids = (
+                set(segment_persisted_pending_ids.get(root, set()))
+                & _segment_cycle_pending_ids(segment_cycle_payload)
+            ) - set(sql_managed_segment_ids)
             static_lane_payload = store.get_runtime_sync(_static_lane_state_key(root)) or {}
             static_lane_active_ids: set[int] = set()
             static_lanes_payload = static_lane_payload.get("lanes") if isinstance(static_lane_payload, dict) else {}
@@ -15252,6 +15350,63 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                         wait_sec,
                         reason,
                         import_followup_limit,
+                    )
+
+            # A pending item from an already-admitted ordinary cycle is not a
+            # new admission.  Dispatch it even while campaign/queue pressure
+            # has reduced the normal ring limits, and do not let the global
+            # five-second baseline cadence make a persisted cursor wait for a
+            # different instance's launch.  Claim/dependency, host/instance,
+            # exact-task and repeat guards remain in force.
+            if (
+                cluster_cron_allowed
+                and persisted_pending_cycle_ids
+                and segment_launched_this_tick <= 0
+            ):
+                pending_cycle_ring = deque(
+                    sid
+                    for sid in _normalize_segment_ids(segment_cycle_payload.get("items"))
+                    if sid in persisted_pending_cycle_ids
+                )
+                pending_slot_limit = max(1, int(segment_slot_limit or 0))
+                pending_slot_limit = min(
+                    pending_slot_limit,
+                    _segment_shared_slots_available(
+                        running,
+                        root,
+                        pending_slot_limit,
+                        store=store,
+                        config=config,
+                        now_ts=now,
+                        sql_db_running_count=segment_sql_db_running_count,
+                    ),
+                )
+                if pending_cycle_ring and pending_slot_limit > 0:
+                    segment_launched_this_tick += _fill_from_ring(
+                        ring=pending_cycle_ring,
+                        ring_limit=pending_slot_limit,
+                        total_limit=pending_slot_limit,
+                        root=root,
+                        task_type="segment",
+                        running=running,
+                        ring_entities=persisted_pending_cycle_ids,
+                        config=config,
+                        store=store,
+                        popens=popens,
+                        build_args=lambda sid: render_mautic_command(
+                            php_bin=config.php_bin,
+                            run_as_user=config.mautic_run_as_user,
+                            root=root,
+                            template=config.cmd_segment_update_template,
+                            id=sid,
+                            batch_limit=config.segment_batch_limit,
+                        ),
+                        blocked_entities=segment_blocked_ids,
+                        dynamic_blocked=_segment_chain_running_conflict,
+                        on_launch=_mark_segment_cycle,
+                        remove_on_launch=True,
+                        bypass_baseline_admission=True,
+                        max_launches=pending_slot_limit,
                     )
 
             if (
