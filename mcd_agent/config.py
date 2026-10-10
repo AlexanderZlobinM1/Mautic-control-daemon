@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import hashlib
 import json
 from pathlib import Path
@@ -852,6 +852,14 @@ class AgentConfig:
     campaign_trigger_progress_watchdog_interval_sec: int
     campaign_trigger_progress_watchdog_stable_checks: int
     campaign_rebuild_min_repeat_sec: int
+    # Canonical static segment lanes. ``segment_whitelist`` remains a
+    # migration alias for priority and is resolved by the daemon; it is not a
+    # third execution lane.
+    segment_priority: list[int] = field(default_factory=list)
+    segment_super_priority: list[int] = field(default_factory=list)
+    segment_priority_instance_settings: dict[str, Any] = field(default_factory=dict)
+    segment_super_priority_instance_settings: dict[str, Any] = field(default_factory=dict)
+    segment_stale_after_sec: int = 24 * 60 * 60
 
 
 def _apply_profile(cfg: AgentConfig) -> AgentConfig:
@@ -2045,6 +2053,11 @@ _RUNTIME_TO_ATTR: dict[str, str] = {
     "segment_whitelist": "segment_whitelist",
     "segment_whitelist_file": "segment_whitelist_file",
     "segment_whitelist_instance_settings": "segment_whitelist_instance_settings",
+    "segment_priority": "segment_priority",
+    "segment_super_priority": "segment_super_priority",
+    "segment_priority_instance_settings": "segment_priority_instance_settings",
+    "segment_super_priority_instance_settings": "segment_super_priority_instance_settings",
+    "segment_stale_after_sec": "segment_stale_after_sec",
     "campaign_whitelist": "campaign_whitelist",
     "campaign_whitelist_file": "campaign_whitelist_file",
     "campaign_whitelist_instance_settings": "campaign_whitelist_instance_settings",
@@ -2339,7 +2352,12 @@ def _reapply_manual_runtime_overrides(cfg: AgentConfig, runtime: dict[str, Any])
         elif isinstance(current, float):
             updates[attr] = float(raw_value)
         elif isinstance(current, list):
-            if attr in {"segment_whitelist", "campaign_whitelist"}:
+            if attr in {
+                "segment_whitelist",
+                "campaign_whitelist",
+                "segment_priority",
+                "segment_super_priority",
+            }:
                 updates[attr] = _normalize_int_list(raw_value)
             else:
                 updates[attr] = _normalize_list(raw_value)
@@ -2816,6 +2834,19 @@ def _load_config_inner(path: str) -> AgentConfig:
             if isinstance(runtime.get("segment_whitelist_instance_settings", {}), dict)
             else {}
         ),
+        segment_priority=_normalize_int_list(runtime.get("segment_priority", [])),
+        segment_super_priority=_normalize_int_list(runtime.get("segment_super_priority", [])),
+        segment_priority_instance_settings=(
+            dict(runtime.get("segment_priority_instance_settings", {}))
+            if isinstance(runtime.get("segment_priority_instance_settings", {}), dict)
+            else {}
+        ),
+        segment_super_priority_instance_settings=(
+            dict(runtime.get("segment_super_priority_instance_settings", {}))
+            if isinstance(runtime.get("segment_super_priority_instance_settings", {}), dict)
+            else {}
+        ),
+        segment_stale_after_sec=max(0, int(runtime.get("segment_stale_after_sec", 24 * 60 * 60) or 0)),
         campaign_whitelist=_normalize_int_list(runtime.get("campaign_whitelist", [])),
         campaign_whitelist_file=str(runtime.get("campaign_whitelist_file")).strip() if runtime.get("campaign_whitelist_file") else None,
         campaign_whitelist_instance_settings=(
@@ -3447,14 +3478,30 @@ def _load_config_inner(path: str) -> AgentConfig:
         campaign_rebuild_min_repeat_sec=max(0, campaign_rebuild_min_repeat_sec),
     )
     if cfg.disable_whitelist:
-        cfg = replace(cfg, segment_whitelist=[], segment_whitelist_file=None, campaign_whitelist=[], campaign_whitelist_file=None)
+        cfg = replace(
+            cfg,
+            segment_whitelist=[],
+            segment_whitelist_file=None,
+            segment_priority=[],
+            segment_super_priority=[],
+            campaign_whitelist=[],
+            campaign_whitelist_file=None,
+        )
     profiled = _apply_profile(cfg)
     merged = _reapply_manual_runtime_overrides(profiled, runtime)
     merged = _enforce_campaign_rebuild_guard(merged)
     merged = _enforce_campaign_trigger_audit_policy(merged)
     merged = _enforce_profile_guards(merged)
     if merged.disable_whitelist:
-        merged = replace(merged, segment_whitelist=[], segment_whitelist_file=None, campaign_whitelist=[], campaign_whitelist_file=None)
+        merged = replace(
+            merged,
+            segment_whitelist=[],
+            segment_whitelist_file=None,
+            segment_priority=[],
+            segment_super_priority=[],
+            campaign_whitelist=[],
+            campaign_whitelist_file=None,
+        )
     # Runtime customization flag is not "runtime section exists"; it is
     # "effective config diverges from selected profile baseline".
     profile_lower = (profile_name or "").strip().lower()

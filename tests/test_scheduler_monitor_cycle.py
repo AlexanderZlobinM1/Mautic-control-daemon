@@ -13,6 +13,7 @@ from mcd_agent.daemon import (
     _publish_segment_monitor_cycle,
     _scheduler_monitor_plan_key,
 )
+from mcd_agent.segment_admission_receipt import build_segment_admission_receipt, validate_segment_admission_receipt
 
 
 class SchedulerMonitorCycleTests(unittest.TestCase):
@@ -211,6 +212,55 @@ class SchedulerMonitorCycleTests(unittest.TestCase):
             self.assertEqual(cycle["item_variants"]["sql"], [204, 205])
             self.assertEqual(cycle["queued"], [204, 61])
             self.assertEqual(cycle["done"], [205])
+
+    def test_segment_cycle_publishes_mautic_failed_as_finished_error(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "state.db"
+            store = TaskStore(str(db_path))
+            root = "/var/www/mautic"
+            receipt = build_segment_admission_receipt(
+                {
+                    "schema": "mcd-segment-cycle-v1",
+                    "cycle_id": "cycle-1",
+                    "status": "active",
+                    "items": [10, 20],
+                    "claimed": [20],
+                    "running": [20],
+                    "done": [],
+                    "errors": [10],
+                    "error_notes": {"10": "mautic_failed"},
+                    "baseline_ready": True,
+                    "updated_at": 100.0,
+                },
+                None,
+                now_ts=101.0,
+            )
+            _publish_scheduler_monitor_cycles(
+                store=store,
+                root=root,
+                cycle_done={},
+                running={},
+                now_ts=101.0,
+                seg_sql_ring=deque(),
+                seg_resume_ring=deque(),
+                seg_prio_ring=deque(),
+                seg_reg_ring=deque([20]),
+                campaign_trigger_prio_ring=deque(),
+                campaign_trigger_reg_ring=deque(),
+                campaign_rebuild_prio_ring=deque(),
+                campaign_rebuild_reg_ring=deque(),
+                segment_error_ids=[10],
+                segment_error_notes={"10": "mautic_failed"},
+                segment_admission_receipt=receipt,
+            )
+            payload = self._read_payload(db_path, root)
+            cycle = payload["cycles"][0]
+            self.assertEqual(cycle["queued"], [20])
+            self.assertEqual(cycle["running"], [])
+            self.assertEqual(cycle["errors"], [10])
+            self.assertEqual(cycle["item_statuses"], {"10": "mautic_failed"})
+            self.assertEqual(cycle["admission_receipt"]["ordinary"]["errors"], [10])
+            self.assertEqual(validate_segment_admission_receipt(cycle["admission_receipt"]), [])
 
     def test_campaign_cycle_keeps_cooldown_items_out_of_queue(self) -> None:
         with tempfile.TemporaryDirectory() as td:

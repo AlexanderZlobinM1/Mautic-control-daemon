@@ -37,7 +37,8 @@ disable_throttle = true
 # Ignore all whitelist sources (true|false).
 disable_whitelist = true
 
-# Segment weight threshold for entering priority ring.
+# Deprecated compatibility settings. Ordinary never uses weight-based
+# promotion; static priority/super-priority are configured in system runtime.
 segment_priority_weight_threshold = 999999
 # Number of priority segment ids by score.
 segment_priority_size = 0

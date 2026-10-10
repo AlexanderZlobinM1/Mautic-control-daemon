@@ -124,7 +124,17 @@ jobs_max_workers = 2
 # 0 keeps both lanes unlimited; MCC hardware profiles set this value.
 scheduler_host_max_parallel = 0
 
-# Segment ids forced to priority ring.
+# Canonical static priority MCC list (the old segment_whitelist key is an
+# alias only; it is not a third execution lane).
+segment_priority = []
+# Canonical static super-priority MCC list. It has higher admission frequency.
+segment_super_priority = []
+# Per-instance overrides for the two static lists.
+segment_priority_instance_settings = {}
+segment_super_priority_instance_settings = {}
+# Ordinary snapshot stale threshold selected by the host profile, seconds.
+segment_stale_after_sec = 86400
+# Legacy priority alias retained for migration compatibility.
 segment_whitelist = []
 # Path to segment whitelist file. MCD writes scoped lines like
 # "instance.example.com: 187 191"; old one-id-per-line files are converted once.

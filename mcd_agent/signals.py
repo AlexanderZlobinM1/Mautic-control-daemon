@@ -317,9 +317,13 @@ def _shadow_running_tasks(
                 "queued": [int(x) for x in list(cycle.get("queued") or []) if str(x).strip().isdigit()],
                 "done": [int(x) for x in list(cycle.get("done") or []) if str(x).strip().isdigit()],
                 "running": [int(x) for x in list(cycle.get("running") or []) if str(x).strip().isdigit()],
+                "errors": [int(x) for x in list(cycle.get("errors") or []) if str(x).strip().isdigit()],
                 "total": int(cycle.get("total", 0) or 0),
                 "updated_at": float(payload.get("updated_at", row["updated_at"] or 0.0) or 0.0),
             }
+            raw_receipt = cycle.get("admission_receipt")
+            if isinstance(raw_receipt, dict):
+                item["admission_receipt"] = raw_receipt
             if item_variants:
                 item["item_variants"] = item_variants
             raw_statuses = cycle.get("item_statuses") if isinstance(cycle.get("item_statuses"), dict) else {}
