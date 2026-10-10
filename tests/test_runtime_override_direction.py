@@ -4,9 +4,25 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from mcd_agent.runtime_overrides import acknowledge_desired_runtime_states, fetch_runtime_overrides, instance_desired_states, merge_instance_desired_states, overrides_fingerprint, push_runtime_overrides
-from mcd_agent.config import load_config, remove_runtime_values
-from mcd_agent.runtime_overrides import apply_remote_overrides, local_runtime_overrides
+from mcd_agent.runtime_overrides import (
+    acknowledge_desired_runtime_states,
+    apply_remote_overrides,
+    canonical_profile_from_runtime_response,
+    fetch_runtime_overrides,
+    instance_desired_states,
+    local_runtime_overrides,
+    merge_instance_desired_states,
+    normalize_segment_special_rings,
+    overrides_fingerprint,
+    push_runtime_overrides,
+    desired_profile_from_runtime_response,
+)
+from mcd_agent.config import (
+    load_config,
+    persist_profile_authority,
+    reapply_profile_authority,
+    remove_runtime_values,
+)
 from mcd_agent import daemon
 
 
@@ -282,6 +298,174 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
                 )
         self.assertEqual(acknowledge.call_count, 2)
         self.assertEqual(store.values["mcc_runtime_acknowledged"]["host"]["revision"], 4)
+
+    def test_special_rings_map_to_generic_instance_lanes_and_ack_exact_revision(self) -> None:
+        class MemoryStore:
+            def __init__(self):
+                self.values = {}
+
+            def get_runtime_sync(self, key):
+                return self.values.get(key)
+
+            def put_runtime_sync(self, key, value):
+                self.values[key] = dict(value)
+
+        uid = "generic.sales-snap.com@MauticFarm-02"
+        special = {
+            "priority": [],
+            "super_priority": {"segments": [101, 102], "slots_override": 1},
+        }
+        states = {uid: {"revision": 5, "runtime_overrides": {"segment_special_rings_v1": special}}}
+        merged = merge_instance_desired_states({}, states)
+
+        self.assertNotIn("segment_special_rings_v1", merged)
+        self.assertEqual(
+            merged["segment_priority_instance_settings"][uid],
+            {"segments": []},
+        )
+        self.assertEqual(
+            merged["segment_super_priority_instance_settings"][uid],
+            {"segments": [101, 102], "slots_override": 1},
+        )
+
+        from tempfile import TemporaryDirectory
+        from pathlib import Path
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "mcd.toml"
+            path.write_text('[profile]\nname = "farm-hiload"\n', encoding="utf-8")
+            cfg = load_config(str(path), allow_recover_from_mcc=False)
+            applied = apply_remote_overrides(cfg, merged)
+
+        effective = applied["config"]
+        inst = SimpleNamespace(instance_uid=uid, root="/var/www/generic/public_html")
+        self.assertEqual(
+            daemon._segment_priority_effective_setting(effective, inst),
+            set(),
+        )
+        self.assertEqual(
+            daemon._segment_super_priority_effective_setting(effective, inst),
+            {101, 102},
+        )
+        self.assertEqual(
+            daemon._segment_static_lane_parallel_limit(effective, inst, super_priority=True),
+            1,
+        )
+        self.assertNotIn("segment_special_rings_v1", applied["unsupported_keys"])
+
+        store = MemoryStore()
+        cfg_for_ack = SimpleNamespace(mcc_url="https://mcc.example", mcc_token="token")
+        with patch(
+            "mcd_agent.runtime_overrides.acknowledge_runtime_state",
+            return_value={"status": "ok"},
+        ) as acknowledge:
+            failures = acknowledge_desired_runtime_states(
+                cfg_for_ack,
+                store,
+                desired_state=None,
+                host_runtime={},
+                instance_states=states,
+                runtime_fingerprint="aggregate",
+            )
+
+        self.assertEqual(failures, [])
+        self.assertEqual(acknowledge.call_args.kwargs["revision"], 5)
+        self.assertEqual(acknowledge.call_args.kwargs["status"], "applied")
+        self.assertEqual(
+            store.values["mcc_runtime_acknowledged"]["instances"][uid]["revision"],
+            5,
+        )
+
+    def test_unknown_special_ring_shape_is_rejected_without_applied_revision(self) -> None:
+        class MemoryStore:
+            def __init__(self):
+                self.values = {}
+
+            def get_runtime_sync(self, key):
+                return self.values.get(key)
+
+            def put_runtime_sync(self, key, value):
+                self.values[key] = dict(value)
+
+        uid = "generic.sales-snap.com@MauticFarm-02"
+        states = {
+            uid: {
+                "revision": 6,
+                "runtime_overrides": {"segment_special_rings_v1": {"super_priority": {"bad": "shape"}}},
+            }
+        }
+        store = MemoryStore()
+        cfg = SimpleNamespace(mcc_url="https://mcc.example", mcc_token="token")
+        with patch(
+            "mcd_agent.runtime_overrides.acknowledge_runtime_state",
+            return_value={"status": "ok"},
+        ) as acknowledge:
+            failures = acknowledge_desired_runtime_states(
+                cfg,
+                store,
+                desired_state=None,
+                host_runtime={},
+                instance_states=states,
+                runtime_fingerprint="aggregate",
+            )
+
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(acknowledge.call_args.kwargs["status"], "rejected")
+        self.assertNotIn("mcc_runtime_acknowledged", store.values)
+
+    def test_special_ring_validation_does_not_drop_bad_ids_or_unknown_fields(self) -> None:
+        self.assertIsNone(
+            normalize_segment_special_rings(
+                {"priority": [101, "not-an-id"], "super_priority": []}
+            )
+        )
+        self.assertIsNone(
+            normalize_segment_special_rings(
+                {"priority": {"segments": [101], "future_key": True}, "super_priority": []}
+            )
+        )
+
+    def test_selected_profile_provenance_survives_runtime_sync_rebase(self) -> None:
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "mcd.toml"
+            path.write_text('[profile]\nname = "farm-hiload"\n', encoding="utf-8")
+            selected = load_config(str(path), allow_recover_from_mcc=False)
+            path.write_text('[profile]\nname = "passive"\n', encoding="utf-8")
+            stale = load_config(str(path), allow_recover_from_mcc=False)
+
+            rebased = reapply_profile_authority(stale, selected.profile_name)
+            self.assertEqual(rebased.profile_name, "farm-hiload")
+            self.assertEqual(rebased.scheduler_host_max_parallel, 12)
+            self.assertEqual(rebased.scheduler_instance_max_parallel, 6)
+
+            persist_profile_authority(str(path), selected.profile_name)
+            reloaded = load_config(str(path), allow_recover_from_mcc=False)
+            self.assertEqual(reloaded.profile_name, "farm-hiload")
+            self.assertEqual(reloaded.scheduler_host_max_parallel, 12)
+
+    def test_desired_profile_wins_over_stale_observed_profile(self) -> None:
+        self.assertEqual(
+            canonical_profile_from_runtime_response(
+                {
+                    "profile_name": "passive",
+                    "desired_state": {"profile": "farm-hiload"},
+                    "observed_profile": "passive",
+                }
+            ),
+            "farm-hiload",
+        )
+        self.assertEqual(
+            desired_profile_from_runtime_response(
+                {
+                    "desired_state": {"profile": "passive"},
+                    "observed_profile": "farm-hiload",
+                }
+            ),
+            "passive",
+        )
 
 
 if __name__ == "__main__":

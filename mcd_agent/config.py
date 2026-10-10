@@ -1087,6 +1087,23 @@ def _apply_profile(cfg: AgentConfig) -> AgentConfig:
     return base
 
 
+def reapply_profile_authority(cfg: AgentConfig, profile_name: str | None) -> AgentConfig:
+    """Rebase an effective config onto the selected workload profile.
+
+    Runtime overrides are allowed to change tunables, but they are not a
+    second source of workload-profile identity.  A fresh config load during a
+    sync can otherwise reintroduce a stale ``passive`` fallback before the
+    canonical runtime payload is applied.  Rebase only the profile-owned
+    capacity fields here; the caller applies current runtime overrides after
+    this function returns.
+    """
+
+    selected = str(profile_name or "").strip().lower()
+    if not selected or selected == str(getattr(cfg, "profile_name", "") or "").strip().lower():
+        return cfg
+    return _apply_profile(replace(cfg, profile_name=selected))
+
+
 def _normalize_list(value: object) -> list[str]:
     if value is None:
         return []
@@ -1689,8 +1706,17 @@ def upsert_runtime_values(config_path: str, updates: dict[str, object]) -> tuple
     return upsert_section_values(config_path, "runtime", updates)
 
 
+def persist_profile_authority(config_path: str, profile_name: str) -> tuple[str, bool]:
+    """Persist the canonical workload-profile identity in the mutable config."""
+
+    selected = str(profile_name or "").strip().lower()
+    if not selected:
+        return str(_resolve_mutable_config_path(config_path)), False
+    return upsert_section_values(config_path, "profile", {"name": selected})
+
+
 def remove_runtime_values(config_path: str, keys: set[str]) -> tuple[str, bool]:
-    path = Path(config_path)
+    path = _resolve_mutable_config_path(config_path)
     if not path.exists() or not keys:
         return str(path), False
     text = path.read_text(encoding="utf-8")

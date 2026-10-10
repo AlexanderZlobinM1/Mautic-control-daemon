@@ -575,6 +575,13 @@ Important:
 - MCC -> MCD:
   - normal path: daemon polls MCC runtime endpoint.
   - immediate path: `mcc_cli host-runtime set/unset` triggers `mcd-cli runtime-overrides trigger`, daemon consumes trigger and pulls immediately.
+  - per-instance `segment_special_rings_v1` is translated into the existing
+    priority/super-priority instance settings by immutable UID; validated
+    `slots_override` controls that lane's parallel limit, and malformed data
+    is rejected rather than silently dropped.
+  - the selected MCC workload profile is kept as canonical provenance across
+    every poll/trigger rebase; a stale observed `passive` state cannot erase an
+    active farm profile, while an explicit desired profile can change it.
   - a successful live apply is acknowledged back to MCC; no daemon restart is required.
 - MCD -> MCC:
   - MCD state push contains `runtime_overrides` and extracted instance-scoped values keyed by `instance_uid`.

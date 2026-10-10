@@ -31,6 +31,8 @@ from mcd_agent.config import (
     DEFAULT_PAGE_HITS_ORPHAN_CLEANUP_GRACE_MIN,
     check_profile_drift_with_mcc,
     load_config,
+    persist_profile_authority,
+    reapply_profile_authority,
     recover_config_from_mcc,
     remove_runtime_values,
     runtime_effective_map,
@@ -121,7 +123,9 @@ from mcd_agent.form_embed import sync_form_embed_settings
 from mcd_agent.runtime_overrides import (
     acknowledge_desired_runtime_states,
     apply_remote_overrides,
+    canonical_profile_from_runtime_response,
     consume_poll_trigger,
+    desired_profile_from_runtime_response,
     fetch_runtime_overrides,
     instance_desired_states,
     local_runtime_overrides,
@@ -1607,6 +1611,36 @@ def _segment_super_priority_effective_setting(config: AgentConfig, inst: object)
     if isinstance(raw, bool):
         return global_ids if raw else set()
     return _static_segment_ids_from_value(raw, super_priority=True)
+
+
+def _segment_static_lane_parallel_limit(
+    config: AgentConfig,
+    inst: object,
+    *,
+    super_priority: bool,
+) -> int:
+    """Resolve an optional per-instance static-lane slot override.
+
+    MCC's special-ring envelope is translated into the supported per-instance
+    lane maps.  ``slots_override`` is lane metadata carried by those maps,
+    not a new runtime key; honoring it here keeps the canonical lane contract
+    effective without introducing host- or instance-specific scheduler code.
+    """
+
+    default = max(1, int(getattr(config, "segment_priority_parallel_idle", 1) or 1))
+    settings_key = (
+        "segment_super_priority_instance_settings"
+        if super_priority
+        else "segment_priority_instance_settings"
+    )
+    found, raw = _static_segment_setting_value(getattr(config, settings_key, {}), inst)
+    if not found or not isinstance(raw, dict) or "slots_override" not in raw:
+        return default
+    try:
+        override = int(raw.get("slots_override"))
+    except (TypeError, ValueError):
+        return default
+    return max(1, override)
 
 
 def _segment_whitelist_effective_setting(config: AgentConfig, inst: object) -> set[int]:
@@ -9448,6 +9482,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
     global _ACTIVE_PRIORITY_EXECUTOR, _SEGMENT_DISPATCH_WAKEUP
     logging.info("MCD loop started")
     base_config = config
+    profile_authority = str(getattr(config, "profile_name", "") or "").strip().lower()
 
     try:
         if _ensure_mcd_service_kill_mode():
@@ -9483,6 +9518,14 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
 
     store = TaskStore(config.state_db_path, config)
     store.put_runtime_sync("local_runtime", local_runtime_overrides(config))
+    store.put_runtime_sync(
+        "profile_authority",
+        {
+            "profile": profile_authority,
+            "source": "local_config",
+            "updated_at": time.time(),
+        },
+    )
     inventory = InstanceInventory(config.state_db_path)
     seeded = ensure_seeded(inventory, config)
     logging.info("Instance inventory loaded: %s", seeded)
@@ -10004,13 +10047,13 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                         _SEGMENT_SUPER_PRIORITY_LANE,
                         "segment_super_priority",
                         max(1, int(getattr(cfg, "segment_super_priority_interval_sec", 1) or 1)),
-                        max(1, int(getattr(cfg, "segment_super_priority_parallel", cfg.segment_priority_parallel_idle) or 1)),
+                        _segment_static_lane_parallel_limit(cfg, inst, super_priority=True),
                     ),
                     (
                         _SEGMENT_PRIORITY_LANE,
                         "segment_priority",
                         max(1, int(cfg.segment_full_scan_interval_sec or 60)),
-                        max(1, int(cfg.segment_priority_parallel_idle or 1)),
+                        _segment_static_lane_parallel_limit(cfg, inst, super_priority=False),
                     ),
                 ):
                     for segment_id in static_pending[lane_name]:
@@ -10497,15 +10540,39 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                     state_for_store = dict(desired_state)
                     state_for_store["instance_revisions"] = revisions
                     store.put_runtime_sync("mcc_runtime_desired_state", state_for_store)
+                response_profile = canonical_profile_from_runtime_response(ro)
+                desired_response_profile = desired_profile_from_runtime_response(ro)
+                # An observed passive snapshot can be stale while a selected
+                # farm profile is still authoritative. A desired profile,
+                # including an intentional passive selection, is authoritative;
+                # otherwise only an active observed profile may repair a stale
+                # passive fallback.
+                if response_profile and (
+                    desired_response_profile is not None or response_profile != "passive"
+                ):
+                    profile_authority = response_profile
                 fp = overrides_fingerprint(overrides)
-                if fp != last_runtime_overrides_fp:
+                config_profile = str(getattr(config, "profile_name", "") or "").strip().lower()
+                profile_sync_needed = bool(profile_authority and config_profile != profile_authority)
+                if fp != last_runtime_overrides_fp or profile_sync_needed:
                     # A cleared MCC key must also leave the effective config.
                     # Reload after deleting absent persisted keys, then apply
                     # the current authoritative overrides to that baseline.
-                    _remove_absent_stable_runtime_from_config(config, overrides)
+                    if fp != last_runtime_overrides_fp:
+                        _remove_absent_stable_runtime_from_config(config, overrides)
                     base_config = load_config(config.config_file_path, allow_recover_from_mcc=False)
+                    if profile_authority:
+                        if str(base_config.profile_name or "").strip().lower() != profile_authority:
+                            try:
+                                persist_profile_authority(config.config_file_path, profile_authority)
+                                base_config = load_config(config.config_file_path, allow_recover_from_mcc=False)
+                            except Exception as exc:
+                                logging.warning("runtime-overrides profile authority persist failed: %s", exc)
+                        base_config = reapply_profile_authority(base_config, profile_authority)
                     applied = apply_remote_overrides(base_config, overrides)
                     next_cfg = applied["config"]
+                    if isinstance(next_cfg, AgentConfig) and profile_authority:
+                        next_cfg = reapply_profile_authority(next_cfg, profile_authority)
                     applied_keys = list(applied.get("applied_keys", []))
                     unsupported_keys = list(applied.get("unsupported_keys", []))
                     blocked_keys = list(applied.get("blocked_keys", []))
@@ -10559,11 +10626,12 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                         last_monitored_email_parser_ts.clear()
                         maintenance_cleanup_rr_index.clear()
                         logging.info("runtime-overrides cleanup schedules refreshed for immediate scheduler apply")
-                    _persist_stable_backup_runtime_to_config(
-                        next_cfg if isinstance(next_cfg, AgentConfig) else config,
-                        applied_keys,
-                        installs,
-                    )
+                    if fp != last_runtime_overrides_fp:
+                        _persist_stable_backup_runtime_to_config(
+                            next_cfg if isinstance(next_cfg, AgentConfig) else config,
+                            applied_keys,
+                            installs,
+                        )
                     # Persisted MCC values are not a new local operator edit.
                     # Refresh the local fingerprint so the next tick does not
                     # echo the same revision back as another desired write.
@@ -10573,6 +10641,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                         "active_runtime",
                         {
                             "profile": (config.profile_name or "").strip().lower(),
+                            "profile_authority": profile_authority,
                             "applied_keys": applied_keys,
                             "blocked_keys": blocked_keys,
                             "unsupported_keys": unsupported_keys,
@@ -12234,6 +12303,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                             note,
                         )
                         config = load_config(config.config_file_path, allow_recover_from_mcc=False)
+                        profile_authority = str(config.profile_name or "").strip().lower()
                         if desired_profile and desired_profile != old_profile:
                             write_profile_selection(
                                 "/opt/mcd",

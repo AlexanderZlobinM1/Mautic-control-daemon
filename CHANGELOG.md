@@ -1,3 +1,17 @@
+## 1.5.68 - 2026-10-10
+
+- Translate MCC's canonical per-instance `segment_special_rings_v1` envelope
+  into the supported priority and super-priority instance settings before
+  applying it; preserve validated `slots_override` capacity and reject malformed
+  envelopes instead of acknowledging dropped work.
+- Acknowledge the exact desired-state revision only after the normalized
+  runtime payload is accepted, with the effective translated payload recorded
+  in the acknowledgement receipt.
+- Preserve the canonical selected workload profile across every runtime sync
+  and trigger, including a stale passive fallback on disk; an observed passive
+  snapshot cannot demote an active selected profile, while an explicit desired
+  passive selection remains valid.
+
 ## 1.5.67 - 2026-10-10
 
 - Preserve the authoritative workload and hardware profile selection across

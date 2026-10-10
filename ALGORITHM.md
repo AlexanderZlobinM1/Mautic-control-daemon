@@ -38,6 +38,25 @@ ordinary snapshot. Обе статические линии имеют собс�
 не убивает running job. Если worker свободен, независимая работа другой линии
 может продолжаться; общая capacity и dependency lock обязательны.
 
+### Канонический runtime envelope
+
+MCC может передать per-instance envelope `segment_special_rings_v1` с двумя
+линями `priority` и `super_priority`. MCD не создаёт отдельную третью
+конфигурацию: envelope нормализуется в поддерживаемые
+`segment_priority_instance_settings` и
+`segment_super_priority_instance_settings` по immutable `instance_uid`.
+Положительные segment IDs дедуплицируются, `slots_override` проверяется и
+применяется к соответствующей static lane. Невалидная форма или неизвестное
+runtime key остаётся rejected и не получает applied revision; `applied`
+acknowledgement отправляется только для принятого effective payload и содержит
+его digest/снимок.
+
+Профиль является отдельной canonical authority. При каждом runtime poll или
+trigger MCD сначала сохраняет выбранный MCC profile, затем rebases свежий
+config на его profile baseline и только после этого применяет runtime tunables.
+Устаревший observed `passive` не может сбросить выбранный active/farm profile;
+явный desired profile, включая `passive`, имеет приоритет.
+
 ## 3. Построение ordinary cycle и порядок
 
 1. Планировщик получает due IDs или bounded full snapshot опубликованных

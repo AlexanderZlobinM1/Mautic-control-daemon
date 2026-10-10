@@ -9,7 +9,13 @@ from urllib import request
 from urllib.error import HTTPError, URLError
 
 from mcd_agent import __version__
-from mcd_agent.config import AgentConfig, apply_runtime_overrides, runtime_remote_allowed_keys, runtime_overrides_from_config_file
+from mcd_agent.config import (
+    AgentConfig,
+    apply_runtime_overrides,
+    runtime_overrides_from_config_file,
+    runtime_remote_allowed_keys,
+    runtime_supported_keys,
+)
 from mcd_agent.host_identity import resolve_agent_identity
 
 
@@ -32,6 +38,9 @@ def _api_base(cfg: AgentConfig) -> str | None:
 
 _INSTANCE_RUNTIME_KEYS = {
     "segment_whitelist_instance_settings",
+    "segment_priority_instance_settings",
+    "segment_super_priority_instance_settings",
+    "segment_special_rings_v1",
     "segment_recurring_priority_v1",
     "campaign_whitelist_instance_settings",
     "page_hits_orphan_cleanup_instance_settings",
@@ -40,6 +49,28 @@ _INSTANCE_RUNTIME_KEYS = {
     "monitored_email_parser_instance_settings",
     "form_embed_instance_settings",
     "empty_leads_cleanup_instance_settings",
+}
+
+_SPECIAL_RING_RUNTIME_KEY = "segment_special_rings_v1"
+_SPECIAL_RING_TARGET_KEYS = {
+    "priority": "segment_priority_instance_settings",
+    "super_priority": "segment_super_priority_instance_settings",
+}
+_PROFILE_NAMES = {
+    "passive",
+    "tiny",
+    "mini",
+    "midi",
+    "maxi",
+    "hiload",
+    "ultra",
+    "farm-tiny",
+    "farm-mini",
+    "farm-midi",
+    "farm-maxi",
+    "farm-hiload",
+    "farm-ultra",
+    "custom",
 }
 
 
@@ -77,6 +108,188 @@ def _canonical_instance_uids(instance_uids: list[str]) -> list[str]:
             continue
         canonical.append(uid)
     return list(dict.fromkeys(canonical))
+
+
+def _decode_json_value(value: object) -> object:
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if not text:
+        return value
+    try:
+        return json.loads(text)
+    except Exception:
+        return value
+
+
+def _segment_ids(value: object) -> list[int] | None:
+    value = _decode_json_value(value)
+    if isinstance(value, dict):
+        for key in ("segments", "segment_ids", "ids", "items"):
+            if key in value:
+                return _segment_ids(value.get(key))
+        return None
+    if isinstance(value, (tuple, list, set)):
+        out: list[int] = []
+        seen: set[int] = set()
+        for raw in value:
+            if isinstance(raw, bool):
+                return None
+            try:
+                segment_id = int(raw)
+            except (TypeError, ValueError):
+                return None
+            if segment_id <= 0:
+                return None
+            if segment_id in seen:
+                continue
+            seen.add(segment_id)
+            out.append(segment_id)
+        return out
+    if isinstance(value, str):
+        parts = [part.strip() for part in value.split(",") if part.strip()]
+        return _segment_ids(parts)
+    return None
+
+
+def _normalize_special_ring_lane(value: object) -> dict[str, Any] | None:
+    value = _decode_json_value(value)
+    if isinstance(value, bool):
+        return {"segments": []} if not value else None
+    if isinstance(value, (tuple, list, set, str)):
+        ids = _segment_ids(value)
+        return {"segments": ids} if ids is not None else None
+    if not isinstance(value, dict):
+        return None
+    supported_keys = {
+        "enabled",
+        "disabled",
+        "segments",
+        "segment_ids",
+        "ids",
+        "items",
+        "slots_override",
+    }
+    if set(value) - supported_keys:
+        return None
+    if value.get("enabled") is False or value.get("disabled") is True:
+        return {"segments": []}
+    if not value:
+        return {"segments": []}
+    ids = _segment_ids(value)
+    if ids is None:
+        return None
+    normalized: dict[str, Any] = {"segments": ids}
+    if "slots_override" in value:
+        raw_slots = value.get("slots_override")
+        if isinstance(raw_slots, bool):
+            return None
+        try:
+            slots = int(raw_slots)
+        except (TypeError, ValueError):
+            return None
+        if slots <= 0:
+            return None
+        normalized["slots_override"] = slots
+    return normalized
+
+
+def normalize_segment_special_rings(value: object) -> dict[str, dict[str, Any]] | None:
+    """Translate MCC's special-ring envelope to supported lane settings.
+
+    The canonical envelope is intentionally instance-agnostic and contains
+    ``priority`` and ``super_priority`` lane values.  MCD's effective config
+    already has generic per-instance settings for those two lanes, so the
+    translation keeps the immutable instance UID as the only map key and
+    leaves no host or segment-specific branch in the consumer.
+    """
+
+    raw = _decode_json_value(value)
+    if not isinstance(raw, dict):
+        return None
+    if isinstance(raw.get("rings"), dict):
+        raw = raw["rings"]
+    if not any(key in raw for key in _SPECIAL_RING_TARGET_KEYS):
+        return None
+    normalized: dict[str, dict[str, Any]] = {}
+    for lane, target_key in _SPECIAL_RING_TARGET_KEYS.items():
+        lane_value = _normalize_special_ring_lane(raw.get(lane, []))
+        if lane_value is None:
+            return None
+        normalized[target_key] = lane_value
+    return normalized
+
+
+def _remove_instance_aliases(mapping: dict[str, Any], uid: str) -> None:
+    base_uid = str(uid).split("@", 1)[0]
+    for current_uid in list(mapping):
+        if str(current_uid).split("@", 1)[0] == base_uid:
+            mapping.pop(current_uid, None)
+
+
+def _set_instance_lane(merged: dict[str, Any], key: str, uid: str, value: object) -> None:
+    current = merged.get(key)
+    next_map = dict(current) if isinstance(current, dict) else {}
+    _remove_instance_aliases(next_map, uid)
+    next_map[str(uid)] = value
+    merged[key] = next_map
+
+
+def _special_ring_instance_entries(value: object) -> dict[str, object] | None:
+    raw = _decode_json_value(value)
+    if not isinstance(raw, dict):
+        return None
+    if isinstance(raw.get("instances"), dict):
+        return {str(uid): item for uid, item in raw["instances"].items()}
+    if any(key in raw for key in _SPECIAL_RING_TARGET_KEYS):
+        return {"": raw}
+    return {str(uid): item for uid, item in raw.items()}
+
+
+def normalize_runtime_override_payload(
+    runtime: dict[str, Any],
+    *,
+    instance_uid: str | None = None,
+) -> tuple[dict[str, Any], list[str]]:
+    """Normalize supported compatibility envelopes before generic apply.
+
+    Returns the translated payload and compatibility keys that could not be
+    interpreted.  Callers can reject a revision containing those keys rather
+    than acknowledging it as applied while silently dropping work.
+    """
+
+    normalized = dict(runtime) if isinstance(runtime, dict) else {}
+    if _SPECIAL_RING_RUNTIME_KEY not in normalized:
+        return normalized, []
+    special = normalized.pop(_SPECIAL_RING_RUNTIME_KEY)
+    if instance_uid:
+        lanes = normalize_segment_special_rings(special)
+        if lanes is None:
+            normalized[_SPECIAL_RING_RUNTIME_KEY] = special
+            return normalized, [_SPECIAL_RING_RUNTIME_KEY]
+        for key, value in lanes.items():
+            _set_instance_lane(normalized, key, str(instance_uid), value)
+        return normalized, []
+
+    direct = normalize_segment_special_rings(special)
+    if direct is not None:
+        normalized["segment_priority"] = list(direct["segment_priority_instance_settings"].get("segments", []))
+        normalized["segment_super_priority"] = list(direct["segment_super_priority_instance_settings"].get("segments", []))
+        return normalized, []
+
+    entries = _special_ring_instance_entries(special)
+    if entries is None:
+        normalized[_SPECIAL_RING_RUNTIME_KEY] = special
+        return normalized, [_SPECIAL_RING_RUNTIME_KEY]
+    for uid, value in entries.items():
+        clean_uid = str(uid or "").strip()
+        lanes = normalize_segment_special_rings(value)
+        if not clean_uid or lanes is None:
+            normalized[_SPECIAL_RING_RUNTIME_KEY] = special
+            return normalized, [_SPECIAL_RING_RUNTIME_KEY]
+        for key, lane_value in lanes.items():
+            _set_instance_lane(normalized, key, clean_uid, lane_value)
+    return normalized, []
 
 
 def instance_desired_states(runtime: dict[str, Any], installs: list[object]) -> dict[str, dict[str, Any]]:
@@ -129,13 +342,37 @@ def merge_instance_desired_states(runtime: dict[str, Any], states: object) -> di
         overrides = raw_state.get("runtime_overrides", raw_state)
         if not isinstance(overrides, dict):
             continue
+        # A canonical row is authoritative for this UID. Clear aliases and
+        # stale lane values before applying its current envelope so a cleared
+        # special ring cannot remain effective after the next poll.
+        scoped_keys = set(_INSTANCE_RUNTIME_KEYS) | set(_SPECIAL_RING_TARGET_KEYS.values())
+        for key in scoped_keys:
+            current = merged.get(key)
+            if not isinstance(current, dict):
+                continue
+            next_map = dict(current)
+            _remove_instance_aliases(next_map, uid)
+            if next_map:
+                merged[key] = next_map
+            else:
+                merged.pop(key, None)
         for key, value in overrides.items():
+            if key == _SPECIAL_RING_RUNTIME_KEY:
+                lanes = normalize_segment_special_rings(value)
+                if lanes is None:
+                    # Preserve malformed data for generic rejection/logging;
+                    # do not claim a revision whose lane payload was dropped.
+                    invalid = merged.get(_SPECIAL_RING_RUNTIME_KEY)
+                    invalid_map = dict(invalid) if isinstance(invalid, dict) else {}
+                    invalid_map[uid] = value
+                    merged[_SPECIAL_RING_RUNTIME_KEY] = invalid_map
+                    continue
+                for lane_key, lane_value in lanes.items():
+                    _set_instance_lane(merged, lane_key, uid, lane_value)
+                continue
             if key not in _INSTANCE_RUNTIME_KEYS:
                 continue
-            current = merged.get(key)
-            next_map = dict(current) if isinstance(current, dict) else {}
-            next_map[uid] = value
-            merged[key] = next_map
+            _set_instance_lane(merged, key, uid, value)
     return merged
 
 
@@ -249,15 +486,16 @@ def consume_poll_trigger(cfg: AgentConfig) -> bool:
 
 
 def apply_remote_overrides(base_cfg: AgentConfig, overrides: dict[str, Any]) -> dict[str, Any]:
+    normalized, compatibility_unsupported = normalize_runtime_override_payload(overrides)
     cfg2, applied, unsupported, blocked = apply_runtime_overrides(
         base_cfg,
-        overrides,
+        normalized,
         allowed_keys=runtime_remote_allowed_keys(),
     )
     return {
         "config": cfg2,
         "applied_keys": applied,
-        "unsupported_keys": unsupported,
+        "unsupported_keys": sorted(set([*unsupported, *compatibility_unsupported])),
         "blocked_keys": blocked,
     }
 
@@ -319,7 +557,34 @@ def acknowledge_desired_runtime_states(
     failures: list[str] = []
 
     def send(scope: str, scope_key: str, revision: int, runtime: dict[str, Any]) -> None:
-        content_sha256 = overrides_fingerprint(runtime)
+        normalized_runtime, compatibility_unsupported = normalize_runtime_override_payload(
+            runtime,
+            instance_uid=scope_key if scope == "instance" else None,
+        )
+        unknown_keys = sorted(set(normalized_runtime) - runtime_supported_keys())
+        blocked_keys = sorted(set(normalized_runtime) - runtime_remote_allowed_keys())
+        rejected_keys = sorted(set([*compatibility_unsupported, *unknown_keys, *blocked_keys]))
+        if rejected_keys:
+            result = acknowledge_runtime_state(
+                cfg,
+                scope=scope,
+                scope_key=scope_key,
+                revision=revision,
+                status="rejected",
+                error="unsupported runtime keys: " + ",".join(rejected_keys),
+                observed={
+                    "runtime_fingerprint": runtime_fingerprint,
+                    "unsupported_keys": rejected_keys,
+                },
+            )
+            failures.append(
+                f"{scope}:{scope_key}:{revision}:rejected:{','.join(rejected_keys)}"
+                if str(result.get("status", "")).lower() == "ok"
+                else f"{scope}:{scope_key}:{revision}:{result.get('reason', 'rejected')}"
+            )
+            return
+
+        content_sha256 = overrides_fingerprint(normalized_runtime)
         if scope == "host":
             previous = acknowledged.get("host")
         else:
@@ -342,6 +607,7 @@ def acknowledge_desired_runtime_states(
             observed={
                 "runtime_fingerprint": runtime_fingerprint,
                 "content_sha256": content_sha256,
+                "effective_runtime": normalized_runtime,
             },
         )
         if str(result.get("status", "")).lower() != "ok":
@@ -381,3 +647,59 @@ def acknowledge_desired_runtime_states(
                 continue
             send("instance", str(uid), revision, runtime)
     return failures
+
+
+def canonical_profile_from_runtime_response(response: object) -> str | None:
+    """Read the MCC-selected workload profile without binding to a host."""
+
+    def value_from(raw: object) -> str | None:
+        if isinstance(raw, str):
+            candidate = raw.strip().lower()
+            return candidate if candidate in _PROFILE_NAMES else None
+        if not isinstance(raw, dict):
+            return None
+        for key in (
+            "desired_profile",
+            "selected_profile",
+            "profile_name",
+            "workload_profile",
+            "profile",
+        ):
+            value = raw.get(key)
+            if isinstance(value, dict):
+                nested = value_from(value)
+                if nested:
+                    return nested
+            elif isinstance(value, str):
+                candidate = value.strip().lower()
+                if candidate in _PROFILE_NAMES:
+                    return candidate
+        return None
+
+    if not isinstance(response, dict):
+        return None
+    # Desired state is authoritative when both desired and observed snapshots
+    # are present. Keep generic profile fields after explicit desired-state
+    # envelopes because MCC may also include a stale observed profile at the
+    # response top level.
+    for key in ("desired_profile", "selected_profile", "desired_state", "desired", "profile_name"):
+        found = value_from(response.get(key))
+        if found:
+            return found
+    for key in ("observed_profile", "observed_state", "observed", "host_state"):
+        found = value_from(response.get(key))
+        if found:
+            return found
+    return value_from(response)
+
+
+def desired_profile_from_runtime_response(response: object) -> str | None:
+    """Return a profile explicitly supplied by MCC desired state, if any."""
+
+    if not isinstance(response, dict):
+        return None
+    desired: dict[str, object] = {}
+    for key in ("desired_profile", "selected_profile", "profile_name", "desired_state", "desired"):
+        if key in response:
+            desired[key] = response[key]
+    return canonical_profile_from_runtime_response(desired)
