@@ -504,6 +504,7 @@ def push_runtime_overrides(
     desired_state_revision: int | None = None,
     instance_desired_states: dict[str, dict[str, Any]] | None = None,
     instance_desired_state_revisions: dict[str, int] | None = None,
+    runtime_change_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     base = _api_base(cfg)
     if not base:
@@ -530,6 +531,8 @@ def push_runtime_overrides(
             payload["instance_desired_states"] = instance_desired_states
         if isinstance(instance_desired_state_revisions, dict):
             payload["instance_desired_state_revisions"] = instance_desired_state_revisions
+        if isinstance(runtime_change_metadata, dict):
+            payload["runtime_change_metadata"] = runtime_change_metadata
     url = base + "/api/v1/agent/runtime-overrides"
     try:
         out = _post_json(url, payload, cfg.mcc_token, timeout_sec=12)

@@ -1,3 +1,15 @@
+## 1.5.74 - 2026-10-10
+
+- Make runtime synchronization bidirectional with durable per-field and
+  per-instance `updated_at`/logical revision metadata and explicit tombstones.
+  Local MCD edits and newer MCC edits now resolve deterministically across
+  offline periods and daemon restarts; an absent key in a stale snapshot is
+  never treated as a deletion.
+- Recover instance-scoped runtime rows from the durable baseline before the
+  first post-update poll, queue one accepted local reconciliation, and retain
+  the metadata through failover/restart so the same row cannot be flattened or
+  pushed twice.
+
 ## 1.5.73 - 2026-10-10
 
 - Queue a local runtime-file delta durably before MCC polling or remote apply;

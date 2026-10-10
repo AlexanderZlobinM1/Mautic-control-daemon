@@ -222,6 +222,817 @@ _CAMPAIGN_TRIGGER_FUTURE_WAKE_EARLY_SEC = 1.0
 _CAMPAIGN_NATIVE_FALLBACK_TIMEOUT_SEC = 30 * 60
 _CAMPAIGN_EMAIL_COUNTER_RECONCILE_MIN_INTERVAL_SEC = 6 * 3600
 _LOCAL_RUNTIME_PUSH_PENDING_KEY = "local_runtime_push_pending"
+_LOCAL_RUNTIME_ACCEPTED_KEY = "local_runtime_accepted"
+_LOCAL_RUNTIME_METADATA_KEY = "local_runtime_metadata"
+_MCC_RUNTIME_METADATA_KEY = "mcc_runtime_metadata"
+_RUNTIME_METADATA_SCHEMA = "mcd-runtime-sync-metadata-v1"
+
+
+def _is_instance_runtime_map_key(key: object) -> bool:
+    text = str(key or "").strip()
+    return text.endswith("_instance_settings") or text in {
+        "segment_recurring_priority_v1",
+        "segment_special_rings_v1",
+    }
+
+
+def _matching_instance_runtime_entry(entries: Mapping[str, Any], uid: object) -> str | None:
+    target = str(uid or "").strip()
+    if not target:
+        return None
+    if target in entries:
+        return target
+    base = target.split("@", 1)[0]
+    matches = [str(key) for key in entries if str(key).split("@", 1)[0] == base]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _merge_missing_instance_runtime_values(
+    current_runtime: Mapping[str, Any],
+    fallback_runtime: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Restore instance rows lost by an update without overriding new local edits."""
+    merged = deepcopy(dict(current_runtime))
+    for key, raw_fallback in fallback_runtime.items():
+        if not _is_instance_runtime_map_key(key) or not isinstance(raw_fallback, dict):
+            continue
+        raw_current = merged.get(key)
+        if not isinstance(raw_current, dict):
+            merged[str(key)] = deepcopy(raw_fallback)
+            continue
+        next_entries = dict(raw_current)
+        for uid, value in raw_fallback.items():
+            if _matching_instance_runtime_entry(next_entries, uid) is None:
+                next_entries[str(uid)] = deepcopy(value)
+        merged[str(key)] = next_entries
+    return merged
+
+
+def _missing_instance_runtime_values(
+    local_runtime: Mapping[str, Any],
+    remote_runtime: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Return local instance rows not represented by the remote snapshot."""
+    missing: dict[str, dict[str, Any]] = {}
+    for key, raw_local in local_runtime.items():
+        if not _is_instance_runtime_map_key(key) or not isinstance(raw_local, dict):
+            continue
+        raw_remote = remote_runtime.get(key)
+        remote_entries = raw_remote if isinstance(raw_remote, dict) else {}
+        for uid, value in raw_local.items():
+            if _matching_instance_runtime_entry(remote_entries, uid) is None:
+                missing.setdefault(str(key), {})[str(uid)] = deepcopy(value)
+    return missing
+
+
+def _remove_instance_runtime_values(
+    runtime: Mapping[str, Any],
+    rows: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Remove only selected instance rows from a local-runtime comparison baseline."""
+    previous = deepcopy(dict(runtime))
+    for key, raw_rows in rows.items():
+        if not isinstance(raw_rows, dict):
+            continue
+        entries = previous.get(key)
+        if not isinstance(entries, dict):
+            continue
+        next_entries = dict(entries)
+        for uid in raw_rows:
+            target = str(uid or "").strip()
+            base = target.split("@", 1)[0]
+            for entry_uid in list(next_entries):
+                if str(entry_uid) == target or str(entry_uid).split("@", 1)[0] == base:
+                    next_entries.pop(entry_uid, None)
+        if next_entries:
+            previous[str(key)] = next_entries
+        else:
+            previous.pop(str(key), None)
+    return previous
+
+
+def _runtime_metadata_empty() -> dict[str, Any]:
+    return {
+        "schema": _RUNTIME_METADATA_SCHEMA,
+        "clock": 0,
+        "host": {},
+        "instances": {},
+    }
+
+
+def _runtime_metadata_number(value: object, default: float = 0.0) -> float:
+    if isinstance(value, bool):
+        return float(default)
+    if isinstance(value, str):
+        text = value.strip()
+        if text:
+            try:
+                return max(0.0, datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp())
+            except ValueError:
+                pass
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    return number if number >= 0 else float(default)
+
+
+def _runtime_metadata_revision(value: object, default: int = 0) -> int:
+    if isinstance(value, bool):
+        return int(default)
+    try:
+        revision = int(value)
+    except (TypeError, ValueError):
+        return int(default)
+    return revision if revision >= 0 else int(default)
+
+
+def _runtime_metadata_stamp(
+    raw: object = None,
+    *,
+    source: str = "mcd",
+    updated_at: object = 0.0,
+    revision: object = 0,
+    event_id: object = "",
+    tombstone: bool = False,
+) -> dict[str, Any]:
+    item = raw if isinstance(raw, dict) else {}
+    selected_source = str(item.get("source", source) or source).strip().lower()
+    if selected_source not in {"mcd", "mcc"}:
+        selected_source = str(source or "mcd").strip().lower()
+        if selected_source not in {"mcd", "mcc"}:
+            selected_source = "mcd"
+    selected_event_id = str(item.get("event_id", event_id) or event_id or "").strip()
+    return {
+        "updated_at": _runtime_metadata_number(item.get("updated_at", updated_at)),
+        "revision": _runtime_metadata_revision(item.get("revision", revision)),
+        "source": selected_source,
+        "event_id": selected_event_id,
+        "tombstone": bool(item.get("tombstone", tombstone)),
+    }
+
+
+def _runtime_metadata_normalize(raw: object) -> dict[str, Any]:
+    """Normalize durable field metadata without trusting file mtimes."""
+    out = _runtime_metadata_empty()
+    if not isinstance(raw, dict):
+        return out
+    out["clock"] = _runtime_metadata_revision(raw.get("clock"), 0)
+    host = raw.get("host")
+    if isinstance(host, dict):
+        for key, stamp in host.items():
+            out["host"][str(key)] = _runtime_metadata_stamp(stamp)
+    instances = raw.get("instances")
+    if isinstance(instances, dict):
+        for uid, values in instances.items():
+            if not isinstance(values, dict):
+                continue
+            next_values: dict[str, Any] = {}
+            for key, stamp in values.items():
+                next_values[str(key)] = _runtime_metadata_stamp(stamp)
+            if next_values:
+                out["instances"][str(uid)] = next_values
+    return out
+
+
+def _runtime_metadata_uid_entry(metadata: Mapping[str, Any], uid: object) -> dict[str, Any] | None:
+    instances = metadata.get("instances")
+    if not isinstance(instances, dict):
+        return None
+    target = str(uid or "").strip()
+    if not target:
+        return None
+    exact = instances.get(target)
+    if isinstance(exact, dict):
+        return exact
+    base = target.split("@", 1)[0]
+    matches = [value for key, value in instances.items() if str(key).split("@", 1)[0] == base and isinstance(value, dict)]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _runtime_metadata_get(
+    metadata: Mapping[str, Any],
+    scope: str,
+    key: str,
+    uid: str = "",
+) -> dict[str, Any] | None:
+    normalized = _runtime_metadata_normalize(metadata)
+    if scope == "host":
+        value = normalized["host"].get(str(key))
+        return value if isinstance(value, dict) else None
+    values = _runtime_metadata_uid_entry(normalized, uid)
+    if not isinstance(values, dict):
+        return None
+    value = values.get(str(key))
+    return value if isinstance(value, dict) else None
+
+
+def _runtime_metadata_set(
+    metadata: dict[str, Any],
+    scope: str,
+    key: str,
+    stamp: Mapping[str, Any],
+    uid: str = "",
+) -> None:
+    if scope == "host":
+        metadata.setdefault("host", {})[str(key)] = dict(stamp)
+        return
+    instances = metadata.setdefault("instances", {})
+    uid_text = str(uid or "").strip()
+    if not uid_text:
+        return
+    values = instances.setdefault(uid_text, {})
+    values[str(key)] = dict(stamp)
+
+
+def _runtime_snapshot_fields(runtime: Mapping[str, Any]) -> dict[tuple[str, str, str], Any]:
+    """Flatten runtime into host-field and instance-field entries."""
+    fields: dict[tuple[str, str, str], Any] = {}
+    for raw_key, value in runtime.items():
+        key = str(raw_key)
+        if _is_instance_runtime_map_key(key) and isinstance(value, dict):
+            for uid, row in value.items():
+                fields[("instance", key, str(uid))] = deepcopy(row)
+        elif not _is_instance_runtime_map_key(key):
+            fields[("host", key, "")] = deepcopy(value)
+    return fields
+
+
+def _runtime_snapshot_from_fields(fields: Mapping[tuple[str, str, str], Any]) -> dict[str, Any]:
+    runtime: dict[str, Any] = {}
+    for (scope, key, uid), value in fields.items():
+        if scope == "host":
+            runtime[key] = deepcopy(value)
+            continue
+        entries = runtime.setdefault(key, {})
+        if isinstance(entries, dict):
+            entries[str(uid)] = deepcopy(value)
+    return runtime
+
+
+def _merge_missing_runtime_values(
+    current_runtime: Mapping[str, Any],
+    fallback_runtime: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Fill only absent fields/instance rows from an accepted durable snapshot."""
+    merged = deepcopy(dict(current_runtime))
+    for key, value in fallback_runtime.items():
+        text_key = str(key)
+        if _is_instance_runtime_map_key(text_key) and isinstance(value, dict):
+            current = merged.get(text_key)
+            if not isinstance(current, dict):
+                merged[text_key] = deepcopy(value)
+                continue
+            next_entries = dict(current)
+            for uid, row in value.items():
+                if _matching_instance_runtime_entry(next_entries, uid) is None:
+                    next_entries[str(uid)] = deepcopy(row)
+            merged[text_key] = next_entries
+        elif text_key not in merged:
+            merged[text_key] = deepcopy(value)
+    return merged
+
+
+def _runtime_metadata_for_snapshot(
+    metadata: Mapping[str, Any],
+    runtime: Mapping[str, Any],
+    *,
+    source: str,
+    updated_at: object = 0.0,
+    revision: object = 0,
+) -> dict[str, Any]:
+    """Add deterministic bootstrap stamps for fields lacking saved metadata."""
+    out = _runtime_metadata_normalize(metadata)
+    fields = _runtime_snapshot_fields(runtime)
+    for scope, key, uid in fields:
+        if _runtime_metadata_get(out, scope, key, uid) is not None:
+            continue
+        stamp = _runtime_metadata_stamp(
+            source=source,
+            updated_at=updated_at,
+            revision=revision,
+            event_id=f"bootstrap:{source}:{scope}:{uid}:{key}",
+        )
+        _runtime_metadata_set(out, scope, key, stamp, uid)
+    return out
+
+
+def _runtime_metadata_max_updated_at(metadata: Mapping[str, Any]) -> float:
+    normalized = _runtime_metadata_normalize(metadata)
+    values: list[float] = []
+    for stamp in normalized["host"].values():
+        if isinstance(stamp, dict):
+            values.append(_runtime_metadata_number(stamp.get("updated_at")))
+    for rows in normalized["instances"].values():
+        if isinstance(rows, dict):
+            for stamp in rows.values():
+                if isinstance(stamp, dict):
+                    values.append(_runtime_metadata_number(stamp.get("updated_at")))
+    return max(values, default=0.0)
+
+
+def _runtime_metadata_paths(metadata: Mapping[str, Any]) -> set[tuple[str, str, str]]:
+    normalized = _runtime_metadata_normalize(metadata)
+    paths: set[tuple[str, str, str]] = {
+        ("host", str(key), "") for key in normalized["host"]
+    }
+    for uid, values in normalized["instances"].items():
+        if isinstance(values, dict):
+            paths.update(("instance", str(key), str(uid)) for key in values)
+    return paths
+
+
+def _runtime_logical_path(path: tuple[str, str, str]) -> tuple[str, str, str]:
+    scope, key, uid = path
+    return scope, key, uid.split("@", 1)[0] if scope == "instance" else ""
+
+
+def _record_local_runtime_changes(
+    metadata: Mapping[str, Any],
+    previous_runtime: Mapping[str, Any],
+    current_runtime: Mapping[str, Any],
+    *,
+    event_ts: object = None,
+) -> dict[str, Any]:
+    """Record one local event for every changed host/instance field."""
+    out = _runtime_metadata_for_snapshot(metadata, previous_runtime, source="mcd")
+    before = _runtime_snapshot_fields(previous_runtime)
+    after = _runtime_snapshot_fields(current_runtime)
+    changed = [path for path in sorted(set(before) | set(after)) if before.get(path) != after.get(path) or path not in after]
+    if not changed:
+        return out
+    clock = _runtime_metadata_revision(out.get("clock"), 0) + 1
+    candidate_ts = _runtime_metadata_number(event_ts, 0.0)
+    if candidate_ts <= 0:
+        candidate_ts = time.time()
+    candidate_ts = max(candidate_ts, _runtime_metadata_max_updated_at(out) + 0.000001)
+    stamp = _runtime_metadata_stamp(
+        source="mcd",
+        updated_at=candidate_ts,
+        revision=clock,
+        event_id=f"mcd:{clock}",
+    )
+    out["clock"] = clock
+    for scope, key, uid in changed:
+        current_present = (scope, key, uid) in after
+        _runtime_metadata_set(
+            out,
+            scope,
+            key,
+            {**stamp, "tombstone": not current_present},
+            uid,
+        )
+    return out
+
+
+def _runtime_stamp_order(stamp: Mapping[str, Any]) -> tuple[Any, ...]:
+    """Compare saved event stamps; MCC wins an exact deterministic tie."""
+    updated_at = _runtime_metadata_number(stamp.get("updated_at"))
+    revision = _runtime_metadata_revision(stamp.get("revision"), 0)
+    source = str(stamp.get("source", "") or "").strip().lower()
+    source_rank = 1 if source == "mcc" else 0
+    event_id = str(stamp.get("event_id", "") or "")
+    return (updated_at, revision, source_rank, event_id)
+
+
+def _runtime_stamp_wins(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+    """Return whether left is newer than right using deterministic LWW order."""
+    left_updated = _runtime_metadata_number(left.get("updated_at"))
+    right_updated = _runtime_metadata_number(right.get("updated_at"))
+    if left_updated > 0 and right_updated > 0:
+        return _runtime_stamp_order(left) > _runtime_stamp_order(right)
+    left_revision = _runtime_metadata_revision(left.get("revision"), 0)
+    right_revision = _runtime_metadata_revision(right.get("revision"), 0)
+    if left_revision != right_revision:
+        return left_revision > right_revision
+    return _runtime_stamp_order(left) > _runtime_stamp_order(right)
+
+
+def _resolve_runtime_snapshots(
+    local_runtime: Mapping[str, Any],
+    remote_runtime: Mapping[str, Any],
+    local_metadata: Mapping[str, Any],
+    remote_metadata: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Resolve host and instance fields with durable last-write-wins metadata."""
+    local_fields = _runtime_snapshot_fields(local_runtime)
+    remote_fields = _runtime_snapshot_fields(remote_runtime)
+    local_meta = _runtime_metadata_for_snapshot(local_metadata, local_runtime, source="mcd")
+    remote_meta = _runtime_metadata_for_snapshot(remote_metadata, remote_runtime, source="mcc")
+    local_groups: dict[tuple[str, str, str], list[tuple[str, str, str]]] = {}
+    remote_groups: dict[tuple[str, str, str], list[tuple[str, str, str]]] = {}
+    for path in local_fields:
+        local_groups.setdefault(_runtime_logical_path(path), []).append(path)
+    for path in remote_fields:
+        remote_groups.setdefault(_runtime_logical_path(path), []).append(path)
+    metadata_paths = _runtime_metadata_paths(local_meta) | _runtime_metadata_paths(remote_meta)
+    all_logical = (
+        set(local_groups)
+        | set(remote_groups)
+        | {_runtime_logical_path(path) for path in metadata_paths}
+    )
+    for scope, key, uid in sorted(all_logical):
+        local_paths = local_groups.get((scope, key, uid), [])
+        remote_paths = remote_groups.get((scope, key, uid), [])
+        if not local_paths and not remote_paths:
+            continue
+        # Base and host-qualified UIDs describe the same instance only when
+        # the alias is unambiguous. Keep multiple qualified rows separate.
+        if len(local_paths) > 1 or len(remote_paths) > 1:
+            continue
+        local_path = local_paths[0] if local_paths else None
+        remote_path = remote_paths[0] if remote_paths else None
+        lookup_uid = (local_path or remote_path or (scope, key, uid))[2]
+        if remote_path is None and _runtime_metadata_get(remote_meta, scope, key, lookup_uid) is None:
+            _runtime_metadata_set(
+                remote_meta,
+                scope,
+                key,
+                _runtime_metadata_stamp(source="mcc", event_id=f"remote:{scope}:{lookup_uid}:{key}"),
+                lookup_uid,
+            )
+    resolved: dict[tuple[str, str, str], Any] = {}
+    resolved_meta = _runtime_metadata_empty()
+    local_wins: list[tuple[str, str, str]] = []
+    remote_wins: list[tuple[str, str, str]] = []
+    local_push: list[tuple[str, str, str]] = []
+    for logical_path in sorted(all_logical):
+        scope, key, logical_uid = logical_path
+        local_paths = local_groups.get(logical_path, [])
+        remote_paths = remote_groups.get(logical_path, [])
+        if len(local_paths) > 1 or len(remote_paths) > 1:
+            continue
+        local_path = local_paths[0] if local_paths else None
+        remote_path = remote_paths[0] if remote_paths else None
+        local_present = local_path is not None
+        remote_present = remote_path is not None
+        local_uid = local_path[2] if local_path else logical_uid
+        remote_uid = remote_path[2] if remote_path else logical_uid
+        local_stamp = _runtime_metadata_get(local_meta, scope, key, local_uid)
+        remote_stamp = _runtime_metadata_get(remote_meta, scope, key, remote_uid)
+        if local_present and not remote_present and not (remote_stamp and remote_stamp.get("tombstone")):
+            winner = "local"
+        elif remote_present and not local_present and not (local_stamp and local_stamp.get("tombstone")):
+            winner = "remote"
+        else:
+            local_stamp = local_stamp or _runtime_metadata_stamp(source="mcd", event_id=f"local:{scope}:{uid}:{key}")
+            remote_stamp = remote_stamp or _runtime_metadata_stamp(source="mcc", event_id=f"remote:{scope}:{uid}:{key}")
+            winner = "remote" if _runtime_stamp_wins(remote_stamp, local_stamp) else "local"
+        stamp = remote_stamp if winner == "remote" else local_stamp
+        if stamp is None:
+            stamp = _runtime_metadata_stamp(source=winner)
+        selected_path = remote_path if winner == "remote" else local_path
+        selected_uid = selected_path[2] if selected_path is not None else (remote_uid if winner == "remote" else local_uid)
+        _runtime_metadata_set(resolved_meta, scope, key, stamp, selected_uid)
+        if winner == "remote":
+            remote_wins.append(selected_path or (scope, key, selected_uid))
+            if remote_present:
+                assert remote_path is not None
+                resolved[remote_path] = deepcopy(remote_fields[remote_path])
+        else:
+            local_wins.append(selected_path or (scope, key, selected_uid))
+            if local_present:
+                assert local_path is not None
+                resolved[local_path] = deepcopy(local_fields[local_path])
+                local_event = bool(
+                    local_stamp
+                    and (
+                        _runtime_metadata_number(local_stamp.get("updated_at")) > 0
+                        or not str(local_stamp.get("event_id", "")).startswith("bootstrap:")
+                    )
+                )
+                if local_event and (
+                    not remote_present or remote_fields.get(remote_path) != local_fields[local_path]
+                ):
+                    local_push.append(local_path)
+            elif local_stamp and local_stamp.get("tombstone") and remote_present:
+                if _runtime_metadata_number(local_stamp.get("updated_at")) > 0 or not str(
+                    local_stamp.get("event_id", "")
+                ).startswith("bootstrap:"):
+                    local_push.append(local_path or (scope, key, local_uid))
+    resolved_meta["clock"] = max(
+        _runtime_metadata_revision(local_meta.get("clock"), 0),
+        _runtime_metadata_revision(remote_meta.get("clock"), 0),
+    )
+    return {
+        "runtime": _runtime_snapshot_from_fields(resolved),
+        "metadata": resolved_meta,
+        "local_wins": local_wins,
+        "remote_wins": remote_wins,
+        "local_push": local_push,
+        "local_tombstones": [path for path in local_wins if path not in resolved],
+        "remote_tombstones": [path for path in remote_wins if path not in resolved],
+    }
+
+
+def _runtime_metadata_wire_merge(
+    metadata: dict[str, Any],
+    raw: object,
+    *,
+    default_source: str = "mcc",
+    default_revision: object = 0,
+    default_updated_at: object = 0.0,
+) -> None:
+    """Accept the versioned host/instance metadata envelope when MCC returns it."""
+    if not isinstance(raw, dict):
+        return
+    host = raw.get("host")
+    if isinstance(host, dict):
+        for key, raw_stamp in host.items():
+            _runtime_metadata_set(
+                metadata,
+                "host",
+                str(key),
+                _runtime_metadata_stamp(
+                    raw_stamp,
+                    source=default_source,
+                    revision=default_revision,
+                    updated_at=default_updated_at,
+                ),
+            )
+    instances = raw.get("instances")
+    if isinstance(instances, dict):
+        for uid, values in instances.items():
+            if not isinstance(values, dict):
+                continue
+            for key, raw_stamp in values.items():
+                _runtime_metadata_set(
+                    metadata,
+                    "instance",
+                    str(key),
+                    _runtime_metadata_stamp(
+                        raw_stamp,
+                        source=default_source,
+                        revision=default_revision,
+                        updated_at=default_updated_at,
+                    ),
+                    str(uid),
+                )
+    tombstones = raw.get("tombstones")
+    if isinstance(tombstones, list):
+        for item in tombstones:
+            if not isinstance(item, dict):
+                continue
+            scope = "instance" if str(item.get("scope", "host")) == "instance" else "host"
+            _runtime_metadata_set(
+                metadata,
+                scope,
+                str(item.get("key", "")),
+                _runtime_metadata_stamp(
+                    item,
+                    source=default_source,
+                    revision=default_revision,
+                    updated_at=default_updated_at,
+                    tombstone=True,
+                ),
+                str(item.get("uid", "")),
+            )
+
+
+def _runtime_metadata_from_response(
+    response: Mapping[str, Any],
+    remote_runtime: Mapping[str, Any],
+    known_local_runtime: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build remote field stamps; old responses get revision-only fallback stamps."""
+    metadata = _runtime_metadata_empty()
+    desired = response.get("desired_state")
+    host_revision = desired.get("revision") if isinstance(desired, dict) else 0
+    host_updated_at = desired.get("updated_at") if isinstance(desired, dict) else response.get("updated_at")
+    raw_metadata = response.get("runtime_metadata")
+    if raw_metadata is None:
+        raw_metadata = response.get("field_metadata", response.get("runtime_overrides_metadata"))
+    _runtime_metadata_wire_merge(
+        metadata,
+        raw_metadata,
+        default_source="mcc",
+        default_revision=host_revision,
+        default_updated_at=host_updated_at,
+    )
+    remote_fields = _runtime_snapshot_fields(remote_runtime)
+    for scope, key, uid in remote_fields:
+        if _runtime_metadata_get(metadata, scope, key, uid) is None:
+            row = {}
+            states = response.get("instance_desired_states")
+            if scope == "instance" and isinstance(states, dict):
+                state = states.get(uid)
+                if not isinstance(state, dict):
+                    match = _matching_instance_runtime_entry(states, uid)
+                    state = states.get(match) if match else None
+                row = state if isinstance(state, dict) else {}
+            row_revision = row.get("revision", host_revision) if isinstance(row, dict) else host_revision
+            row_updated = row.get("updated_at", host_updated_at) if isinstance(row, dict) else host_updated_at
+            _runtime_metadata_set(
+                metadata,
+                scope,
+                key,
+                _runtime_metadata_stamp(
+                    source="mcc",
+                    revision=row_revision,
+                    updated_at=row_updated,
+                    event_id=f"mcc:{scope}:{uid}:{key}:{row_revision}",
+                ),
+                uid,
+            )
+    # A present instance row with a revision and an explicit empty
+    # runtime_overrides envelope is an intentional field-level clear. A
+    # missing row or a missing key in an old snapshot is not a deletion.
+    states = response.get("instance_desired_states")
+    if isinstance(states, dict):
+        for raw_uid, raw_state in states.items():
+            if not isinstance(raw_state, dict) or "runtime_overrides" not in raw_state:
+                continue
+            uid = str(raw_uid)
+            row_revision = raw_state.get("revision", host_revision)
+            row_updated = raw_state.get("updated_at", host_updated_at)
+            known_fields = _runtime_snapshot_fields(known_local_runtime)
+            for scope, key, field_uid in known_fields:
+                if scope != "instance" or field_uid.split("@", 1)[0] != uid.split("@", 1)[0]:
+                    continue
+                state_overrides = raw_state.get("runtime_overrides")
+                if isinstance(state_overrides, dict) and key in state_overrides:
+                    continue
+                if _runtime_metadata_get(metadata, "instance", key, field_uid) is None:
+                    _runtime_metadata_set(
+                        metadata,
+                        "instance",
+                        key,
+                        _runtime_metadata_stamp(
+                            source="mcc",
+                            revision=row_revision,
+                            updated_at=row_updated,
+                            event_id=f"mcc:tombstone:{uid}:{key}:{row_revision}",
+                            tombstone=True,
+                        ),
+                        field_uid,
+                    )
+    return metadata
+
+
+def _runtime_metadata_has_accepted(store: object) -> bool:
+    try:
+        raw = store.get_runtime_sync(_LOCAL_RUNTIME_ACCEPTED_KEY)
+    except Exception:
+        return False
+    return isinstance(raw, dict) and isinstance(raw.get("runtime"), dict)
+
+
+def _accepted_runtime_response_matches(store: object, response: Mapping[str, Any]) -> bool:
+    """Recognize the exact accepted snapshot so a normal poll cannot echo it."""
+    try:
+        accepted = store.get_runtime_sync(_LOCAL_RUNTIME_ACCEPTED_KEY)
+    except Exception:
+        return False
+    if not isinstance(accepted, dict):
+        return False
+    desired = response.get("desired_state")
+    accepted_revision = accepted.get("host_revision")
+    response_revision = desired.get("revision") if isinstance(desired, dict) else None
+    if not isinstance(accepted_revision, int) or isinstance(accepted_revision, bool):
+        return False
+    if response_revision != accepted_revision:
+        return False
+    accepted_instances = accepted.get("instance_revisions")
+    if not isinstance(accepted_instances, dict):
+        return True
+    response_instances = response.get("instance_desired_states")
+    response_instances = response_instances if isinstance(response_instances, dict) else {}
+    for uid, revision in accepted_instances.items():
+        if not isinstance(revision, int) or isinstance(revision, bool):
+            return False
+        matched_uid = _matching_instance_runtime_entry(response_instances, uid)
+        if matched_uid is None:
+            return False
+        row = response_instances.get(matched_uid)
+        if not isinstance(row, dict) or row.get("revision") != revision:
+            return False
+    return True
+
+
+def _clear_local_runtime_accepted(store: object) -> None:
+    try:
+        delete = getattr(store, "delete_runtime_sync", None)
+        if callable(delete):
+            delete([_LOCAL_RUNTIME_ACCEPTED_KEY])
+    except Exception:
+        logging.warning("runtime-overrides accepted marker cleanup failed")
+
+
+def _runtime_metadata_has_remote_tombstone(
+    metadata: Mapping[str, Any],
+    key: str,
+) -> bool:
+    normalized = _runtime_metadata_normalize(metadata)
+    host_stamp = normalized["host"].get(str(key))
+    if isinstance(host_stamp, dict) and host_stamp.get("tombstone") and host_stamp.get("source") == "mcc":
+        return True
+    instances = normalized.get("instances")
+    if isinstance(instances, dict):
+        for values in instances.values():
+            stamp = values.get(str(key)) if isinstance(values, dict) else None
+            if isinstance(stamp, dict) and stamp.get("tombstone") and stamp.get("source") == "mcc":
+                return True
+    return False
+
+
+def _persist_resolved_runtime_to_config(
+    config: AgentConfig,
+    previous_runtime: Mapping[str, Any],
+    resolved_runtime: Mapping[str, Any],
+    resolved_metadata: Mapping[str, Any],
+) -> None:
+    """Persist only resolved values and explicit MCC tombstones."""
+    previous = dict(previous_runtime)
+    resolved = dict(resolved_runtime)
+    stable_keys = (_STABLE_RUNTIME_KEYS | set(previous) | set(resolved)) & _STABLE_RUNTIME_KEYS
+    updates = {
+        str(key): deepcopy(resolved[key])
+        for key in stable_keys
+        if key in resolved and previous.get(key) != resolved.get(key)
+    }
+    if updates:
+        try:
+            path, changed = upsert_runtime_values(config.config_file_path, updates)
+            if changed:
+                logging.info(
+                    "runtime-overrides resolved values persisted to config (%s): keys=%s",
+                    path,
+                    ",".join(sorted(updates)),
+                )
+        except Exception as exc:
+            logging.warning("runtime-overrides resolved persistence failed: %s", exc)
+    removals = {
+        str(key)
+        for key in stable_keys
+        if key in previous
+        and key not in resolved
+        and _runtime_metadata_has_remote_tombstone(resolved_metadata, str(key))
+    }
+    if removals:
+        try:
+            path, changed = remove_runtime_values(config.config_file_path, removals)
+            if changed:
+                logging.info(
+                    "runtime-overrides explicit MCC tombstones removed config keys (%s): keys=%s",
+                    path,
+                    ",".join(sorted(removals)),
+                )
+        except Exception as exc:
+            logging.warning("runtime-overrides explicit tombstone persistence failed: %s", exc)
+
+
+def _runtime_reconciliation_previous(
+    baseline: Mapping[str, Any],
+    current: Mapping[str, Any],
+    remote: Mapping[str, Any],
+    resolution: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Make a pending local delta for fields where local LWW won."""
+    previous = deepcopy(dict(baseline))
+    local_fields = _runtime_snapshot_fields(current)
+    remote_fields = _runtime_snapshot_fields(remote)
+    for path in resolution.get("local_push", []):
+        scope, key, uid = path
+        entries = previous.get(key) if scope == "instance" else None
+        if scope == "host":
+            previous.pop(key, None)
+            continue
+        if isinstance(entries, dict):
+            next_entries = dict(entries)
+            for entry_uid in list(next_entries):
+                if str(entry_uid) == uid or str(entry_uid).split("@", 1)[0] == uid.split("@", 1)[0]:
+                    next_entries.pop(entry_uid, None)
+            if next_entries:
+                previous[key] = next_entries
+            else:
+                previous.pop(key, None)
+    return previous
+
+
+def _persist_recovered_instance_runtime(
+    config: AgentConfig,
+    current_runtime: Mapping[str, Any],
+    recovered_runtime: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Materialize durable instance rows before the daemon classifies local edits."""
+    updates = {
+        str(key): deepcopy(value)
+        for key, value in recovered_runtime.items()
+        if _is_instance_runtime_map_key(key) and current_runtime.get(key) != value
+    }
+    if not updates:
+        return dict(recovered_runtime)
+    try:
+        path, changed = upsert_runtime_values(config.config_file_path, updates)
+        if changed:
+            logging.warning(
+                "runtime-overrides restored missing instance rows from durable baseline (%s): keys=%s",
+                path,
+                ",".join(sorted(updates)),
+            )
+    except Exception as exc:
+        logging.warning("runtime-overrides instance-row recovery failed: %s", exc)
+    return dict(recovered_runtime)
 
 
 def _read_local_runtime_push_pending(store: object) -> dict[str, dict[str, Any]] | None:
@@ -256,18 +1067,95 @@ def _queue_local_runtime_delta(
     current = deepcopy(dict(current_local_runtime))
     baseline = store.get_runtime_sync("local_runtime")
     baseline = baseline if isinstance(baseline, dict) else {}
+    metadata_raw = store.get_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY)
+    metadata = _runtime_metadata_for_snapshot(metadata_raw, baseline, source="mcd")
     pending = _read_local_runtime_push_pending(store)
     if current == baseline:
+        store.put_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY, metadata)
         if pending is not None and pending["current"] != current:
             _clear_local_runtime_push_pending(store)
             pending = None
         return pending
+    metadata = _record_local_runtime_changes(metadata, baseline, current)
+    store.put_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY, metadata)
     previous = pending["previous"] if pending is not None else deepcopy(baseline)
     if pending is not None and pending["current"] == current:
         return pending
     next_pending = {"previous": previous, "current": current}
     store.put_runtime_sync(_LOCAL_RUNTIME_PUSH_PENDING_KEY, next_pending)
     return next_pending
+
+
+def _accepted_local_runtime_snapshot(store: object) -> dict[str, Any]:
+    try:
+        raw = store.get_runtime_sync(_LOCAL_RUNTIME_ACCEPTED_KEY)
+    except Exception:
+        return {}
+    if not isinstance(raw, dict) or not isinstance(raw.get("runtime"), dict):
+        return {}
+    return deepcopy(raw["runtime"])
+
+
+def _remote_runtime_response_is_stale(store: object, response: Mapping[str, Any]) -> bool:
+    """Do not let a post-push stale poll clear a just-accepted instance row."""
+    try:
+        accepted = store.get_runtime_sync(_LOCAL_RUNTIME_ACCEPTED_KEY)
+    except Exception:
+        return False
+    if not isinstance(accepted, dict):
+        return False
+    accepted_host_revision = accepted.get("host_revision")
+    desired_state = response.get("desired_state")
+    response_host_revision = desired_state.get("revision") if isinstance(desired_state, dict) else None
+    if (
+        isinstance(accepted_host_revision, int)
+        and not isinstance(accepted_host_revision, bool)
+    ):
+        if not isinstance(response_host_revision, int) or isinstance(response_host_revision, bool):
+            return True
+        if response_host_revision < accepted_host_revision:
+            return True
+    accepted_instances = accepted.get("instance_revisions")
+    response_instances = response.get("instance_desired_states")
+    if not isinstance(accepted_instances, dict):
+        return False
+    response_instances = response_instances if isinstance(response_instances, dict) else {}
+    for uid, accepted_revision in accepted_instances.items():
+        if not isinstance(accepted_revision, int) or isinstance(accepted_revision, bool):
+            continue
+        matched_uid = _matching_instance_runtime_entry(response_instances, uid)
+        if matched_uid is None:
+            return True
+        row = response_instances.get(matched_uid)
+        response_revision = row.get("revision") if isinstance(row, dict) else None
+        if not isinstance(response_revision, int) or isinstance(response_revision, bool):
+            return True
+        if response_revision < accepted_revision:
+            return True
+    return False
+
+
+def _queue_missing_remote_instance_runtime(
+    store: object,
+    current_local_runtime: Mapping[str, Any],
+    remote_runtime: Mapping[str, Any],
+) -> dict[str, dict[str, Any]] | None:
+    """Queue local instance rows absent from a non-stale MCC snapshot."""
+    accepted_runtime = _accepted_local_runtime_snapshot(store)
+    comparison_runtime = _merge_missing_instance_runtime_values(remote_runtime, accepted_runtime)
+    missing = _missing_instance_runtime_values(current_local_runtime, comparison_runtime)
+    if not missing:
+        return _read_local_runtime_push_pending(store)
+    baseline = store.get_runtime_sync("local_runtime")
+    baseline = baseline if isinstance(baseline, dict) else {}
+    previous = _remove_instance_runtime_values(baseline, missing)
+    pending = {
+        "previous": previous,
+        "current": deepcopy(dict(current_local_runtime)),
+    }
+    store.put_runtime_sync(_LOCAL_RUNTIME_PUSH_PENDING_KEY, pending)
+    store.put_runtime_sync("local_runtime", previous)
+    return pending
 
 
 def _sync_local_runtime_baseline_after_config_recovery(config: AgentConfig, store: object) -> str:
@@ -280,25 +1168,80 @@ def _sync_local_runtime_baseline_after_config_recovery(config: AgentConfig, stor
 
 
 def _initialize_local_runtime_baseline(config: AgentConfig, store: object) -> tuple[dict[str, Any], str]:
-    """Load the last local edit baseline without erasing a stopped daemon's delta."""
+    """Recover local instance intent before the first post-update classification."""
     current = local_runtime_overrides(config)
     pending = _read_local_runtime_push_pending(store)
     stored = store.get_runtime_sync("local_runtime")
     if pending is not None:
+        recovered = _merge_missing_instance_runtime_values(current, pending["current"])
+        _persist_recovered_instance_runtime(config, current, recovered)
         stored = pending["previous"]
         store.put_runtime_sync("local_runtime", stored)
-    elif not isinstance(stored, dict):
+        metadata = _runtime_metadata_for_snapshot(
+            store.get_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY),
+            stored,
+            source="mcd",
+        )
+        store.put_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY, metadata)
+        return dict(stored), overrides_fingerprint(stored)
+
+    if not isinstance(stored, dict):
         stored = current
         store.put_runtime_sync("local_runtime", current)
+        metadata = _runtime_metadata_for_snapshot(
+            store.get_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY),
+            current,
+            source="mcd",
+        )
+        store.put_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY, metadata)
+        return dict(stored), overrides_fingerprint(stored)
+
+    remote_runtime = store.get_runtime_sync("mcc_runtime")
+    remote_runtime = remote_runtime if isinstance(remote_runtime, dict) else {}
+    accepted_runtime = _accepted_local_runtime_snapshot(store)
+    remote_for_recovery = _merge_missing_instance_runtime_values(remote_runtime, accepted_runtime)
+
+    # A package/update may leave the mutable file without an instance row even
+    # though the durable local baseline still has it. Restore only rows that
+    # are also absent from the last known MCC/accepted snapshot; an explicit
+    # local deletion against a present remote row remains a real local delta.
+    recoverable = deepcopy(stored)
+    for key, rows in _missing_instance_runtime_values(stored, remote_for_recovery).items():
+        current_entries = current.get(key)
+        if not isinstance(current_entries, dict):
+            recoverable[str(key)] = deepcopy(stored.get(key, {}))
+            continue
+        missing_rows = {
+            str(uid): deepcopy(value)
+            for uid, value in rows.items()
+            if _matching_instance_runtime_entry(current_entries, uid) is None
+        }
+        if missing_rows:
+            existing = recoverable.get(key)
+            existing = dict(existing) if isinstance(existing, dict) else {}
+            existing.update(missing_rows)
+            recoverable[str(key)] = existing
+    recovered = _merge_missing_instance_runtime_values(current, recoverable)
+    _persist_recovered_instance_runtime(config, current, recovered)
+    current = recovered
+
+    metadata = _runtime_metadata_for_snapshot(
+        store.get_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY),
+        stored,
+        source="mcd",
+    )
+    if current != stored:
+        metadata = _record_local_runtime_changes(metadata, stored, current)
+    store.put_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY, metadata)
+
+    missing_remote = _missing_instance_runtime_values(current, remote_for_recovery)
+    if missing_remote or current != stored:
+        previous = _remove_instance_runtime_values(stored, missing_remote)
+        pending = {"previous": previous, "current": deepcopy(current)}
+        store.put_runtime_sync(_LOCAL_RUNTIME_PUSH_PENDING_KEY, pending)
+        store.put_runtime_sync("local_runtime", previous)
+        return previous, overrides_fingerprint(previous)
     return dict(stored), overrides_fingerprint(stored)
-
-
-def _is_instance_runtime_map_key(key: object) -> bool:
-    text = str(key or "").strip()
-    return text.endswith("_instance_settings") or text in {
-        "segment_recurring_priority_v1",
-        "segment_special_rings_v1",
-    }
 
 
 def _rebase_local_runtime_payload(
@@ -455,6 +1398,7 @@ def _retry_local_runtime_push_after_conflict(
     previous_local_runtime: Mapping[str, Any],
     current_local_runtime: Mapping[str, Any],
     installs: list[object],
+    runtime_metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Fetch current MCC state and retry the local delta on its new revision."""
     instance_uids = sorted(
@@ -496,6 +1440,7 @@ def _retry_local_runtime_push_after_conflict(
             latest_instance_states,
             desired_uids,
         ),
+        runtime_change_metadata=dict(runtime_metadata) if isinstance(runtime_metadata, Mapping) else None,
     )
 
 
@@ -507,6 +1452,7 @@ def _push_local_runtime_change(
     *,
     desired_revision: int | None,
     instance_revisions: Mapping[str, Any],
+    runtime_metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Push a local edit on a fresh snapshot, retrying once on conflict."""
     instance_uids = sorted(
@@ -557,6 +1503,7 @@ def _push_local_runtime_change(
         desired_state_revision=fresh_desired_revision,
         instance_desired_states=desired_instances,
         instance_desired_state_revisions=fresh_instance_revisions,
+        runtime_change_metadata=dict(runtime_metadata) if isinstance(runtime_metadata, Mapping) else None,
     )
     if str(pushed.get("status", "")).strip().lower() != "conflict":
         return pushed
@@ -565,13 +1512,20 @@ def _push_local_runtime_change(
         previous_local_runtime,
         current_local_runtime,
         installs,
+        runtime_metadata=runtime_metadata,
     )
     result = dict(rebased)
     result["_local_rebase_attempted"] = True
     return result
 
 
-def _store_desired_runtime_push_result(store: object, pushed: Mapping[str, Any]) -> bool:
+def _store_desired_runtime_push_result(
+    store: object,
+    pushed: Mapping[str, Any],
+    *,
+    accepted_runtime: Mapping[str, Any] | None = None,
+    runtime_metadata: Mapping[str, Any] | None = None,
+) -> bool:
     """Persist the accepted desired revision and its per-instance revisions."""
     if str(pushed.get("status", "")).strip().lower() != "ok":
         return False
@@ -583,7 +1537,7 @@ def _store_desired_runtime_push_result(store: object, pushed: Mapping[str, Any])
         return False
     state_for_store = dict(state)
     pushed_instances = pushed.get("instance_desired_states")
-    state_for_store["instance_revisions"] = (
+    instance_revisions = (
         {
             str(uid): int(item["revision"])
             for uid, item in pushed_instances.items()
@@ -594,7 +1548,39 @@ def _store_desired_runtime_push_result(store: object, pushed: Mapping[str, Any])
         if isinstance(pushed_instances, dict)
         else {}
     )
+    state_for_store["instance_revisions"] = instance_revisions
     store.put_runtime_sync("mcc_runtime_desired_state", state_for_store)
+    pushed_runtime = pushed.get("runtime_overrides")
+    if not isinstance(pushed_runtime, dict):
+        pushed_runtime = state.get("runtime_overrides") if isinstance(state.get("runtime_overrides"), dict) else None
+    if not isinstance(pushed_runtime, dict):
+        pushed_runtime = deepcopy(dict(accepted_runtime)) if isinstance(accepted_runtime, Mapping) else {}
+    accepted_runtime_hint = deepcopy(dict(accepted_runtime)) if isinstance(accepted_runtime, Mapping) else {}
+    accepted_snapshot = merge_instance_desired_states(pushed_runtime, pushed_instances)
+    accepted_snapshot = _merge_missing_runtime_values(accepted_snapshot, accepted_runtime_hint)
+    store.put_runtime_sync("mcc_runtime", accepted_snapshot)
+    pushed_metadata = pushed.get("runtime_metadata")
+    if not isinstance(pushed_metadata, dict):
+        pushed_metadata = pushed.get("field_metadata")
+    if not isinstance(pushed_metadata, dict):
+        pushed_metadata = runtime_metadata if isinstance(runtime_metadata, Mapping) else None
+    accepted_metadata = _runtime_metadata_for_snapshot(
+        pushed_metadata if isinstance(pushed_metadata, Mapping) else {},
+        accepted_snapshot,
+        source="mcc" if isinstance(pushed_metadata, Mapping) else "mcd",
+        revision=revision,
+    )
+    store.put_runtime_sync(_MCC_RUNTIME_METADATA_KEY, accepted_metadata)
+    store.put_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY, accepted_metadata)
+    store.put_runtime_sync(
+        _LOCAL_RUNTIME_ACCEPTED_KEY,
+        {
+            "runtime": accepted_snapshot,
+            "host_revision": int(revision),
+            "instance_revisions": instance_revisions,
+            "metadata": accepted_metadata,
+        },
+    )
     return True
 
 
@@ -5510,7 +6496,7 @@ class TaskStore:
             self.conn.execute(
                 """
                 DELETE FROM runtime_sync
-                WHERE key NOT IN ('taskstore_mysql_migrated_v1', 'local_runtime', 'local_runtime_push_pending', 'mcc_runtime')
+                WHERE key NOT IN ('taskstore_mysql_migrated_v1', 'local_runtime', 'local_runtime_push_pending', 'local_runtime_accepted', 'local_runtime_metadata', 'mcc_runtime', 'mcc_runtime_metadata')
                   AND key NOT LIKE 'logical_issues:v1:%'
                 """
             )
@@ -10858,6 +11844,12 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                 known_instance_revisions = (
                     known_instance_revisions_raw if isinstance(known_instance_revisions_raw, dict) else {}
                 )
+                push_metadata_raw = store.get_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY)
+                push_metadata = _runtime_metadata_for_snapshot(
+                    push_metadata_raw,
+                    local_runtime_to_push,
+                    source="mcd",
+                )
                 # Local edits are accepted only when based on MCC's current
                 # revision. If the revision moved, rebase the local delta on
                 # a fresh canonical snapshot instead of polling it over the
@@ -10870,9 +11862,15 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                     installs,
                     desired_revision=known_revision,
                     instance_revisions=known_instance_revisions,
+                    runtime_metadata=push_metadata,
                 )
                 p_status = str(pushed.get("status", "")).strip().lower()
-                accepted = p_status == "ok" and _store_desired_runtime_push_result(store, pushed)
+                accepted = p_status == "ok" and _store_desired_runtime_push_result(
+                    store,
+                    pushed,
+                    accepted_runtime=local_runtime_to_push,
+                    runtime_metadata=push_metadata,
+                )
                 if accepted:
                     after_push_runtime = local_runtime_overrides(config)
                     store.put_runtime_sync("local_runtime", local_runtime_to_push)
@@ -10907,6 +11905,14 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                     logging.warning("runtime-overrides local push failed: %s", pushed.get("reason", "unknown"))
         elif not (config.mcc_url and config.mcc_token):
             store.put_runtime_sync("local_runtime", local_runtime)
+            store.put_runtime_sync(
+                _LOCAL_RUNTIME_METADATA_KEY,
+                _runtime_metadata_for_snapshot(
+                    store.get_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY),
+                    local_runtime,
+                    source="mcd",
+                ),
+            )
             _clear_local_runtime_push_pending(store)
             last_local_runtime_fp = local_fp
             local_runtime_push_pending = False
@@ -10944,12 +11950,91 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                 if _queue_local_runtime_delta(store, during_poll_runtime) is not None:
                     local_runtime_push_pending = True
                     status = "deferred_local_delta"
+            if status == "ok" and not local_runtime_push_pending:
+                # An accepted desired write must not be undone by a stale
+                # response from a request that was already in flight. After
+                # that guard, resolve every host field and instance field by
+                # saved event metadata; a missing key is not a deletion.
+                if _remote_runtime_response_is_stale(store, ro):
+                    status = "deferred_remote_stale"
+                    logging.info("runtime-overrides remote response deferred behind accepted revision")
+                else:
+                    overrides_raw = ro.get("runtime_overrides")
+                    remote_runtime = (
+                        merge_instance_desired_states(
+                            overrides_raw if isinstance(overrides_raw, dict) else {},
+                            ro.get("instance_desired_states"),
+                        )
+                    )
+                    instance_states = ro.get("instance_desired_states")
+                    if _accepted_runtime_response_matches(store, ro):
+                        accepted_raw = store.get_runtime_sync(_LOCAL_RUNTIME_ACCEPTED_KEY)
+                        accepted_runtime = (
+                            accepted_raw.get("runtime")
+                            if isinstance(accepted_raw, dict) and isinstance(accepted_raw.get("runtime"), dict)
+                            else {}
+                        )
+                        remote_runtime = _merge_missing_runtime_values(remote_runtime, accepted_runtime)
+                    current_local_runtime = local_runtime_overrides(config)
+                    local_metadata = _runtime_metadata_for_snapshot(
+                        store.get_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY),
+                        current_local_runtime,
+                        source="mcd",
+                    )
+                    remote_metadata = _runtime_metadata_from_response(
+                        ro,
+                        remote_runtime,
+                        current_local_runtime,
+                    )
+                    resolution = _resolve_runtime_snapshots(
+                        current_local_runtime,
+                        remote_runtime,
+                        local_metadata,
+                        remote_metadata,
+                    )
+                    if resolution.get("local_push"):
+                        baseline = store.get_runtime_sync("local_runtime")
+                        baseline = baseline if isinstance(baseline, dict) else {}
+                        previous = _runtime_reconciliation_previous(
+                            baseline,
+                            current_local_runtime,
+                            remote_runtime,
+                            resolution,
+                        )
+                        pending = {
+                            "previous": previous,
+                            "current": deepcopy(current_local_runtime),
+                        }
+                        store.put_runtime_sync(_LOCAL_RUNTIME_PUSH_PENDING_KEY, pending)
+                        store.put_runtime_sync("local_runtime", previous)
+                        store.put_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY, local_metadata)
+                        local_runtime_push_pending = True
+                        status = "deferred_local_delta"
+                    else:
+                        if _runtime_metadata_has_accepted(store):
+                            _clear_local_runtime_accepted(store)
+                        ro["_mcd_remote_runtime"] = remote_runtime
+                        ro["_mcd_remote_metadata"] = remote_metadata
+                        ro["_mcd_resolved_runtime"] = resolution["runtime"]
+                        ro["_mcd_resolved_metadata"] = resolution["metadata"]
+                        store.put_runtime_sync("mcc_runtime", remote_runtime)
+                        store.put_runtime_sync(_MCC_RUNTIME_METADATA_KEY, remote_metadata)
             if status == "ok":
                 overrides_raw = ro.get("runtime_overrides")
-                overrides = overrides_raw if isinstance(overrides_raw, dict) else {}
                 instance_states = ro.get("instance_desired_states")
-                overrides = merge_instance_desired_states(overrides, instance_states)
-                store.put_runtime_sync("mcc_runtime", overrides)
+                overrides = ro.get("_mcd_resolved_runtime")
+                if not isinstance(overrides, dict):
+                    overrides = overrides_raw if isinstance(overrides_raw, dict) else {}
+                remote_runtime = ro.get("_mcd_remote_runtime")
+                if not isinstance(remote_runtime, dict):
+                    remote_runtime = merge_instance_desired_states(
+                        overrides_raw if isinstance(overrides_raw, dict) else {},
+                        instance_states,
+                    )
+                resolved_metadata = ro.get("_mcd_resolved_metadata")
+                if not isinstance(resolved_metadata, dict):
+                    resolved_metadata = store.get_runtime_sync(_MCC_RUNTIME_METADATA_KEY) or {}
+                store.put_runtime_sync("mcc_runtime", remote_runtime)
                 desired_state = ro.get("desired_state")
                 if isinstance(desired_state, dict):
                     revisions: dict[str, int] = {}
@@ -10975,11 +12060,17 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                 config_profile = str(getattr(config, "profile_name", "") or "").strip().lower()
                 profile_sync_needed = bool(profile_authority and config_profile != profile_authority)
                 if fp != last_runtime_overrides_fp or profile_sync_needed:
-                    # A cleared MCC key must also leave the effective config.
-                    # Reload after deleting absent persisted keys, then apply
-                    # the current authoritative overrides to that baseline.
+                    # Persist only the LWW-resolved values. An absent key is
+                    # removed only when the winning MCC metadata is an
+                    # explicit tombstone; an old/partial response cannot
+                    # erase a local stable value during startup.
                     if fp != last_runtime_overrides_fp:
-                        _remove_absent_stable_runtime_from_config(config, overrides)
+                        _persist_resolved_runtime_to_config(
+                            config,
+                            local_runtime_overrides(config),
+                            overrides,
+                            resolved_metadata,
+                        )
                     base_config = load_config(config.config_file_path, allow_recover_from_mcc=False)
                     if profile_authority:
                         if str(base_config.profile_name or "").strip().lower() != profile_authority:
@@ -11055,11 +12146,11 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                     if _queue_local_runtime_delta(store, late_local_runtime) is not None:
                         local_runtime_push_pending = True
                     if fp != last_runtime_overrides_fp and not local_runtime_push_pending:
-                        _persist_stable_backup_runtime_to_config(
-                            next_cfg if isinstance(next_cfg, AgentConfig) else config,
-                            applied_keys,
-                            installs,
-                            instance_states=instance_states,
+                        _persist_resolved_runtime_to_config(
+                            config,
+                            local_runtime_overrides(config),
+                            overrides,
+                            resolved_metadata,
                         )
                     # Persisted MCC values are not a new local operator edit.
                     # Refresh the local fingerprint so the next tick does not
@@ -11074,6 +12165,14 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                     else:
                         current_local_runtime = local_runtime_overrides(config)
                         store.put_runtime_sync("local_runtime", current_local_runtime)
+                        store.put_runtime_sync(
+                            _LOCAL_RUNTIME_METADATA_KEY,
+                            _runtime_metadata_for_snapshot(
+                                resolved_metadata,
+                                current_local_runtime,
+                                source="mcc",
+                            ),
+                        )
                         last_local_runtime_fp = overrides_fingerprint(current_local_runtime)
                     last_runtime_overrides_fp = fp
                     store.put_runtime_sync(
@@ -11107,13 +12206,17 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                 startup_runtime_sync_pending = True
                 runtime_overrides_sync_requested = True
                 next_runtime_overrides_poll_at = 0.0
+            elif status == "deferred_remote_stale":
+                startup_runtime_sync_pending = True
+                runtime_overrides_sync_requested = True
+                next_runtime_overrides_poll_at = 0.0
             else:
                 reason = str(ro.get("reason", "unknown")).strip() or "unknown"
                 if reason != last_runtime_overrides_error:
                     logging.warning("runtime-overrides fetch failed: %s", reason)
                 last_runtime_overrides_error = reason
                 next_runtime_overrides_poll_at = now + max(30, poll_interval)
-            if status != "deferred_local_delta":
+            if status not in {"deferred_local_delta", "deferred_remote_stale"}:
                 runtime_overrides_sync_requested = False
 
         if now >= next_backup_profile_sync_at:

@@ -4,7 +4,7 @@
 фактическую схему после исправления admission и должен обновляться вместе с
 кодом, тестами и runtime receipt. Документ не является разрешением на
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.73 (прямой follow-up от 1.5.72).
+Актуальная редакция этого канона — MCD 1.5.74 (прямой follow-up от 1.5.73).
 
 Для instance-scoped desired state локальный inventory UID является стабильной
 основой, но transport запрашивает также динамически полученный
@@ -20,6 +20,23 @@ instance-rows, которых нет в локальном delta. Сравнен
 этот ключ. Поэтому restart/trigger не стирает удалённое кольцо, а прямое
 локальное добавление и явное удаление проходят одним и тем же безопасным
 rebased payload.
+
+Синхронизация двусторонняя и использует durable metadata
+`mcd-runtime-sync-metadata-v1`: для каждого host-поля и каждого поля
+instance-row сохраняются `updated_at`, logical `revision`, `source`,
+`event_id` и `tombstone`. При конфликте побеждает более новый сохранённый
+event: сначала сравнивается `updated_at`, при отсутствии timestamp —
+`revision`; точная ничья разрешается детерминированно в пользу MCC, затем по
+`event_id`. Эти значения живут в state backend и не вычисляются из mtime
+файла, поэтому offline-изменения переживают restart. MCD CLI/локальный config
+пушит выигравшее локальное поле в MCC, а более новое поле из MCC materialize-ся
+в config MCD. Отсутствие поля в старом/неполном snapshot не удаляет значение;
+удаление действительно только при явном более новом tombstone. Accepted merge
+сохраняет metadata и следующий poll не создаёт ping-pong или duplicate push.
+
+Bootstrap после approved update сначала восстанавливает отсутствующие
+instance-rows из durable baseline, затем создаёт ровно один pending delta до
+первого accepted desired revision; remote apply до этого момента запрещён.
 
 После startup/poll persistence строится также из canonical MCC
 `instance_desired_states`, а не только из profile-shaped effective config.

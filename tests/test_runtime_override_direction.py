@@ -1113,6 +1113,238 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             )
         )
 
+    def test_runtime_lww_mcd_newer_wins_over_mcc_even_when_mcc_revision_is_higher(self) -> None:
+        local_metadata = daemon._runtime_metadata_empty()
+        remote_metadata = daemon._runtime_metadata_empty()
+        daemon._runtime_metadata_set(
+            local_metadata,
+            "host",
+            "scheduler_host_max_parallel",
+            daemon._runtime_metadata_stamp(
+                source="mcd", updated_at=200.0, revision=3, event_id="mcd:200"
+            ),
+        )
+        daemon._runtime_metadata_set(
+            remote_metadata,
+            "host",
+            "scheduler_host_max_parallel",
+            daemon._runtime_metadata_stamp(
+                source="mcc", updated_at=100.0, revision=99, event_id="mcc:100"
+            ),
+        )
+
+        resolved = daemon._resolve_runtime_snapshots(
+            {"scheduler_host_max_parallel": 12},
+            {"scheduler_host_max_parallel": 4},
+            local_metadata,
+            remote_metadata,
+        )
+        self.assertEqual(resolved["runtime"]["scheduler_host_max_parallel"], 12)
+        self.assertIn(("host", "scheduler_host_max_parallel", ""), resolved["local_wins"])
+
+    def test_runtime_lww_mcc_newer_wins_and_offline_updated_at_is_primary(self) -> None:
+        local_metadata = daemon._runtime_metadata_empty()
+        remote_metadata = daemon._runtime_metadata_empty()
+        daemon._runtime_metadata_set(
+            local_metadata,
+            "instance",
+            "segment_priority_instance_settings",
+            daemon._runtime_metadata_stamp(
+                source="mcd", updated_at=300.0, revision=1, event_id="mcd:offline"
+            ),
+            "app.example.test",
+        )
+        daemon._runtime_metadata_set(
+            remote_metadata,
+            "instance",
+            "segment_priority_instance_settings",
+            daemon._runtime_metadata_stamp(
+                source="mcc", updated_at=200.0, revision=50, event_id="mcc:offline"
+            ),
+            "app.example.test@farm-a",
+        )
+        resolved = daemon._resolve_runtime_snapshots(
+            {
+                "segment_priority_instance_settings": {
+                    "app.example.test": {"segments": [101]}
+                }
+            },
+            {
+                "segment_priority_instance_settings": {
+                    "app.example.test@farm-a": {"segments": [202]}
+                }
+            },
+            local_metadata,
+            remote_metadata,
+        )
+        self.assertEqual(
+            resolved["runtime"]["segment_priority_instance_settings"]["app.example.test"],
+            {"segments": [101]},
+        )
+
+        daemon._runtime_metadata_set(
+            remote_metadata,
+            "host",
+            "scheduler_host_max_parallel",
+            daemon._runtime_metadata_stamp(
+                source="mcc", updated_at=20.0, revision=8, event_id="mcc:newer"
+            ),
+        )
+        daemon._runtime_metadata_set(
+            local_metadata,
+            "host",
+            "scheduler_host_max_parallel",
+            daemon._runtime_metadata_stamp(
+                source="mcd", updated_at=10.0, revision=100, event_id="mcd:older"
+            ),
+        )
+        newer_remote = daemon._resolve_runtime_snapshots(
+            {"scheduler_host_max_parallel": 12},
+            {"scheduler_host_max_parallel": 4},
+            local_metadata,
+            remote_metadata,
+        )
+        self.assertEqual(newer_remote["runtime"]["scheduler_host_max_parallel"], 4)
+
+    def test_explicit_newer_remote_tombstone_wins_but_stale_absence_does_not_delete(self) -> None:
+        local_metadata = daemon._runtime_metadata_empty()
+        daemon._runtime_metadata_set(
+            local_metadata,
+            "host",
+            "scheduler_host_max_parallel",
+            daemon._runtime_metadata_stamp(
+                source="mcd", updated_at=10.0, revision=1, event_id="mcd:old"
+            ),
+        )
+        stale = daemon._resolve_runtime_snapshots(
+            {"scheduler_host_max_parallel": 12},
+            {},
+            local_metadata,
+            daemon._runtime_metadata_empty(),
+        )
+        self.assertEqual(stale["runtime"]["scheduler_host_max_parallel"], 12)
+        self.assertFalse(stale["remote_tombstones"])
+
+        remote_metadata = daemon._runtime_metadata_empty()
+        daemon._runtime_metadata_set(
+            remote_metadata,
+            "host",
+            "scheduler_host_max_parallel",
+            daemon._runtime_metadata_stamp(
+                source="mcc",
+                updated_at=20.0,
+                revision=2,
+                event_id="mcc:delete",
+                tombstone=True,
+            ),
+        )
+        deleted = daemon._resolve_runtime_snapshots(
+            {"scheduler_host_max_parallel": 12},
+            {},
+            local_metadata,
+            remote_metadata,
+        )
+        self.assertNotIn("scheduler_host_max_parallel", deleted["runtime"])
+        self.assertIn(("host", "scheduler_host_max_parallel", ""), deleted["remote_tombstones"])
+
+    def test_runtime_metadata_and_recovered_instance_row_survive_restart_and_push_once(self) -> None:
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        class MemoryStore:
+            def __init__(self, values=None):
+                self.values = dict(values or {})
+
+            def get_runtime_sync(self, key):
+                return self.values.get(key)
+
+            def put_runtime_sync(self, key, value):
+                self.values[key] = dict(value)
+
+            def delete_runtime_sync(self, keys):
+                for key in keys:
+                    self.values.pop(key, None)
+                return 1
+
+        row = {"segments": [101], "slots_override": 1}
+        local_before_update = {
+            "segment_priority_instance_settings": {
+                "app.example.test@farm-a": row,
+            }
+        }
+        install = SimpleNamespace(
+            instance_uid="app.example.test",
+            root="/var/www/app/public",
+            name="app",
+            primary_domain="app.example.test",
+            domains=["app.example.test"],
+        )
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "mcd.toml"
+            path.write_text('[profile]\nname = "farm-hiload"\n', encoding="utf-8")
+            cfg = load_config(str(path), allow_recover_from_mcc=False)
+            store = MemoryStore({"local_runtime": local_before_update, "mcc_runtime": {}})
+
+            baseline, _ = daemon._initialize_local_runtime_baseline(cfg, store)
+            self.assertEqual(baseline, {})
+            self.assertIsNotNone(daemon._read_local_runtime_push_pending(store))
+            recovered_cfg = load_config(str(path), allow_recover_from_mcc=False)
+            recovered = local_runtime_overrides(recovered_cfg)
+            self.assertEqual(
+                recovered["segment_priority_instance_settings"]["app.example.test@farm-a"],
+                row,
+            )
+
+            accepted = {
+                "status": "ok",
+                "desired_state": {"revision": 4},
+                "runtime_overrides": {},
+                "instance_desired_states": {
+                    "app.example.test@farm-a": {"revision": 2, "runtime_overrides": {}}
+                },
+            }
+            with patch("mcd_agent.daemon.fetch_runtime_overrides", return_value={
+                "status": "ok",
+                "runtime_overrides": {},
+                "instance_desired_states": {},
+                "desired_state": {"revision": 3},
+            }), patch("mcd_agent.daemon.push_runtime_overrides", return_value=accepted) as push:
+                result = daemon._push_local_runtime_change(
+                    cfg,
+                    {},
+                    recovered,
+                    [install],
+                    desired_revision=3,
+                    instance_revisions={},
+                    runtime_metadata=store.get_runtime_sync(daemon._LOCAL_RUNTIME_METADATA_KEY),
+                )
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(push.call_count, 1)
+            self.assertIn(
+                "runtime_change_metadata",
+                push.call_args.kwargs,
+            )
+            self.assertTrue(
+                daemon._store_desired_runtime_push_result(
+                    store,
+                    accepted,
+                    accepted_runtime=recovered,
+                    runtime_metadata=store.get_runtime_sync(daemon._LOCAL_RUNTIME_METADATA_KEY),
+                )
+            )
+            store.put_runtime_sync("local_runtime", recovered)
+            daemon._clear_local_runtime_push_pending(store)
+            restarted = load_config(str(path), allow_recover_from_mcc=False)
+            restarted_baseline, _ = daemon._initialize_local_runtime_baseline(restarted, store)
+            self.assertEqual(restarted_baseline, recovered)
+            self.assertIsNone(daemon._read_local_runtime_push_pending(store))
+            self.assertEqual(
+                store.get_runtime_sync(daemon._LOCAL_RUNTIME_METADATA_KEY)["schema"],
+                daemon._RUNTIME_METADATA_SCHEMA,
+            )
+            self.assertEqual(push.call_count, 1)
+
     def test_selected_profile_provenance_survives_runtime_sync_rebase(self) -> None:
         from pathlib import Path
         from tempfile import TemporaryDirectory
