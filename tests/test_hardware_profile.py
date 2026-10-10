@@ -5,10 +5,12 @@ import unittest
 from pathlib import Path
 
 from mcd_agent.hardware_profile import (
+    capture_profile_authority,
     read_profile_selection,
     recommended_farm_profile,
     recommended_profile,
     reconcile_hardware_profile,
+    restore_profile_authority,
     write_profile_selection,
 )
 from mcd_agent.mode import _read_profile_name
@@ -169,6 +171,70 @@ class HardwareProfileTests(unittest.TestCase):
             self.assertEqual(_read_profile_name(str(config)), "midi")
             self.assertEqual(_read_hardware_profile_name(str(config)), "midi")
             self.assertEqual(read_profile_selection(str(install))["profile"], "midi")
+
+    def test_rollout_and_rollback_restore_authoritative_profile_sections(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            install = root / "install"
+            config = root / "mcd.toml"
+            config.write_text(
+                "\n".join(
+                    [
+                        "[profile]",
+                        'name = "farm-hiload"',
+                        "",
+                        "[hardware]",
+                        'profile = "farm-hiload"',
+                        "",
+                        "[runtime]",
+                        "segment_retry_count = 3",
+                        "other_value = 7",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            write_profile_selection(
+                str(install),
+                mode="manual",
+                profile="farm-hiload",
+                cpu_count=12,
+                memory_kib=64 * 1024 * 1024,
+            )
+            snapshot = capture_profile_authority(str(config), str(install))
+
+            config.write_text(
+                "\n".join(
+                    [
+                        "[profile]",
+                        'name = "passive"',
+                        "",
+                        "[hardware]",
+                        'profile = "auto"',
+                        "",
+                        "[runtime]",
+                        "segment_retry_count = 0",
+                        "other_value = 99",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            write_profile_selection(
+                str(install),
+                mode="auto",
+                profile="passive",
+                cpu_count=1,
+                memory_kib=1,
+            )
+            restore_profile_authority(snapshot)
+
+            self.assertEqual(_read_profile_name(str(config)), "farm-hiload")
+            self.assertEqual(_read_hardware_profile_name(str(config)), "farm-hiload")
+            self.assertIn("segment_retry_count = 0", config.read_text(encoding="utf-8"))
+            selection = read_profile_selection(str(install))
+            self.assertEqual(selection["mode"], "manual")
+            self.assertEqual(selection["profile"], "farm-hiload")
 
 
 if __name__ == "__main__":

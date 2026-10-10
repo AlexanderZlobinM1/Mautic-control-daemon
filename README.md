@@ -137,7 +137,9 @@ MCD (MauticControlDaemon) is a host-level service that can run in two modes:
 - MCD self-update model:
   - MCC returns build plan (`test|approved|lts`) via authenticated API.
   - MCD performs update locally (download/stage/atomic source switch/restart) and reports result back to MCC.
-  - apply path does not run `pip install`; host update is source-switch only.
+  - apply path switches the source tree and synchronizes the actual venv
+    `mcd_agent` package/console scripts from that exact source; metadata and
+    imported code are verified before restart.
   - MCC limits concurrent update sessions (`10` by default); extra nodes receive wait/retry signal.
   - MCD auto-cleans old self-update artifacts (`/opt/mcd/var/updates` archives + `/opt/mcd/var/backup/mcd-src-preupdate-*`) by retention policy.
     - default: keep last `3` archives and `3` preupdate backups, max age `30` days, cleanup once per day.
@@ -519,6 +521,12 @@ Important:
     - `1` = no retry (only initial attempt),
     - `>1` = bounded retries (attempt cap),
     - `0` or negative = unlimited immediate retries (with `task_retry_delay_sec` pause).
+  - `runtime.segment_retry_count` is the host-profile policy for automatic
+    segment commands and counts retries after the initial attempt: `0` means
+    one start, `3` (the default) means at most four starts. A non-zero Mautic
+    exit is recorded as the segment's terminal outcome after the bound; it is
+    not a daemon failure, and the dispatcher continues with the next eligible
+    item while the failed item remains due for the next cycle.
   - global default: `runtime.command_timeout_sec = 0` and `runtime.worker_watchdog_sec = 0` (long-running tasks are not killed by timeout).
   - `runtime.worker_stuck_policy = skip|restart` and `runtime.worker_stuck_restart_limit` control reaction on stuck processes.
   - `runtime.state_db_path` sets SQLite process-state storage path (default `/opt/mcd/var/mcd-state.db`).

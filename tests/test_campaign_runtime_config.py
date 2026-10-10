@@ -114,6 +114,25 @@ class CampaignRuntimeConfigTests(unittest.TestCase):
         self.assertEqual(cfg.scheduler_instance_max_parallel, 0)
         self.assertEqual(cfg.scheduler_fairness_watchdog_sec, 300)
 
+    def test_segment_retry_count_is_host_profile_configurable(self) -> None:
+        path = Path(tempfile.mkdtemp()) / "mcd.toml"
+        path.write_text(
+            '[profile]\nname = "farm-hiload"\n[runtime]\nsegment_retry_count = 4\n',
+            encoding="utf-8",
+        )
+
+        cfg = load_config(str(path), allow_recover_from_mcc=False)
+
+        self.assertEqual(cfg.segment_retry_count, 4)
+
+    def test_segment_retry_count_defaults_to_three_after_profile_application(self) -> None:
+        path = Path(tempfile.mkdtemp()) / "mcd.toml"
+        path.write_text('[profile]\nname = "farm-hiload"\n', encoding="utf-8")
+
+        cfg = load_config(str(path), allow_recover_from_mcc=False)
+
+        self.assertEqual(cfg.segment_retry_count, 3)
+
     def test_named_profile_capacity_cannot_be_overridden_by_persisted_runtime(self) -> None:
         path = Path(tempfile.mkdtemp()) / "mcd.toml"
         path.write_text(

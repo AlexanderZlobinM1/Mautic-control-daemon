@@ -740,6 +740,110 @@ class SegmentAdmissionTests(unittest.TestCase):
         self.assertEqual(popens, {})
         store.finish.assert_called_once()
 
+    def test_segment_retry_policy_runs_four_attempts_then_continues_next_item(self) -> None:
+        state, _added, _started = sync_cycle(
+            None,
+            planned_ids=[10, 20],
+            never_built=[],
+            running_ids=[],
+            now_ts=100.0,
+        )
+        state, claimed = claim_item(
+            state,
+            entity_id=10,
+            eligible_ids=[10, 20],
+            blocked_ids=[],
+            running_ids=[],
+            now_ts=100.1,
+        )
+        self.assertTrue(claimed)
+        state = mark_running(state, entity_id=10, now_ts=100.2)
+
+        class RuntimeStore:
+            def __init__(self, payload: dict[str, object]) -> None:
+                self.payload = payload
+                self.next_row_id = 2
+                self.finished: list[tuple[int, str, int | None, str | None]] = []
+
+            def get_runtime_sync(self, _key: str) -> dict[str, object]:
+                return self.payload
+
+            def put_runtime_sync(self, _key: str, payload: dict[str, object]) -> None:
+                self.payload = payload
+
+            def recent_task_problem_counts(self, **_kwargs: object) -> dict[int, int]:
+                return {}
+
+            def add_running(self, _task: RunningTask) -> int:
+                row_id = self.next_row_id
+                self.next_row_id += 1
+                return row_id
+
+            def finish(self, row_id: int, state: str, rc: int | None, note: str | None) -> None:
+                self.finished.append((row_id, state, rc, note))
+
+        store = RuntimeStore(state)
+        wakeup = threading.Event()
+        starts: list[int] = [1]
+        callbacks: list[tuple[int | None, bool, str | None]] = []
+
+        def spawn(**_kwargs: object) -> Mock:
+            process = Mock()
+            process.pid = 100 + len(starts)
+            process.poll.return_value = 23
+            starts.append(process.pid)
+            return process
+
+        task = RunningTask(
+            row_id=1,
+            root="/var/www/site",
+            task_key="/var/www/site|segment|10",
+            task_type="segment",
+            entity_id=10,
+            command_str="php mautic segments:update --id=10",
+            timeout_sec=60,
+            attempts=1,
+            started_at=100.0,
+            pid=100,
+        )
+        process = Mock()
+        process.poll.return_value = 23
+        running = {task.task_key: task}
+        popens = {task.task_key: process}
+
+        def terminal_callback(item: RunningTask, success: bool, note: str | None) -> None:
+            callbacks.append((item.entity_id, success, note))
+            _segment_terminal_and_wake(store, wakeup, item, success, note)
+
+        with patch("mcd_agent.daemon._spawn_command", side_effect=spawn):
+            for _ in range(4):
+                _monitor_running(
+                    config=SimpleNamespace(
+                        task_retry_max=1,
+                        segment_retry_count=3,
+                        task_retry_delay_sec=0,
+                    ),
+                    store=store,
+                    running=running,
+                    popens=popens,
+                    segment_terminal_callback=terminal_callback,
+                )
+
+        self.assertEqual(len(starts), 4)
+        self.assertEqual(callbacks, [(10, False, "non_zero_exit")])
+        self.assertTrue(wakeup.is_set())
+        self.assertEqual(store.finished[-1], (4, "failed", 23, "non_zero_exit"))
+        next_state, next_claimed = claim_item(
+            store.payload,
+            entity_id=20,
+            eligible_ids=[10, 20],
+            blocked_ids=[],
+            running_ids=[],
+            now_ts=101.0,
+        )
+        self.assertTrue(next_claimed)
+        self.assertEqual(next_state["errors"], [10])
+
     def test_terminal_wakes_waiting_dispatcher_and_next_claim_is_immediate(self) -> None:
         state, _added, _started = sync_cycle(
             None,

@@ -18,9 +18,10 @@ from mcd_agent import __version__
 from mcd_agent.backup import backup_lock_active
 from mcd_agent.cluster_routing import cluster_route_targets
 from mcd_agent.config import AgentConfig
+from mcd_agent.hardware_profile import capture_profile_authority, restore_profile_authority
 from mcd_agent.host_identity import resolve_agent_identity
 from mcd_agent.state_backend import mysql_state_connection, mysql_state_enabled, mysql_state_table_names
-from mcd_agent.version_identity import agent_version_payload, installed_agent_version, package_agent_version
+from mcd_agent.version_identity import agent_version_payload, installed_agent_version, package_agent_version, source_version
 
 try:
     import fcntl
@@ -368,17 +369,20 @@ def _install_agent_package_for_source(install_dir: Path, source_dir: Path) -> No
         [
             str(venv_python),
             "-c",
-            "import site; print(site.getsitepackages()[0])",
+            "import site, sysconfig; paths = site.getsitepackages(); print(paths[0] if paths else sysconfig.get_paths()['purelib'])",
         ],
         capture_output=True,
         text=True,
     )
-    if site_proc.returncode == 0:
-        site_dir = Path((site_proc.stdout or "").strip())
-        if site_dir.exists():
-            for dist_info in site_dir.glob("mcd_agent-*.dist-info"):
-                if dist_info.is_dir():
-                    shutil.rmtree(dist_info)
+    if site_proc.returncode != 0:
+        detail = (site_proc.stderr or site_proc.stdout or "cannot locate venv site-packages").strip()
+        raise RuntimeError(f"venv site-packages lookup failed: {detail}")
+    site_dir = Path((site_proc.stdout or "").strip())
+    if not site_dir.is_dir():
+        raise RuntimeError(f"venv site-packages directory not found: {site_dir}")
+    for dist_info in site_dir.glob("mcd_agent-*.dist-info"):
+        if dist_info.is_dir():
+            shutil.rmtree(dist_info)
     cmd = [
         str(venv_python),
         "-m",
@@ -386,6 +390,7 @@ def _install_agent_package_for_source(install_dir: Path, source_dir: Path) -> No
         "install",
         "--disable-pip-version-check",
         "--no-input",
+        "--no-cache-dir",
         "--no-deps",
         "--force-reinstall",
         str(source_dir),
@@ -394,6 +399,67 @@ def _install_agent_package_for_source(install_dir: Path, source_dir: Path) -> No
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "pip install agent package failed").strip()
         raise RuntimeError(f"agent package install failed: {detail}")
+
+    # Pip is responsible for distribution metadata and console scripts, but a
+    # reinstall can leave files that were removed from the new source tree or
+    # retain an old package directory when metadata was already inconsistent.
+    # Replace the importable package tree from the exact source used by the
+    # rollout so metadata and executable code cannot disagree after deploy or
+    # rollback.
+    package_src = source_dir / "mcd_agent"
+    package_dst = site_dir / "mcd_agent"
+    staged_package = site_dir / f".mcd_agent.replace-{os.getpid()}-{time.time_ns()}"
+    previous_package = site_dir / f".mcd_agent.previous-{os.getpid()}-{time.time_ns()}"
+    shutil.copytree(
+        package_src,
+        staged_package,
+        symlinks=True,
+        ignore=_copytree_ignore_artifacts,
+    )
+    try:
+        if package_dst.exists() or package_dst.is_symlink():
+            os.replace(package_dst, previous_package)
+        os.replace(staged_package, package_dst)
+        if previous_package.exists():
+            shutil.rmtree(previous_package)
+    except Exception:
+        if package_dst.exists() or package_dst.is_symlink():
+            shutil.rmtree(package_dst, ignore_errors=True)
+        if previous_package.exists():
+            os.replace(previous_package, package_dst)
+        if staged_package.exists():
+            shutil.rmtree(staged_package, ignore_errors=True)
+        raise
+
+    source_ver = source_version(source_dir) or ""
+    verify = subprocess.run(
+        [
+            str(venv_python),
+            "-c",
+            "import importlib.metadata as m, mcd_agent; "
+            "print(m.version('mcd-agent')); print(mcd_agent.__version__); "
+            "print(mcd_agent.__file__)",
+        ],
+        cwd="/",
+        capture_output=True,
+        text=True,
+    )
+    if verify.returncode != 0:
+        detail = (verify.stderr or verify.stdout or "installed package verification failed").strip()
+        raise RuntimeError(f"installed package verification failed: {detail}")
+    lines = [line.strip() for line in (verify.stdout or "").splitlines() if line.strip()]
+    if len(lines) < 3:
+        raise RuntimeError("installed package verification returned incomplete output")
+    package_ver, imported_ver, imported_path = lines[-3:]
+    expected_path = str((package_dst / "__init__.py").resolve())
+    if source_ver and (package_ver != source_ver or imported_ver != source_ver):
+        raise RuntimeError(
+            f"installed package version mismatch source={source_ver} metadata={package_ver} imported={imported_ver}"
+        )
+    if Path(imported_path).resolve() != Path(expected_path):
+        raise RuntimeError(
+            f"installed package path mismatch expected={expected_path} imported={imported_path}"
+        )
 
 
 def _ensure_venv_pip(venv_python: Path) -> None:
@@ -1374,6 +1440,10 @@ def _apply_update_locked(cfg: AgentConfig, plan: dict[str, Any], lock_f) -> tupl
     if active_defer is not None:
         return False, active_defer
     install_dir = Path(str(getattr(cfg, "mcd_install_dir", "/opt/mcd") or "/opt/mcd"))
+    profile_authority = capture_profile_authority(
+        str(getattr(cfg, "config_file_path", "") or ""),
+        str(install_dir),
+    )
     src_dir = install_dir / "src"
     current_installed = installed_agent_version()
     if _semver(target) <= _semver(current_installed):
@@ -1381,6 +1451,7 @@ def _apply_update_locked(cfg: AgentConfig, plan: dict[str, Any], lock_f) -> tupl
             repair_note = ""
             if _agent_package_sync_needed(current_installed):
                 repair_note = "; " + _repair_agent_package_sync(install_dir, src_dir)
+            restore_profile_authority(profile_authority)
             msg = (
                 f"source/running version mismatch repaired: source={current_installed} "
                 f"running={__version__}{repair_note}; service restart scheduled"
@@ -1448,6 +1519,7 @@ def _apply_update_locked(cfg: AgentConfig, plan: dict[str, Any], lock_f) -> tupl
         os.replace(src_next_dir, src_dir)
         swapped = True
         _install_agent_package_for_source(install_dir, src_dir)
+        restore_profile_authority(profile_authority)
         _ensure_mcd_service_kill_mode()
 
         release_session(
@@ -1506,6 +1578,7 @@ def _apply_update_locked(cfg: AgentConfig, plan: dict[str, Any], lock_f) -> tupl
     except Exception as e:
         msg = str(e)
         # Best-effort rollback from pre-update source copy.
+        rollback_errors: list[str] = []
         try:
             if swapped and old_src_dir is not None and old_src_dir.exists():
                 if src_dir.exists():
@@ -1518,13 +1591,16 @@ def _apply_update_locked(cfg: AgentConfig, plan: dict[str, Any], lock_f) -> tupl
                     tf.extractall(install_dir)
             if src_dir.exists():
                 _install_agent_package_for_source(install_dir, src_dir)
-        except Exception:
-            pass
+            restore_profile_authority(profile_authority)
+        except Exception as rollback_exc:
+            rollback_errors.append(str(rollback_exc))
         try:
             if src_next_dir.exists():
                 shutil.rmtree(src_next_dir)
         except Exception:
             pass
+        if rollback_errors:
+            msg = f"{msg}; rollback failed: {'; '.join(rollback_errors)[:500]}"
         release_session(
             cfg,
             session_id,

@@ -15,6 +15,10 @@ from mcd_agent.mode import (
 
 PROFILE_SELECTION_FILE = "hardware-profile-selection.json"
 
+_PROFILE_AUTHORITY_SECTION_RE = re.compile(
+    r"(?ms)^\[(?P<name>profile|hardware)\]\s*.*?(?=^\[|\Z)"
+)
+
 
 @dataclass(frozen=True, slots=True)
 class HardwareProfileResult:
@@ -226,3 +230,93 @@ def profile_authority_snapshot(config_path: str, install_dir: str = "/opt/mcd") 
         ],
         "instance_local_settings": ["nginx.client_max_body_size"],
     }
+
+
+def capture_profile_authority(config_path: str, install_dir: str = "/opt/mcd") -> dict[str, object]:
+    """Capture only the operator-selected profile authority for package swaps.
+
+    Source rollouts must not make a profile decision.  Keep the two selected
+    profile sections and the hardware-selection marker separate from the
+    source tree so a deploy or rollback cannot turn an active host into the
+    example/passive profile or silently re-run hardware auto-selection.
+    """
+
+    path = _resolve_mutable_config_path(config_path) if str(config_path or "").strip() else Path("")
+    if not str(config_path or "").strip() or not path.exists():
+        return {}
+    text = path.read_text(encoding="utf-8")
+    sections: dict[str, str | None] = {"profile": None, "hardware": None}
+    for match in _PROFILE_AUTHORITY_SECTION_RE.finditer(text):
+        sections[str(match.group("name"))] = match.group(0)
+
+    selection_path = _state_path(install_dir)
+    selection_exists = selection_path.exists()
+    selection_bytes = selection_path.read_bytes() if selection_exists else b""
+    return {
+        "config_path": str(path),
+        "config_sections": sections,
+        "selection_path": str(selection_path),
+        "selection_exists": selection_exists,
+        "selection_bytes": selection_bytes,
+    }
+
+
+def _replace_profile_authority_sections(text: str, sections: dict[str, object]) -> str:
+    """Restore profile/hardware sections without touching other config."""
+
+    updated = text
+    for name in ("profile", "hardware"):
+        desired = sections.get(name)
+        match = None
+        for candidate in _PROFILE_AUTHORITY_SECTION_RE.finditer(updated):
+            if str(candidate.group("name")) == name:
+                match = candidate
+                break
+        if desired is None:
+            if match is not None:
+                updated = updated[: match.start()] + updated[match.end() :]
+            continue
+        raw = str(desired)
+        if match is not None:
+            updated = updated[: match.start()] + raw + updated[match.end() :]
+        else:
+            if updated and not updated.endswith("\n"):
+                updated += "\n"
+            updated += ("\n" if updated else "") + raw
+    return updated
+
+
+def restore_profile_authority(snapshot: dict[str, object] | None) -> None:
+    """Restore a previously captured profile selection after a source swap.
+
+    The function is intentionally value/path based; it contains no host or
+    instance names and never recalculates a profile from local hardware.
+    """
+
+    if not isinstance(snapshot, dict) or not snapshot:
+        return
+    config_name = str(snapshot.get("config_path") or "").strip()
+    if config_name:
+        config_path = Path(config_name)
+        sections = snapshot.get("config_sections")
+        if config_path.exists() and isinstance(sections, dict):
+            original = config_path.read_text(encoding="utf-8")
+            updated = _replace_profile_authority_sections(original, sections)
+            if updated != original:
+                config_path.write_text(updated, encoding="utf-8")
+
+    selection_name = str(snapshot.get("selection_path") or "").strip()
+    if not selection_name:
+        return
+    selection_path = Path(selection_name)
+    if bool(snapshot.get("selection_exists")):
+        raw = snapshot.get("selection_bytes")
+        if not isinstance(raw, bytes):
+            raise RuntimeError("profile authority snapshot has invalid selection bytes")
+        selection_path.parent.mkdir(parents=True, exist_ok=True)
+        temp = selection_path.with_suffix(selection_path.suffix + ".restore-tmp")
+        temp.write_bytes(raw)
+        os.chmod(temp, 0o600)
+        os.replace(temp, selection_path)
+    elif selection_path.exists():
+        selection_path.unlink()

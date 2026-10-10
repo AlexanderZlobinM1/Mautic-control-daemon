@@ -122,9 +122,20 @@ dependency и execution locks.
 
 ## 5. Retry и terminal/error
 
-`done` записывается только после успешного process exit. Non-zero exit,
-timeout, lost PID и lock-busy становятся terminal error после исчерпания
-обычного retry policy; до этого item остаётся claimed для respawn. Error не
+`done` записывается только после успешного process exit. Для automatic segment
+`runtime.segment_retry_count` — внешняя host-profile policy и означает число
+повторов после initial attempt: значение `3` даёт максимум четыре фактических
+запуска одного item, без хардкода хоста или segment ID. До исчерпания bound
+item остаётся claimed для respawn.
+
+Код Mautic с `rc != 0` сам по себе не является ошибкой MCD. Если MCD честно
+запустил process, выполнил bounded retries, записал terminal outcome текущего
+cycle и немедленно продолжил следующий eligible item, алгоритм соблюдён.
+Ошибка MCD — это падение daemon, потеря/сброс persisted cycle, нарушение
+retry/dead-letter policy или остановка очереди после terminal outcome.
+После исчерпания retries segment получает terminal error текущего cycle,
+его applied baseline не продвигается и он остаётся due для следующего cycle;
+terminal callback будит dispatcher без ожидания следующего tick. Error не
 блокирует независимые items, но учитывается failure cooldown и receipt.
 Цикл terminal, когда каждый его item находится в `done` или terminal error и
 нет running/claimed работы.

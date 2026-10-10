@@ -21,6 +21,11 @@ from pathlib import Path
 from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
+try:
+    import fcntl
+except Exception:  # pragma: no cover - non-POSIX development environments
+    fcntl = None  # type: ignore[assignment]
+
 from mcd_agent.config import (
     AgentConfig,
     DEFAULT_PAGE_HITS_ORPHAN_CLEANUP_GRACE_MIN,
@@ -197,7 +202,6 @@ _SEGMENT_STALE_PRIORITY_SEC = 24 * 3600
 _SEGMENT_STUCK_SPILLOVER_SEC = 2 * 3600
 _SEGMENT_FAILURE_COOLDOWN_SEC = 3600
 _SEGMENT_FAILURE_COOLDOWN_THRESHOLD = 3
-_SEGMENT_AUTOMATIC_RETRY_CAP = 3
 _CAMPAIGN_TRIGGER_AUTOMATIC_RETRY_CAP = 2
 _DB_DISPATCH_PAUSE_SEC = 120
 _DB_WATCHDOG_LONG_QUERIES_PAUSE_THRESHOLD = 50
@@ -6056,6 +6060,197 @@ class TaskStore:
         return deleted_rows, non_running, vacuum_done
 
     @_task_store_serialized
+    def task_lifecycle(
+        self,
+        *,
+        now_ts: float,
+        min_age_sec: int,
+        archive_dir: str,
+        admission_dir: str,
+        dry_run: bool,
+        states: tuple[str, ...] = ("done", "failed", "timeout", "lost", "skipped", "cancelled"),
+    ) -> dict[str, object]:
+        """Preview/apply safe archival of old terminal task receipts.
+
+        Running rows and rows whose execution lock is currently held are
+        preserved.  The lock directory contains persistent inode names, so
+        existence alone is not treated as activity; POSIX flock probing keeps
+        stale lock files from blocking cleanup forever and fails closed when a
+        lock cannot be inspected.
+        """
+
+        wanted_states = tuple(
+            dict.fromkeys(str(state or "").strip().lower() for state in states if str(state or "").strip())
+        )
+        if not wanted_states:
+            wanted_states = ("done", "failed", "timeout", "lost", "skipped", "cancelled")
+        now = float(now_ts)
+        cutoff = now - max(0.0, float(min_age_sec))
+        running_rows = self.running_rows()
+        running_ids = sorted(int(row.get("id") or 0) for row in running_rows if int(row.get("id") or 0) > 0)
+
+        def _fetch_rows() -> list[dict[str, object]]:
+            placeholders = ",".join(["%s"] * len(wanted_states))
+            if self._mysql_mode:
+                table = self._mysql_tables.get("tasks", "")
+                if table and self._mysql_available():
+                    try:
+                        return self._mysql_query(
+                            f"""
+                            SELECT id, host_name, root, task_key, task_type, entity_id,
+                                   command_str, pid, timeout_sec, attempts, state, note,
+                                   started_at, finished_at, rc, manual_request_id
+                            FROM `{table}`
+                            WHERE host_name=%s
+                              AND state IN ({placeholders})
+                              AND COALESCE(finished_at, started_at) < %s
+                            ORDER BY COALESCE(finished_at, started_at) ASC, id ASC
+                            """,
+                            (self._node_id, *wanted_states, cutoff),
+                        )
+                    except Exception:
+                        pass
+            sqlite_placeholders = ",".join(["?"] * len(wanted_states))
+            return self._sqlite_fetchall_dicts(
+                f"""
+                SELECT id, root, task_key, task_type, entity_id, command_str,
+                       pid, timeout_sec, attempts, state, note, started_at,
+                       finished_at, rc, manual_request_id
+                FROM tasks
+                WHERE state IN ({sqlite_placeholders})
+                  AND COALESCE(finished_at, started_at) < ?
+                ORDER BY COALESCE(finished_at, started_at) ASC, id ASC
+                """,
+                (*wanted_states, cutoff),
+            )
+
+        def _lock_held(task_key: str) -> bool:
+            digest = hashlib.sha256(str(task_key).encode("utf-8")).hexdigest()
+            path = Path(admission_dir) / f"{digest}.lock"
+            if not path.exists():
+                return False
+            if fcntl is None:
+                return True
+            try:
+                with path.open("a+") as handle:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                return False
+            except BlockingIOError:
+                return True
+            except OSError:
+                return True
+
+        rows = _fetch_rows()
+        protected_rows: list[dict[str, object]] = []
+        candidate_rows: list[dict[str, object]] = []
+        for row in rows:
+            if _lock_held(str(row.get("task_key") or "")):
+                protected_rows.append(row)
+            else:
+                candidate_rows.append(row)
+
+        candidate_ids = [int(row.get("id") or 0) for row in candidate_rows if int(row.get("id") or 0) > 0]
+        protected_ids = [int(row.get("id") or 0) for row in protected_rows if int(row.get("id") or 0) > 0]
+        dead_letter_states = {"failed", "timeout", "lost"}
+        dead_letter_ids = [
+            int(row.get("id") or 0)
+            for row in candidate_rows
+            if int(row.get("id") or 0) > 0 and str(row.get("state") or "").strip().lower() in dead_letter_states
+        ]
+        preserved_by_state: dict[str, list[int]] = {"running": list(running_ids)}
+        for row in protected_rows:
+            state = str(row.get("state") or "unknown").strip().lower() or "unknown"
+            preserved_by_state.setdefault(state, []).append(int(row.get("id") or 0))
+
+        result: dict[str, object] = {
+            "phase": "dry_run" if dry_run else "apply",
+            "cutoff_ts": cutoff,
+            "candidate_ids": candidate_ids,
+            "deleted_ids": [],
+            "protected_ids": protected_ids,
+            "dead_letter_ids": dead_letter_ids,
+            "running_ids": running_ids,
+            "preserved_by_state": preserved_by_state,
+            "archive_path": "",
+            "admission_dir": str(admission_dir),
+        }
+        if dry_run or not candidate_rows:
+            return result
+
+        archive_root = Path(archive_dir)
+        archive_root.mkdir(parents=True, exist_ok=True)
+        archive_path = archive_root / f"tasks-lifecycle-{time.time_ns()}.jsonl.gz"
+        try:
+            with gzip.open(archive_path, "wt", encoding="utf-8") as handle:
+                for row in candidate_rows:
+                    handle.write(json.dumps(dict(row), ensure_ascii=False, sort_keys=True) + "\n")
+        except Exception:
+            archive_path.unlink(missing_ok=True)
+            raise
+
+        deleted_ids: list[int] = []
+        if self._mysql_mode:
+            table = self._mysql_tables.get("tasks", "")
+            if table and self._mysql_available():
+                try:
+                    placeholders = ",".join(["%s"] * len(candidate_ids))
+                    self._mysql_exec(
+                        f"DELETE FROM `{table}` WHERE host_name=%s AND id IN ({placeholders})",
+                        (self._node_id, *candidate_ids),
+                    )
+                    deleted_ids = list(candidate_ids)
+                except Exception:
+                    deleted_ids = []
+        if not deleted_ids:
+            placeholders = ",".join(["?"] * len(candidate_ids))
+            self.conn.execute(f"DELETE FROM tasks WHERE id IN ({placeholders})", tuple(candidate_ids))
+            self.conn.commit()
+            deleted_ids = list(candidate_ids)
+        result["phase"] = "applied"
+        result["deleted_ids"] = deleted_ids
+        result["archive_path"] = str(archive_path)
+        return result
+
+    @_task_store_serialized
+    def purge_failed_tasks(
+        self,
+        *,
+        admission_dir: str,
+        dry_run: bool,
+        expected_candidate_ids: list[object] | None = None,
+    ) -> dict[str, object]:
+        """Compatibility operation for explicitly purging failure receipts."""
+
+        archive_dir = str(getattr(self.cfg, "tasks_archive_dir", "/opt/mcd/var/task-history"))
+        preview = self.task_lifecycle(
+            now_ts=time.time(),
+            min_age_sec=0,
+            archive_dir=archive_dir,
+            admission_dir=admission_dir,
+            dry_run=True,
+            states=("failed", "timeout", "lost"),
+        )
+        if dry_run:
+            return preview
+        actual = sorted(int(value) for value in preview.get("candidate_ids", []) if int(value) > 0)
+        expected = sorted(
+            int(value) for value in (expected_candidate_ids or []) if str(value).strip().isdigit() and int(value) > 0
+        )
+        if expected_candidate_ids is not None and expected != actual:
+            preview["phase"] = "preflight_changed"
+            preview["reason"] = "candidate_ids_changed"
+            return preview
+        return self.task_lifecycle(
+            now_ts=time.time(),
+            min_age_sec=0,
+            archive_dir=archive_dir,
+            admission_dir=admission_dir,
+            dry_run=False,
+            states=("failed", "timeout", "lost"),
+        )
+
+    @_task_store_serialized
     def put_runtime_sync(self, key: str, payload: dict[str, object]) -> None:
         now = time.time()
         if self._mysql_mode:
@@ -8383,6 +8578,23 @@ def _submit_if_slot_uncoordinated(
     return True
 
 
+def _effective_task_retry_max(config: AgentConfig, task: RunningTask) -> int:
+    """Return the effective maximum number of starts for one task.
+
+    Segment retries are deliberately a separate host-profile policy.  Keep
+    this calculation shared by the completion gate and the respawn path so a
+    segment configured for retries is not filtered out by the generic
+    ``task_retry_max`` setting before ``_respawn_task`` can apply its policy.
+    """
+    retry_max = int(config.task_retry_max)
+    if task.manual_request_id is None and task.task_type == "campaign_trigger" and retry_max == 1:
+        retry_max = _CAMPAIGN_TRIGGER_AUTOMATIC_RETRY_CAP
+    if task.manual_request_id is None and task.task_type == "segment" and task.entity_id is not None:
+        segment_retry_count = max(0, int(getattr(config, "segment_retry_count", 3) or 0))
+        retry_max = segment_retry_count + 1
+    return retry_max
+
+
 def _respawn_task(
     *,
     config: AgentConfig,
@@ -8395,12 +8607,12 @@ def _respawn_task(
     # - <= 0 : unlimited retries
     # - 1    : no retry (initial run only), unless a targeted campaign trigger override applies
     # - > 1  : bounded retries up to configured attempt cap
-    retry_max = int(config.task_retry_max)
-    if task.manual_request_id is None and task.task_type == "campaign_trigger" and retry_max == 1:
-        retry_max = _CAMPAIGN_TRIGGER_AUTOMATIC_RETRY_CAP
+    retry_max = _effective_task_retry_max(config, task)
     if task.manual_request_id is None and task.task_type == "segment" and task.entity_id is not None:
-        if retry_max <= 0:
-            retry_max = _SEGMENT_AUTOMATIC_RETRY_CAP
+        # Segment retry policy is host/profile configurable and counts retries
+        # after the initial attempt. Keep it independent from the generic
+        # command policy: the normal host profile defaults to three retries,
+        # i.e. four actual starts for one segment item.
         problem_counts = store.recent_task_problem_counts(
             root=task.root,
             task_type="segment",
@@ -8681,10 +8893,8 @@ def _monitor_running(
                 respawned = False
                 if rc != 0 and not lock_busy:
                     logging.warning("[%s] %s entity=%s failed rc=%s", task.root, task.task_type, task.entity_id, rc)
-                    task_retry_max = int(config.task_retry_max)
-                    if task.manual_request_id is None and task.task_type == "campaign_trigger" and task_retry_max == 1:
-                        task_retry_max = _CAMPAIGN_TRIGGER_AUTOMATIC_RETRY_CAP
-                    retry_enabled = (task_retry_max <= 0) or (task_retry_max > 1)
+                    retry_max = _effective_task_retry_max(config, task)
+                    retry_enabled = (retry_max <= 0) or (retry_max > 1)
                     if retry_enabled:
                         if config.task_retry_delay_sec > 0:
                             time.sleep(config.task_retry_delay_sec)

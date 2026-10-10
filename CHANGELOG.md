@@ -1,3 +1,18 @@
+## 1.5.67 - 2026-10-10
+
+- Preserve the authoritative workload and hardware profile selection across
+  self-update deploy/rollback, including the manual hardware-selection marker;
+  source/package replacement never reselects a host profile.
+- Replace the importable venv `mcd_agent` tree from the exact rollout source
+  after pip metadata/script installation, and verify imported code, metadata,
+  and source version agree on both deploy and rollback.
+- Implement the missing `tasks-lifecycle` and `purge-failed` TaskStore
+  operations with dry-run JSON, active-lock protection, and compressed
+  terminal receipts before deletion.
+- Add host-profile `segment_retry_count` (default `3` retries after initial,
+  four maximum starts) and document that bounded Mautic non-zero exits are
+  terminal item outcomes while the dispatcher continues the cycle.
+
 ## 1.5.66 - 2026-10-10
 
 - Serialize all `TaskStore` SQLite/MySQL operations across scheduler,
