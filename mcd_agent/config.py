@@ -2091,14 +2091,27 @@ def recover_config_from_mcc(config_path: str, *, reason: str) -> tuple[bool, str
 
 def runtime_overrides_from_config_file(path: str) -> dict[str, Any]:
     """
-    Read operator runtime overrides from config file (include-aware).
+    Read MCC-manageable operator runtime overrides from config file.
+
+    The runtime section also contains daemon bootstrap/static settings such as
+    ``dispatch_interval_sec`` and ``poll_interval_sec``.  Those values are
+    intentionally not part of the MCC runtime contract.  Returning them here
+    made a local baseline push them into the desired-state API, where a
+    newer MCC correctly persisted them but rejected the agent acknowledgement
+    as unsupported.  Project only the keys that can participate in the
+    bidirectional runtime contract; static/local settings remain in the
+    config file and continue to be loaded by ``load_config``.
     """
+    def managed(values: dict[str, Any]) -> dict[str, Any]:
+        allowed = runtime_remote_allowed_keys()
+        return {key: value for key, value in values.items() if key in allowed}
+
     try:
         cfg = _load_toml_with_includes(path)
         rt = cfg.get("runtime", {})
         if isinstance(rt, dict):
             cleaned, _ = _strip_legacy_runtime_keys(dict(rt))
-            return cleaned
+            return managed(cleaned)
     except Exception:
         pass
     # Fallback to mutable file only if include parser failed.
@@ -2112,7 +2125,7 @@ def runtime_overrides_from_config_file(path: str) -> dict[str, Any]:
     rt2 = raw.get("runtime", {})
     if isinstance(rt2, dict):
         cleaned2, _ = _strip_legacy_runtime_keys(dict(rt2))
-        return cleaned2
+        return managed(cleaned2)
     return {}
 
 

@@ -265,6 +265,32 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             5,
         )
 
+    def test_local_runtime_snapshot_excludes_daemon_bootstrap_keys(self) -> None:
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "mcd.toml"
+            path.write_text(
+                '[profile]\nname = "custom"\n\n'
+                '[runtime]\n'
+                'dispatch_interval_sec = 0.2\n'
+                'poll_interval_sec = 1\n'
+                'php_bin = "/usr/bin/php"\n'
+                'import_stall_timeout_sec = 900\n'
+                'segment_retry_count = 2\n',
+                encoding="utf-8",
+            )
+
+            cfg = load_config(str(path), allow_recover_from_mcc=False)
+            runtime = local_runtime_overrides(cfg)
+
+        self.assertEqual(runtime["import_stall_timeout_sec"], 900)
+        self.assertEqual(runtime["segment_retry_count"], 2)
+        self.assertNotIn("dispatch_interval_sec", runtime)
+        self.assertNotIn("poll_interval_sec", runtime)
+        self.assertNotIn("php_bin", runtime)
+
     def test_conflicting_local_change_rebases_latest_mcc_state_before_retry(self) -> None:
         cfg = SimpleNamespace(mcc_url="https://mcc.example", mcc_token="token")
         install = SimpleNamespace(
