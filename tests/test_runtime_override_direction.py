@@ -205,19 +205,26 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "ok")
         self.assertTrue(result["_local_rebase_attempted"])
-        fetch.assert_called_once_with(cfg, instance_uids=["generic.sales-snap.com"])
+        self.assertEqual(fetch.call_count, 2)
+        fetch.assert_any_call(cfg, instance_uids=["generic.sales-snap.com"])
         self.assertEqual(push.call_count, 2)
         self.assertEqual(
             push.call_args_list[0].kwargs["instance_desired_states"],
             {
                 "generic.sales-snap.com@MauticFarm-02": {
                     "segment_priority_instance_settings": {"segments": [102]},
-                }
+                },
+                "other.sales-snap.com@MauticFarm-02": {
+                    "segment_priority_instance_settings": {"segments": [303]},
+                },
             },
         )
         self.assertEqual(
             push.call_args_list[0].kwargs["instance_desired_state_revisions"],
-            {"generic.sales-snap.com@MauticFarm-02": 7},
+            {
+                "generic.sales-snap.com@MauticFarm-02": 8,
+                "other.sales-snap.com@MauticFarm-02": 4,
+            },
         )
         payload = push.call_args.args[1]
         self.assertEqual(payload["scheduler_host_max_parallel"], 6)
@@ -236,12 +243,18 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             {
                 "generic.sales-snap.com@MauticFarm-02": {
                     "segment_priority_instance_settings": {"segments": [102]},
-                }
+                },
+                "other.sales-snap.com@MauticFarm-02": {
+                    "segment_priority_instance_settings": {"segments": [303]},
+                },
             },
         )
         self.assertEqual(
             push.call_args.kwargs["instance_desired_state_revisions"],
-            {"generic.sales-snap.com@MauticFarm-02": 8},
+            {
+                "generic.sales-snap.com@MauticFarm-02": 8,
+                "other.sales-snap.com@MauticFarm-02": 4,
+            },
         )
         class MemoryStore:
             def __init__(self):
@@ -255,6 +268,193 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
         self.assertEqual(
             store.values["mcc_runtime_desired_state"],
             {"revision": 13, "instance_revisions": {"generic.sales-snap.com@MauticFarm-02": 9}},
+        )
+
+    def test_local_restart_preserves_remote_special_ring_when_baseline_has_no_instance_key(self) -> None:
+        cfg = SimpleNamespace(mcc_url="https://mcc.example", mcc_token="token")
+        install = SimpleNamespace(
+            instance_uid="generic.sales-snap.com",
+            root="/var/www/generic/public_html",
+            name="generic",
+            primary_domain="generic.sales-snap.com",
+            domains=["generic.sales-snap.com"],
+        )
+        previous = {"scheduler_host_max_parallel": 4}
+        current = {"scheduler_host_max_parallel": 6}
+        qualified_uid = "generic.sales-snap.com@MauticFarm-02"
+        fresh = {
+            "status": "ok",
+            "runtime_overrides": {"scheduler_host_max_parallel": 5},
+            "instance_desired_states": {
+                qualified_uid: {
+                    "revision": 5,
+                    "runtime_overrides": {
+                        "segment_special_rings_v1": {
+                            "priority": [],
+                            "super_priority": {"segments": [101, 102], "slots_override": 1},
+                        },
+                    },
+                },
+            },
+            "desired_state": {"revision": 7},
+        }
+        with patch("mcd_agent.daemon.fetch_runtime_overrides", return_value=fresh), patch(
+            "mcd_agent.daemon.push_runtime_overrides",
+            return_value={"status": "ok", "desired_state": {"revision": 8}},
+        ) as push:
+            result = daemon._push_local_runtime_change(
+                cfg,
+                previous,
+                current,
+                [install],
+                desired_revision=6,
+                instance_revisions={qualified_uid: 4},
+            )
+
+        self.assertEqual(result["status"], "ok")
+        payload = push.call_args.args[1]
+        self.assertEqual(
+            payload["segment_super_priority_instance_settings"][qualified_uid],
+            {"segments": [101, 102], "slots_override": 1},
+        )
+        self.assertEqual(
+            push.call_args.kwargs["instance_desired_states"],
+            {
+                qualified_uid: {
+                    "segment_priority_instance_settings": {"segments": []},
+                    "segment_super_priority_instance_settings": {
+                        "segments": [101, 102],
+                        "slots_override": 1,
+                    },
+                },
+            },
+        )
+        self.assertEqual(
+            push.call_args.kwargs["instance_desired_state_revisions"],
+            {qualified_uid: 5},
+        )
+        self.assertEqual(push.call_args.kwargs["desired_state_revision"], 7)
+
+    def test_explicit_local_instance_removal_clears_only_removed_field(self) -> None:
+        cfg = SimpleNamespace(mcc_url="https://mcc.example", mcc_token="token")
+        install = SimpleNamespace(
+            instance_uid="generic.sales-snap.com",
+            root="/var/www/generic/public_html",
+            name="generic",
+            primary_domain="generic.sales-snap.com",
+            domains=["generic.sales-snap.com"],
+        )
+        qualified_uid = "generic.sales-snap.com@MauticFarm-02"
+        previous = {
+            "segment_super_priority_instance_settings": {
+                "generic.sales-snap.com": {"segments": [101, 102], "slots_override": 1},
+            },
+        }
+        current = {
+            "segment_priority_instance_settings": {
+                "generic.sales-snap.com": {"segments": [303]},
+            },
+        }
+        fresh = {
+            "status": "ok",
+            "runtime_overrides": {},
+            "instance_desired_states": {
+                qualified_uid: {
+                    "revision": 5,
+                    "runtime_overrides": {
+                        "segment_priority_instance_settings": {"segments": [404]},
+                        "segment_super_priority_instance_settings": {
+                            "segments": [101, 102],
+                            "slots_override": 1,
+                        },
+                        "segment_whitelist_instance_settings": {"segments": [909]},
+                    },
+                },
+            },
+            "desired_state": {"revision": 9},
+        }
+        with patch("mcd_agent.daemon.fetch_runtime_overrides", return_value=fresh), patch(
+            "mcd_agent.daemon.push_runtime_overrides",
+            return_value={"status": "ok"},
+        ) as push:
+            result = daemon._push_local_runtime_change(
+                cfg,
+                previous,
+                current,
+                [install],
+                desired_revision=8,
+                instance_revisions={qualified_uid: 4},
+            )
+
+        self.assertEqual(result["status"], "ok")
+        row = push.call_args.kwargs["instance_desired_states"][qualified_uid]
+        self.assertEqual(row["segment_priority_instance_settings"], {"segments": [303]})
+        self.assertEqual(row["segment_whitelist_instance_settings"], {"segments": [909]})
+        self.assertNotIn("segment_super_priority_instance_settings", row)
+        payload = push.call_args.args[1]
+        self.assertEqual(
+            payload["segment_priority_instance_settings"][qualified_uid],
+            {"segments": [303]},
+        )
+        self.assertNotIn("segment_super_priority_instance_settings", payload)
+        self.assertEqual(
+            payload["segment_whitelist_instance_settings"][qualified_uid],
+            {"segments": [909]},
+        )
+
+    def test_direct_local_instance_add_is_sent_without_dropping_remote_fields(self) -> None:
+        cfg = SimpleNamespace(mcc_url="https://mcc.example", mcc_token="token")
+        install = SimpleNamespace(
+            instance_uid="generic.sales-snap.com",
+            root="/var/www/generic/public_html",
+            name="generic",
+            primary_domain="generic.sales-snap.com",
+            domains=["generic.sales-snap.com"],
+        )
+        qualified_uid = "generic.sales-snap.com@MauticFarm-02"
+        previous = {"scheduler_host_max_parallel": 4}
+        current = {
+            "scheduler_host_max_parallel": 4,
+            "segment_super_priority_instance_settings": {
+                "generic.sales-snap.com": {"segments": [201, 202], "slots_override": 1},
+            },
+        }
+        fresh = {
+            "status": "ok",
+            "runtime_overrides": {},
+            "instance_desired_states": {
+                qualified_uid: {
+                    "revision": 5,
+                    "runtime_overrides": {
+                        "segment_whitelist_instance_settings": {"segments": [909]},
+                    },
+                },
+            },
+            "desired_state": {"revision": 10},
+        }
+        with patch("mcd_agent.daemon.fetch_runtime_overrides", return_value=fresh), patch(
+            "mcd_agent.daemon.push_runtime_overrides",
+            return_value={"status": "ok"},
+        ) as push:
+            result = daemon._push_local_runtime_change(
+                cfg,
+                previous,
+                current,
+                [install],
+                desired_revision=9,
+                instance_revisions={qualified_uid: 4},
+            )
+
+        self.assertEqual(result["status"], "ok")
+        row = push.call_args.kwargs["instance_desired_states"][qualified_uid]
+        self.assertEqual(
+            row["segment_super_priority_instance_settings"],
+            {"segments": [201, 202], "slots_override": 1},
+        )
+        self.assertEqual(row["segment_whitelist_instance_settings"], {"segments": [909]})
+        self.assertEqual(
+            push.call_args.args[1]["segment_super_priority_instance_settings"][qualified_uid],
+            {"segments": [201, 202], "slots_override": 1},
         )
 
     def test_suffixed_mcc_response_maps_rings_and_acks_exact_revision(self) -> None:

@@ -132,6 +132,7 @@ from mcd_agent.runtime_overrides import (
     instance_desired_states,
     local_runtime_overrides,
     merge_instance_desired_states,
+    normalize_segment_special_rings,
     overrides_fingerprint,
     push_runtime_overrides,
 )
@@ -271,22 +272,116 @@ def _rebase_local_runtime_payload(
     return rebased
 
 
-def _changed_local_instance_desired_states(
+def _normalize_instance_runtime_row(value: object) -> dict[str, Any]:
+    """Normalize one desired-state row to the lane-key wire shape."""
+    if not isinstance(value, dict):
+        return {}
+    row: dict[str, Any] = {}
+    for key, item in value.items():
+        if key == "revision":
+            continue
+        if key == "segment_special_rings_v1":
+            lanes = normalize_segment_special_rings(item)
+            if lanes is None:
+                # Keep malformed compatibility data visible so the normal
+                # validation/ack path can reject it instead of silently
+                # deleting it during a local rebase.
+                row[key] = deepcopy(item)
+            else:
+                row.update(deepcopy(lanes))
+            continue
+        row[str(key)] = deepcopy(item)
+    return row
+
+
+def _normalize_instance_runtime_rows(states: object) -> dict[str, dict[str, Any]]:
+    """Return instance rows without transport-only revisions."""
+    if not isinstance(states, dict):
+        return {}
+    rows: dict[str, dict[str, Any]] = {}
+    for raw_uid, raw_state in states.items():
+        uid = str(raw_uid or "").strip()
+        if not uid or not isinstance(raw_state, dict):
+            continue
+        overrides = raw_state.get("runtime_overrides", raw_state)
+        row = _normalize_instance_runtime_row(overrides)
+        rows[uid] = row
+    return rows
+
+
+def _local_instance_runtime_rows(
     previous_local_runtime: Mapping[str, Any],
     current_local_runtime: Mapping[str, Any],
     installs: list[object],
-) -> dict[str, dict[str, Any]]:
-    """Return only changed canonical instance rows; empty rows mean clear."""
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Extract normalized local rows before and after the local edit."""
     previous = instance_desired_states(dict(previous_local_runtime), installs)
     current = instance_desired_states(dict(current_local_runtime), installs)
-    changed: dict[str, dict[str, Any]] = {}
-    for uid in sorted(set(previous) | set(current)):
-        before = previous.get(uid)
-        after = current.get(uid)
-        if before == after:
-            continue
-        changed[str(uid)] = deepcopy(after) if isinstance(after, dict) else {}
-    return changed
+    return (
+        {
+            str(uid): _normalize_instance_runtime_row(row)
+            for uid, row in previous.items()
+            if isinstance(row, dict)
+        },
+        {
+            str(uid): _normalize_instance_runtime_row(row)
+            for uid, row in current.items()
+            if isinstance(row, dict)
+        },
+    )
+
+
+def _rebase_local_instance_runtime_states(
+    latest_runtime: Mapping[str, Any],
+    latest_instance_states: object,
+    previous_local_runtime: Mapping[str, Any],
+    current_local_runtime: Mapping[str, Any],
+    installs: list[object],
+) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+    """Apply field-level local instance deltas to a fresh MCC snapshot.
+
+    The desired endpoint treats the replace payload as authoritative.  Keep
+    every remote row and only change fields that differ from the persisted
+    local baseline.  In particular, a missing local field is not a deletion
+    unless that field existed in the persisted baseline.
+    """
+    remote_rows = _normalize_instance_runtime_rows(latest_instance_states)
+    previous_rows, current_rows = _local_instance_runtime_rows(
+        previous_local_runtime,
+        current_local_runtime,
+        installs,
+    )
+    known_uids = set(remote_rows)
+    previous_rows = associate_instance_desired_states(previous_rows, known_uids)
+    current_rows = associate_instance_desired_states(current_rows, known_uids)
+
+    final_rows = {uid: deepcopy(row) for uid, row in remote_rows.items()}
+    for uid in sorted(set(previous_rows) | set(current_rows)):
+        before = previous_rows.get(uid, {})
+        after = current_rows.get(uid, {})
+        row = deepcopy(final_rows.get(uid, {}))
+        remote_present = uid in final_rows
+        for key in sorted(set(before) | set(after)):
+            if key in after:
+                # A key unchanged since the local baseline must not overwrite
+                # a newer remote value.  A newly added/edited key is local
+                # intent and is therefore applied to the fresh row.
+                if key not in before or before[key] != after[key] or not remote_present:
+                    row[key] = deepcopy(after[key])
+            elif key in before:
+                # Only an explicit removal from a baseline that contained the
+                # key is a deletion.  Unseen remote keys remain untouched.
+                row.pop(key, None)
+        if remote_present or row or after:
+            final_rows[uid] = row
+
+    rebased = _rebase_local_runtime_payload(
+        latest_runtime,
+        previous_local_runtime,
+        current_local_runtime,
+    )
+    rebased = merge_instance_desired_states(rebased, final_rows)
+    return rebased, final_rows
 
 
 def _instance_state_revisions(states: object, wanted_uids: set[str]) -> dict[str, int]:
@@ -325,39 +420,29 @@ def _retry_local_runtime_push_after_conflict(
     latest_host = latest_host if isinstance(latest_host, dict) else {}
     latest_instance_states = fresh.get("instance_desired_states")
     latest = merge_instance_desired_states(latest_host, latest_instance_states)
-    changed_instances = _changed_local_instance_desired_states(
+    rebased, desired_instances = _rebase_local_instance_runtime_states(
+        latest,
+        latest_instance_states,
         previous_local_runtime,
         current_local_runtime,
         installs,
     )
-    known_instance_uids = (
-        set(latest_instance_states)
-        if isinstance(latest_instance_states, dict)
-        else set()
-    )
-    changed_instances = associate_instance_desired_states(changed_instances, known_instance_uids)
-    rebased = _rebase_local_runtime_payload(
-        latest,
-        previous_local_runtime,
-        current_local_runtime,
-    )
-    rebased = merge_instance_desired_states(rebased, changed_instances)
 
     desired_state = fresh.get("desired_state")
     desired_revision = desired_state.get("revision") if isinstance(desired_state, dict) else None
     if not isinstance(desired_revision, int):
         desired_revision = None
-    changed_uids = set(changed_instances)
+    desired_uids = set(desired_instances)
     return push_runtime_overrides(
         config,
         rebased,
         merge=False,
         target="desired",
         desired_state_revision=desired_revision,
-        instance_desired_states=changed_instances,
+        instance_desired_states=desired_instances,
         instance_desired_state_revisions=_instance_state_revisions(
             latest_instance_states,
-            changed_uids,
+            desired_uids,
         ),
     )
 
@@ -371,21 +456,55 @@ def _push_local_runtime_change(
     desired_revision: int | None,
     instance_revisions: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Push a local edit, rebasing once when the initial revision is stale."""
-    local_instance_states = instance_desired_states(dict(current_local_runtime), installs)
-    local_instance_states = associate_instance_desired_states(local_instance_states, instance_revisions)
+    """Push a local edit on a fresh snapshot, retrying once on conflict."""
+    instance_uids = sorted(
+        {
+            str(getattr(inst, "instance_uid", "") or "").strip()
+            for inst in installs
+            if str(getattr(inst, "instance_uid", "") or "").strip()
+        }
+    )
+    fresh = fetch_runtime_overrides(config, instance_uids=instance_uids)
+    if str(fresh.get("status", "")).strip().lower() != "ok":
+        return fresh
+
+    latest_host = fresh.get("runtime_overrides")
+    latest_host = latest_host if isinstance(latest_host, dict) else {}
+    latest_instance_states = fresh.get("instance_desired_states")
+    latest = merge_instance_desired_states(latest_host, latest_instance_states)
+    rebased, desired_instances = _rebase_local_instance_runtime_states(
+        latest,
+        latest_instance_states,
+        previous_local_runtime,
+        current_local_runtime,
+        installs,
+    )
+    fresh_desired_state = fresh.get("desired_state")
+    fresh_desired_revision = (
+        fresh_desired_state.get("revision")
+        if isinstance(fresh_desired_state, dict)
+        else None
+    )
+    if not isinstance(fresh_desired_revision, int):
+        fresh_desired_revision = desired_revision
+    fresh_instance_revisions = _instance_state_revisions(
+        latest_instance_states,
+        set(desired_instances),
+    )
+    # A fresh canonical response supersedes the stored revision.  Keep a
+    # stored per-instance revision only for a local row absent from the
+    # response, which can occur while a newly-created install is registering.
+    for uid, revision in instance_revisions.items():
+        if uid in desired_instances and uid not in fresh_instance_revisions and isinstance(revision, int):
+            fresh_instance_revisions[str(uid)] = int(revision)
     pushed = push_runtime_overrides(
         config,
-        dict(current_local_runtime),
+        rebased,
         merge=False,
         target="desired",
-        desired_state_revision=desired_revision,
-        instance_desired_states=local_instance_states,
-        instance_desired_state_revisions={
-            str(key): int(value)
-            for key, value in instance_revisions.items()
-            if isinstance(value, int)
-        },
+        desired_state_revision=fresh_desired_revision,
+        instance_desired_states=desired_instances,
+        instance_desired_state_revisions=fresh_instance_revisions,
     )
     if str(pushed.get("status", "")).strip().lower() != "conflict":
         return pushed

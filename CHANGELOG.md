@@ -1,3 +1,11 @@
+## 1.5.71 - 2026-10-10
+
+- Preserve the full fresh MCC instance desired-state snapshot during a local
+  push; apply only field-level local deltas, so an instance key absent from a
+  persisted local baseline is never cleared accidentally. Explicit local
+  removal clears only the key that was present in that baseline, while direct
+  local additions are sent with unrelated remote instance fields intact.
+
 ## 1.5.70 - 2026-10-10
 
 - Accept both stable local instance UIDs and MCC host-qualified aliases on
