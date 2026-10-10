@@ -1,6 +1,6 @@
 [project]
 name = "mcd-agent"
-version = "1.5.78"
+version = "1.5.79"
 description = "MauticControlDaemon host agent"
 requires-python = ">=3.10"
 readme = "README.md"
@@ -16,6 +16,9 @@ mcd-cli = "mcd_agent.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["mcd_agent*"]
+
+[tool.setuptools]
+py-modules = ["sitecustomize"]
 
 [tool.setuptools.package-data]
 mcd_agent = ["templates/nginx/*.conf", "contracts/*.json", "contracts/fixtures/*.json"]

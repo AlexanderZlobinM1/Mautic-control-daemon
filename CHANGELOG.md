@@ -1,3 +1,9 @@
+## 1.5.79 - 2026-10-10
+
+- Add a managed-venv bootstrap so the legacy 1.5.75 updater can verify a
+  successor package before the new updater code is loaded; remove only stale
+  MCD source/editable shadow hooks and keep provenance fail-closed.
+
 ## 1.5.78 - 2026-10-10
 
 - Fix self-update package verification when a stale editable install or
