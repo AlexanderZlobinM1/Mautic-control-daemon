@@ -1,3 +1,13 @@
+## 1.5.75 - 2026-10-10
+
+- Bootstrap runtime synchronization from one fresh canonical MCC read before
+  classifying a missing local instance row as a deletion. A newer qualified
+  MCC row is materialized into the mutable config/effective runtime first;
+  partial host snapshots remain non-destructive and accepted instance state is
+  not cleared on restart.
+- Preserve the bidirectional `updated_at`/revision/tombstone LWW metadata and
+  avoid a duplicate desired push during the restart bootstrap.
+
 ## 1.5.74 - 2026-10-10
 
 - Make runtime synchronization bidirectional with durable per-field and

@@ -1244,6 +1244,98 @@ def _initialize_local_runtime_baseline(config: AgentConfig, store: object) -> tu
     return dict(stored), overrides_fingerprint(stored)
 
 
+def _store_runtime_fetch_snapshot(
+    store: object,
+    response: Mapping[str, Any],
+    remote_runtime: Mapping[str, Any],
+    remote_metadata: Mapping[str, Any],
+) -> None:
+    """Persist a canonical MCC read before any local baseline classification."""
+    store.put_runtime_sync("mcc_runtime", dict(remote_runtime))
+    store.put_runtime_sync(_MCC_RUNTIME_METADATA_KEY, dict(remote_metadata))
+    desired_state = response.get("desired_state")
+    if not isinstance(desired_state, dict):
+        return
+    revisions: dict[str, int] = {}
+    instance_states = response.get("instance_desired_states")
+    if isinstance(instance_states, dict):
+        for uid, item in instance_states.items():
+            if isinstance(item, dict) and isinstance(item.get("revision"), int) and not isinstance(item.get("revision"), bool):
+                revisions[str(uid)] = int(item["revision"])
+    state_for_store = dict(desired_state)
+    state_for_store["instance_revisions"] = revisions
+    store.put_runtime_sync("mcc_runtime_desired_state", state_for_store)
+
+
+def _bootstrap_remote_runtime_before_local_baseline(
+    config: AgentConfig,
+    store: object,
+    instance_uids: list[str],
+) -> str:
+    """Read canonical MCC state before startup can mistake a missing file row for deletion."""
+    if not config.mcc_url or not config.mcc_token:
+        return "disabled"
+    response = fetch_runtime_overrides(config, instance_uids=instance_uids)
+    status = str(response.get("status", "")).strip().lower()
+    if status != "ok":
+        return status or "error"
+    if _remote_runtime_response_is_stale(store, response):
+        logging.info("runtime-overrides startup bootstrap deferred behind accepted revision")
+        return "deferred_remote_stale"
+
+    overrides_raw = response.get("runtime_overrides")
+    remote_runtime = merge_instance_desired_states(
+        overrides_raw if isinstance(overrides_raw, dict) else {},
+        response.get("instance_desired_states"),
+    )
+    if _accepted_runtime_response_matches(store, response):
+        accepted_raw = store.get_runtime_sync(_LOCAL_RUNTIME_ACCEPTED_KEY)
+        accepted_runtime = (
+            accepted_raw.get("runtime")
+            if isinstance(accepted_raw, dict) and isinstance(accepted_raw.get("runtime"), dict)
+            else {}
+        )
+        remote_runtime = _merge_missing_runtime_values(remote_runtime, accepted_runtime)
+
+    current_local_runtime = local_runtime_overrides(config)
+    local_metadata = _runtime_metadata_for_snapshot(
+        store.get_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY),
+        current_local_runtime,
+        source="mcd",
+    )
+    remote_metadata = _runtime_metadata_from_response(
+        response,
+        remote_runtime,
+        current_local_runtime,
+    )
+    resolution = _resolve_runtime_snapshots(
+        current_local_runtime,
+        remote_runtime,
+        local_metadata,
+        remote_metadata,
+    )
+    _store_runtime_fetch_snapshot(store, response, remote_runtime, remote_metadata)
+    if resolution.get("local_push"):
+        # Keep the local event for the normal accepted-push path. Do not apply
+        # a remote snapshot over a newer offline MCD edit during bootstrap.
+        store.put_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY, local_metadata)
+        return "local_pending"
+
+    resolved_runtime = resolution["runtime"]
+    resolved_metadata = resolution["metadata"]
+    _persist_resolved_runtime_to_config(
+        config,
+        current_local_runtime,
+        resolved_runtime,
+        resolved_metadata,
+    )
+    store.put_runtime_sync("local_runtime", resolved_runtime)
+    store.put_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY, resolved_metadata)
+    _clear_local_runtime_push_pending(store)
+    _clear_local_runtime_accepted(store)
+    return "applied"
+
+
 def _rebase_local_runtime_payload(
     latest_runtime: Mapping[str, Any],
     previous_local_runtime: Mapping[str, Any],
@@ -10877,7 +10969,6 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
         campaign_whitelist = set()
 
     store = TaskStore(config.state_db_path, config)
-    _, startup_local_runtime_fp = _initialize_local_runtime_baseline(config, store)
     store.put_runtime_sync(
         "profile_authority",
         {
@@ -10917,6 +11008,19 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
             installs = inventory.list_instances()
     else:
         installs = inventory.list_instances()
+    bootstrap_status = _bootstrap_remote_runtime_before_local_baseline(
+        config,
+        store,
+        [str(getattr(inst, "instance_uid", "") or "") for inst in installs],
+    )
+    if bootstrap_status == "applied":
+        try:
+            config = load_config(config.config_file_path, allow_recover_from_mcc=False)
+            base_config = config
+            profile_authority = str(getattr(config, "profile_name", "") or "").strip().lower()
+        except Exception as exc:
+            logging.warning("runtime-overrides startup bootstrap reload failed: %s", exc)
+    _, startup_local_runtime_fp = _initialize_local_runtime_baseline(config, store)
     _sync_segment_whitelist_file(config, installs)
     _refresh_instance_db_maps(installs, db_configs_by_root, mautic_timezones_by_root)
     _apply_instance_runtime_guard(installs, reason="startup")

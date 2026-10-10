@@ -4,7 +4,7 @@
 фактическую схему после исправления admission и должен обновляться вместе с
 кодом, тестами и runtime receipt. Документ не является разрешением на
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.74 (прямой follow-up от 1.5.73).
+Актуальная редакция этого канона — MCD 1.5.75 (прямой follow-up от 1.5.74).
 
 Для instance-scoped desired state локальный inventory UID является стабильной
 основой, но transport запрашивает также динамически полученный
@@ -37,6 +37,10 @@ event: сначала сравнивается `updated_at`, при отсутс
 Bootstrap после approved update сначала восстанавливает отсутствующие
 instance-rows из durable baseline, затем создаёт ровно один pending delta до
 первого accepted desired revision; remote apply до этого момента запрещён.
+При restart первым read-only шагом выполняется свежий canonical MCC fetch с
+instance UID aliases и field metadata. Его более новый qualified row
+materialize-ся в mutable config/effective runtime до локальной deletion
+classification; принятый instance row не очищается неполным host snapshot.
 
 После startup/poll persistence строится также из canonical MCC
 `instance_desired_states`, а не только из profile-shaped effective config.

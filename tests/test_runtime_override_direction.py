@@ -1345,6 +1345,86 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             )
             self.assertEqual(push.call_count, 1)
 
+    def test_restart_bootstrap_reads_fresh_mcc_row_before_classifying_local_absence(self) -> None:
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        class MemoryStore:
+            def __init__(self, values=None):
+                self.values = dict(values or {})
+
+            def get_runtime_sync(self, key):
+                return self.values.get(key)
+
+            def put_runtime_sync(self, key, value):
+                self.values[key] = dict(value)
+
+            def delete_runtime_sync(self, keys):
+                for key in keys:
+                    self.values.pop(key, None)
+                return 1
+
+        qualified_uid = "app.example.test@farm-a"
+        desired_runtime = {
+            "segment_priority_instance_settings": {
+                qualified_uid: {"segments": [7], "slots_override": 1}
+            },
+            "segment_super_priority_instance_settings": {
+                qualified_uid: {"segments": [8, 9], "slots_override": 1}
+            },
+        }
+        response = {
+            "status": "ok",
+            "runtime_overrides": {},
+            "instance_desired_states": {
+                qualified_uid: {
+                    "revision": 4,
+                    "updated_at": 200.0,
+                    "runtime_overrides": {
+                        "segment_priority_instance_settings": {"segments": [7], "slots_override": 1},
+                        "segment_super_priority_instance_settings": {
+                            "segments": [8, 9],
+                            "slots_override": 1,
+                        },
+                    },
+                }
+            },
+            "desired_state": {"revision": 12, "updated_at": 200.0},
+        }
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "mcd.toml"
+            path.write_text('[profile]\nname = "farm-hiload"\n', encoding="utf-8")
+            cfg = SimpleNamespace(
+                config_file_path=str(path),
+                mcc_url="https://mcc.example",
+                mcc_token="token",
+            )
+            store = MemoryStore(
+                {
+                    # This is the accepted local state before the simulated
+                    # restart; the mutable file itself is intentionally empty.
+                    "local_runtime": desired_runtime,
+                    "mcc_runtime": {},
+                }
+            )
+            with patch("mcd_agent.daemon.fetch_runtime_overrides", return_value=response) as fetch:
+                status = daemon._bootstrap_remote_runtime_before_local_baseline(
+                    cfg,
+                    store,
+                    ["app.example.test"],
+                )
+            self.assertEqual(status, "applied")
+            self.assertEqual(fetch.call_count, 1)
+
+            restarted = load_config(str(path), allow_recover_from_mcc=False)
+            persisted = local_runtime_overrides(restarted)
+            self.assertEqual(persisted, desired_runtime)
+            baseline, _ = daemon._initialize_local_runtime_baseline(restarted, store)
+            self.assertEqual(baseline, desired_runtime)
+            self.assertIsNone(daemon._read_local_runtime_push_pending(store))
+            self.assertEqual(store.get_runtime_sync("mcc_runtime"), desired_runtime)
+
     def test_selected_profile_provenance_survives_runtime_sync_rebase(self) -> None:
         from pathlib import Path
         from tempfile import TemporaryDirectory
