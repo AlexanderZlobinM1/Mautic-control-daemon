@@ -513,13 +513,34 @@ def push_runtime_overrides(
     target_mode = str(target or "observed").strip().lower()
     if target_mode not in {"observed", "desired"}:
         target_mode = "observed"
+    runtime_payload = runtime_overrides if isinstance(runtime_overrides, dict) else {}
+    instance_payload = instance_desired_states
+    if target_mode == "desired":
+        # Desired state is a bidirectional runtime contract.  Project the
+        # host and instance envelopes through the same authority metadata
+        # used by remote application so local-only/bootstrap keys and future
+        # unknown keys never get persisted as MCC desired state.  Observed
+        # pushes intentionally remain open for telemetry envelopes that are
+        # not runtime settings.
+        remote_keys = runtime_remote_allowed_keys()
+        runtime_payload = {
+            key: value for key, value in runtime_payload.items() if key in remote_keys
+        }
+        if isinstance(instance_desired_states, dict):
+            instance_payload = {
+                str(uid): {
+                    key: value for key, value in values.items() if key in remote_keys
+                }
+                for uid, values in instance_desired_states.items()
+                if isinstance(values, dict)
+            }
     payload = {
         "hostname": str(ident.get("effective_hostname") or ""),
         "mcc_host_name": str(ident.get("effective_mcc_host_name") or ""),
         "agent_hostname": str(ident.get("local_hostname") or ""),
         "configured_host_name": str(ident.get("configured_host_name") or ""),
         "agent_version": __version__,
-        "runtime_overrides": runtime_overrides if isinstance(runtime_overrides, dict) else {},
+        "runtime_overrides": runtime_payload,
         "push_mode": "merge" if merge else "replace",
         "target": target_mode,
     }
@@ -527,8 +548,8 @@ def push_runtime_overrides(
         payload["desired_state_protocol"] = 1
         if isinstance(desired_state_revision, int):
             payload["desired_state_revision"] = desired_state_revision
-        if isinstance(instance_desired_states, dict):
-            payload["instance_desired_states"] = instance_desired_states
+        if isinstance(instance_payload, dict):
+            payload["instance_desired_states"] = instance_payload
         if isinstance(instance_desired_state_revisions, dict):
             payload["instance_desired_state_revisions"] = instance_desired_state_revisions
         if isinstance(runtime_change_metadata, dict):

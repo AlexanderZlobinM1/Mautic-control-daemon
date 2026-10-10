@@ -291,6 +291,49 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
         self.assertNotIn("poll_interval_sec", runtime)
         self.assertNotIn("php_bin", runtime)
 
+    def test_desired_push_projects_host_and_instance_payloads_through_contract(self) -> None:
+        cfg = SimpleNamespace(mcc_url="https://mcc.example", mcc_token="token")
+        identity = {
+            "effective_hostname": "host-1",
+            "effective_mcc_host_name": "host-1",
+            "local_hostname": "host-1",
+            "configured_host_name": "",
+        }
+        response = {
+            "status": "ok",
+            "desired_state": {"revision": 4, "runtime_overrides": {"import_stall_timeout_sec": 900}},
+            "instance_desired_states": {"example@host-1": {"revision": 2, "runtime_overrides": {}}},
+        }
+        with patch("mcd_agent.runtime_overrides.resolve_agent_identity", return_value=identity), patch(
+            "mcd_agent.runtime_overrides._post_json", return_value=response
+        ) as post:
+            result = push_runtime_overrides(
+                cfg,
+                {
+                    "import_stall_timeout_sec": 900,
+                    "dispatch_interval_sec": 0.2,
+                    "poll_interval_sec": 1,
+                    "future_local_only_key": "keep-local",
+                },
+                target="desired",
+                desired_state_revision=3,
+                instance_desired_states={
+                    "example@host-1": {
+                        "import_stall_timeout_sec": 900,
+                        "dispatch_interval_sec": 0.2,
+                        "future_local_only_key": "keep-local",
+                    },
+                },
+            )
+
+        self.assertEqual(result["status"], "ok")
+        payload = post.call_args.args[1]
+        self.assertEqual(payload["runtime_overrides"], {"import_stall_timeout_sec": 900})
+        self.assertEqual(
+            payload["instance_desired_states"],
+            {"example@host-1": {"import_stall_timeout_sec": 900}},
+        )
+
     def test_conflicting_local_change_rebases_latest_mcc_state_before_retry(self) -> None:
         cfg = SimpleNamespace(mcc_url="https://mcc.example", mcc_token="token")
         install = SimpleNamespace(
