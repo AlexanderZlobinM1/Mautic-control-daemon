@@ -1,3 +1,9 @@
+## 1.5.78 - 2026-10-10
+
+- Fix self-update package verification when a stale editable install or
+  source-tree PYTHONPATH shadows the venv package; isolate venv probes,
+  remove only MCD editable hooks, and preserve rollback after a path mismatch.
+
 ## 1.5.77 - 2026-10-10
 
 - Repackage the verified 1.5.76 scheduler fix as the next immutable release

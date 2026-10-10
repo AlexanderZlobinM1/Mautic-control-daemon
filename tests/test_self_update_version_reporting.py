@@ -452,6 +452,148 @@ class SelfUpdateVersionReportingTests(unittest.TestCase):
         self.assertEqual(restarts, [True])
         self.assertEqual(releases[0]["result_status"], "success")
 
+    def test_package_sync_clears_editable_source_shadow_and_isolates_venv_probe(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            install_dir = root / "mcd"
+            source_dir = install_dir / "src"
+            venv_python = install_dir / "venv" / "bin" / "python"
+            site_dir = install_dir / "venv" / "lib" / "python3.12" / "site-packages"
+            source_dir.mkdir(parents=True)
+            (source_dir / "mcd_agent").mkdir()
+            (source_dir / "pyproject.toml").write_text(
+                "[project]\nname='mcd-agent'\nversion='1.5.78'\n",
+                encoding="utf-8",
+            )
+            (source_dir / "mcd_agent" / "__init__.py").write_text(
+                '__version__ = "1.5.78"\n',
+                encoding="utf-8",
+            )
+            venv_python.parent.mkdir(parents=True)
+            venv_python.touch()
+            site_dir.mkdir(parents=True)
+
+            (site_dir / "__editable__.mcd_agent-1.5.77.pth").write_text(
+                "import __editable___mcd_agent_1_5_77_finder; __editable___mcd_agent_1_5_77_finder.install()\n",
+                encoding="utf-8",
+            )
+            (site_dir / "__editable___mcd_agent_1_5_77_finder.py").write_text(
+                "# stale finder\n",
+                encoding="utf-8",
+            )
+            (site_dir / "mcd_agent.egg-link").write_text(str(source_dir) + "\n", encoding="utf-8")
+            (site_dir / "easy-install.pth").write_text(
+                f"{source_dir}\n/other/package\n",
+                encoding="utf-8",
+            )
+
+            calls: list[tuple[list[str], dict[str, object]]] = []
+
+            def run(cmd: list[str], **kwargs: object) -> SimpleNamespace:
+                calls.append((cmd, kwargs))
+                code = cmd[-1] if "-c" in cmd else ""
+                if "site.getsitepackages" in code:
+                    return SimpleNamespace(returncode=0, stdout=f"{site_dir}\n", stderr="")
+                if "import importlib.metadata" in code:
+                    return SimpleNamespace(
+                        returncode=0,
+                        stdout=f"1.5.78\n1.5.78\n{site_dir / 'mcd_agent' / '__init__.py'}\n",
+                        stderr="",
+                    )
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with patch.dict(
+                self_update.os.environ,
+                {"PYTHONPATH": str(source_dir), "PYTHONHOME": str(root / "wrong-python")},
+                clear=False,
+            ), patch.object(self_update, "_ensure_venv_pip"), patch.object(
+                self_update.subprocess, "run", side_effect=run
+            ):
+                self_update._install_agent_package_for_source(install_dir, source_dir)
+
+            self.assertFalse((site_dir / "__editable__.mcd_agent-1.5.77.pth").exists())
+            self.assertFalse((site_dir / "__editable___mcd_agent_1_5_77_finder.py").exists())
+            self.assertFalse((site_dir / "mcd_agent.egg-link").exists())
+            self.assertEqual(
+                (site_dir / "easy-install.pth").read_text(encoding="utf-8"),
+                "/other/package\n",
+            )
+            self.assertTrue((site_dir / "mcd_agent" / "__init__.py").exists())
+            for _cmd, kwargs in calls:
+                env = kwargs["env"]
+                self.assertNotIn("PYTHONPATH", env)
+                self.assertNotIn("PYTHONHOME", env)
+
+    def test_apply_update_rolls_back_and_resynchronizes_package_after_path_mismatch(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = _cfg(tmp)
+            cfg.mcd_install_dir = str(root / "mcd")
+            cfg.config_file_path = ""
+            cfg.mcd_update_cleanup_enabled = False
+            install_dir = Path(cfg.mcd_install_dir)
+            src_dir = install_dir / "src"
+            (src_dir / "mcd_agent").mkdir(parents=True)
+            (src_dir / "old-marker").write_text("old\n", encoding="utf-8")
+            archive = root / "mcd-agent-1.5.78.tar.gz"
+            archive.touch()
+            calls: list[Path] = []
+            releases: list[dict[str, object]] = []
+
+            def install_package(_install_dir: Path, source_dir: Path) -> None:
+                calls.append(source_dir)
+                if len(calls) == 1:
+                    raise RuntimeError(
+                        "installed package path mismatch expected=/opt/mcd/venv/lib/python3.12/site-packages/"
+                        "mcd_agent/__init__.py imported=/opt/mcd/src/mcd_agent/__init__.py"
+                    )
+
+            def extract_archive(_archive: Path, destination: Path) -> None:
+                (destination / "mcd_agent").mkdir(parents=True)
+                (destination / "mcd_agent" / "__init__.py").write_text(
+                    '__version__ = "1.5.78"\n',
+                    encoding="utf-8",
+                )
+
+            old_installed = self_update.installed_agent_version
+            old_release = self_update.release_session
+            try:
+                self_update.installed_agent_version = lambda: "1.5.75"
+                self_update.release_session = lambda _cfg, _session_id, **kwargs: releases.append(kwargs)
+                with patch.object(self_update, "capture_profile_authority", return_value={}), patch.object(
+                    self_update, "restore_profile_authority"
+                ), patch.object(self_update, "_update_archive_path", return_value=archive), patch.object(
+                    self_update, "_ensure_update_archive", return_value=archive
+                ), patch.object(
+                    self_update, "_extract_archive_to_dir", side_effect=extract_archive
+                ), patch.object(
+                    self_update, "_install_requirements_for_staged_source"
+                ), patch.object(
+                    self_update, "_pre_switch_smoke_check"
+                ), patch.object(
+                    self_update, "_install_agent_package_for_source", side_effect=install_package
+                ):
+                    ok, msg = self_update.apply_update(
+                        cfg,
+                        {
+                            "status": "update",
+                            "target": "1.5.78",
+                            "package_url": "https://mcc.invalid/mcd-agent-1.5.78.tar.gz",
+                            "session_id": "sess-path-mismatch",
+                        },
+                    )
+            finally:
+                self_update.installed_agent_version = old_installed
+                self_update.release_session = old_release
+
+            self.assertFalse(ok)
+            self.assertIn("installed package path mismatch", msg)
+            self.assertNotIn("rollback failed", msg)
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(calls[1], src_dir)
+            self.assertEqual((src_dir / "old-marker").read_text(encoding="utf-8"), "old\n")
+            self.assertEqual(releases[0]["result_status"], "failed")
+
     def test_update_cleanup_defaults_remove_old_agent_artifacts(self) -> None:
         with TemporaryDirectory() as tmp:
             install_dir = Path(tmp) / "mcd"

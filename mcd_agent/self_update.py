@@ -313,6 +313,56 @@ def _copytree_ignore_artifacts(_src_dir: str, names: list[str]) -> set[str]:
     return ignored
 
 
+def _isolated_venv_env() -> dict[str, str]:
+    """Run venv probes without source-tree path injection from the daemon."""
+    env = os.environ.copy()
+    # The daemon may itself be running from /opt/mcd/src or may have been
+    # started with PYTHONPATH pointing there.  Child venv probes must resolve
+    # mcd_agent from site-packages, otherwise a valid package install is
+    # falsely reported as an installed-package path mismatch.
+    env.pop("PYTHONPATH", None)
+    env.pop("PYTHONHOME", None)
+    return env
+
+
+def _remove_agent_editable_artifacts(site_dir: Path, source_dir: Path) -> list[str]:
+    """Remove stale editable-install hooks that can shadow site-packages."""
+    source_roots = {
+        str(source_dir),
+        str(source_dir.resolve()),
+        str(source_dir / "mcd_agent"),
+        str((source_dir / "mcd_agent").resolve()),
+    }
+    removed: list[str] = []
+    for candidate in sorted(site_dir.iterdir()):
+        name = candidate.name.lower()
+        is_agent_hook = name in {"mcd_agent.egg-link", "mcd-agent.egg-link"}
+        is_agent_hook = is_agent_hook or (
+            name.startswith("__editable__")
+            and ("mcd_agent" in name or "mcd-agent" in name)
+        )
+        if candidate.suffix.lower() == ".pth" and candidate.is_file():
+            try:
+                content = candidate.read_text(encoding="utf-8")
+            except OSError:
+                content = ""
+            if any(root in content for root in source_roots):
+                lines = [line for line in content.splitlines(keepends=True) if line.strip() not in source_roots]
+                if lines:
+                    candidate.write_text("".join(lines), encoding="utf-8")
+                    removed.append(candidate.name)
+                    continue
+                is_agent_hook = True
+        if not is_agent_hook:
+            continue
+        if candidate.is_dir() and not candidate.is_symlink():
+            shutil.rmtree(candidate)
+        else:
+            candidate.unlink(missing_ok=True)
+        removed.append(candidate.name)
+    return removed
+
+
 def _extract_archive_to_dir(archive_path: Path, dst_dir: Path) -> None:
     with tempfile.TemporaryDirectory(prefix="mcd-self-update-") as td:
         td_path = Path(td)
@@ -351,7 +401,7 @@ def _install_requirements_for_staged_source(install_dir: Path, staged_src_dir: P
         "-r",
         str(req),
     ]
-    proc = subprocess.run(cmd, cwd="/", capture_output=True, text=True)
+    proc = subprocess.run(cmd, cwd="/", capture_output=True, text=True, env=_isolated_venv_env())
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "pip install failed").strip()
         raise RuntimeError(f"dependency install failed: {detail}")
@@ -371,6 +421,7 @@ def _install_agent_package_for_source(install_dir: Path, source_dir: Path) -> No
             "-c",
             "import site, sysconfig; paths = site.getsitepackages(); print(paths[0] if paths else sysconfig.get_paths()['purelib'])",
         ],
+        env=_isolated_venv_env(),
         capture_output=True,
         text=True,
     )
@@ -383,6 +434,9 @@ def _install_agent_package_for_source(install_dir: Path, source_dir: Path) -> No
     for dist_info in site_dir.glob("mcd_agent-*.dist-info"):
         if dist_info.is_dir():
             shutil.rmtree(dist_info)
+    removed_hooks = _remove_agent_editable_artifacts(site_dir, source_dir)
+    if removed_hooks:
+        logging.info("MCD self-update: removed stale editable package hooks: %s", removed_hooks)
     cmd = [
         str(venv_python),
         "-m",
@@ -395,7 +449,7 @@ def _install_agent_package_for_source(install_dir: Path, source_dir: Path) -> No
         "--force-reinstall",
         str(source_dir),
     ]
-    proc = subprocess.run(cmd, cwd="/", capture_output=True, text=True)
+    proc = subprocess.run(cmd, cwd="/", capture_output=True, text=True, env=_isolated_venv_env())
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "pip install agent package failed").strip()
         raise RuntimeError(f"agent package install failed: {detail}")
@@ -441,6 +495,7 @@ def _install_agent_package_for_source(install_dir: Path, source_dir: Path) -> No
             "print(mcd_agent.__file__)",
         ],
         cwd="/",
+        env=_isolated_venv_env(),
         capture_output=True,
         text=True,
     )
@@ -463,7 +518,14 @@ def _install_agent_package_for_source(install_dir: Path, source_dir: Path) -> No
 
 
 def _ensure_venv_pip(venv_python: Path) -> None:
-    probe = subprocess.run([str(venv_python), "-m", "pip", "--version"], cwd="/", capture_output=True, text=True)
+    env = _isolated_venv_env()
+    probe = subprocess.run(
+        [str(venv_python), "-m", "pip", "--version"],
+        cwd="/",
+        capture_output=True,
+        text=True,
+        env=env,
+    )
     if probe.returncode == 0:
         return
     proc = subprocess.run(
@@ -471,6 +533,7 @@ def _ensure_venv_pip(venv_python: Path) -> None:
         cwd="/",
         capture_output=True,
         text=True,
+        env=env,
     )
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "ensurepip failed").strip()
@@ -499,6 +562,7 @@ def _pre_switch_smoke_check(install_dir: Path, staged_src_dir: Path) -> None:
 
     compile_proc = subprocess.run(
         [str(venv_python), "-m", "compileall", "-q", str(staged_src_dir)],
+        env=_isolated_venv_env(),
         capture_output=True,
         text=True,
     )
@@ -529,6 +593,7 @@ if not hasattr(backup, "backup_lock_active"):
 """
     smoke_proc = subprocess.run(
         [str(venv_python), "-c", smoke_script],
+        env=_isolated_venv_env(),
         capture_output=True,
         text=True,
     )
