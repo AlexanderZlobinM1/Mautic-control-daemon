@@ -157,6 +157,7 @@ from mcd_agent.segment_admission import (
     sync_cycle as _segment_cycle_sync_state,
 )
 from mcd_agent.static_segment_lanes import (
+    ORPHAN_GRACE_SEC as _STATIC_LANE_ORPHAN_GRACE_SEC,
     PRIORITY as _SEGMENT_PRIORITY_LANE,
     SCHEMA as _STATIC_SEGMENT_LANES_SCHEMA,
     SUPER_PRIORITY as _SEGMENT_SUPER_PRIORITY_LANE,
@@ -2578,6 +2579,8 @@ def _static_lanes_reconcile(
     root: str,
     plans: dict[str, list[int]],
     now_ts: float,
+    active_evidence: Mapping[tuple[str, int], Mapping[str, object] | bool] | None = None,
+    orphan_grace_sec: int = _STATIC_LANE_ORPHAN_GRACE_SEC,
 ) -> tuple[dict[str, object], dict[str, list[int]], bool]:
     key = _static_lane_state_key(root)
     with _SEGMENT_STATIC_LANE_LOCK:
@@ -2585,9 +2588,123 @@ def _static_lanes_reconcile(
             store.get_runtime_sync(key),
             plans=plans,
             now_ts=now_ts,
+            active_evidence=active_evidence,
+            orphan_grace_sec=orphan_grace_sec,
         )
         store.put_runtime_sync(key, state)
     return state, added, started_new
+
+
+def _static_lane_runtime_evidence(
+    *,
+    store: "TaskStore",
+    root: str,
+    static_state: Mapping[str, object] | None,
+    running: Mapping[str, "RunningTask"],
+    priority_executor: "_PriorityTaskExecutor | None",
+    liveness_probe: Callable[["RunningTask"], Mapping[str, object] | bool] | None = None,
+    store_running_rows: list[Mapping[str, object]] | None = None,
+    now_ts: float | None = None,
+) -> dict[tuple[str, int], dict[str, object]]:
+    """Resolve independent evidence for persisted static-lane claims.
+
+    The persisted lane marker is deliberately used only as a grace anchor.
+    A live executor, nonterminal TaskStore row, or read-only segment process/DB
+    probe must be present before a claim is adopted as live.
+    """
+
+    now = float(now_ts if now_ts is not None else time.time())
+    lanes_raw = static_state.get("lanes") if isinstance(static_state, Mapping) else {}
+    lanes = lanes_raw if isinstance(lanes_raw, Mapping) else {}
+    task_types = {
+        _SEGMENT_SUPER_PRIORITY_LANE: "segment_super_priority",
+        _SEGMENT_PRIORITY_LANE: "segment_priority",
+    }
+    rows = store_running_rows
+    if rows is None:
+        try:
+            rows = store.running_rows()
+        except Exception:
+            rows = []
+
+    running_candidates: dict[tuple[int, str], RunningTask] = {}
+    for task in running.values():
+        if str(task.root) != str(root) or task.entity_id is None:
+            continue
+        running_candidates.setdefault((int(task.entity_id), str(task.task_type)), task)
+
+    store_candidates: set[tuple[int, str]] = set()
+    for row in rows or []:
+        if str(row.get("root") or "") != str(root) or row.get("entity_id") is None:
+            continue
+        try:
+            sid = int(row.get("entity_id"))
+        except (TypeError, ValueError):
+            continue
+        store_candidates.add((sid, str(row.get("task_type") or "")))
+
+    result: dict[tuple[str, int], dict[str, object]] = {}
+    for lane_name, task_type in task_types.items():
+        payload = lanes.get(lane_name)
+        payload = payload if isinstance(payload, Mapping) else {}
+        active_ids = set(_normalize_segment_ids([*(payload.get("claimed") or []), *(payload.get("running") or [])]))
+        for sid in active_ids:
+            evidence: dict[str, object] = {}
+            if priority_executor is not None:
+                try:
+                    if priority_executor.is_active(str(root), task_type, int(sid)):
+                        evidence["executor_active"] = True
+                except Exception:
+                    pass
+            if (int(sid), task_type) in store_candidates:
+                evidence["taskstore_active"] = True
+            if any((int(sid), candidate_type) in store_candidates for candidate_type in ("segment", "segment_sql")):
+                evidence["taskstore_active"] = True
+
+            candidate = running_candidates.get((int(sid), task_type))
+            if candidate is None:
+                candidate = running_candidates.get((int(sid), "segment"))
+            marker = _segment_runtime_marker_load(store, root, int(sid))
+            if marker:
+                for field in ("last_independent_at", "started_at"):
+                    try:
+                        if marker.get(field) is not None:
+                            evidence[field] = float(marker[field])
+                    except (TypeError, ValueError):
+                        pass
+            if candidate is None and (marker or liveness_probe is not None):
+                try:
+                    marker_started_at = float(marker.get("started_at") or now)
+                except (TypeError, ValueError):
+                    marker_started_at = now
+                try:
+                    marker_pid = int(marker.get("pid") or 0)
+                except (TypeError, ValueError):
+                    marker_pid = 0
+                candidate = RunningTask(
+                    row_id=0,
+                    root=str(root),
+                    task_key=_task_key(str(root), task_type, int(sid)),
+                    task_type=task_type,
+                    entity_id=int(sid),
+                    command_str=str(marker.get("command_str") or ""),
+                    timeout_sec=0,
+                    attempts=1,
+                    started_at=marker_started_at,
+                    pid=marker_pid,
+                )
+            if candidate is not None and liveness_probe is not None:
+                try:
+                    probe = liveness_probe(candidate)
+                except Exception:
+                    probe = {}
+                if isinstance(probe, Mapping):
+                    if any(bool(probe.get(key)) for key in ("active", "db", "db_process", "process", "runtime_confirmed")):
+                        evidence["db"] = True
+                elif isinstance(probe, bool) and probe:
+                    evidence["process"] = True
+            result[(lane_name, int(sid))] = evidence
+    return result
 
 
 def _static_lane_claim(
@@ -12126,11 +12243,23 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                         )
                     except Exception as exc:
                         logging.warning("[%s] static segment lane planning failed: %s", root, exc)
+                static_state_before = store.get_runtime_sync(_static_lane_state_key(root)) or {}
+                static_active_evidence = _static_lane_runtime_evidence(
+                    store=store,
+                    root=root,
+                    static_state=static_state_before if isinstance(static_state_before, Mapping) else {},
+                    running=running,
+                    priority_executor=priority_executor,
+                    liveness_probe=_segment_liveness_probe,
+                    now_ts=time.time(),
+                )
                 static_state, static_added, static_started_new = _static_lanes_reconcile(
                     store,
                     root=root,
                     plans=static_plans,
                     now_ts=time.time(),
+                    active_evidence=static_active_evidence,
+                    orphan_grace_sec=_STATIC_LANE_ORPHAN_GRACE_SEC,
                 )
                 if any(static_added.values()):
                     logging.info(
@@ -12204,6 +12333,59 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                         if not claimed:
                             continue
 
+                        static_args = render_mautic_command(
+                            php_bin=cfg.php_bin,
+                            run_as_user=cfg.mautic_run_as_user,
+                            root=root,
+                            template=cfg.cmd_segment_update_template,
+                            id=int(segment_id),
+                            batch_limit=cfg.segment_batch_limit,
+                        )
+                        static_started_at = time.time()
+                        static_timeout_sec = max(
+                            0,
+                            int(getattr(cfg, "priority_segment_timeout_sec", 3600) or 0),
+                        )
+                        static_command_str = shlex.join(static_args)
+
+                        def _static_segment_marker_task(
+                            pid: int,
+                            *,
+                            root: str = root,
+                            task_type: str = task_type,
+                            segment_id: int = int(segment_id),
+                            started_at: float = static_started_at,
+                            command_str: str = static_command_str,
+                            timeout_sec: int = static_timeout_sec,
+                        ) -> RunningTask:
+                            return RunningTask(
+                                row_id=0,
+                                root=root,
+                                task_key=_task_key(root, task_type, segment_id),
+                                task_type=task_type,
+                                entity_id=segment_id,
+                                command_str=command_str,
+                                timeout_sec=timeout_sec,
+                                attempts=1,
+                                started_at=started_at,
+                                pid=int(pid),
+                            )
+
+                        def _static_segment_started(
+                            pid: int,
+                            *,
+                            started_at: float = static_started_at,
+                        ) -> None:
+                            task = _static_segment_marker_task(pid)
+                            _segment_runtime_marker_write(
+                                store,
+                                task,
+                                status="running",
+                                now_ts=max(float(started_at), time.time()),
+                                pid=int(pid),
+                                command_str=static_command_str,
+                            )
+
                         def _static_segment_complete(
                             rc: int | None,
                             *,
@@ -12211,15 +12393,25 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                             lane_name: str = lane_name,
                             segment_id: int = int(segment_id),
                         ) -> None:
+                            note = None if rc == 0 else (
+                                "task_lock_busy" if rc == _TASK_LOCK_BUSY_RC else "static_segment_error"
+                            )
+                            _segment_runtime_marker_write(
+                                store,
+                                _static_segment_marker_task(0),
+                                status="terminal",
+                                now_ts=time.time(),
+                                note=note,
+                                pid=0,
+                                command_str=static_command_str,
+                            )
                             _static_lane_terminal(
                                 store,
                                 root=root,
                                 lane=lane_name,
                                 entity_id=segment_id,
                                 success=bool(rc == 0),
-                                note=None
-                                if rc == 0
-                                else ("task_lock_busy" if rc == _TASK_LOCK_BUSY_RC else "static_segment_error"),
+                                note=note,
                                 now_ts=time.time(),
                             )
                             segment_dispatch_wakeup.set()
@@ -12229,25 +12421,16 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                             root=root,
                             task_type=task_type,
                             entity_id=int(segment_id),
-                            args=render_mautic_command(
-                                php_bin=cfg.php_bin,
-                                run_as_user=cfg.mautic_run_as_user,
-                                root=root,
-                                template=cfg.cmd_segment_update_template,
-                                id=int(segment_id),
-                                batch_limit=cfg.segment_batch_limit,
-                            ),
+                            args=static_args,
                             interval_sec=interval_sec,
                             max_parallel=max_parallel,
-                            timeout_sec=max(
-                                0,
-                                int(getattr(cfg, "priority_segment_timeout_sec", 3600) or 0),
-                            ),
+                            timeout_sec=static_timeout_sec,
                             on_success=lambda root=root, segment_id=int(segment_id): _mark_segment_finished(
                                 root,
                                 segment_id,
                             ),
                             on_complete=_static_segment_complete,
+                            on_start=_static_segment_started,
                         )
                         if started:
                             _static_lane_running(

@@ -4,9 +4,10 @@
 фактическую схему после исправления admission и должен обновляться вместе с
 кодом, тестами и runtime receipt. Документ не является разрешением на
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.80 (immutable release поверх
-принятого e910f67b; прямой follow-up от 1.5.79 без дополнительного изменения
-execution behavior).
+Актуальная редакция этого канона — MCD 1.5.81 (follow-up после immutable
+1.5.80). В этой редакции исправлено execution behavior статических priority и
+super-priority очередей после restart/update: persisted claim больше не
+считается доказательством живого worker.
 
 Для instance-scoped desired state локальный inventory UID является стабильной
 основой, но transport запрашивает также динамически полученный
@@ -169,6 +170,26 @@ root запускается не более одного раза в своей 
 TaskStore receipt обязаны фиксировать deduplicated root plan и union closure,
 без неоднозначного ручного подтверждения алгоритма.
 
+### Reconcile persisted static claims after restart/update
+
+Каждый startup и scheduler tick перед dispatch сверяет `claimed`/`running`
+элементы статической линии с независимыми признаками исполнения: активной
+задачей соответствующего `priority_executor`, non-terminal строкой TaskStore
+и read-only process/DB evidence сегментного runtime. Доказанная живая работа
+adopt-ится и остаётся в своей lane; marker-only snapshot не считается живым.
+
+Для каждого активного элемента сохраняется `active_meta` с `claimed_at`,
+`running_at`, последним независимо подтверждённым heartbeat и
+`orphan_since`. Если evidence исчезло, claim не сбрасывается мгновенно:
+сохраняется bounded orphan grace (60 секунд по умолчанию), anchored к
+последнему независимому marker/start. Повторное чтение persisted marker или
+его `heartbeat_at` не продлевает grace. По истечении grace scheduler под
+static-lane lock атомарно удаляет ID только из `claimed`/`running`, оставляя
+текущий порядок `items`, `done`, `errors` и lane closure без cycle reset,
+reorder или повторного выполнения. Следующий dispatch в том же tick может
+сразу claim/start возвращённый pending item; до expiry claim блокирует
+duplicate.
+
 ## 4. Claim, worker и slots
 
 Перед spawn worker атомарно claim-ит следующий eligible item из persisted
@@ -184,6 +205,12 @@ claim-ит следующий eligible item текущей очереди; ож�
 
 TaskStore task key и OS execution lock остаются последней защитой от duplicate
 claim, включая restart и concurrent workers.
+
+Static-lane runtime marker пишется на actual spawn/terminal callback. Он
+помогает привязать grace к независимому старту, но сам по себе не удерживает
+claim. Поэтому restart с живым executor/process принимает существующую работу,
+а restart с phantom `claimed/running` гарантированно возвращает item в тот же
+pending ring после bounded grace.
 
 Для ordinary cycle есть два разных решения, которые нельзя смешивать:
 `admission` добавляет новые IDs в persisted cycle, а `dispatch` запускает уже
@@ -301,6 +328,7 @@ cycle без ручного `segments:update`, profile/capacity/data changes. Ad
 | Правило | Source | Проверка/receipt |
 |---|---|---|
 | две статические линии и исключение из ordinary | `mcd_agent/static_segment_lanes.py`, `daemon.py` | `tests/test_static_segment_lanes.py` |
+| static claim liveness, orphan grace и restart adoption | `mcd_agent/static_segment_lanes.py`, `daemon.py` | `tests/test_static_segment_lanes.py`, `tests/test_segment_liveness.py` |
 | ordinary категории, FIFO и mid-cycle admission | `mcd_agent/segment_admission.py`, `daemon.py` | `tests/test_segment_admission.py` |
 | dedupe и сохранение порядка ring | `mcd_agent/ring_utils.py`, `daemon.py` | `tests/test_segment_ring_reconcile.py` |
 | dependency closure и terminal plan | `mcd_agent/segment_dependencies.py`, `daemon.py` | `tests/test_segment_dependencies.py` |

@@ -1,3 +1,15 @@
+## 1.5.81 - 2026-10-11
+
+- Reconcile persisted static priority and super-priority claims against live
+  priority-executor, TaskStore, and independent segment process/DB evidence.
+  A restart/update no longer leaves a phantom `claimed`/`running` item out of
+  the pending ring forever: live work is adopted, while an unproven claim gets
+  one bounded orphan grace window and is then released in place without a
+  cycle reset, reorder, or loss of `done`/`errors` state.
+- Persist static-lane active metadata and runtime markers, keep marker-only
+  observations from renewing orphan grace, and cover both Mautic 6 dependency
+  closures and Mautic 7 terminal/root plans for priority and super-priority.
+
 ## 1.5.80 - 2026-10-11
 
 - Release the accepted e910f67b runtime-authority projection as the next

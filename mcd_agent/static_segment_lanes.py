@@ -21,6 +21,17 @@ SCHEMA = "mcd-static-segment-lanes-v1"
 SUPER_PRIORITY = "super_priority"
 PRIORITY = "priority"
 LANES = (SUPER_PRIORITY, PRIORITY)
+ORPHAN_GRACE_SEC = 60
+_LIVE_EVIDENCE_KEYS = (
+    "active",
+    "db",
+    "db_process",
+    "executor_active",
+    "live",
+    "process",
+    "runtime_confirmed",
+    "taskstore_active",
+)
 
 
 def normalize_ids(values: Iterable[object] | None) -> list[int]:
@@ -52,6 +63,56 @@ def _empty_lane(items: Iterable[object] | None = None) -> dict[str, object]:
         "errors": [],
         "error_notes": {},
     }
+
+
+def _timestamp(value: object) -> float | None:
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_active_meta(raw: object) -> dict[str, dict[str, dict[str, float]]]:
+    source = raw if isinstance(raw, Mapping) else {}
+    normalized: dict[str, dict[str, dict[str, float]]] = {}
+    for lane_name in LANES:
+        lane_raw = source.get(lane_name)
+        if not isinstance(lane_raw, Mapping):
+            normalized[lane_name] = {}
+            continue
+        lane_meta: dict[str, dict[str, float]] = {}
+        for raw_sid, raw_meta in lane_raw.items():
+            try:
+                sid = int(raw_sid)
+            except (TypeError, ValueError):
+                continue
+            if sid <= 0 or not isinstance(raw_meta, Mapping):
+                continue
+            meta: dict[str, float] = {}
+            for field in ("claimed_at", "running_at", "last_independent_at", "orphan_since"):
+                value = _timestamp(raw_meta.get(field))
+                if value is not None:
+                    meta[field] = value
+            if meta:
+                lane_meta[str(sid)] = meta
+        normalized[lane_name] = lane_meta
+    return normalized
+
+
+def _evidence_is_live(evidence: object) -> bool:
+    if isinstance(evidence, Mapping):
+        return any(bool(evidence.get(key)) for key in _LIVE_EVIDENCE_KEYS)
+    return bool(evidence) if isinstance(evidence, bool) else False
+
+
+def _evidence_timestamp(evidence: object, *fields: str) -> float | None:
+    if not isinstance(evidence, Mapping):
+        return None
+    for field in fields:
+        value = _timestamp(evidence.get(field))
+        if value is not None:
+            return value
+    return None
 
 
 def _normalize_lane(raw: object, planned: Iterable[object] | None = None) -> dict[str, object]:
@@ -142,8 +203,18 @@ def reconcile_state(
     *,
     plans: Mapping[str, Iterable[object]],
     now_ts: float,
+    active_evidence: Mapping[tuple[str, int], Mapping[str, object] | bool] | None = None,
+    orphan_grace_sec: int = ORPHAN_GRACE_SEC,
 ) -> tuple[dict[str, object], dict[str, list[int]], bool]:
-    """Persist a lane snapshot without reordering an active queue."""
+    """Persist a lane snapshot without reordering an active queue.
+
+    Persisted ``claimed``/``running`` values are durable coordination state,
+    not proof that a process still exists.  A live executor, TaskStore row, or
+    independent process/DB probe may adopt the item.  Without such evidence we
+    retain the claim for one bounded grace window, then release it in place so
+    the same persisted ring can claim it again.  Marker-only observations may
+    anchor that grace window, but never renew it.
+    """
 
     source = raw if isinstance(raw, Mapping) else {}
     old_lanes = source.get("lanes") if isinstance(source.get("lanes"), Mapping) else {}
@@ -151,22 +222,64 @@ def reconcile_state(
     started_new = not old_lanes or complete
     added: dict[str, list[int]] = {lane: [] for lane in LANES}
     lanes: dict[str, dict[str, object]] = {}
+    active_meta = _normalize_active_meta(source.get("active_meta"))
+    evidence = active_evidence if isinstance(active_evidence, Mapping) else {}
+    grace = max(1, int(orphan_grace_sec or ORPHAN_GRACE_SEC))
     for lane_name in LANES:
         planned = normalize_ids(plans.get(lane_name, []))
         if started_new:
             lanes[lane_name] = _empty_lane(planned)
+            active_meta[lane_name] = {}
             added[lane_name] = list(planned)
             continue
         lane = _normalize_lane(old_lanes.get(lane_name), [])
         existing = set(normalize_ids(lane.get("items")))
         additions = [sid for sid in planned if sid not in existing]
         lane["items"] = [*normalize_ids(lane.get("items")), *additions]
+
+        lane_meta: dict[str, dict[str, float]] = {}
+        for sid in normalize_ids([*lane.get("claimed", []), *lane.get("running", [])]):
+            key = (lane_name, int(sid))
+            item_evidence = evidence.get(key)
+            prior = dict(active_meta.get(lane_name, {}).get(str(sid), {}))
+            if _evidence_is_live(item_evidence):
+                independent_at = _evidence_timestamp(
+                    item_evidence,
+                    "independent_at",
+                    "last_independent_at",
+                    "observed_at",
+                )
+                prior.setdefault("claimed_at", float(now_ts))
+                prior.setdefault("running_at", float(now_ts))
+                prior["last_independent_at"] = float(independent_at if independent_at is not None else now_ts)
+                prior.pop("orphan_since", None)
+                lane_meta[str(sid)] = prior
+                continue
+
+            orphan_since = _timestamp(prior.get("orphan_since"))
+            if orphan_since is None:
+                orphan_since = (
+                    _timestamp(prior.get("last_independent_at"))
+                    or _timestamp(prior.get("running_at"))
+                    or _timestamp(prior.get("claimed_at"))
+                    or _evidence_timestamp(item_evidence, "last_independent_at", "started_at")
+                    or float(now_ts)
+                )
+                prior["orphan_since"] = float(orphan_since)
+            if float(now_ts) - float(orphan_since) >= grace:
+                lane["claimed"] = [value for value in normalize_ids(lane.get("claimed")) if value != sid]
+                lane["running"] = [value for value in normalize_ids(lane.get("running")) if value != sid]
+                continue
+            lane_meta[str(sid)] = prior
+
+        active_meta[lane_name] = lane_meta
         lanes[lane_name] = lane
         added[lane_name] = additions
     state = {
         "schema": SCHEMA,
         "status": "active" if any(lane.get("items") for lane in lanes.values()) else "terminal",
         "lanes": lanes,
+        "active_meta": active_meta,
         "updated_at": float(now_ts),
     }
     if all(_lane_complete(lane) for lane in lanes.values()):
@@ -208,8 +321,16 @@ def claim_item(
         state["lanes"] = lanes
         return state, False
     current["claimed"] = normalize_ids([*current.get("claimed", []), sid])
+    active_meta = _normalize_active_meta(state.get("active_meta"))
+    lane_meta = active_meta[lane]
+    item_meta = dict(lane_meta.get(str(sid), {}))
+    item_meta.setdefault("claimed_at", float(now_ts))
+    item_meta.pop("orphan_since", None)
+    lane_meta[str(sid)] = item_meta
+    active_meta[lane] = lane_meta
     lanes[lane] = current
     state["lanes"] = lanes
+    state["active_meta"] = active_meta
     state["status"] = "active"
     state["updated_at"] = float(now_ts)
     return state, True
@@ -226,8 +347,17 @@ def mark_running(raw: Mapping[str, Any] | None, *, lane: str, entity_id: int, no
     if sid in set(normalize_ids(current.get("items"))):
         current["claimed"] = normalize_ids([*current.get("claimed", []), sid])
         current["running"] = normalize_ids([*current.get("running", []), sid])
+        active_meta = _normalize_active_meta(state.get("active_meta"))
+        lane_meta = active_meta[lane]
+        item_meta = dict(lane_meta.get(str(sid), {}))
+        item_meta.setdefault("claimed_at", float(now_ts))
+        item_meta.setdefault("running_at", float(now_ts))
+        item_meta.pop("orphan_since", None)
+        lane_meta[str(sid)] = item_meta
+        active_meta[lane] = lane_meta
         lanes[lane] = current
         state["lanes"] = lanes
+        state["active_meta"] = active_meta
         state["status"] = "active"
         state["updated_at"] = float(now_ts)
     return state
@@ -243,8 +373,11 @@ def release_claim(raw: Mapping[str, Any] | None, *, lane: str, entity_id: int, n
     sid = int(entity_id)
     current["claimed"] = [x for x in normalize_ids(current.get("claimed")) if x != sid]
     current["running"] = [x for x in normalize_ids(current.get("running")) if x != sid]
+    active_meta = _normalize_active_meta(state.get("active_meta"))
+    active_meta[lane].pop(str(sid), None)
     lanes[lane] = current
     state["lanes"] = lanes
+    state["active_meta"] = active_meta
     state["status"] = "terminal" if all(_lane_complete(item) for item in lanes.values()) else "active"
     state["updated_at"] = float(now_ts)
     return state
@@ -268,6 +401,8 @@ def mark_terminal(
     sid = int(entity_id)
     current["claimed"] = [x for x in normalize_ids(current.get("claimed")) if x != sid]
     current["running"] = [x for x in normalize_ids(current.get("running")) if x != sid]
+    active_meta = _normalize_active_meta(state.get("active_meta"))
+    active_meta[lane].pop(str(sid), None)
     if success:
         current["done"] = normalize_ids([*current.get("done", []), sid])
         current["errors"] = [x for x in normalize_ids(current.get("errors")) if x != sid]
@@ -279,6 +414,7 @@ def mark_terminal(
             current["error_notes"] = notes
     lanes[lane] = current
     state["lanes"] = lanes
+    state["active_meta"] = active_meta
     state["status"] = "terminal" if all(_lane_complete(item) for item in lanes.values()) else "active"
     state["updated_at"] = float(now_ts)
     return state
