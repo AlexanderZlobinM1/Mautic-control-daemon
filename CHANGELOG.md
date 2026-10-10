@@ -1,3 +1,14 @@
+## 1.5.69 - 2026-10-10
+
+- Keep bounded segment retries profile-driven: the approved default is two
+  retries after the initial start (three total starts), and a terminal Mautic
+  non-zero exit immediately releases the cycle to the next eligible item.
+- Persist the local runtime baseline across daemon restart and, after a
+  desired-state revision conflict, fetch the latest MCC state, rebase only
+  the local delta, preserve unrelated host/instance keys, and retry once.
+- Keep custom profiles autonomous without MCC while using the normal observed
+  state push when MCC becomes available.
+
 ## 1.5.68 - 2026-10-10
 
 - Translate MCC's canonical per-instance `segment_special_rings_v1` envelope

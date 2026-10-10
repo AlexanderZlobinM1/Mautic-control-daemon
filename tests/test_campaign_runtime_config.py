@@ -4,10 +4,13 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from mcd_agent.config import load_config
 from mcd_agent.daemon import _campaign_native_fallback_args, _campaign_native_fallback_metrics
 from mcd_agent.mode import SUPPORTED_PROFILE_NAMES
+from mcd_agent.runtime_overrides import local_runtime_overrides
+from mcd_agent.state_push import MCCStatePusher
 
 
 class CampaignRuntimeConfigTests(unittest.TestCase):
@@ -114,6 +117,71 @@ class CampaignRuntimeConfigTests(unittest.TestCase):
         self.assertEqual(cfg.scheduler_instance_max_parallel, 0)
         self.assertEqual(cfg.scheduler_fairness_watchdog_sec, 300)
 
+    def test_custom_profile_runs_without_mcc_and_reports_observed_state_when_available(self) -> None:
+        path = Path(tempfile.mkdtemp()) / "mcd.toml"
+        path.write_text(
+            "\n".join(
+                [
+                    "[profile]",
+                    'name = "custom"',
+                    "[runtime]",
+                    "scheduler_host_max_parallel = 6",
+                    "segment_priority_parallel_idle = 2",
+                    "segment_regular_parallel_idle = 3",
+                    "segment_retry_count = 3",
+                    f'state_db_path = "{path.parent / "state.db"}"',
+                    f'scheduler_pause_flag_path = "{path.parent / "scheduler.pause"}"',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        cfg = load_config(str(path), allow_recover_from_mcc=False)
+        self.assertEqual(cfg.profile_name, "custom")
+        self.assertIsNone(cfg.mcc_url)
+        self.assertIsNone(cfg.mcc_token)
+        self.assertEqual(cfg.scheduler_host_max_parallel, 6)
+        self.assertEqual(cfg.segment_priority_parallel_idle, 2)
+        self.assertEqual(cfg.segment_regular_parallel_idle, 3)
+        self.assertEqual(cfg.segment_retry_count, 3)
+        self.assertFalse(MCCStatePusher(cfg).enabled())
+
+        path.write_text(
+            path.read_text(encoding="utf-8") + '\n[mcc]\nurl = "https://mcc.example"\ntoken = "token"\n',
+            encoding="utf-8",
+        )
+        managed_cfg = load_config(str(path), allow_recover_from_mcc=False)
+        pusher = MCCStatePusher(managed_cfg)
+        self.assertTrue(pusher.enabled())
+        payload = {
+            "profile": managed_cfg.profile_name,
+            "runtime_overrides": local_runtime_overrides(managed_cfg),
+        }
+        self.assertEqual(payload["profile"], "custom")
+        self.assertEqual(payload["runtime_overrides"]["scheduler_host_max_parallel"], 6)
+        self.assertEqual(payload["runtime_overrides"]["segment_retry_count"], 3)
+
+        class Response:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def read(self) -> bytes:
+                return b'{"status":"ok"}'
+
+        with patch("mcd_agent.state_push.request.urlopen", return_value=Response()) as urlopen:
+            ok, message = pusher.send(payload)
+
+        self.assertTrue(ok)
+        self.assertEqual(message, '{"status":"ok"}')
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "https://mcc.example/api/v1/agent/state")
+
     def test_segment_retry_count_is_host_profile_configurable(self) -> None:
         path = Path(tempfile.mkdtemp()) / "mcd.toml"
         path.write_text(
@@ -125,13 +193,13 @@ class CampaignRuntimeConfigTests(unittest.TestCase):
 
         self.assertEqual(cfg.segment_retry_count, 4)
 
-    def test_segment_retry_count_defaults_to_three_after_profile_application(self) -> None:
+    def test_segment_retry_count_defaults_to_two_after_profile_application(self) -> None:
         path = Path(tempfile.mkdtemp()) / "mcd.toml"
         path.write_text('[profile]\nname = "farm-hiload"\n', encoding="utf-8")
 
         cfg = load_config(str(path), allow_recover_from_mcc=False)
 
-        self.assertEqual(cfg.segment_retry_count, 3)
+        self.assertEqual(cfg.segment_retry_count, 2)
 
     def test_named_profile_capacity_cannot_be_overridden_by_persisted_runtime(self) -> None:
         path = Path(tempfile.mkdtemp()) / "mcd.toml"

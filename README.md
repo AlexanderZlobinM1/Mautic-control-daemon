@@ -523,7 +523,7 @@ Important:
     - `0` or negative = unlimited immediate retries (with `task_retry_delay_sec` pause).
   - `runtime.segment_retry_count` is the host-profile policy for automatic
     segment commands and counts retries after the initial attempt: `0` means
-    one start, `3` (the default) means at most four starts. A non-zero Mautic
+    one start, `2` (the approved default) means at most three starts. A non-zero Mautic
     exit is recorded as the segment's terminal outcome after the bound; it is
     not a daemon failure, and the dispatcher continues with the next eligible
     item while the failed item remains due for the next cycle.

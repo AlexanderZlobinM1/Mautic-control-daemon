@@ -4,6 +4,7 @@
 фактическую схему после исправления admission и должен обновляться вместе с
 кодом, тестами и runtime receipt. Документ не является разрешением на
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
+Актуальная редакция этого канона — MCD 1.5.69 (прямой follow-up от 1.5.68).
 
 ## 1. Область и границы
 
@@ -143,15 +144,18 @@ dependency и execution locks.
 
 `done` записывается только после успешного process exit. Для automatic segment
 `runtime.segment_retry_count` — внешняя host-profile policy и означает число
-повторов после initial attempt: значение `3` даёт максимум четыре фактических
-запуска одного item, без хардкода хоста или segment ID. До исчерпания bound
-item остаётся claimed для respawn.
+повторов после initial attempt: approved default `2` даёт максимум три
+фактических запуска одного item, без хардкода хоста или segment ID. До
+исчерпания bound item остаётся claimed для respawn.
 
 Код Mautic с `rc != 0` сам по себе не является ошибкой MCD. Если MCD честно
 запустил process, выполнил bounded retries, записал terminal outcome текущего
 cycle и немедленно продолжил следующий eligible item, алгоритм соблюдён.
-Ошибка MCD — это падение daemon, потеря/сброс persisted cycle, нарушение
-retry/dead-letter policy или остановка очереди после terminal outcome.
+Исчерпанный bounded retry — только terminal Mautic failure этого item, а не
+scheduler error/FAIL и не permanent dead-letter: независимые items
+продолжаются, item остаётся due для следующего cycle. Ошибка MCD — это падение
+daemon, потеря/сброс persisted cycle, неверное число attempts, duplicate/
+overlap, зависание или отсутствие следующего claim после terminal outcome.
 После исчерпания retries segment получает terminal error текущего cycle,
 его applied baseline не продвигается и он остаётся due для следующего cycle;
 terminal callback будит dispatcher без ожидания следующего tick. Error не

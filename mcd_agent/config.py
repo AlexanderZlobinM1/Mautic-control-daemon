@@ -874,7 +874,7 @@ class AgentConfig:
     segment_stale_after_sec: int = 24 * 60 * 60
     # Number of retries after the initial attempt for an automatic segment
     # command. Values below zero are normalized to zero at load time.
-    segment_retry_count: int = 3
+    segment_retry_count: int = 2
 
 
 def _apply_profile(cfg: AgentConfig) -> AgentConfig:
@@ -2988,7 +2988,7 @@ def _load_config_inner(path: str) -> AgentConfig:
         weights_recalc_interval_sec=int(runtime.get("weights_recalc_interval_sec", 86_400)),
         task_retry_max=int(runtime.get("task_retry_max", 1)),
         task_retry_delay_sec=int(runtime.get("task_retry_delay_sec", 2)),
-        segment_retry_count=max(0, int(runtime.get("segment_retry_count", 3) or 0)),
+        segment_retry_count=max(0, int(runtime.get("segment_retry_count", 2) or 0)),
         worker_watchdog_sec=int(runtime.get("worker_watchdog_sec", 0)),
         worker_stuck_policy=str(runtime.get("worker_stuck_policy", "skip")),
         worker_stuck_restart_limit=int(runtime.get("worker_stuck_restart_limit", 1)),

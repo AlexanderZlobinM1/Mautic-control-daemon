@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import tempfile
 import unittest
 import threading
 import time
@@ -9,6 +10,7 @@ from unittest.mock import Mock, patch
 
 from mcd_agent.daemon import (
     RunningTask,
+    TaskStore,
     _segment_cycle_claim,
     _segment_cycle_manual_prepare,
     _segment_cycle_manual_terminal,
@@ -740,7 +742,7 @@ class SegmentAdmissionTests(unittest.TestCase):
         self.assertEqual(popens, {})
         store.finish.assert_called_once()
 
-    def test_segment_retry_policy_runs_four_attempts_then_continues_next_item(self) -> None:
+    def test_segment_retry_policy_runs_three_attempts_then_continues_next_item(self) -> None:
         state, _added, _started = sync_cycle(
             None,
             planned_ids=[10, 20],
@@ -816,11 +818,11 @@ class SegmentAdmissionTests(unittest.TestCase):
             _segment_terminal_and_wake(store, wakeup, item, success, note)
 
         with patch("mcd_agent.daemon._spawn_command", side_effect=spawn):
-            for _ in range(4):
+            for _ in range(3):
                 _monitor_running(
                     config=SimpleNamespace(
                         task_retry_max=1,
-                        segment_retry_count=3,
+                        segment_retry_count=2,
                         task_retry_delay_sec=0,
                     ),
                     store=store,
@@ -829,10 +831,10 @@ class SegmentAdmissionTests(unittest.TestCase):
                     segment_terminal_callback=terminal_callback,
                 )
 
-        self.assertEqual(len(starts), 4)
+        self.assertEqual(len(starts), 3)
         self.assertEqual(callbacks, [(10, False, "non_zero_exit")])
         self.assertTrue(wakeup.is_set())
-        self.assertEqual(store.finished[-1], (4, "failed", 23, "non_zero_exit"))
+        self.assertEqual(store.finished[-1], (3, "failed", 23, "non_zero_exit"))
         next_state, next_claimed = claim_item(
             store.payload,
             entity_id=20,
@@ -843,6 +845,112 @@ class SegmentAdmissionTests(unittest.TestCase):
         )
         self.assertTrue(next_claimed)
         self.assertEqual(next_state["errors"], [10])
+
+    def test_real_task_history_does_not_truncate_three_segment_starts(self) -> None:
+        root = "/var/www/site"
+        task_key = f"{root}|segment|10"
+        callbacks: list[tuple[int | None, bool, str | None]] = []
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = TaskStore(f"{directory}/state.db")
+            try:
+                state, _added, _started = sync_cycle(
+                    None,
+                    planned_ids=[10, 20],
+                    never_built=[],
+                    running_ids=[],
+                    now_ts=100.0,
+                )
+                state, claimed = claim_item(
+                    state,
+                    entity_id=10,
+                    eligible_ids=[10, 20],
+                    blocked_ids=[],
+                    running_ids=[],
+                    now_ts=100.1,
+                )
+                self.assertTrue(claimed)
+                state = mark_running(state, entity_id=10, now_ts=100.2)
+                store.put_runtime_sync(cycle_key(root), state)
+
+                task = RunningTask(
+                    row_id=0,
+                    root=root,
+                    task_key=task_key,
+                    task_type="segment",
+                    entity_id=10,
+                    command_str="php mautic segments:update --id=10",
+                    timeout_sec=60,
+                    attempts=1,
+                    started_at=100.0,
+                    pid=100,
+                )
+                task.row_id = store.add_running(task)
+                running = {task_key: task}
+                initial_process = Mock()
+                initial_process.poll.return_value = 23
+                popens = {task_key: initial_process}
+                spawned: list[Mock] = []
+
+                def spawn(**_kwargs: object) -> Mock:
+                    process = Mock()
+                    process.pid = 200 + len(spawned)
+                    process.poll.return_value = 23
+                    spawned.append(process)
+                    return process
+
+                def terminal_callback(item: RunningTask, success: bool, note: str | None) -> None:
+                    callbacks.append((item.entity_id, success, note))
+                    _segment_terminal_and_wake(store, threading.Event(), item, success, note)
+
+                config = SimpleNamespace(
+                    task_retry_max=1,
+                    segment_retry_count=2,
+                    task_retry_delay_sec=0,
+                )
+                with patch("mcd_agent.daemon._spawn_command", side_effect=spawn):
+                    for _ in range(3):
+                        _monitor_running(
+                            config=config,
+                            store=store,
+                            running=running,
+                            popens=popens,
+                            segment_terminal_callback=terminal_callback,
+                        )
+
+                self.assertEqual(len(spawned), 2)
+                self.assertEqual(
+                    store.recent_task_problem_counts(
+                        root=root,
+                        task_type="segment",
+                        since_sec=3600,
+                    ),
+                    {10: 3},
+                )
+                rows = store.conn.execute(
+                    "SELECT attempts, state, rc FROM tasks WHERE task_key=? ORDER BY attempts",
+                    (task_key,),
+                ).fetchall()
+                self.assertEqual(
+                    [(row[0], row[1], row[2]) for row in rows],
+                    [(1, "failed", 23), (2, "failed", 23), (3, "failed", 23)],
+                )
+                self.assertEqual(callbacks, [(10, False, "non_zero_exit")])
+
+                terminal_state = store.get_runtime_sync(cycle_key(root))
+                self.assertEqual(terminal_state["errors"], [10])
+                terminal_state, next_claimed = claim_item(
+                    terminal_state,
+                    entity_id=20,
+                    eligible_ids=[10, 20],
+                    blocked_ids=[],
+                    running_ids=[],
+                    now_ts=101.0,
+                )
+                self.assertTrue(next_claimed)
+                self.assertEqual(terminal_state["claimed"], [20])
+            finally:
+                store.close()
 
     def test_terminal_wakes_waiting_dispatcher_and_next_claim_is_immediate(self) -> None:
         state, _added, _started = sync_cycle(
