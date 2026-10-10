@@ -1,3 +1,12 @@
+## 1.5.73 - 2026-10-10
+
+- Queue a local runtime-file delta durably before MCC polling or remote apply;
+  the pending previous/current pair survives restart and state-backend failover,
+  prevents a concurrent remote refresh from replacing the local baseline, and
+  is cleared only after MCC returns an accepted desired-state revision. A
+  single accepted push preserves the canonical instance rows and prevents a
+  duplicate follow-up push.
+
 ## 1.5.72 - 2026-10-10
 
 - Persist canonical instance desired-state rows received from MCC before

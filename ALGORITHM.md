@@ -4,7 +4,7 @@
 фактическую схему после исправления admission и должен обновляться вместе с
 кодом, тестами и runtime receipt. Документ не является разрешением на
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.72 (прямой follow-up от 1.5.71).
+Актуальная редакция этого канона — MCD 1.5.73 (прямой follow-up от 1.5.72).
 
 Для instance-scoped desired state локальный inventory UID является стабильной
 основой, но transport запрашивает также динамически полученный
@@ -27,6 +27,14 @@ Qualified UID и его priority/super-priority lane maps сначала materia
 локальном runtime, затем именно этот snapshot становится baseline; restart не
 создаёт ложную local deletion и не отправляет пустой instance-row обратно в
 MCC.
+
+Если локальный config-файл изменился во время remote poll/apply, MCD сначала
+сохраняет пару `previous/current` в durable `local_runtime_push_pending`, а
+remote baseline не продвигает. Проверка выполняется перед fetch, после network
+round-trip и непосредственно перед baseline refresh; pending переживает restart
+и failover state backend. Только ответ MCC с принятой desired-state `revision`
+разрешает сохранить новый local baseline и удалить pending; conflict/error или
+неполный ответ оставляют delta для следующего ровно одного rebased push.
 
 ## 1. Область и границы
 

@@ -73,6 +73,135 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
         self.assertEqual(fingerprint, overrides_fingerprint(baseline))
         self.assertEqual(store.values["local_runtime"], {"scheduler_host_max_parallel": 4})
 
+    def test_local_delta_survives_same_loop_remote_refresh_and_pushes_once(self) -> None:
+        class MemoryStore:
+            def __init__(self, values=None):
+                self.values = dict(values or {})
+
+            def get_runtime_sync(self, key):
+                return self.values.get(key)
+
+            def put_runtime_sync(self, key, value):
+                self.values[key] = dict(value)
+
+            def delete_runtime_sync(self, keys):
+                for key in keys:
+                    self.values.pop(key, None)
+                return 1
+
+        cfg = SimpleNamespace(config_file_path="/tmp/mcd-race.toml")
+        local_edit = {
+            "segment_super_priority_instance_settings": {
+                "generic.sales-snap.com": {"segments": [201, 202], "slots_override": 1},
+            },
+        }
+        store = MemoryStore({"local_runtime": {}})
+
+        # The edit is durably captured before the simulated remote poll is
+        # allowed to refresh any runtime baseline.
+        pending = daemon._queue_local_runtime_delta(store, local_edit)
+        self.assertEqual(pending, {"previous": {}, "current": local_edit})
+
+        # Model the race: remote apply attempts to replace the local baseline.
+        store.put_runtime_sync("local_runtime", {"scheduler_host_max_parallel": 9})
+        with patch("mcd_agent.daemon.local_runtime_overrides", return_value=local_edit):
+            restarted_baseline, _fingerprint = daemon._initialize_local_runtime_baseline(cfg, store)
+        self.assertEqual(restarted_baseline, {})
+        self.assertEqual(store.values["local_runtime"], {})
+        self.assertEqual(
+            store.values[daemon._LOCAL_RUNTIME_PUSH_PENDING_KEY],
+            {"previous": {}, "current": local_edit},
+        )
+
+        install = SimpleNamespace(
+            instance_uid="generic.sales-snap.com",
+            root="/var/www/generic/public_html",
+            name="generic",
+            primary_domain="generic.sales-snap.com",
+            domains=["generic.sales-snap.com"],
+        )
+        qualified_uid = "generic.sales-snap.com@MauticFarm-02"
+        fresh = {
+            "status": "ok",
+            "runtime_overrides": {},
+            "instance_desired_states": {
+                qualified_uid: {
+                    "revision": 6,
+                    "runtime_overrides": {
+                        "segment_whitelist_instance_settings": {"segments": [909]},
+                    },
+                },
+            },
+            "desired_state": {"revision": 10},
+        }
+        accepted = {
+            "status": "ok",
+            "desired_state": {"revision": 11},
+            "instance_desired_states": {qualified_uid: {"revision": 7}},
+        }
+        with patch("mcd_agent.daemon.fetch_runtime_overrides", return_value=fresh), patch(
+            "mcd_agent.daemon.push_runtime_overrides", return_value=accepted
+        ) as push:
+            result = daemon._push_local_runtime_change(
+                SimpleNamespace(mcc_url="https://mcc.example", mcc_token="token"),
+                pending["previous"],
+                pending["current"],
+                [install],
+                desired_revision=9,
+                instance_revisions={qualified_uid: 5},
+            )
+
+        self.assertEqual(result, accepted)
+        self.assertEqual(push.call_count, 1)
+        row = push.call_args.kwargs["instance_desired_states"][qualified_uid]
+        self.assertEqual(row["segment_whitelist_instance_settings"], {"segments": [909]})
+        self.assertEqual(
+            row["segment_super_priority_instance_settings"],
+            {"segments": [201, 202], "slots_override": 1},
+        )
+
+        self.assertTrue(daemon._store_desired_runtime_push_result(store, result))
+        store.put_runtime_sync("local_runtime", local_edit)
+        daemon._clear_local_runtime_push_pending(store)
+        self.assertIsNone(daemon._read_local_runtime_push_pending(store))
+        # The accepted revision is the only state transition that clears the
+        # durable delta; a second pass has nothing left to push.
+        self.assertIsNone(daemon._queue_local_runtime_delta(store, local_edit))
+        self.assertEqual(store.values["mcc_runtime_desired_state"]["revision"], 11)
+
+    def test_pending_local_delta_is_not_cleared_by_incomplete_push_ack(self) -> None:
+        class MemoryStore:
+            def __init__(self):
+                self.values = {
+                    "local_runtime": {},
+                    daemon._LOCAL_RUNTIME_PUSH_PENDING_KEY: {
+                        "previous": {},
+                        "current": {"scheduler_host_max_parallel": 6},
+                    },
+                }
+
+            def get_runtime_sync(self, key):
+                return self.values.get(key)
+
+            def put_runtime_sync(self, key, value):
+                self.values[key] = dict(value)
+
+            def delete_runtime_sync(self, keys):
+                for key in keys:
+                    self.values.pop(key, None)
+                return 1
+
+        store = MemoryStore()
+        self.assertFalse(daemon._store_desired_runtime_push_result(store, {"status": "ok"}))
+        self.assertIsNotNone(daemon._read_local_runtime_push_pending(store))
+        self.assertFalse(
+            daemon._store_desired_runtime_push_result(
+                store,
+                {"status": "ok", "desired_state": {"revision": "11"}},
+            )
+        )
+        self.assertIsNotNone(daemon._read_local_runtime_push_pending(store))
+
     def test_poll_requests_local_and_host_qualified_instance_uid_aliases(self) -> None:
         cfg = SimpleNamespace(mcc_url="https://mcc.example", mcc_token="token")
         identity = {

@@ -221,6 +221,53 @@ _CAMPAIGN_TRIGGER_STUCK_COOLDOWN_SEC = 900
 _CAMPAIGN_TRIGGER_FUTURE_WAKE_EARLY_SEC = 1.0
 _CAMPAIGN_NATIVE_FALLBACK_TIMEOUT_SEC = 30 * 60
 _CAMPAIGN_EMAIL_COUNTER_RECONCILE_MIN_INTERVAL_SEC = 6 * 3600
+_LOCAL_RUNTIME_PUSH_PENDING_KEY = "local_runtime_push_pending"
+
+
+def _read_local_runtime_push_pending(store: object) -> dict[str, dict[str, Any]] | None:
+    """Read a durable local-runtime delta queued before a remote refresh."""
+    try:
+        raw = store.get_runtime_sync(_LOCAL_RUNTIME_PUSH_PENDING_KEY)
+    except Exception:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    previous = raw.get("previous")
+    current = raw.get("current")
+    if not isinstance(previous, dict) or not isinstance(current, dict):
+        return None
+    return {"previous": deepcopy(previous), "current": deepcopy(current)}
+
+
+def _clear_local_runtime_push_pending(store: object) -> None:
+    try:
+        delete = getattr(store, "delete_runtime_sync", None)
+        if callable(delete):
+            delete([_LOCAL_RUNTIME_PUSH_PENDING_KEY])
+    except Exception:
+        logging.warning("runtime-overrides pending local delta cleanup failed")
+
+
+def _queue_local_runtime_delta(
+    store: object,
+    current_local_runtime: Mapping[str, Any],
+) -> dict[str, dict[str, Any]] | None:
+    """Persist a local edit before any MCC poll may refresh its baseline."""
+    current = deepcopy(dict(current_local_runtime))
+    baseline = store.get_runtime_sync("local_runtime")
+    baseline = baseline if isinstance(baseline, dict) else {}
+    pending = _read_local_runtime_push_pending(store)
+    if current == baseline:
+        if pending is not None and pending["current"] != current:
+            _clear_local_runtime_push_pending(store)
+            pending = None
+        return pending
+    previous = pending["previous"] if pending is not None else deepcopy(baseline)
+    if pending is not None and pending["current"] == current:
+        return pending
+    next_pending = {"previous": previous, "current": current}
+    store.put_runtime_sync(_LOCAL_RUNTIME_PUSH_PENDING_KEY, next_pending)
+    return next_pending
 
 
 def _sync_local_runtime_baseline_after_config_recovery(config: AgentConfig, store: object) -> str:
@@ -228,14 +275,19 @@ def _sync_local_runtime_baseline_after_config_recovery(config: AgentConfig, stor
     runtime = local_runtime_overrides(config)
     fingerprint = overrides_fingerprint(runtime)
     store.put_runtime_sync("local_runtime", runtime)
+    _clear_local_runtime_push_pending(store)
     return fingerprint
 
 
 def _initialize_local_runtime_baseline(config: AgentConfig, store: object) -> tuple[dict[str, Any], str]:
     """Load the last local edit baseline without erasing a stopped daemon's delta."""
     current = local_runtime_overrides(config)
+    pending = _read_local_runtime_push_pending(store)
     stored = store.get_runtime_sync("local_runtime")
-    if not isinstance(stored, dict):
+    if pending is not None:
+        stored = pending["previous"]
+        store.put_runtime_sync("local_runtime", stored)
+    elif not isinstance(stored, dict):
         stored = current
         store.put_runtime_sync("local_runtime", current)
     return dict(stored), overrides_fingerprint(stored)
@@ -524,20 +576,28 @@ def _store_desired_runtime_push_result(store: object, pushed: Mapping[str, Any])
     if str(pushed.get("status", "")).strip().lower() != "ok":
         return False
     state = pushed.get("desired_state")
-    if isinstance(state, dict):
-        state_for_store = dict(state)
-        pushed_instances = pushed.get("instance_desired_states")
-        state_for_store["instance_revisions"] = (
-            {
-                str(uid): int(item["revision"])
-                for uid, item in pushed_instances.items()
-                if isinstance(item, dict) and isinstance(item.get("revision"), int)
-            }
-            if isinstance(pushed_instances, dict)
-            else {}
-        )
-        store.put_runtime_sync("mcc_runtime_desired_state", state_for_store)
+    if not isinstance(state, dict):
+        return False
+    revision = state.get("revision")
+    if not isinstance(revision, int) or isinstance(revision, bool):
+        return False
+    state_for_store = dict(state)
+    pushed_instances = pushed.get("instance_desired_states")
+    state_for_store["instance_revisions"] = (
+        {
+            str(uid): int(item["revision"])
+            for uid, item in pushed_instances.items()
+            if isinstance(item, dict)
+            and isinstance(item.get("revision"), int)
+            and not isinstance(item.get("revision"), bool)
+        }
+        if isinstance(pushed_instances, dict)
+        else {}
+    )
+    store.put_runtime_sync("mcc_runtime_desired_state", state_for_store)
     return True
+
+
 _CAMPAIGN_EMAIL_COUNTER_RECONCILE_RECENT_SEC = 14 * 86400
 _CAMPAIGN_EMAIL_COUNTER_RECONCILE_DEFER_LOG_SEC = 15 * 60
 # Avoid spending an entire scheduler pass probing stale audit candidates.
@@ -5450,7 +5510,7 @@ class TaskStore:
             self.conn.execute(
                 """
                 DELETE FROM runtime_sync
-                WHERE key NOT IN ('taskstore_mysql_migrated_v1', 'local_runtime', 'mcc_runtime')
+                WHERE key NOT IN ('taskstore_mysql_migrated_v1', 'local_runtime', 'local_runtime_push_pending', 'mcc_runtime')
                   AND key NOT LIKE 'logical_issues:v1:%'
                 """
             )
@@ -9989,7 +10049,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
     next_inventory_auto_rescan_at = time.time() + min(300, max(60, int(getattr(config, "poll_interval_sec", 60) or 60)))
     last_inventory_signature = ""
     runtime_overrides_sync_requested = False
-    local_runtime_push_pending = False
+    local_runtime_push_pending = _read_local_runtime_push_pending(store) is not None
     # Always perform an initial runtime-overrides sync after daemon start/restart.
     # This is required even when periodic polling is disabled to avoid running
     # with stale local-only runtime after self-update/service restart.
@@ -10772,11 +10832,25 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
 
         local_runtime = local_runtime_overrides(config)
         local_fp = overrides_fingerprint(local_runtime)
-        if local_fp != last_local_runtime_fp:
-            if config.mcc_url and config.mcc_token:
+        pending_local_runtime = None
+        if config.mcc_url and config.mcc_token:
+            pending_local_runtime = _queue_local_runtime_delta(store, local_runtime)
+            if pending_local_runtime is not None:
+                local_runtime_push_pending = True
+        if config.mcc_url and config.mcc_token and (
+            pending_local_runtime is not None or local_fp != last_local_runtime_fp
+        ):
+            if pending_local_runtime is None:
                 previous_local_runtime = store.get_runtime_sync("local_runtime")
-                if not isinstance(previous_local_runtime, dict):
-                    previous_local_runtime = {}
+                previous_local_runtime = previous_local_runtime if isinstance(previous_local_runtime, dict) else {}
+                if local_runtime == previous_local_runtime:
+                    last_local_runtime_fp = local_fp
+                else:
+                    pending_local_runtime = _queue_local_runtime_delta(store, local_runtime)
+                    local_runtime_push_pending = pending_local_runtime is not None
+            if pending_local_runtime is not None:
+                previous_local_runtime = pending_local_runtime["previous"]
+                local_runtime_to_push = pending_local_runtime["current"]
                 known_state = store.get_runtime_sync("mcc_runtime_desired_state") or {}
                 known_revision_raw = known_state.get("revision")
                 known_revision = known_revision_raw if isinstance(known_revision_raw, int) else None
@@ -10787,24 +10861,39 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                 # Local edits are accepted only when based on MCC's current
                 # revision. If the revision moved, rebase the local delta on
                 # a fresh canonical snapshot instead of polling it over the
-                # local edit.
+                # local edit. The pending payload is durable so a remote poll
+                # or daemon restart cannot hide this edit.
                 pushed = _push_local_runtime_change(
                     config,
                     previous_local_runtime,
-                    local_runtime,
+                    local_runtime_to_push,
                     installs,
                     desired_revision=known_revision,
                     instance_revisions=known_instance_revisions,
                 )
                 p_status = str(pushed.get("status", "")).strip().lower()
-                if p_status == "ok":
-                    _store_desired_runtime_push_result(store, pushed)
-                    store.put_runtime_sync("local_runtime", local_runtime)
-                    last_local_runtime_fp = local_fp
-                    local_runtime_push_pending = False
+                accepted = p_status == "ok" and _store_desired_runtime_push_result(store, pushed)
+                if accepted:
+                    after_push_runtime = local_runtime_overrides(config)
+                    store.put_runtime_sync("local_runtime", local_runtime_to_push)
+                    if after_push_runtime != local_runtime_to_push:
+                        # A second edit arrived while the first write was in
+                        # flight. Keep the accepted state as the new baseline
+                        # and queue only the newer delta.
+                        pending_local_runtime = {
+                            "previous": deepcopy(local_runtime_to_push),
+                            "current": deepcopy(after_push_runtime),
+                        }
+                        store.put_runtime_sync(_LOCAL_RUNTIME_PUSH_PENDING_KEY, pending_local_runtime)
+                        local_runtime_push_pending = True
+                        last_local_runtime_fp = overrides_fingerprint(local_runtime_to_push)
+                    else:
+                        _clear_local_runtime_push_pending(store)
+                        local_runtime_push_pending = False
+                        last_local_runtime_fp = overrides_fingerprint(local_runtime_to_push)
                     logging.info(
                         "runtime-overrides local change pushed to MCC (keys=%s)",
-                        ",".join(sorted(local_runtime.keys())) if local_runtime else "-",
+                        ",".join(sorted(local_runtime_to_push.keys())) if local_runtime_to_push else "-",
                     )
                     _sync_and_publish_form_embed_status(config, installs, reason="local_runtime_push")
                 elif p_status == "conflict":
@@ -10816,10 +10905,11 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                 elif p_status != "disabled":
                     local_runtime_push_pending = True
                     logging.warning("runtime-overrides local push failed: %s", pushed.get("reason", "unknown"))
-            else:
-                store.put_runtime_sync("local_runtime", local_runtime)
-                last_local_runtime_fp = local_fp
-                local_runtime_push_pending = False
+        elif not (config.mcc_url and config.mcc_token):
+            store.put_runtime_sync("local_runtime", local_runtime)
+            _clear_local_runtime_push_pending(store)
+            last_local_runtime_fp = local_fp
+            local_runtime_push_pending = False
 
         if consume_poll_trigger(config):
             runtime_overrides_sync_requested = True
@@ -10828,6 +10918,13 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
 
         runtime_poll_enabled = bool(getattr(config, "mcc_runtime_overrides_poll_enabled", False))
         should_runtime_poll = runtime_poll_enabled and now >= next_runtime_overrides_poll_at
+        if config.mcc_url and config.mcc_token and not local_runtime_push_pending:
+            # Re-sample immediately before the remote fetch. A file edit can
+            # arrive after the normal local-change block above; queue it
+            # durably before the poll may refresh the baseline.
+            pre_poll_runtime = local_runtime_overrides(config)
+            if _queue_local_runtime_delta(store, pre_poll_runtime) is not None:
+                local_runtime_push_pending = True
         if config.mcc_url and config.mcc_token and (
             (startup_runtime_sync_pending or runtime_overrides_sync_requested or should_runtime_poll)
             and not local_runtime_push_pending
@@ -10838,6 +10935,15 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
             )
             status = str(ro.get("status", "")).strip().lower()
             poll_interval = max(15, min(300, int(config.mcc_push_interval_sec or config.poll_interval_sec or 60)))
+            if status == "ok" and not local_runtime_push_pending:
+                # Re-sample after the network round trip as well. If the
+                # operator edited runtime while MCC was responding, defer
+                # applying/persisting that response until the local delta is
+                # accepted.
+                during_poll_runtime = local_runtime_overrides(config)
+                if _queue_local_runtime_delta(store, during_poll_runtime) is not None:
+                    local_runtime_push_pending = True
+                    status = "deferred_local_delta"
             if status == "ok":
                 overrides_raw = ro.get("runtime_overrides")
                 overrides = overrides_raw if isinstance(overrides_raw, dict) else {}
@@ -10940,7 +11046,15 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                         last_monitored_email_parser_ts.clear()
                         maintenance_cleanup_rr_index.clear()
                         logging.info("runtime-overrides cleanup schedules refreshed for immediate scheduler apply")
-                    if fp != last_runtime_overrides_fp:
+                    # Take one last durable snapshot immediately before any
+                    # local baseline refresh. This also covers a profile-only
+                    # remote apply where the aggregate runtime fingerprint is
+                    # unchanged. A file edit after the earlier race check
+                    # must never be absorbed into the new baseline.
+                    late_local_runtime = local_runtime_overrides(config)
+                    if _queue_local_runtime_delta(store, late_local_runtime) is not None:
+                        local_runtime_push_pending = True
+                    if fp != last_runtime_overrides_fp and not local_runtime_push_pending:
                         _persist_stable_backup_runtime_to_config(
                             next_cfg if isinstance(next_cfg, AgentConfig) else config,
                             applied_keys,
@@ -10950,9 +11064,17 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                     # Persisted MCC values are not a new local operator edit.
                     # Refresh the local fingerprint so the next tick does not
                     # echo the same revision back as another desired write.
-                    current_local_runtime = local_runtime_overrides(config)
-                    store.put_runtime_sync("local_runtime", current_local_runtime)
-                    last_local_runtime_fp = overrides_fingerprint(current_local_runtime)
+                    # When a local delta was queued during this poll, retain
+                    # the old baseline; the next loop must push that delta.
+                    if local_runtime_push_pending:
+                        startup_runtime_sync_pending = True
+                        runtime_overrides_sync_requested = True
+                        next_runtime_overrides_poll_at = 0.0
+                        logging.info("runtime-overrides remote apply deferred behind durable local change")
+                    else:
+                        current_local_runtime = local_runtime_overrides(config)
+                        store.put_runtime_sync("local_runtime", current_local_runtime)
+                        last_local_runtime_fp = overrides_fingerprint(current_local_runtime)
                     last_runtime_overrides_fp = fp
                     store.put_runtime_sync(
                         "active_runtime",
@@ -10964,29 +11086,35 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                             "unsupported_keys": unsupported_keys,
                         },
                     )
-                for failure in acknowledge_desired_runtime_states(
-                    config,
-                    store,
-                    desired_state=desired_state,
-                    host_runtime=overrides_raw if isinstance(overrides_raw, dict) else {},
-                    instance_states=instance_states,
-                    runtime_fingerprint=fp,
-                ):
-                    logging.warning("runtime desired-state acknowledgement failed: %s", failure)
-                startup_runtime_sync_pending = False
-                last_runtime_overrides_error = ""
-                next_runtime_overrides_poll_at = now + poll_interval
+                if not local_runtime_push_pending:
+                    for failure in acknowledge_desired_runtime_states(
+                        config,
+                        store,
+                        desired_state=desired_state,
+                        host_runtime=overrides_raw if isinstance(overrides_raw, dict) else {},
+                        instance_states=instance_states,
+                        runtime_fingerprint=fp,
+                    ):
+                        logging.warning("runtime desired-state acknowledgement failed: %s", failure)
+                    startup_runtime_sync_pending = False
+                    last_runtime_overrides_error = ""
+                    next_runtime_overrides_poll_at = now + poll_interval
             elif status == "disabled":
                 startup_runtime_sync_pending = False
                 last_runtime_overrides_error = ""
                 next_runtime_overrides_poll_at = now + poll_interval
+            elif status == "deferred_local_delta":
+                startup_runtime_sync_pending = True
+                runtime_overrides_sync_requested = True
+                next_runtime_overrides_poll_at = 0.0
             else:
                 reason = str(ro.get("reason", "unknown")).strip() or "unknown"
                 if reason != last_runtime_overrides_error:
                     logging.warning("runtime-overrides fetch failed: %s", reason)
                 last_runtime_overrides_error = reason
                 next_runtime_overrides_poll_at = now + max(30, poll_interval)
-            runtime_overrides_sync_requested = False
+            if status != "deferred_local_delta":
+                runtime_overrides_sync_requested = False
 
         if now >= next_backup_profile_sync_at:
             try:
