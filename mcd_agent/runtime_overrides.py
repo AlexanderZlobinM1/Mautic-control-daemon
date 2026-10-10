@@ -100,14 +100,95 @@ def _matching_instance_entry(entries: dict[str, Any], keys: list[str]) -> str | 
     return canonical[0] if len(canonical) == 1 else None
 
 
-def _canonical_instance_uids(instance_uids: list[str]) -> list[str]:
+def _canonical_instance_uids(instance_uids: list[str], *, host_name: str = "") -> list[str]:
+    """Return local UIDs plus one host-qualified compatibility alias.
+
+    Inventory keeps the stable local UID, while older/current MCC desired
+    rows may be addressed by the immutable ``<uid>@<mcc-host>`` key.  Send
+    both forms without inventing a host or binding the code to a domain.
+    """
     canonical: list[str] = []
+    host = str(host_name or "").strip()
     for raw_uid in instance_uids:
         uid = str(raw_uid or "").strip()
         if not uid:
             continue
         canonical.append(uid)
+        if host and "@" not in uid:
+            canonical.append(f"{uid}@{host}")
     return list(dict.fromkeys(canonical))
+
+
+def associate_instance_desired_states(
+    states: dict[str, dict[str, Any]],
+    known_uids: object,
+) -> dict[str, dict[str, Any]]:
+    """Associate local instance rows with unambiguous MCC UID aliases."""
+    available = {
+        str(uid or "").strip()
+        for uid in (known_uids if isinstance(known_uids, (list, tuple, set, dict)) else [])
+        if str(uid or "").strip()
+    }
+    if not available:
+        return dict(states)
+    out: dict[str, dict[str, Any]] = {}
+    used: set[str] = set()
+    for raw_uid, value in states.items():
+        uid = str(raw_uid or "").strip()
+        if not uid or not isinstance(value, dict):
+            continue
+        target = uid if uid in available else ""
+        if not target:
+            base = uid.split("@", 1)[0]
+            matches = [
+                candidate
+                for candidate in available
+                if candidate not in used and candidate.split("@", 1)[0] == base
+            ]
+            if len(matches) == 1:
+                target = matches[0]
+        target = target or uid
+        out[target] = value
+        used.add(target)
+    return out
+
+
+def normalize_instance_desired_state_rows(
+    states: object,
+    requested_uids: object = None,
+) -> dict[str, dict[str, Any]]:
+    """Collapse legacy/base and immutable host-qualified rows per instance."""
+    if not isinstance(states, dict):
+        return {}
+    requested = {
+        str(uid or "").strip()
+        for uid in (requested_uids if isinstance(requested_uids, (list, tuple, set, dict)) else [])
+        if str(uid or "").strip()
+    }
+    grouped: dict[str, list[tuple[str, dict[str, Any], int]]] = {}
+    for position, (raw_uid, raw_state) in enumerate(states.items()):
+        uid = str(raw_uid or "").strip()
+        if not uid or not isinstance(raw_state, dict):
+            continue
+        grouped.setdefault(uid.split("@", 1)[0], []).append((uid, raw_state, position))
+
+    out: dict[str, dict[str, Any]] = {}
+    for rows in grouped.values():
+        def rank(row: tuple[str, dict[str, Any], int]) -> tuple[int, int, int, int, int]:
+            uid, state, position = row
+            revision = state.get("revision")
+            revision_value = int(revision) if isinstance(revision, int) and not isinstance(revision, bool) else -1
+            return (
+                1 if "@" in uid and uid in requested else 0,
+                1 if "@" in uid else 0,
+                1 if uid in requested else 0,
+                revision_value,
+                -position,
+            )
+
+        uid, state, _position = max(rows, key=rank)
+        out[uid] = state
+    return out
 
 
 def _decode_json_value(value: object) -> object:
@@ -381,7 +462,11 @@ def fetch_runtime_overrides(cfg: AgentConfig, *, instance_uids: list[str] | None
     if not base:
         return {"status": "disabled", "reason": "mcc_url_not_set"}
     ident = resolve_agent_identity(cfg)
-    canonical_instance_uids = _canonical_instance_uids(instance_uids or [])
+    effective_host_name = str(ident.get("effective_mcc_host_name") or ident.get("effective_hostname") or "").strip()
+    canonical_instance_uids = _canonical_instance_uids(
+        instance_uids or [],
+        host_name=effective_host_name,
+    )
     payload = {
         "hostname": str(ident.get("effective_hostname") or ""),
         "mcc_host_name": str(ident.get("effective_mcc_host_name") or ""),
@@ -397,6 +482,10 @@ def fetch_runtime_overrides(cfg: AgentConfig, *, instance_uids: list[str] | None
         out.setdefault("status", "error")
         if not isinstance(out.get("runtime_overrides"), dict):
             out["runtime_overrides"] = {}
+        out["instance_desired_states"] = normalize_instance_desired_state_rows(
+            out.get("instance_desired_states"),
+            canonical_instance_uids,
+        )
         return out
     except HTTPError as e:
         return {"status": "error", "reason": f"http_{e.code}", "runtime_overrides": {}}

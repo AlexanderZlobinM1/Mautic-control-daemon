@@ -123,6 +123,7 @@ from mcd_agent.monitored_email import (
 from mcd_agent.form_embed import sync_form_embed_settings
 from mcd_agent.runtime_overrides import (
     acknowledge_desired_runtime_states,
+    associate_instance_desired_states,
     apply_remote_overrides,
     canonical_profile_from_runtime_response,
     consume_poll_trigger,
@@ -329,6 +330,12 @@ def _retry_local_runtime_push_after_conflict(
         current_local_runtime,
         installs,
     )
+    known_instance_uids = (
+        set(latest_instance_states)
+        if isinstance(latest_instance_states, dict)
+        else set()
+    )
+    changed_instances = associate_instance_desired_states(changed_instances, known_instance_uids)
     rebased = _rebase_local_runtime_payload(
         latest,
         previous_local_runtime,
@@ -365,13 +372,15 @@ def _push_local_runtime_change(
     instance_revisions: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Push a local edit, rebasing once when the initial revision is stale."""
+    local_instance_states = instance_desired_states(dict(current_local_runtime), installs)
+    local_instance_states = associate_instance_desired_states(local_instance_states, instance_revisions)
     pushed = push_runtime_overrides(
         config,
         dict(current_local_runtime),
         merge=False,
         target="desired",
         desired_state_revision=desired_revision,
-        instance_desired_states=instance_desired_states(dict(current_local_runtime), installs),
+        instance_desired_states=local_instance_states,
         instance_desired_state_revisions={
             str(key): int(value)
             for key, value in instance_revisions.items()

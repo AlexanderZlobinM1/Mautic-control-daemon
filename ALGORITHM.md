@@ -4,7 +4,14 @@
 фактическую схему после исправления admission и должен обновляться вместе с
 кодом, тестами и runtime receipt. Документ не является разрешением на
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.69 (прямой follow-up от 1.5.68).
+Актуальная редакция этого канона — MCD 1.5.70 (прямой follow-up от 1.5.69).
+
+Для instance-scoped desired state локальный inventory UID является стабильной
+основой, но transport запрашивает также динамически полученный
+`<uid>@<mcc-host>` alias. Если MCC вернул legacy/base и immutable qualified
+строки одной instance, MCD выбирает qualified текущую revision, применяет
+нормализацию special rings и ack-ит ровно эту строку; host/domain в коде не
+зашиваются.
 
 ## 1. Область и границы
 

@@ -1,3 +1,9 @@
+## 1.5.70 - 2026-10-10
+
+- Accept both stable local instance UIDs and MCC host-qualified aliases on
+  the wire; collapse legacy/base and qualified rows to the exact current
+  desired revision before normalizing rings and acknowledging it.
+
 ## 1.5.69 - 2026-10-10
 
 - Keep bounded segment retries profile-driven: the approved default is two
