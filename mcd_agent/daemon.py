@@ -15617,7 +15617,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                 persisted_pending_cycle_ids
                 or seg_sql_long_ring
                 or seg_sql_ring
-                or segment_resume_ring
+                or segment_resume_rings.get(root)
                 or seg_prio_ring
                 or seg_reg_ring
             )
