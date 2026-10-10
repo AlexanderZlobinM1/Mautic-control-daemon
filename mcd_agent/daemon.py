@@ -16,7 +16,9 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
+from functools import wraps
 from pathlib import Path
+from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
 from mcd_agent.config import (
@@ -126,6 +128,34 @@ from mcd_agent.ring_utils import advance_ring_after_launch as _advance_ring_afte
 from mcd_agent.ring_utils import mark_ring_entity_executed as _mark_ring_entity_executed
 from mcd_agent.ring_utils import reconcile_ring as _reconcile_ring
 from mcd_agent.ring_utils import reconcile_full_scan_pending as _reconcile_full_scan_pending
+from mcd_agent.segment_admission import (
+    claim_item as _segment_cycle_claim_item,
+    cycle_key as _segment_cycle_key,
+    mark_running as _segment_cycle_mark_running,
+    mark_terminal as _segment_cycle_mark_terminal,
+    manual_admission_info as _segment_cycle_manual_info,
+    manual_claim as _segment_cycle_manual_claim_state,
+    manual_release as _segment_cycle_manual_release_state,
+    manual_terminal as _segment_cycle_manual_terminal_state,
+    never_built_ids as _never_built_segment_ids,
+    ordinary_snapshot_order as _ordinary_segment_snapshot_order,
+    release_claim as _segment_cycle_release_claim,
+    source_baseline as _ordinary_segment_source_baseline,
+    sync_cycle as _segment_cycle_sync_state,
+)
+from mcd_agent.static_segment_lanes import (
+    PRIORITY as _SEGMENT_PRIORITY_LANE,
+    SCHEMA as _STATIC_SEGMENT_LANES_SCHEMA,
+    SUPER_PRIORITY as _SEGMENT_SUPER_PRIORITY_LANE,
+    build_lane_plans as _build_static_segment_lane_plans,
+    claim_item as _static_lane_claim_item,
+    mark_running as _static_lane_mark_running,
+    mark_terminal as _static_lane_mark_terminal,
+    pending_items as _static_lane_pending_items,
+    reconcile_state as _static_lane_reconcile_state,
+    release_claim as _static_lane_release_claim,
+    state_key as _static_lane_state_key,
+)
 from mcd_agent.service_profiles import service_profiles_apply_once
 from mcd_agent.self_update import _ensure_mcd_service_kill_mode, maybe_auto_update
 from mcd_agent.segment_filter_safety import format_segment_filter_issues, segment_invalid_filter_issues
@@ -195,6 +225,7 @@ _CAMPAIGN_TRIGGER_STALE_SCAN_CAP = 8
 _PRIORITY_DISPATCH_REGULAR_CHUNK = 8
 _TASK_LOCK_BUSY_RC = 75
 _CAMPAIGN_EXACT_TASK_TYPES = frozenset({"campaign_update", "campaign_rebuild", "campaign_trigger"})
+_STATIC_SEGMENT_TASK_TYPES = frozenset({"segment_priority", "segment_super_priority"})
 _IMPORT_FAST_FOLLOW_SEC = 60
 _ENTITY_LAUNCH_GUARD: dict[str, float] = {}
 _CAMPAIGN_FALLBACK_COORDINATOR_LOCK = threading.RLock()
@@ -206,6 +237,11 @@ _CAMPAIGN_TRIGGER_FUTURE_WAKE_LOGGED: dict[tuple[str, int], str] = {}
 _CAMPAIGN_EMAIL_COUNTER_RECONCILE_AT: dict[tuple[str, int], float] = {}
 _CAMPAIGN_EMAIL_COUNTER_RECONCILE_DEFER_LOG_AT: dict[tuple[str, int], float] = {}
 _SEGMENT_FINISHED_AT: dict[tuple[str, int], float] = {}
+_SEGMENT_CYCLE_LOCK = threading.RLock()
+_SEGMENT_STATIC_LANE_LOCK = threading.RLock()
+_SEGMENT_ADMISSION_CONTEXT: dict[str, dict[str, object]] = {}
+_SEGMENT_DISPATCH_WAKEUP: threading.Event | None = None
+_ACTIVE_PRIORITY_EXECUTOR: Any | None = None
 _CAMPAIGN_REBUILD_FINISHED_AT: dict[tuple[str, int], float] = {}
 _SEGMENT_FILTER_WARN_TS: dict[tuple[str, str], float] = {}
 _SEGMENT_FAILURE_WARN_TS: dict[tuple[str, int], float] = {}
@@ -428,6 +464,8 @@ _MESSAGE_QUEUE_STABLE_RUNTIME_KEYS = {
 }
 _SEGMENT_WHITELIST_STABLE_RUNTIME_KEYS = {
     "segment_whitelist_instance_settings",
+    "segment_priority_instance_settings",
+    "segment_super_priority_instance_settings",
     "campaign_whitelist_instance_settings",
     "segment_recurring_priority_v1",
 }
@@ -539,6 +577,469 @@ def _mark_segment_finished(root: str, segment_id: int | None, now_ts: float | No
     if sid <= 0:
         return
     _SEGMENT_FINISHED_AT[(str(root), sid)] = float(now_ts or time.time())
+
+
+def _segment_cycle_sync(
+    store: "TaskStore",
+    *,
+    root: str,
+    planned_ids: list[int] | tuple[int, ...] | set[int],
+    never_built_ids: list[int] | tuple[int, ...] | set[int],
+    running_ids: list[int] | tuple[int, ...] | set[int],
+    now_ts: float,
+    source_snapshot: Mapping[object, object] | None = None,
+) -> tuple[dict[str, object], list[int], bool]:
+    """Persist an ordinary cycle without resetting an active cursor."""
+
+    key = _segment_cycle_key(root)
+    with _SEGMENT_CYCLE_LOCK:
+        state, added, started_new = _segment_cycle_sync_state(
+            store.get_runtime_sync(key),
+            planned_ids=planned_ids,
+            never_built=never_built_ids,
+            running_ids=running_ids,
+            now_ts=now_ts,
+            source_snapshot=source_snapshot,
+        )
+        store.put_runtime_sync(key, state)
+    return state, added, started_new
+
+
+def _segment_cycle_claim(
+    store: "TaskStore",
+    *,
+    root: str,
+    entity_id: int,
+    eligible_ids: list[int] | tuple[int, ...] | set[int] | None,
+    blocked_ids: list[int] | tuple[int, ...] | set[int] | None,
+    running_ids: list[int] | tuple[int, ...] | set[int] | None,
+    now_ts: float,
+) -> bool:
+    key = _segment_cycle_key(root)
+    with _SEGMENT_CYCLE_LOCK:
+        state, claimed = _segment_cycle_claim_item(
+            store.get_runtime_sync(key),
+            entity_id=int(entity_id),
+            eligible_ids=eligible_ids,
+            blocked_ids=blocked_ids,
+            running_ids=running_ids,
+            now_ts=now_ts,
+        )
+        if claimed:
+            store.put_runtime_sync(key, state)
+        return claimed
+
+
+def _segment_cycle_release(store: "TaskStore", *, root: str, entity_id: int, now_ts: float) -> None:
+    key = _segment_cycle_key(root)
+    with _SEGMENT_CYCLE_LOCK:
+        state = _segment_cycle_release_claim(
+            store.get_runtime_sync(key),
+            entity_id=int(entity_id),
+            now_ts=now_ts,
+        )
+        store.put_runtime_sync(key, state)
+
+
+def _segment_cycle_running(store: "TaskStore", *, root: str, entity_id: int, now_ts: float) -> None:
+    key = _segment_cycle_key(root)
+    with _SEGMENT_CYCLE_LOCK:
+        state = _segment_cycle_mark_running(
+            store.get_runtime_sync(key),
+            entity_id=int(entity_id),
+            now_ts=now_ts,
+        )
+        store.put_runtime_sync(key, state)
+
+
+def _segment_cycle_terminal(
+    store: "TaskStore",
+    *,
+    root: str,
+    entity_id: int,
+    success: bool,
+    note: str | None,
+    now_ts: float,
+) -> None:
+    key = _segment_cycle_key(root)
+    with _SEGMENT_CYCLE_LOCK:
+        state = _segment_cycle_mark_terminal(
+            store.get_runtime_sync(key),
+            entity_id=int(entity_id),
+            success=bool(success),
+            note=note,
+            now_ts=now_ts,
+        )
+        store.put_runtime_sync(key, state)
+
+
+def _manual_static_lane_for_ids(
+    static_state: Mapping[str, object] | None,
+    entity_ids: list[int],
+    *,
+    super_priority_ids: set[int],
+    priority_ids: set[int],
+) -> tuple[str | None, str | None]:
+    """Resolve one static owner for a manual target/parent closure."""
+
+    lanes_raw = static_state.get("lanes") if isinstance(static_state, Mapping) else {}
+    lanes = lanes_raw if isinstance(lanes_raw, Mapping) else {}
+    memberships: dict[int, set[str]] = {}
+    for lane_name in (_SEGMENT_SUPER_PRIORITY_LANE, _SEGMENT_PRIORITY_LANE):
+        lane_payload = lanes.get(lane_name)
+        lane_items = lane_payload.get("items") if isinstance(lane_payload, Mapping) else []
+        for raw_sid in lane_items or []:
+            try:
+                sid = int(raw_sid)
+            except (TypeError, ValueError):
+                continue
+            if sid > 0:
+                memberships.setdefault(sid, set()).add(lane_name)
+
+    assigned: set[str] = set()
+    for sid in entity_ids:
+        current = memberships.get(int(sid), set())
+        if len(current) > 1:
+            return None, "manual_dependency_overlap_static_lanes"
+        if current:
+            assigned.update(current)
+    if assigned:
+        if len(assigned) > 1:
+            return None, "manual_dependency_overlap_static_lanes"
+        # Persisted lane membership is authoritative for an active queue. A
+        # super-priority owner may absorb a lower-priority configured parent,
+        # but a lower lane may not absorb a super-priority dependency.
+        if _SEGMENT_PRIORITY_LANE in assigned and any(
+            sid in super_priority_ids and sid not in memberships for sid in entity_ids
+        ):
+            return None, "manual_dependency_overlap_static_lanes"
+        return next(iter(assigned)), None
+    if any(sid in super_priority_ids for sid in entity_ids):
+        return _SEGMENT_SUPER_PRIORITY_LANE, None
+    if any(sid in priority_ids for sid in entity_ids):
+        return _SEGMENT_PRIORITY_LANE, None
+    return None, None
+
+
+def _segment_cycle_manual_prepare(
+    store: "TaskStore",
+    *,
+    root: str,
+    request_id: int,
+    entity_ids: list[int],
+    observed_snapshot: Mapping[object, object] | None,
+    super_priority_ids: set[int],
+    priority_ids: set[int],
+    globally_running_ids: set[int],
+    now_ts: float,
+) -> tuple[bool, str]:
+    """Atomically claim a manual segment target in ordinary or static state."""
+
+    ids = [int(sid) for sid in entity_ids if int(sid) > 0]
+    if not ids:
+        return False, "manual_target_missing"
+    if set(ids) & set(globally_running_ids):
+        return False, "manual_dependency_overlap_running"
+    ordinary_key = _segment_cycle_key(root)
+    static_key = _static_lane_state_key(root)
+    with _SEGMENT_CYCLE_LOCK:
+        with _SEGMENT_STATIC_LANE_LOCK:
+            ordinary_raw = store.get_runtime_sync(ordinary_key) or {}
+            static_raw = store.get_runtime_sync(static_key) or {}
+            static_lane, static_reason = _manual_static_lane_for_ids(
+                static_raw if isinstance(static_raw, Mapping) else {},
+                ids,
+                super_priority_ids=super_priority_ids,
+                priority_ids=priority_ids,
+            )
+            ordinary_items = {
+                int(value)
+                for value in list(ordinary_raw.get("items") or [])
+                if str(value).strip().isdigit() and int(value) > 0
+            } if isinstance(ordinary_raw, Mapping) else set()
+            static_items: set[int] = set()
+            static_lanes_raw = static_raw.get("lanes") if isinstance(static_raw, Mapping) else {}
+            if isinstance(static_lanes_raw, Mapping):
+                for lane_payload in static_lanes_raw.values():
+                    if not isinstance(lane_payload, Mapping):
+                        continue
+                    static_items.update(
+                        int(value)
+                        for value in list(lane_payload.get("items") or [])
+                        if str(value).strip().isdigit() and int(value) > 0
+                    )
+            if static_reason:
+                return False, static_reason
+            if static_lane is not None and set(ids) & ordinary_items:
+                return False, "manual_dependency_overlap_ordinary"
+            if static_lane is None and set(ids) & static_items:
+                return False, "manual_dependency_overlap_static"
+
+            if static_lane is None:
+                next_ordinary, claimed, reason = _segment_cycle_manual_claim_state(
+                    ordinary_raw if isinstance(ordinary_raw, Mapping) else {},
+                    request_id=int(request_id),
+                    entity_ids=ids,
+                    lane="ordinary",
+                    observed_snapshot=observed_snapshot,
+                    now_ts=now_ts,
+                )
+                if not claimed:
+                    return False, reason
+                store.put_runtime_sync(ordinary_key, next_ordinary)
+                return True, reason
+
+            next_static = dict(static_raw) if isinstance(static_raw, Mapping) else {}
+            next_static.setdefault("schema", _STATIC_SEGMENT_LANES_SCHEMA)
+            lanes = next_static.get("lanes") if isinstance(next_static.get("lanes"), Mapping) else {}
+            lane_payload = dict(lanes.get(static_lane) or {}) if isinstance(lanes, Mapping) else {}
+            lane_payload["items"] = list(dict.fromkeys([*(lane_payload.get("items") or []), *ids]))
+            next_lanes = dict(lanes) if isinstance(lanes, Mapping) else {}
+            next_lanes[static_lane] = lane_payload
+            next_static["lanes"] = next_lanes
+            claimed_static: list[int] = []
+            for sid in ids:
+                next_static, claimed = _static_lane_claim_item(
+                    next_static,
+                    lane=static_lane,
+                    entity_id=int(sid),
+                    blocked_ids=[],
+                    globally_running_ids=globally_running_ids,
+                    now_ts=now_ts,
+                )
+                if not claimed:
+                    for claimed_sid in claimed_static:
+                        next_static = _static_lane_release_claim(
+                            next_static,
+                            lane=static_lane,
+                            entity_id=int(claimed_sid),
+                            now_ts=now_ts,
+                        )
+                    return False, "manual_static_claim_conflict"
+                claimed_static.append(int(sid))
+            next_ordinary, claimed, reason = _segment_cycle_manual_claim_state(
+                ordinary_raw if isinstance(ordinary_raw, Mapping) else {},
+                request_id=int(request_id),
+                entity_ids=ids,
+                lane=static_lane,
+                observed_snapshot=observed_snapshot,
+                now_ts=now_ts,
+            )
+            if not claimed:
+                for claimed_sid in claimed_static:
+                    next_static = _static_lane_release_claim(
+                        next_static,
+                        lane=static_lane,
+                        entity_id=int(claimed_sid),
+                        now_ts=now_ts,
+                    )
+                return False, reason
+            store.put_runtime_sync(static_key, next_static)
+            store.put_runtime_sync(ordinary_key, next_ordinary)
+            return True, reason
+
+
+def _segment_cycle_manual_release(
+    store: "TaskStore",
+    *,
+    root: str,
+    request_id: int,
+    now_ts: float,
+) -> None:
+    ordinary_key = _segment_cycle_key(root)
+    static_key = _static_lane_state_key(root)
+    with _SEGMENT_CYCLE_LOCK:
+        with _SEGMENT_STATIC_LANE_LOCK:
+            ordinary_raw = store.get_runtime_sync(ordinary_key) or {}
+            info = _segment_cycle_manual_info(
+                ordinary_raw if isinstance(ordinary_raw, Mapping) else {},
+                request_id=int(request_id),
+            )
+            if isinstance(info, Mapping) and str(info.get("lane") or "") in {
+                _SEGMENT_SUPER_PRIORITY_LANE,
+                _SEGMENT_PRIORITY_LANE,
+            }:
+                static_state = store.get_runtime_sync(static_key) or {}
+                for sid in list(info.get("entity_ids") or []):
+                    static_state = _static_lane_release_claim(
+                        static_state if isinstance(static_state, Mapping) else {},
+                        lane=str(info.get("lane")),
+                        entity_id=int(sid),
+                        now_ts=now_ts,
+                    )
+                store.put_runtime_sync(static_key, static_state)
+            next_ordinary = _segment_cycle_manual_release_state(
+                ordinary_raw if isinstance(ordinary_raw, Mapping) else {},
+                request_id=int(request_id),
+                now_ts=now_ts,
+            )
+            store.put_runtime_sync(ordinary_key, next_ordinary)
+
+
+def _segment_cycle_manual_terminal(
+    store: "TaskStore",
+    *,
+    root: str,
+    request_id: int,
+    success: bool,
+    note: str | None,
+    now_ts: float,
+) -> None:
+    ordinary_key = _segment_cycle_key(root)
+    static_key = _static_lane_state_key(root)
+    with _SEGMENT_CYCLE_LOCK:
+        with _SEGMENT_STATIC_LANE_LOCK:
+            ordinary_raw = store.get_runtime_sync(ordinary_key) or {}
+            info = _segment_cycle_manual_info(
+                ordinary_raw if isinstance(ordinary_raw, Mapping) else {},
+                request_id=int(request_id),
+            )
+            next_ordinary = _segment_cycle_manual_terminal_state(
+                ordinary_raw if isinstance(ordinary_raw, Mapping) else {},
+                request_id=int(request_id),
+                success=bool(success),
+                note=note,
+                now_ts=now_ts,
+            )
+            if isinstance(info, Mapping) and str(info.get("lane") or "") in {
+                _SEGMENT_SUPER_PRIORITY_LANE,
+                _SEGMENT_PRIORITY_LANE,
+            }:
+                static_state = store.get_runtime_sync(static_key) or {}
+                lane = str(info.get("lane"))
+                for sid in list(info.get("entity_ids") or []):
+                    static_state = _static_lane_mark_terminal(
+                        static_state if isinstance(static_state, Mapping) else {},
+                        lane=lane,
+                        entity_id=int(sid),
+                        success=bool(success),
+                        note=note,
+                        now_ts=now_ts,
+                    )
+                store.put_runtime_sync(static_key, static_state)
+            store.put_runtime_sync(ordinary_key, next_ordinary)
+
+
+def _segment_terminal_and_wake(
+    store: "TaskStore",
+    wakeup: threading.Event,
+    task: "RunningTask",
+    success: bool,
+    note: str | None,
+) -> None:
+    """Commit terminal state and wake the dispatcher for an immediate claim."""
+
+    if task.entity_id is None:
+        return
+    if task.manual_request_id is not None:
+        _segment_cycle_manual_terminal(
+            store,
+            root=task.root,
+            request_id=int(task.manual_request_id),
+            success=bool(success),
+            note=note,
+            now_ts=time.time(),
+        )
+    else:
+        _segment_cycle_terminal(
+            store,
+            root=task.root,
+            entity_id=int(task.entity_id),
+            success=bool(success),
+            note=note,
+            now_ts=time.time(),
+        )
+    wakeup.set()
+
+
+def _static_lanes_reconcile(
+    store: "TaskStore",
+    *,
+    root: str,
+    plans: dict[str, list[int]],
+    now_ts: float,
+) -> tuple[dict[str, object], dict[str, list[int]], bool]:
+    key = _static_lane_state_key(root)
+    with _SEGMENT_STATIC_LANE_LOCK:
+        state, added, started_new = _static_lane_reconcile_state(
+            store.get_runtime_sync(key),
+            plans=plans,
+            now_ts=now_ts,
+        )
+        store.put_runtime_sync(key, state)
+    return state, added, started_new
+
+
+def _static_lane_claim(
+    store: "TaskStore",
+    *,
+    root: str,
+    lane: str,
+    entity_id: int,
+    blocked_ids: set[int],
+    globally_running_ids: set[int],
+    now_ts: float,
+) -> bool:
+    key = _static_lane_state_key(root)
+    with _SEGMENT_STATIC_LANE_LOCK:
+        state, claimed = _static_lane_claim_item(
+            store.get_runtime_sync(key),
+            lane=lane,
+            entity_id=int(entity_id),
+            blocked_ids=blocked_ids,
+            globally_running_ids=globally_running_ids,
+            now_ts=now_ts,
+        )
+        if claimed:
+            store.put_runtime_sync(key, state)
+        return claimed
+
+
+def _static_lane_running(store: "TaskStore", *, root: str, lane: str, entity_id: int, now_ts: float) -> None:
+    key = _static_lane_state_key(root)
+    with _SEGMENT_STATIC_LANE_LOCK:
+        state = _static_lane_mark_running(
+            store.get_runtime_sync(key),
+            lane=lane,
+            entity_id=int(entity_id),
+            now_ts=now_ts,
+        )
+        store.put_runtime_sync(key, state)
+
+
+def _static_lane_release(store: "TaskStore", *, root: str, lane: str, entity_id: int, now_ts: float) -> None:
+    key = _static_lane_state_key(root)
+    with _SEGMENT_STATIC_LANE_LOCK:
+        state = _static_lane_release_claim(
+            store.get_runtime_sync(key),
+            lane=lane,
+            entity_id=int(entity_id),
+            now_ts=now_ts,
+        )
+        store.put_runtime_sync(key, state)
+
+
+def _static_lane_terminal(
+    store: "TaskStore",
+    *,
+    root: str,
+    lane: str,
+    entity_id: int,
+    success: bool,
+    note: str | None,
+    now_ts: float,
+) -> None:
+    key = _static_lane_state_key(root)
+    with _SEGMENT_STATIC_LANE_LOCK:
+        state = _static_lane_mark_terminal(
+            store.get_runtime_sync(key),
+            lane=lane,
+            entity_id=int(entity_id),
+            success=bool(success),
+            note=note,
+            now_ts=now_ts,
+        )
+        store.put_runtime_sync(key, state)
 
 
 def _mark_campaign_rebuild_finished(root: str, campaign_id: int | None, now_ts: float | None = None) -> None:
@@ -1034,35 +1535,87 @@ def _plugin_operation_runtime_heartbeat(store: "TaskStore", task: "RunningTask",
     )
 
 
-def _segment_whitelist_effective_setting(config: AgentConfig, inst: object) -> set[int]:
-    if bool(getattr(config, "disable_whitelist", False)):
-        return set()
+def _static_segment_setting_value(settings: object, inst: object) -> tuple[bool, object]:
+    return _instance_scoped_whitelist_entry(settings, inst)
 
-    def global_segment_ids() -> set[int]:
-        return set(getattr(config, "segment_whitelist", []) or []) | _load_segment_whitelist_file(
-            getattr(config, "segment_whitelist_file", None),
-            inst,
-        )
 
-    settings = getattr(config, "segment_whitelist_instance_settings", {})
-    found, raw = _instance_scoped_whitelist_entry(settings, inst)
-    if not found:
-        return global_segment_ids()
+def _static_segment_ids_from_value(raw: object, *, super_priority: bool) -> set[int]:
     if isinstance(raw, dict):
         if "enabled" in raw and not _to_boolish(raw.get("enabled"), True):
             return set()
-        if _to_boolish(raw.get("disable_whitelist"), False):
+        if _to_boolish(raw.get("disable_whitelist"), False) or _to_boolish(raw.get("disabled"), False):
             return set()
-        ids_raw = raw.get("segment_whitelist", raw.get("segments", raw.get("ids", raw.get("whitelist", []))))
-        ids = set(_to_int_list(ids_raw))
-        ids.update(_to_int_list(_whitelist_realtime_block(raw).get("ids", [])))
-        file_raw = str(raw.get("segment_whitelist_file", "") or "").strip()
+        keys = (
+            ("segment_super_priority", "super_priority", "segments", "ids")
+            if super_priority
+            else ("segment_priority", "segment_whitelist", "priority", "segments", "ids", "whitelist")
+        )
+        for key in keys:
+            if key in raw:
+                return set(_to_int_list(raw.get(key)))
+        return set()
+    if isinstance(raw, bool):
+        return set()
+    return set(_to_int_list(raw))
+
+
+def _segment_priority_effective_setting(config: AgentConfig, inst: object) -> set[int]:
+    """Resolve the canonical priority list; whitelist is only its old alias."""
+
+    if bool(getattr(config, "disable_whitelist", False)):
+        return set()
+    global_ids = set(getattr(config, "segment_priority", []) or [])
+    global_ids.update(getattr(config, "segment_whitelist", []) or [])
+    global_ids |= _load_segment_whitelist_file(getattr(config, "segment_whitelist_file", None), inst)
+    found, raw = _static_segment_setting_value(
+        getattr(config, "segment_priority_instance_settings", {}),
+        inst,
+    )
+    if not found:
+        found, raw = _static_segment_setting_value(
+            getattr(config, "segment_whitelist_instance_settings", {}),
+            inst,
+        )
+    if not found:
+        return global_ids
+    if isinstance(raw, bool):
+        return global_ids if raw else set()
+    ids = _static_segment_ids_from_value(raw, super_priority=False)
+    if isinstance(raw, dict):
+        file_raw = str(raw.get("segment_priority_file", raw.get("segment_whitelist_file", "")) or "").strip()
         if file_raw:
             ids |= _load_segment_whitelist_file(file_raw, inst)
-        return ids
+    return ids
+
+
+def _segment_super_priority_effective_setting(config: AgentConfig, inst: object) -> set[int]:
+    """Resolve the sole additional static super-priority MCC list."""
+
+    if bool(getattr(config, "disable_whitelist", False)):
+        return set()
+    global_ids = set(getattr(config, "segment_super_priority", []) or [])
+    found, raw = _static_segment_setting_value(
+        getattr(config, "segment_super_priority_instance_settings", {}),
+        inst,
+    )
+    if not found:
+        return global_ids
     if isinstance(raw, bool):
-        return global_segment_ids() if raw else set()
-    return set(_to_int_list(raw))
+        return global_ids if raw else set()
+    return _static_segment_ids_from_value(raw, super_priority=True)
+
+
+def _segment_whitelist_effective_setting(config: AgentConfig, inst: object) -> set[int]:
+    """Backward-compatible effective whitelist, including legacy realtime IDs."""
+
+    ids = _segment_priority_effective_setting(config, inst)
+    found, raw = _instance_scoped_whitelist_entry(
+        getattr(config, "segment_whitelist_instance_settings", {}),
+        inst,
+    )
+    if found and isinstance(raw, dict):
+        ids.update(_to_int_list(_whitelist_realtime_block(raw).get("ids", [])))
+    return ids
 
 
 def _segment_whitelist_realtime_setting(
@@ -2057,7 +2610,7 @@ def _segment_sql_worker_total_count() -> int:
         return len(_SEGMENT_SQL_WORKERS)
 
 
-_SCHEDULER_SEGMENT_TASK_TYPES = frozenset({"segment", "segment_sql", "import"})
+_SCHEDULER_SEGMENT_TASK_TYPES = frozenset({"segment", "segment_sql", "import", *_STATIC_SEGMENT_TASK_TYPES})
 _SCHEDULER_CAMPAIGN_TASK_TYPES = frozenset({"campaign_update", "campaign_trigger", "campaign_rebuild"})
 _SCHEDULER_BASELINE_SEGMENT_TASK_TYPES = _SCHEDULER_SEGMENT_TASK_TYPES
 _SCHEDULER_BASELINE_CAMPAIGN_TASK_TYPES = _SCHEDULER_CAMPAIGN_TASK_TYPES
@@ -2124,9 +2677,12 @@ def _scheduler_host_running_count(
 ) -> int:
     lane = _scheduler_task_lane(task_type)
     if lane == "segment":
+        static_count = 0
+        if _ACTIVE_PRIORITY_EXECUTOR is not None:
+            static_count = _ACTIVE_PRIORITY_EXECUTOR.active_count(None, _STATIC_SEGMENT_TASK_TYPES)
         return sum(1 for task in running.values() if task.task_type in _SCHEDULER_SEGMENT_TASK_TYPES) + (
             _segment_sql_worker_total_count()
-        )
+        ) + static_count
     if lane == "campaign":
         return sum(1 for task in running.values() if task.task_type in _SCHEDULER_CAMPAIGN_TASK_TYPES)
     return len(running) + _segment_sql_worker_total_count()
@@ -2593,6 +3149,7 @@ def _run_sql_segment_ring(
     async_worker: bool = False,
     sql_db_running_count: int | None = None,
     on_launch=None,
+    on_terminal=None,
     dynamic_blocked=None,
 ) -> int:
     if not config.segment_sql_ring_enabled:
@@ -2758,11 +3315,17 @@ def _run_sql_segment_ring(
             worker_key = (str(root), int(sid))
 
             def _worker() -> None:
+                success = False
                 try:
-                    _execute_rebuild()
+                    success = bool(_execute_rebuild())
                 finally:
                     with _SEGMENT_SQL_WORKERS_LOCK:
                         _SEGMENT_SQL_WORKERS.pop(worker_key, None)
+                    if on_terminal is not None:
+                        try:
+                            on_terminal(sid, success, None if success else "segment_sql_error")
+                        except Exception:
+                            pass
 
             thread = threading.Thread(
                 target=_worker,
@@ -2793,7 +3356,13 @@ def _run_sql_segment_ring(
             logging.info("[%s] %s worker started id=%s", root, str(ring_label or "segment_sql"), sid)
             continue
 
-        if _execute_rebuild():
+        success = bool(_execute_rebuild())
+        if on_terminal is not None:
+            try:
+                on_terminal(sid, success, None if success else "segment_sql_error")
+            except Exception:
+                pass
+        if success:
             ring.rotate(-1)
             launched += 1
             if on_launch is not None:
@@ -3213,11 +3782,12 @@ def _split_segment_circles(
     priority_size: int,
     stale_priority_ids: set[int] | None = None,
 ) -> tuple[list[int], list[int]]:
+    # Compatibility helper for older callers. The ordinary scheduler no longer
+    # uses this computed split; its persisted cycle uses source snapshots.
     uniq = list(dict.fromkeys(ids))
     stale_set = set(stale_priority_ids or set())
     priority_set: set[int] = set(whitelist)
-    if stale_priority_ids:
-        priority_set.update(stale_priority_ids)
+    priority_set.update(stale_set)
     ranked = sorted(uniq, key=lambda x: (-weights.get(x, 0.0), x))
     for sid in ranked[: max(0, priority_size)]:
         priority_set.add(sid)
@@ -3226,11 +3796,6 @@ def _split_segment_circles(
             priority_set.add(sid)
 
     def _prio_key(sid: int) -> tuple[int, int, float, int]:
-        # Priority order inside ring:
-        # 1) whitelist (forced),
-        # 2) stale (>24h or never built),
-        # 3) computed weight,
-        # 4) id for deterministic tie-break.
         return (
             0 if sid in whitelist else 1,
             0 if sid in stale_set else 1,
@@ -3239,7 +3804,10 @@ def _split_segment_circles(
         )
 
     priority = sorted([x for x in uniq if x in priority_set], key=_prio_key)
-    regular = sorted([x for x in uniq if x not in priority_set], key=lambda x: (-weights.get(x, 0.0), x))
+    regular = sorted(
+        [x for x in uniq if x not in priority_set],
+        key=lambda x: (-weights.get(x, 0.0), x),
+    )
     return priority, regular
 
 
@@ -4122,8 +4690,16 @@ def _fill_from_ring(
     on_launch=None,
     bypass_repeat_guard_entities: set[int] | None = None,
     queued_at_by_entity: dict[int, float] | None = None,
+    admission_claim=None,
+    admission_release=None,
+    admission_running=None,
     max_launches: int = 1,
 ) -> int:
+    if task_type == "segment" and admission_claim is None:
+        context = _SEGMENT_ADMISSION_CONTEXT.get(str(root), {})
+        admission_claim = context.get("claim")
+        admission_release = context.get("release")
+        admission_running = context.get("running")
     if not ring or ring_limit <= 0 or total_limit <= 0:
         return 0
     launched_count = 0
@@ -4164,6 +4740,16 @@ def _fill_from_ring(
         if not bypass_repeat_guard and not _launch_allowed(config, root, task_type, eid):
             ring.rotate(-1)
             continue
+        claimed = False
+        if admission_claim is not None:
+            try:
+                claimed = bool(admission_claim(eid))
+            except Exception as e:
+                logging.warning("[%s] %s entity=%s admission claim failed: %s", root, task_type, eid, e)
+                claimed = False
+            if not claimed:
+                ring.rotate(-1)
+                continue
         args = build_args(eid)
         launched = _submit_if_slot(
             config=config,
@@ -4179,6 +4765,11 @@ def _fill_from_ring(
             bypass_repeat_guard=bypass_repeat_guard,
         )
         if launched:
+            if admission_running is not None and claimed:
+                try:
+                    admission_running(eid)
+                except Exception:
+                    pass
             if task_type == "segment":
                 queued_at = (queued_at_by_entity or {}).pop(eid, None)
                 if queued_at is not None:
@@ -4197,6 +4788,11 @@ def _fill_from_ring(
             _advance_ring_after_launch(ring, eid, remove_on_launch=remove_launched)
             launched_count += 1
         else:
+            if admission_release is not None and claimed:
+                try:
+                    admission_release(eid)
+                except Exception:
+                    pass
             break
     return launched_count
 
@@ -4235,10 +4831,31 @@ def _compute_throttle_active(samples: deque[tuple[float, int]], threshold: int, 
     return min(v for _, v in samples) >= threshold
 
 
+def _task_store_serialized(method: Callable[..., Any]) -> Callable[..., Any]:
+    """Serialize every TaskStore operation that can touch a shared DB handle.
+
+    ``TaskStore`` intentionally uses one SQLite connection for the daemon's
+    scheduler and state-push threads. ``check_same_thread=False`` permits that
+    ownership model, but it does not make a connection re-entrant: an
+    overlapping ``execute``/``commit`` can raise ``sqlite3.InterfaceError``
+    and leave the scheduler with in-flight work marked lost. Keep the lock at
+    the store boundary so SQLite and the optional MySQL handle follow the same
+    transaction ordering, without coupling the fix to a host or task type.
+    """
+
+    @wraps(method)
+    def _serialized(self: "TaskStore", *args: Any, **kwargs: Any) -> Any:
+        with self._db_lock:
+            return method(self, *args, **kwargs)
+
+    return _serialized
+
+
 class TaskStore:
     def __init__(self, path: str, cfg: AgentConfig | None = None) -> None:
         self.path = path
         self.cfg = cfg
+        self._db_lock = threading.RLock()
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
@@ -4278,6 +4895,7 @@ class TaskStore:
             if self._mysql_available(force_probe=True) and self._migrate_sqlite_to_mysql_once():
                 self._sqlite_prune_for_failover()
 
+    @_task_store_serialized
     def close(self) -> None:
         try:
             if self._mysql_conn is not None:
@@ -4299,6 +4917,7 @@ class TaskStore:
         placeholders = ",".join(["%s"] * len(aliases))
         return placeholders, aliases
 
+    @_task_store_serialized
     def _init_sqlite_schema(self) -> None:
         self.conn.execute(
             """
@@ -4370,12 +4989,14 @@ class TaskStore:
         )
         self.conn.commit()
 
+    @_task_store_serialized
     def _ensure_sqlite_column(self, table: str, column: str, ddl: str) -> None:
         cur = self.conn.execute(f"PRAGMA table_info({table})")
         cols = {str(r["name"]) for r in cur.fetchall()}
         if column not in cols:
             self.conn.execute(ddl)
 
+    @_task_store_serialized
     def _mysql_mark_error(self) -> None:
         self._mysql_retry_after_ts = time.time() + 15.0
         try:
@@ -4385,6 +5006,7 @@ class TaskStore:
             pass
         self._mysql_conn = None
 
+    @_task_store_serialized
     def _mysql_available(self, *, force_probe: bool = False) -> bool:
         if not self._mysql_mode or self.cfg is None:
             return False
@@ -4405,6 +5027,7 @@ class TaskStore:
             self._mysql_mark_error()
             return False
 
+    @_task_store_serialized
     def _mysql_query(self, sql: str, params: tuple[object, ...] = ()) -> list[dict[str, object]]:
         if not self._mysql_available():
             raise RuntimeError("mysql_unavailable")
@@ -4418,6 +5041,7 @@ class TaskStore:
             self._mysql_mark_error()
             raise
 
+    @_task_store_serialized
     def _mysql_exec(self, sql: str, params: tuple[object, ...] = ()) -> tuple[int, int]:
         if not self._mysql_available():
             raise RuntimeError("mysql_unavailable")
@@ -4430,6 +5054,7 @@ class TaskStore:
             self._mysql_mark_error()
             raise
 
+    @_task_store_serialized
     def _mysql_exec_many(self, sql: str, params: list[tuple[object, ...]]) -> int:
         if not params:
             return 0
@@ -4444,10 +5069,12 @@ class TaskStore:
             self._mysql_mark_error()
             raise
 
+    @_task_store_serialized
     def _sqlite_fetchall_dicts(self, sql: str, params: tuple[object, ...] = ()) -> list[dict[str, object]]:
         cur = self.conn.execute(sql, params)
         return [dict(r) for r in cur.fetchall()]
 
+    @_task_store_serialized
     def _sqlite_prune_for_failover(self) -> None:
         """In mysql mode keep only minimum local fallback footprint."""
         if not self._mysql_mode:
@@ -4470,6 +5097,7 @@ class TaskStore:
         except Exception:
             pass
 
+    @_task_store_serialized
     def sync_sqlite_running_shadow(self) -> dict[str, int]:
         """
         Keep the local SQLite failover shadow aligned with MySQL running rows.
@@ -4538,6 +5166,7 @@ class TaskStore:
                 pass
         return stats
 
+    @_task_store_serialized
     def _migrate_sqlite_to_mysql_once(self) -> bool:
         if not self._mysql_mode:
             return False
@@ -4756,6 +5385,7 @@ class TaskStore:
             return False
         return True
 
+    @_task_store_serialized
     def mark_old_running_lost(self) -> None:
         now = time.time()
         if self._mysql_mode:
@@ -4778,6 +5408,7 @@ class TaskStore:
         )
         self.conn.commit()
 
+    @_task_store_serialized
     def add_running(self, task: RunningTask) -> int:
         if self._mysql_mode:
             tasks_table = self._mysql_tables.get("tasks", "")
@@ -4854,6 +5485,7 @@ class TaskStore:
         self.conn.commit()
         return int(cur.lastrowid)
 
+    @_task_store_serialized
     def finish(self, row_id: int, state: str, rc: int | None, note: str | None) -> None:
         now = time.time()
         if self._mysql_mode:
@@ -4882,6 +5514,7 @@ class TaskStore:
         )
         self.conn.commit()
 
+    @_task_store_serialized
     def running_rows(self) -> list[dict[str, object]]:
         if self._mysql_mode:
             tasks_table = self._mysql_tables.get("tasks", "")
@@ -4895,6 +5528,7 @@ class TaskStore:
                     pass
         return self._sqlite_fetchall_dicts("SELECT * FROM tasks WHERE state='running' ORDER BY id ASC")
 
+    @_task_store_serialized
     def running_count(self) -> int:
         if self._mysql_mode:
             tasks_table = self._mysql_tables.get("tasks", "")
@@ -4910,6 +5544,7 @@ class TaskStore:
         row = self.conn.execute("SELECT COUNT(*) AS cnt FROM tasks WHERE state='running'").fetchone()
         return int(row["cnt"] if row else 0)
 
+    @_task_store_serialized
     def running_task_summaries(self) -> list[dict[str, object]]:
         if self._mysql_mode:
             tasks_table = self._mysql_tables.get("tasks", "")
@@ -4930,6 +5565,7 @@ class TaskStore:
             "SELECT id, root, task_type, entity_id, pid, command_str FROM tasks WHERE state='running' ORDER BY id ASC"
         )
 
+    @_task_store_serialized
     def has_running_task_key(self, task_key: str) -> bool:
         if self._mysql_mode:
             tasks_table = self._mysql_tables.get("tasks", "")
@@ -4953,6 +5589,7 @@ class TaskStore:
         ).fetchone()
         return bool(row)
 
+    @_task_store_serialized
     def last_task_started_at(self, task_key: str) -> float:
         if self._mysql_mode:
             tasks_table = self._mysql_tables.get("tasks", "")
@@ -4975,6 +5612,7 @@ class TaskStore:
         ).fetchone()
         return float((row["started_at"] if row else 0.0) or 0.0)
 
+    @_task_store_serialized
     def recent_task_problem_counts(
         self,
         *,
@@ -5044,6 +5682,7 @@ class TaskStore:
                 out[eid] = cnt
         return out
 
+    @_task_store_serialized
     def recent_task_duration_stats(
         self,
         *,
@@ -5132,6 +5771,7 @@ class TaskStore:
                 stats["last_finished_at"] = finished
         return out
 
+    @_task_store_serialized
     def get_weights(self, kind: str, root: str, max_age_sec: int) -> dict[int, float]:
         min_ts = time.time() - max(1, max_age_sec)
         out: dict[int, float] = {}
@@ -5161,6 +5801,7 @@ class TaskStore:
             out[int(row["entity_id"])] = float(row["weight"])
         return out
 
+    @_task_store_serialized
     def put_weights(self, kind: str, root: str, weights: dict[int, float]) -> None:
         now = time.time()
         if self._mysql_mode:
@@ -5194,6 +5835,7 @@ class TaskStore:
         )
         self.conn.commit()
 
+    @_task_store_serialized
     def compact_tasks(
         self,
         *,
@@ -5413,6 +6055,7 @@ class TaskStore:
 
         return deleted_rows, non_running, vacuum_done
 
+    @_task_store_serialized
     def put_runtime_sync(self, key: str, payload: dict[str, object]) -> None:
         now = time.time()
         if self._mysql_mode:
@@ -5439,6 +6082,7 @@ class TaskStore:
         )
         self.conn.commit()
 
+    @_task_store_serialized
     def get_runtime_sync(self, key: str) -> dict[str, object] | None:
         if self._mysql_mode:
             table = self._mysql_tables.get("runtime_sync", "")
@@ -5471,6 +6115,7 @@ class TaskStore:
             return None
         return payload if isinstance(payload, dict) else None
 
+    @_task_store_serialized
     def delete_runtime_sync(self, keys: list[str]) -> int:
         clean = list(dict.fromkeys(str(key or "").strip() for key in keys if str(key or "").strip()))
         if not clean:
@@ -5494,6 +6139,7 @@ class TaskStore:
         self.conn.commit()
         return int(cur.rowcount or 0)
 
+    @_task_store_serialized
     def list_runtime_sync(self, prefix: str = "") -> list[tuple[str, dict[str, object]]]:
         key_prefix = str(prefix or "")
         out: dict[str, dict[str, object]] = {}
@@ -5546,6 +6192,7 @@ class TaskStore:
 
         return sorted(out.items())
 
+    @_task_store_serialized
     def enqueue_manual_request(
         self,
         *,
@@ -5611,6 +6258,7 @@ class TaskStore:
         self.conn.commit()
         return int(cur.lastrowid)
 
+    @_task_store_serialized
     def pending_manual_requests(self, root: str, limit: int = 32) -> list[dict[str, object]]:
         lim = max(1, int(limit))
         if self._mysql_mode:
@@ -5642,9 +6290,11 @@ class TaskStore:
             (str(root), lim),
         )
 
+    @_task_store_serialized
     def get_manual_request_status(self, req_id: int) -> str | None:
         return self.get_manual_request_status_for_host(req_id, None)
 
+    @_task_store_serialized
     def get_manual_request_status_for_host(self, req_id: int, host_name: str | None = None) -> str | None:
         target_host = str(host_name or self._node_id).strip() or self._node_id
         if self._mysql_mode:
@@ -5671,6 +6321,7 @@ class TaskStore:
             return None
         return str(row["status"])
 
+    @_task_store_serialized
     def cancel_manual_request(self, req_id: int, note: str = "fallback_direct_exec") -> bool:
         now = time.time()
         if self._mysql_mode:
@@ -5710,6 +6361,7 @@ class TaskStore:
         self.conn.commit()
         return int(cur.rowcount or 0) > 0
 
+    @_task_store_serialized
     def mark_manual_request_launched(self, req_id: int, task_key: str) -> None:
         now = time.time()
         if self._mysql_mode:
@@ -5748,6 +6400,7 @@ class TaskStore:
         )
         self.conn.commit()
 
+    @_task_store_serialized
     def finish_manual_request(self, req_id: int, status: str, note: str | None = None) -> None:
         now = time.time()
         if self._mysql_mode:
@@ -6235,6 +6888,8 @@ def _campaign_fallback_end(root: str) -> None:
 def _task_execution_lock_key(root: str, task_type: str, entity_id: int | None) -> str:
     if task_type in _CAMPAIGN_EXACT_TASK_TYPES:
         return _task_key(root, "campaign", entity_id)
+    if task_type in _STATIC_SEGMENT_TASK_TYPES:
+        return _task_key(root, "segment", entity_id)
     if task_type == "segment_recurring_priority":
         return _task_key(root, "segment", entity_id)
     return _task_key(root, task_type, entity_id)
@@ -6310,6 +6965,15 @@ class _PriorityTaskExecutor:
             return any(
                 active_type == task_type
                 for _active_root, active_type, _capacity_lane in self._active.values()
+            )
+
+    def active_count(self, root: str | None = None, task_types: set[str] | None = None) -> int:
+        with self._guard:
+            return sum(
+                1
+                for active_root, active_type, _capacity_lane in self._active.values()
+                if (root is None or active_root == root)
+                and (task_types is None or active_type in task_types)
             )
 
     def last_finished(self, root: str, task_type: str, entity_id: int) -> float:
@@ -7189,10 +7853,14 @@ def _segment_shared_slots_used(
         _segment_sql_running_state_count(store=store, root=root, config=config, now_ts=now_ts),
         max(0, int(sql_db_running_count or 0)),
     )
+    static_running = 0
+    if _ACTIVE_PRIORITY_EXECUTOR is not None:
+        static_running = _ACTIVE_PRIORITY_EXECUTOR.active_count(root, _STATIC_SEGMENT_TASK_TYPES)
     return (
         _running_count(running, root, "segment")
         + sql_running_count
         + _running_count(running, root, "import")
+        + static_running
     )
 
 
@@ -7610,6 +8278,18 @@ def _submit_if_slot(
         _campaign_dispatch_end(root, task_type)
 
 
+def _wait_for_segment_process_exit(
+    proc: subprocess.Popen[bytes],
+    wakeup: threading.Event,
+) -> None:
+    try:
+        proc.wait()
+    except Exception:
+        pass
+    finally:
+        wakeup.set()
+
+
 def _submit_if_slot_uncoordinated(
     *,
     config: AgentConfig,
@@ -7649,7 +8329,7 @@ def _submit_if_slot_uncoordinated(
     if baseline_admission and not _scheduler_baseline_launch_due(str(baseline_lane)):
         return False
     host_slots = _scheduler_host_slots_available(config, running, task_type, root=root)
-    if host_slots is not None and host_slots <= 0:
+    if not ignore_limit and host_slots is not None and host_slots <= 0:
         return False
     instance_slots = _scheduler_instance_slots_available(
         config,
@@ -7669,6 +8349,13 @@ def _submit_if_slot_uncoordinated(
         task_type=task_type,
     )
     proc = _spawn_command(root=root, args=args, stdout_path=stdout_path, stderr_path=stderr_path)
+    if task_type == "segment" and _SEGMENT_DISPATCH_WAKEUP is not None:
+        threading.Thread(
+            target=_wait_for_segment_process_exit,
+            args=(proc, _SEGMENT_DISPATCH_WAKEUP),
+            name=f"mcd-segment-wakeup-{entity_id or 'full'}",
+            daemon=True,
+        ).start()
     task = RunningTask(
         row_id=0,
         root=root,
@@ -7908,6 +8595,7 @@ def _monitor_running(
     db_configs_by_root: dict[str, object] | None = None,
     mautic_timezones_by_root: dict[str, str | None] | None = None,
     campaign_progress_watchdog: dict[str, dict[str, object]] | None = None,
+    segment_terminal_callback: Callable[[RunningTask, bool, str | None], None] | None = None,
 ) -> None:
     now = time.time()
     db_configs = db_configs_by_root or {}
@@ -8003,6 +8691,13 @@ def _monitor_running(
                         respawned = _respawn_task(config=config, store=store, running=running, popens=popens, task=task)
                 if task.manual_request_id is not None and not respawned:
                     store.finish_manual_request(task.manual_request_id, state, note)
+                if (
+                    segment_terminal_callback is not None
+                    and task.task_type == "segment"
+                    and task.entity_id is not None
+                    and not respawned
+                ):
+                    segment_terminal_callback(task, bool(rc == 0), note)
                 continue
 
         alive = _is_pid_alive(task.pid)
@@ -8022,6 +8717,12 @@ def _monitor_running(
             popens.pop(key, None)
             if task.manual_request_id is not None:
                 store.finish_manual_request(task.manual_request_id, "lost", "pid_cmd_mismatch")
+            if (
+                segment_terminal_callback is not None
+                and task.task_type == "segment"
+                and task.entity_id is not None
+            ):
+                segment_terminal_callback(task, False, "pid_cmd_mismatch")
             logging.warning(
                 "[%s] %s entity=%s pid=%s command-mismatch detected, marking lost",
                 task.root,
@@ -8084,6 +8785,13 @@ def _monitor_running(
                 respawned = _respawn_task(config=config, store=store, running=running, popens=popens, task=task)
             if task.manual_request_id is not None and not respawned:
                 store.finish_manual_request(task.manual_request_id, "timeout", "killed_by_timeout")
+            if (
+                segment_terminal_callback is not None
+                and task.task_type == "segment"
+                and task.entity_id is not None
+                and not respawned
+            ):
+                segment_terminal_callback(task, False, "killed_by_timeout")
             continue
 
         if not alive:
@@ -8111,6 +8819,12 @@ def _monitor_running(
             popens.pop(key, None)
             if task.manual_request_id is not None:
                 store.finish_manual_request(task.manual_request_id, "lost", "pid_not_alive")
+            if (
+                segment_terminal_callback is not None
+                and task.task_type == "segment"
+                and task.entity_id is not None
+            ):
+                segment_terminal_callback(task, False, "pid_not_alive")
             logging.warning("[%s] %s entity=%s pid_lost=%s", task.root, task.task_type, task.entity_id, task.pid)
 
 
@@ -8297,6 +9011,10 @@ def _dispatch_manual_requests_for_root(
     reb_prio_ring: deque[int],
     reb_reg_ring: deque[int],
     monitor_cycle_done: dict[tuple[str, str], set[int]] | None = None,
+    db: MauticDB | None = None,
+    mautic_major: int = 0,
+    segment_super_priority_ids: set[int] | None = None,
+    segment_priority_ids: set[int] | None = None,
 ) -> None:
     pending = store.pending_manual_requests(root, limit=64)
     if not pending:
@@ -8316,6 +9034,15 @@ def _dispatch_manual_requests_for_root(
             rejected,
         )
         return
+    manual_segment_snapshot: Mapping[object, object] | None = None
+    manual_segment_parents: dict[int, set[int]] = {}
+    if db is not None:
+        try:
+            manual_rows = db.fetch_published_segment_filters()
+            manual_segment_snapshot = _ordinary_segment_source_baseline(manual_rows)
+            _manual_children, manual_segment_parents = segment_dependency_maps(manual_rows)
+        except Exception as exc:
+            logging.warning("[%s] manual segment admission read failed: %s", root, exc)
     for row in pending:
         req_id = int(row["id"])
         task_type = str(row["task_type"] or "").strip()
@@ -8335,21 +9062,77 @@ def _dispatch_manual_requests_for_root(
                 store.finish_manual_request(req_id, "skipped", "managed_by_segment_sql_running")
                 continue
 
-        launched = _submit_if_slot(
-            config=config,
-            store=store,
-            running=running,
-            root=root,
-            task_type=task_type,
-            entity_id=entity_id,
-            args=args,
-            timeout_sec=timeout_sec,
-            max_parallel_for_type=1,
-            popens=popens,
-            ignore_limit=True,
-            manual_request_id=req_id,
-        )
+            if int(mautic_major or 0) >= 7:
+                manual_entity_ids = [int(entity_id)]
+            else:
+                manual_entity_ids = dependency_expanded_segment_plan(
+                    [int(entity_id)],
+                    manual_segment_parents,
+                )
+            if manual_segment_snapshot is None:
+                current_cycle = store.get_runtime_sync(_segment_cycle_key(root)) or {}
+                current_observed = (
+                    current_cycle.get("observed_snapshot")
+                    if isinstance(current_cycle, Mapping)
+                    else None
+                )
+            else:
+                current_observed = manual_segment_snapshot
+            globally_running_ids = {
+                int(task.entity_id)
+                for task in running.values()
+                if task.root == root
+                and task.entity_id is not None
+                and task.task_type in {"segment", "segment_sql"}
+            }
+            globally_running_ids.update(_segment_sql_worker_ids(root))
+            prepared, prepare_reason = _segment_cycle_manual_prepare(
+                store,
+                root=root,
+                request_id=req_id,
+                entity_ids=manual_entity_ids,
+                observed_snapshot=current_observed if isinstance(current_observed, Mapping) else None,
+                super_priority_ids=set(segment_super_priority_ids or set()),
+                priority_ids=set(segment_priority_ids or set()),
+                globally_running_ids=globally_running_ids,
+                now_ts=time.time(),
+            )
+            if not prepared:
+                store.finish_manual_request(req_id, "skipped", prepare_reason)
+                continue
+
+        try:
+            launched = _submit_if_slot(
+                config=config,
+                store=store,
+                running=running,
+                root=root,
+                task_type=task_type,
+                entity_id=entity_id,
+                args=args,
+                timeout_sec=timeout_sec,
+                max_parallel_for_type=1,
+                popens=popens,
+                ignore_limit=True,
+                manual_request_id=req_id,
+            )
+        except Exception:
+            if task_type == "segment" and entity_id is not None:
+                _segment_cycle_manual_release(
+                    store,
+                    root=root,
+                    request_id=req_id,
+                    now_ts=time.time(),
+                )
+            raise
         if not launched:
+            if task_type == "segment" and entity_id is not None:
+                _segment_cycle_manual_release(
+                    store,
+                    root=root,
+                    request_id=req_id,
+                    now_ts=time.time(),
+                )
             store.finish_manual_request(req_id, "skipped", "already_running")
             continue
 
@@ -8452,6 +9235,7 @@ def _apply_instance_runtime_guard(installs: list[MauticInstall], *, reason: str)
 
 
 def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
+    global _ACTIVE_PRIORITY_EXECUTOR, _SEGMENT_DISPATCH_WAKEUP
     logging.info("MCD loop started")
     base_config = config
 
@@ -8654,6 +9438,15 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
     pusher = MCCStatePusher(config, runtime_store=store)
 
     priority_executor = _PriorityTaskExecutor()
+    _ACTIVE_PRIORITY_EXECUTOR = priority_executor
+    segment_dispatch_wakeup = threading.Event()
+    _SEGMENT_DISPATCH_WAKEUP = segment_dispatch_wakeup
+
+    def _segment_terminal_callback(task: RunningTask, success: bool, note: str | None) -> None:
+        # A terminal worker frees a slot immediately. Wake the scheduler so
+        # the next claim does not wait for the configured dispatch interval.
+        _segment_terminal_and_wake(store, segment_dispatch_wakeup, task, success, note)
+
     recurring_segment_priority_loop = _RecurringSegmentPriorityLoop(priority_executor)
     priority_trigger_last_checked: dict[str, float] = {}
     priority_trigger_checked_rebuild: dict[str, float] = {}
@@ -8941,6 +9734,164 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                             "delay_sec": max(0, int((time.time() - fallback_scheduled_at) // 60) * 60),
                         },
                     )
+                segment_priority_ids = _segment_priority_effective_setting(cfg, inst)
+                segment_super_priority_ids = _segment_super_priority_effective_setting(cfg, inst)
+                static_plans = {_SEGMENT_SUPER_PRIORITY_LANE: [], _SEGMENT_PRIORITY_LANE: []}
+                static_parents: dict[int, set[int]] = {}
+                if segment_priority_ids or segment_super_priority_ids:
+                    try:
+                        static_rows = MauticDB(inst.db).fetch_published_segment_filters()
+                        static_children, static_parents = segment_dependency_maps(static_rows)
+                        static_plans = _build_static_segment_lane_plans(
+                            super_priority_ids=segment_super_priority_ids,
+                            priority_ids=segment_priority_ids,
+                            parents_by_child=static_parents,
+                            children_by_parent=static_children,
+                            mautic_major=int(getattr(inst, "mautic_major", 0) or 0),
+                        )
+                    except Exception as exc:
+                        logging.warning("[%s] static segment lane planning failed: %s", root, exc)
+                static_state, static_added, static_started_new = _static_lanes_reconcile(
+                    store,
+                    root=root,
+                    plans=static_plans,
+                    now_ts=time.time(),
+                )
+                if any(static_added.values()):
+                    logging.info(
+                        "[%s] static segment lanes cycle started_new=%s super_added=%s priority_added=%s",
+                        root,
+                        static_started_new,
+                        ",".join(str(x) for x in static_added[_SEGMENT_SUPER_PRIORITY_LANE]) or "-",
+                        ",".join(str(x) for x in static_added[_SEGMENT_PRIORITY_LANE]) or "-",
+                    )
+
+                def _static_lane_running_ids() -> set[int]:
+                    ids = {
+                        int(task.entity_id)
+                        for task in running.values()
+                        if task.root == root
+                        and task.entity_id is not None
+                        and task.task_type in {"segment", "segment_sql"}
+                    }
+                    for lane_name in (_SEGMENT_SUPER_PRIORITY_LANE, _SEGMENT_PRIORITY_LANE):
+                        lane_payload = (static_state.get("lanes") or {}).get(lane_name, {})
+                        ids.update(int(x) for x in lane_payload.get("running", []) if int(x) > 0)
+                    ids.update(_segment_sql_worker_ids(root))
+                    return ids
+
+                static_pending = {
+                    lane_name: _static_lane_pending_items(static_state, lane_name)
+                    for lane_name in (_SEGMENT_SUPER_PRIORITY_LANE, _SEGMENT_PRIORITY_LANE)
+                }
+                all_static_pending = set(static_pending[_SEGMENT_SUPER_PRIORITY_LANE]) | set(
+                    static_pending[_SEGMENT_PRIORITY_LANE]
+                )
+                static_host_limit = _scheduler_host_lane_limit(cfg, "segment")
+                static_host_used = _scheduler_host_running_count(running, "segment")
+                for lane_name, task_type, interval_sec, max_parallel in (
+                    (
+                        _SEGMENT_SUPER_PRIORITY_LANE,
+                        "segment_super_priority",
+                        max(1, int(getattr(cfg, "segment_super_priority_interval_sec", 1) or 1)),
+                        max(1, int(getattr(cfg, "segment_super_priority_parallel", cfg.segment_priority_parallel_idle) or 1)),
+                    ),
+                    (
+                        _SEGMENT_PRIORITY_LANE,
+                        "segment_priority",
+                        max(1, int(cfg.segment_full_scan_interval_sec or 60)),
+                        max(1, int(cfg.segment_priority_parallel_idle or 1)),
+                    ),
+                ):
+                    for segment_id in static_pending[lane_name]:
+                        if static_host_limit > 0 and static_host_used >= static_host_limit:
+                            break
+                        parent_ids = set(static_parents.get(int(segment_id), set()))
+                        active_ids = _static_lane_running_ids()
+                        blocked_ids = {
+                            int(parent_id)
+                            for parent_id in parent_ids
+                            if int(parent_id) in all_static_pending or int(parent_id) in active_ids
+                        }
+                        if blocked_ids:
+                            continue
+                        if priority_executor.active_count(root, {task_type}) >= max_parallel:
+                            break
+                        claimed = _static_lane_claim(
+                            store,
+                            root=root,
+                            lane=lane_name,
+                            entity_id=int(segment_id),
+                            blocked_ids={int(segment_id)} if int(segment_id) in active_ids else set(),
+                            globally_running_ids=active_ids,
+                            now_ts=time.time(),
+                        )
+                        if not claimed:
+                            continue
+
+                        def _static_segment_complete(
+                            rc: int | None,
+                            *,
+                            root: str = root,
+                            lane_name: str = lane_name,
+                            segment_id: int = int(segment_id),
+                        ) -> None:
+                            _static_lane_terminal(
+                                store,
+                                root=root,
+                                lane=lane_name,
+                                entity_id=segment_id,
+                                success=bool(rc == 0),
+                                note=None
+                                if rc == 0
+                                else ("task_lock_busy" if rc == _TASK_LOCK_BUSY_RC else "static_segment_error"),
+                                now_ts=time.time(),
+                            )
+                            segment_dispatch_wakeup.set()
+
+                        started = priority_executor.launch(
+                            cfg,
+                            root=root,
+                            task_type=task_type,
+                            entity_id=int(segment_id),
+                            args=render_mautic_command(
+                                php_bin=cfg.php_bin,
+                                run_as_user=cfg.mautic_run_as_user,
+                                root=root,
+                                template=cfg.cmd_segment_update_template,
+                                id=int(segment_id),
+                                batch_limit=cfg.segment_batch_limit,
+                            ),
+                            interval_sec=interval_sec,
+                            max_parallel=max_parallel,
+                            timeout_sec=max(
+                                0,
+                                int(getattr(cfg, "priority_segment_timeout_sec", 3600) or 0),
+                            ),
+                            on_success=lambda root=root, segment_id=int(segment_id): _mark_segment_finished(
+                                root,
+                                segment_id,
+                            ),
+                            on_complete=_static_segment_complete,
+                        )
+                        if started:
+                            _static_lane_running(
+                                store,
+                                root=root,
+                                lane=lane_name,
+                                entity_id=int(segment_id),
+                                now_ts=time.time(),
+                            )
+                            static_host_used += 1
+                        else:
+                            _static_lane_release(
+                                store,
+                                root=root,
+                                lane=lane_name,
+                                entity_id=int(segment_id),
+                                now_ts=time.time(),
+                            )
+
                 for segment_id in sorted(_priority_realtime_segment_ids(segment_realtime)):
                     priority_executor.launch(
                         cfg,
@@ -9191,6 +10142,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
             db_configs_by_root=db_configs_by_root,
             mautic_timezones_by_root=mautic_timezones_by_root,
             campaign_progress_watchdog=campaign_progress_watchdog,
+            segment_terminal_callback=_segment_terminal_callback,
         )
         now = time.time()
         if now >= next_scheduler_reconcile_at:
@@ -10053,7 +11005,12 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                 if not inst.db:
                     continue
                 root = inst.root
-                segment_whitelist_for_inst = _segment_whitelist_effective_setting(config, inst)
+                segment_priority_for_inst = _segment_priority_effective_setting(config, inst)
+                segment_super_priority_for_inst = _segment_super_priority_effective_setting(config, inst)
+                segment_static_ids_for_inst = (
+                    segment_priority_for_inst | segment_super_priority_for_inst
+                )
+                segment_whitelist_for_inst = segment_priority_for_inst
                 campaign_whitelist_for_inst = _campaign_whitelist_effective_setting(config, inst)
                 db = MauticDB(inst.db)
                 sql_ctx = campaign_sql_time_context(now_utc, inst.mautic_timezone, inst.mautic_major)
@@ -10268,16 +11225,67 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                     campaign_rebuild_ids = sorted(list(dict.fromkeys(campaign_rebuild_ids)), reverse=True)
 
                 if segment_ids is not None:
-                    standard_segment_ids = list(dict.fromkeys(segment_ids))
+                    observed_segment_ids = list(dict.fromkeys(segment_ids))
+                    standard_segment_ids = list(observed_segment_ids)
                     published_segment_ids: set[int] | None = None
                     dependency_children: dict[int, set[int]] = {}
                     dependency_parents: dict[int, set[int]] = {}
+                    never_built_segment_ids: list[int] = []
+                    dep_rows: list[dict[str, object]] = []
+                    source_snapshot: Mapping[object, object] | None = None
+                    static_excluded_ids = set(segment_static_ids_for_inst)
+                    previous_cycle_payload = store.get_runtime_sync(_segment_cycle_key(root)) or {}
+                    # Bootstrap is fail-open: without a completed baseline,
+                    # every observed built candidate is eligible for the
+                    # nearest ordinary cycle. The baseline is persisted only
+                    # after terminal completion of that cycle.
+                    previous_cycle_baseline: Mapping[object, object] = {}
+                    previous_cycle_retry_ids: list[object] = []
+                    if isinstance(previous_cycle_payload, dict):
+                        if previous_cycle_payload.get("baseline_ready"):
+                            candidate_baseline = previous_cycle_payload.get("baseline")
+                            previous_cycle_baseline = (
+                                candidate_baseline
+                                if isinstance(candidate_baseline, Mapping)
+                                else {}
+                            )
+                        previous_cycle_retry_ids = list(previous_cycle_payload.get("errors") or [])
+                        previous_cycle_retry_ids.extend(list(previous_cycle_payload.get("manual_retry_ids") or []))
                     try:
                         dep_rows = db.fetch_published_segment_filters()
                         published_segment_ids = {int(row["id"]) for row in dep_rows}
+                        source_snapshot = _ordinary_segment_source_baseline(dep_rows)
+                        never_built_segment_ids = _never_built_segment_ids(dep_rows)
                         dependency_children, dependency_parents = segment_dependency_maps(dep_rows)
                         segment_dependencies_by_root[root] = dependency_children
                         segment_parents_by_root[root] = dependency_parents
+                        static_plans = _build_static_segment_lane_plans(
+                            super_priority_ids=segment_super_priority_for_inst,
+                            priority_ids=segment_priority_for_inst,
+                            parents_by_child=dependency_parents,
+                            children_by_parent=dependency_children,
+                            mautic_major=int(getattr(inst, "mautic_major", 0) or 0),
+                        )
+                        for lane_ids in static_plans.values():
+                            static_excluded_ids.update(int(sid) for sid in lane_ids if int(sid) > 0)
+                        standard_segment_ids = _ordinary_segment_snapshot_order(
+                            dep_rows,
+                            observed_segment_ids,
+                            static_priority_ids=static_excluded_ids,
+                            baseline_snapshot=previous_cycle_baseline,
+                            retry_ids=previous_cycle_retry_ids,
+                            stale_after_sec=int(
+                                getattr(config, "segment_stale_after_sec", _SEGMENT_STALE_PRIORITY_SEC)
+                                or _SEGMENT_STALE_PRIORITY_SEC
+                            ),
+                            now_ts=float(now),
+                        )
+                        if never_built_segment_ids:
+                            logging.info(
+                                "[%s] never-built segment admission ids=%s",
+                                root,
+                                ",".join(str(x) for x in never_built_segment_ids[:50]),
+                            )
                         if int(getattr(inst, "mautic_major", 0) or 0) >= 7:
                             planned_before = list(standard_segment_ids)
                             standard_segment_ids, suppressed_ids = mautic7_terminal_segment_plan(
@@ -10325,6 +11333,49 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                         dependency_children = segment_dependencies_by_root.get(root, {})
                         dependency_parents = segment_parents_by_root.get(root, {})
                         logging.warning("[%s] segment dependency planning failed: %s", root, e)
+                    # Static priority/super-priority own their full closure;
+                    # ordinary scheduling must not duplicate those entities.
+                    standard_segment_ids = [
+                        sid for sid in standard_segment_ids if sid not in static_excluded_ids
+                    ]
+                    cycle_state, cycle_added_ids, cycle_started_new = _segment_cycle_sync(
+                        store,
+                        root=root,
+                        planned_ids=standard_segment_ids,
+                        never_built_ids=never_built_segment_ids,
+                        running_ids=[
+                            int(task.entity_id)
+                            for task in running.values()
+                            if task.root == root and task.task_type == "segment" and task.entity_id is not None
+                        ]
+                        + [
+                            int(segment_id)
+                            for segment_id in standard_segment_ids
+                            if priority_executor.is_active(root, "segment", int(segment_id))
+                        ],
+                        now_ts=float(now),
+                        source_snapshot=source_snapshot,
+                    )
+                    if cycle_added_ids:
+                        logging.info(
+                            "[%s] segment cycle admission cycle_id=%s started_new=%s added=%s",
+                            root,
+                            cycle_state.get("cycle_id", "-"),
+                            cycle_started_new,
+                            ",".join(str(x) for x in cycle_added_ids[:50]),
+                        )
+                    cycle_done_ids = {int(x) for x in list(cycle_state.get("done") or []) if int(x) > 0}
+                    cycle_error_ids = {int(x) for x in list(cycle_state.get("errors") or []) if int(x) > 0}
+                    cycle_pending_ids = [
+                        int(x)
+                        for x in list(cycle_state.get("items") or [])
+                        if int(x) > 0
+                        and int(x) not in cycle_done_ids
+                        and int(x) not in cycle_error_ids
+                        and int(x) not in static_excluded_ids
+                    ]
+                    if cycle_pending_ids:
+                        standard_segment_ids = cycle_pending_ids
                     standard_segment_ids = _reconcile_full_scan_pending(
                         segment_full_scan_pending.setdefault(root, set()),
                         standard_segment_ids,
@@ -10354,6 +11405,15 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                         except Exception as e:
                             logging.warning("[%s] segment filter validation failed: %s", root, e)
                     segment_invalid_filter_sets[root] = invalid_filter_ids
+                    for invalid_id in sorted(invalid_filter_ids):
+                        _segment_cycle_terminal(
+                            store,
+                            root=root,
+                            entity_id=int(invalid_id),
+                            success=False,
+                            note="invalid_segment_filter",
+                            now_ts=float(now),
+                        )
                     failure_blocked_ids = _segment_failure_blocked_ids(store, root)
                     for sid in sorted(set(standard_segment_ids) & failure_blocked_ids)[:20]:
                         _log_segment_failure_cooldown(root, sid)
@@ -10536,56 +11596,21 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                         segment_sql_active_sets[root] = set()
                         segment_sql_done_sets[root] = set()
 
-                    segment_weight_rows: list[dict[str, object]] = []
-                    seg_w: dict[int, float] = {}
-                    stale_seg_ids: set[int] = set()
-                    if standard_segment_ids:
-                        try:
-                            segment_weight_rows = db.fetch_rows(config.sql_segment_weights, limit=5000, context=sql_ctx)
-                        except Exception as e:
-                            logging.warning("[%s] segment weight query failed: %s", root, e)
-                            segment_weight_rows = []
-
-                        seg_w = store.get_weights("segment", root, config.weights_recalc_interval_sec)
-                        if _needs_weight_recalc(standard_segment_ids, seg_w):
-                            seg_w = _segment_weights(
-                                standard_segment_ids,
-                                segment_weight_rows,
-                                segment_whitelist_for_inst,
-                                now_ts,
-                            )
-                            store.put_weights("segment", root, seg_w)
-                        stale_seg_ids = _stale_segment_priority_ids(
-                            standard_segment_ids,
-                            segment_weight_rows,
-                            now_ts,
-                            stale_sec=_SEGMENT_STALE_PRIORITY_SEC,
-                        )
-                    else:
-                        store.put_weights("segment", root, {})
-
-                    seg_prio, seg_reg = _split_segment_circles(
-                        standard_segment_ids,
-                        seg_w,
-                        segment_whitelist_for_inst,
-                        config.segment_priority_weight_threshold,
-                        config.segment_priority_size,
-                        stale_priority_ids=stale_seg_ids,
-                    )
-                    if config.ring_mode == "single":
-                        seg_prio, seg_reg = [], list(dict.fromkeys(standard_segment_ids))
+                    # Ordinary never has a computed priority lane. Static
+                    # priority/super-priority are dispatched by the persisted
+                    # MCC lanes above and were removed from this snapshot.
+                    store.put_weights("segment", root, {})
+                    seg_prio, seg_reg = [], list(dict.fromkeys(standard_segment_ids))
                     if not _partition_complete(standard_segment_ids, seg_prio, seg_reg):
                         logging.warning("[%s] invalid segment partition, forcing single ring", root)
-                        seg_prio, seg_reg = [], sorted(list(dict.fromkeys(standard_segment_ids)))
+                        seg_prio, seg_reg = [], list(dict.fromkeys(standard_segment_ids))
                     segment_prio_rings[root] = _reconcile_ring(
                         segment_prio_rings.get(root),
                         seg_prio,
-                        new_to_front=True,
                     )
                     segment_reg_rings[root] = _reconcile_ring(
                         segment_reg_rings.get(root),
                         seg_reg,
-                        new_to_front=True,
                     )
                     segment_prio_sets[root] = set(seg_prio)
                     segment_reg_sets[root] = set(seg_reg)
@@ -11456,7 +12481,10 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                 continue
 
             root = inst.root
-            segment_whitelist_for_inst = _segment_whitelist_effective_setting(config, inst)
+            segment_priority_for_inst = _segment_priority_effective_setting(config, inst)
+            segment_super_priority_for_inst = _segment_super_priority_effective_setting(config, inst)
+            segment_static_ids_for_inst = segment_priority_for_inst | segment_super_priority_for_inst
+            segment_whitelist_for_inst = segment_static_ids_for_inst
             recurring_priority_entries = recurring_priority_entries_for_instance(
                 getattr(config, "segment_recurring_priority_v1", {}),
                 inst,
@@ -11508,6 +12536,26 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
             segment_blocked_ids |= active_import_target_ids
             dependency_parents_for_root = segment_parents_by_root.get(root, {})
             dependency_children_for_root = segment_dependencies_by_root.get(root, {})
+            segment_cycle_payload = store.get_runtime_sync(_segment_cycle_key(root)) or {}
+            static_lane_payload = store.get_runtime_sync(_static_lane_state_key(root)) or {}
+            static_lane_active_ids: set[int] = set()
+            static_lanes_payload = static_lane_payload.get("lanes") if isinstance(static_lane_payload, dict) else {}
+            if isinstance(static_lanes_payload, dict):
+                for lane_payload in static_lanes_payload.values():
+                    if not isinstance(lane_payload, dict):
+                        continue
+                    static_lane_active_ids.update(
+                        int(value)
+                        for value in [*(lane_payload.get("claimed") or []), *(lane_payload.get("running") or [])]
+                        if str(value).strip().isdigit() and int(value) > 0
+                    )
+            segment_cycle_ids = {
+                int(value)
+                for value in list(segment_cycle_payload.get("items") or [])
+                if str(value).strip().isdigit() and int(value) > 0
+            }
+            if not segment_cycle_ids:
+                segment_cycle_ids = set(seg_prio_ring) | set(seg_reg_ring)
 
             def _segment_chain_running_conflict(eid: int) -> bool:
                 if int(eid) in active_import_target_ids:
@@ -11539,6 +12587,30 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                         running_related = {int(task.entity_id)}
                     if candidate_related & running_related:
                         return True
+                for priority_sid in segment_cycle_ids:
+                    if not priority_executor.is_active(root, "segment", int(priority_sid)):
+                        continue
+                    try:
+                        priority_related = segment_related_ids(
+                            int(priority_sid),
+                            dependency_parents_for_root,
+                            dependency_children_for_root,
+                        )
+                    except Exception:
+                        priority_related = {int(priority_sid)}
+                    if candidate_related & priority_related:
+                        return True
+                for static_sid in static_lane_active_ids:
+                    try:
+                        static_related = segment_related_ids(
+                            int(static_sid),
+                            dependency_parents_for_root,
+                            dependency_children_for_root,
+                        )
+                    except Exception:
+                        static_related = {int(static_sid)}
+                    if candidate_related & static_related:
+                        return True
                 for running_sid in _segment_sql_worker_ids(root):
                     try:
                         running_related = segment_related_ids(
@@ -11551,6 +12623,43 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                     if candidate_related & running_related:
                         return True
                 return False
+
+            def _segment_running_ids() -> set[int]:
+                ids = {
+                    int(task.entity_id)
+                    for task in running.values()
+                    if task.root == root and task.task_type == "segment" and task.entity_id is not None
+                }
+                ids.update(
+                    sid
+                    for sid in segment_cycle_ids
+                    if priority_executor.is_active(root, "segment", int(sid))
+                )
+                ids.update(static_lane_active_ids)
+                return ids
+
+            def _claim_segment_cycle_item(sid: int) -> bool:
+                return _segment_cycle_claim(
+                    store,
+                    root=root,
+                    entity_id=int(sid),
+                    eligible_ids=segment_cycle_ids,
+                    blocked_ids=segment_blocked_ids,
+                    running_ids=_segment_running_ids(),
+                    now_ts=time.time(),
+                )
+
+            def _mark_segment_cycle_running(sid: int) -> None:
+                _segment_cycle_running(store, root=root, entity_id=int(sid), now_ts=time.time())
+
+            def _release_segment_cycle_item(sid: int) -> None:
+                _segment_cycle_release(store, root=root, entity_id=int(sid), now_ts=time.time())
+
+            _SEGMENT_ADMISSION_CONTEXT[str(root)] = {
+                "claim": _claim_segment_cycle_item,
+                "release": _release_segment_cycle_item,
+                "running": _mark_segment_cycle_running,
+            }
 
             def _trigger_waits_for_rebuild(cid: int) -> bool:
                 if not config.enable_campaign_rebuild:
@@ -11585,6 +12694,16 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                     root=root,
                     task_type="segment",
                     entity_id=sid,
+                )
+
+            def _mark_segment_cycle_terminal(sid: int, success: bool, note: str | None = None) -> None:
+                _segment_cycle_terminal(
+                    store,
+                    root=root,
+                    entity_id=int(sid),
+                    success=bool(success),
+                    note=note,
+                    now_ts=time.time(),
                 )
 
             def _mark_campaign_trigger_cycle(cid: int) -> None:
@@ -11801,6 +12920,10 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                 reb_prio_ring=reb_prio_ring,
                 reb_reg_ring=reb_reg_ring,
                 monitor_cycle_done=monitor_cycle_done,
+                db=db,
+                mautic_major=int(getattr(inst, "mautic_major", 0) or 0),
+                segment_super_priority_ids=segment_super_priority_for_inst,
+                segment_priority_ids=segment_priority_for_inst,
             )
 
             if not (cluster_cron_allowed or cluster_import_allowed or cluster_cache_allowed):
@@ -11945,6 +13068,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                     async_worker=True,
                     sql_db_running_count=segment_sql_db_running_count,
                     on_launch=_mark_segment_cycle,
+                    on_terminal=_mark_segment_cycle_terminal,
                     dynamic_blocked=_segment_chain_running_conflict,
                 )
             if (
@@ -11978,6 +13102,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                     now_local=inst_now,
                     sql_db_running_count=segment_sql_db_running_count,
                     on_launch=_mark_segment_cycle,
+                    on_terminal=_mark_segment_cycle_terminal,
                     dynamic_blocked=_segment_chain_running_conflict,
                 )
 
@@ -13512,5 +14637,8 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                     last_monitor_signals_push_error = reason
 
         if single_cycle:
+            _ACTIVE_PRIORITY_EXECUTOR = None
+            _SEGMENT_DISPATCH_WAKEUP = None
             return
-        time.sleep(max(0.1, float(config.dispatch_interval_sec)))
+        segment_dispatch_wakeup.wait(timeout=max(0.1, float(config.dispatch_interval_sec)))
+        segment_dispatch_wakeup.clear()

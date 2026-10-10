@@ -1,3 +1,17 @@
+## 1.5.66 - 2026-10-10
+
+- Serialize all `TaskStore` SQLite/MySQL operations across scheduler,
+  terminal-callback, and state-push threads, preventing shared-connection
+  `sqlite3.InterfaceError` crashes and false `pid_lost` recovery after a
+  concurrent state push.
+- Add a long-cycle persistence regression across several minute ticks and a
+  deterministic shared-connection concurrency regression.
+
+## 1.5.65 - 2026-10-10
+
+- Add persisted ordinary segment-cycle admission with deterministic never-built/changed/stale ordering, retry retention, and same-state manual admissions.
+- Add canonical super-priority and priority segment lanes with dependency-aware claims, shared host capacity, terminal wake-up, and release-line compatibility guards.
+
 ## 1.5.64 - 2026-10-09
 
 - Finalize the image-install bootstrap and cache-clear correction for the
