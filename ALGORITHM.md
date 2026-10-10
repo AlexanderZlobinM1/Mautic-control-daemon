@@ -153,9 +153,13 @@ config на его profile baseline и только после этого при
 Статические queues строятся отдельно: общие dependencies двух линий принадлежат
 линии с более высоким precedence и выполняются ровно один раз. Например,
 `super-priority 58` и `priority 59` с общим parent 57 дают единый plan `57,
-58` в super и `59` в priority на Mautic ≤6. Для Mautic 7 sibling terminal
-commands не должны добавлять 57 второй раз; source/CLI и TaskStore receipts
-обязаны подтвердить, покрывает ли один native command union closure.
+58` в super и `59` в priority на Mautic ≤6. Для Mautic 7 правило строгое:
+MCD планирует и запускает только опубликованные terminal/root IDs, а каждый
+root запускается не более одного раза в своей lane. Общий parent 57 не
+создаётся отдельной MCD task и не дублируется между sibling commands; его
+покрытие допускается только внутри native Mautic closure. Source/CLI и
+TaskStore receipt обязаны фиксировать deduplicated root plan и union closure,
+без неоднозначного ручного подтверждения алгоритма.
 
 ## 4. Claim, worker и slots
 
@@ -207,10 +211,14 @@ scheduler error/FAIL и не permanent dead-letter: независимые items
 продолжаются, item остаётся due для следующего cycle. Ошибка MCD — это падение
 daemon, потеря/сброс persisted cycle, неверное число attempts, duplicate/
 overlap, зависание или отсутствие следующего claim после terminal outcome.
-После исчерпания retries segment получает terminal error текущего cycle,
-его applied baseline не продвигается и он остаётся due для следующего cycle;
-terminal callback будит dispatcher без ожидания следующего tick. Error не
-блокирует независимые items, но учитывается failure cooldown и receipt.
+После исчерпания retries segment получает terminal error текущего cycle с
+`mautic_failed`, его applied baseline не продвигается и он остаётся due для
+следующего cycle; terminal callback будит dispatcher без ожидания следующего
+tick. Потеря PID/command ownership — отдельный scheduler error: перед
+terminalization MCD удерживает claim только bounded grace window, измеренную от
+последнего независимо подтверждённого process/DB heartbeat. Один лишь
+persisted marker эту window не продлевает. Error не блокирует независимые
+items, но учитывается failure cooldown и receipt.
 Цикл terminal, когда каждый его item находится в `done` или terminal error и
 нет running/claimed работы.
 
@@ -234,6 +242,7 @@ cycle без ручного `segments:update`, profile/capacity/data changes. Ad
 | dependency closure и terminal plan | `mcd_agent/segment_dependencies.py`, `daemon.py` | `tests/test_segment_dependencies.py` |
 | persisted cycle, never-built admission и atomic claim | `mcd_agent/segment_admission.py`, `daemon.py` | `tests/test_segment_admission.py` |
 | host/instance slots и rotation | `mcd_agent/daemon.py` | `tests/test_campaign_ring_dispatch.py` |
+| profile retry budget, three starts and bounded orphan expiry | `mcd_agent/config.py`, `mcd_agent/daemon.py` | `tests/test_segment_admission.py` |
 | monitor queued/running/done/error receipt | `mcd_agent/daemon.py` | `tests/test_scheduler_monitor_cycle.py`, `tests/test_signals_scheduler_history.py` |
 | natural b2bss/Adonis evidence | runtime TaskStore/MCC receipts | rollout acceptance (после package/install) |
 

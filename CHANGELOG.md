@@ -1,3 +1,11 @@
+## 1.5.76 - 2026-10-10
+
+- Bound segment orphan reconciliation to the last independently confirmed
+  process/DB heartbeat; a persisted marker cannot renew its own grace window.
+- Keep the approved profile-backed segment retry policy at two retries after
+  the initial launch (three total starts), report exhausted Mautic execution as
+  `mautic_failed`, and document the deduplicated Mautic 7 static-lane closure.
+
 ## 1.5.75 - 2026-10-10
 
 - Bootstrap runtime synchronization from one fresh canonical MCC read before

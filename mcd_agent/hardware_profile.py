@@ -8,8 +8,10 @@ from pathlib import Path
 import re
 
 from mcd_agent.mode import (
+    _clear_profile_runtime_overrides,
     _read_profile_name,
     _resolve_mutable_config_path,
+    _sanitize_on_passive_exit,
 )
 
 
@@ -167,6 +169,7 @@ def reconcile_hardware_profile(
     if current == "farm":
         target = recommended_farm_profile(cpu_count=cpus, memory_kib=memory)
         _write_hardware_profile_name(config_path, target)
+        _clear_profile_runtime_overrides(config_path)
         write_profile_selection(
             install_dir,
             mode="manual",
@@ -200,7 +203,11 @@ def reconcile_hardware_profile(
     target = recommended_profile(cpu_count=cpus, memory_kib=memory)
     changed = target != current
     if changed:
+        was_passive = current == "passive"
         _write_hardware_profile_name(config_path, target)
+        _clear_profile_runtime_overrides(config_path)
+        if was_passive:
+            _sanitize_on_passive_exit(config_path)
     write_profile_selection(
         install_dir,
         mode="auto",

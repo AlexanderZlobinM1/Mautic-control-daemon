@@ -15,6 +15,7 @@ from mcd_agent.daemon import (
     _segment_cycle_manual_prepare,
     _segment_cycle_manual_terminal,
     _monitor_running,
+    _segment_runtime_marker_write,
     _submit_if_slot_uncoordinated,
     _segment_shared_slots_available,
     _segment_terminal_and_wake,
@@ -742,6 +743,71 @@ class SegmentAdmissionTests(unittest.TestCase):
         self.assertEqual(popens, {})
         store.finish.assert_called_once()
 
+    def test_lost_segment_marker_expires_without_self_refreshing(self) -> None:
+        task = RunningTask(
+            row_id=1,
+            root="/var/www/site",
+            task_key="/var/www/site|segment|10",
+            task_type="segment",
+            entity_id=10,
+            command_str="php mautic segments:update --id=10",
+            timeout_sec=60,
+            attempts=1,
+            started_at=100.0,
+            pid=123,
+        )
+        marker = {
+            "schema": "mcd-segment-runtime-marker-v1",
+            "status": "running",
+            "started_at": 100.0,
+            "heartbeat_at": 100.0,
+            "last_independent_at": 100.0,
+        }
+        store = Mock()
+        persisted = {"value": marker}
+        store.get_runtime_sync.side_effect = lambda _key: persisted["value"]
+        store.put_runtime_sync.side_effect = lambda _key, payload: persisted.__setitem__("value", dict(payload))
+        _segment_runtime_marker_write(store, task, status="running", now_ts=100.0)
+        running = {task.task_key: task}
+        popens: dict[str, Mock] = {}
+        callbacks: list[tuple[bool, str | None]] = []
+
+        config = SimpleNamespace(
+            task_retry_max=1,
+            segment_retry_count=0,
+            task_retry_delay_sec=0,
+            worker_watchdog_sec=0,
+        )
+        with patch("mcd_agent.daemon._is_pid_alive", return_value=False):
+            clock = {"now": 150.0}
+            with patch("mcd_agent.daemon.time", SimpleNamespace(time=lambda: clock["now"])):
+                _monitor_running(
+                    config=config,
+                    store=store,
+                    running=running,
+                    popens=popens,
+                    segment_liveness_probe=lambda _task: {},
+                    segment_terminal_callback=lambda _task, success, note: callbacks.append((success, note)),
+                )
+                self.assertIn(task.task_key, running)
+                self.assertEqual(persisted["value"]["heartbeat_at"], 100.0)
+                self.assertEqual(persisted["value"]["last_independent_at"], 100.0)
+                self.assertEqual(persisted["value"]["lost_at"], 100.0)
+
+                clock["now"] = 161.0
+                _monitor_running(
+                    config=config,
+                    store=store,
+                    running=running,
+                    popens=popens,
+                    segment_liveness_probe=lambda _task: {},
+                    segment_terminal_callback=lambda _task, success, note: callbacks.append((success, note)),
+                )
+
+        self.assertNotIn(task.task_key, running)
+        self.assertEqual(callbacks, [(False, "scheduler_error")])
+        self.assertEqual(persisted["value"]["terminal_note"], "scheduler_error")
+
     def test_segment_retry_policy_runs_three_attempts_then_continues_next_item(self) -> None:
         state, _added, _started = sync_cycle(
             None,
@@ -832,9 +898,9 @@ class SegmentAdmissionTests(unittest.TestCase):
                 )
 
         self.assertEqual(len(starts), 3)
-        self.assertEqual(callbacks, [(10, False, "non_zero_exit")])
+        self.assertEqual(callbacks, [(10, False, "mautic_failed")])
         self.assertTrue(wakeup.is_set())
-        self.assertEqual(store.finished[-1], (3, "failed", 23, "non_zero_exit"))
+        self.assertEqual(store.finished[-1], (3, "failed", 23, "mautic_failed"))
         next_state, next_claimed = claim_item(
             store.payload,
             entity_id=20,
@@ -935,7 +1001,7 @@ class SegmentAdmissionTests(unittest.TestCase):
                     [(row[0], row[1], row[2]) for row in rows],
                     [(1, "failed", 23), (2, "failed", 23), (3, "failed", 23)],
                 )
-                self.assertEqual(callbacks, [(10, False, "non_zero_exit")])
+                self.assertEqual(callbacks, [(10, False, "mautic_failed")])
 
                 terminal_state = store.get_runtime_sync(cycle_key(root))
                 self.assertEqual(terminal_state["errors"], [10])

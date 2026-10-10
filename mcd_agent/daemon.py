@@ -1684,6 +1684,10 @@ _PRIORITY_DISPATCH_REGULAR_CHUNK = 8
 _TASK_LOCK_BUSY_RC = 75
 _CAMPAIGN_EXACT_TASK_TYPES = frozenset({"campaign_update", "campaign_rebuild", "campaign_trigger"})
 _STATIC_SEGMENT_TASK_TYPES = frozenset({"segment_priority", "segment_super_priority"})
+_SEGMENT_RUNTIME_TASK_TYPES = frozenset({"segment", "segment_sql", "import", *_STATIC_SEGMENT_TASK_TYPES})
+_SEGMENT_RUNTIME_MARKER_SCHEMA = "mcd-segment-runtime-marker-v1"
+_SEGMENT_RUNTIME_MARKER_PREFIX = "segment_runtime:"
+_SEGMENT_ORPHAN_GRACE_SEC = 60
 _IMPORT_FAST_FOLLOW_SEC = 60
 _ENTITY_LAUNCH_GUARD: dict[str, float] = {}
 _CAMPAIGN_FALLBACK_COORDINATOR_LOCK = threading.RLock()
@@ -2035,6 +2039,116 @@ def _mark_segment_finished(root: str, segment_id: int | None, now_ts: float | No
     if sid <= 0:
         return
     _SEGMENT_FINISHED_AT[(str(root), sid)] = float(now_ts or time.time())
+
+
+def _segment_runtime_marker_key(root: str, entity_id: int) -> str:
+    digest = hashlib.sha1(str(root or "").encode("utf-8")).hexdigest()[:24]
+    return f"{_SEGMENT_RUNTIME_MARKER_PREFIX}{digest}:{int(entity_id)}"
+
+
+def _segment_runtime_marker_load(
+    store: "TaskStore",
+    root: str,
+    entity_id: int | None,
+) -> dict[str, object]:
+    if entity_id is None:
+        return {}
+    try:
+        sid = int(entity_id)
+    except (TypeError, ValueError):
+        return {}
+    if sid <= 0 or not hasattr(store, "get_runtime_sync"):
+        return {}
+    raw = store.get_runtime_sync(_segment_runtime_marker_key(root, sid))
+    return dict(raw) if isinstance(raw, Mapping) else {}
+
+
+def _segment_runtime_marker_write(
+    store: "TaskStore",
+    task: "RunningTask",
+    *,
+    status: str,
+    now_ts: float,
+    note: str | None = None,
+    pid: int | None = None,
+    command_str: str | None = None,
+) -> None:
+    """Persist one segment liveness marker.
+
+    ``last_independent_at`` is written only by callers that have independently
+    confirmed a process/DB heartbeat (a launch or a live-process/DB probe).
+    Marker-only observations must never refresh that timestamp; otherwise a
+    dead process could keep its own orphan grace period alive forever.
+    """
+
+    if task.entity_id is None or task.task_type not in _SEGMENT_RUNTIME_TASK_TYPES:
+        return
+    if not hasattr(store, "get_runtime_sync") or not hasattr(store, "put_runtime_sync"):
+        return
+    marker = _segment_runtime_marker_load(store, task.root, task.entity_id)
+    marker.update(
+        {
+            "schema": _SEGMENT_RUNTIME_MARKER_SCHEMA,
+            "root": str(task.root),
+            "task_type": str(task.task_type),
+            "entity_id": int(task.entity_id),
+            "status": str(status or "running"),
+            "pid": int(pid if pid is not None else task.pid),
+            "command_str": str(command_str if command_str is not None else task.command_str),
+            "started_at": float(task.started_at),
+            "heartbeat_at": float(now_ts),
+            "updated_at": float(now_ts),
+        }
+    )
+    if status == "running":
+        marker["last_independent_at"] = float(now_ts)
+        marker.pop("lost_at", None)
+        marker.pop("terminal_at", None)
+        marker.pop("terminal_note", None)
+    else:
+        marker["terminal_at"] = float(now_ts)
+        if note:
+            marker["terminal_note"] = str(note)[:500]
+    store.put_runtime_sync(_segment_runtime_marker_key(task.root, int(task.entity_id)), marker)
+
+
+def _segment_runtime_marker_orphan_active(
+    store: "TaskStore",
+    task: "RunningTask",
+    *,
+    now_ts: float,
+    grace_sec: int = _SEGMENT_ORPHAN_GRACE_SEC,
+) -> bool:
+    """Keep a claim briefly after independent runtime evidence disappears.
+
+    The grace window is anchored to the last independently confirmed
+    heartbeat, never to the current poll. Persisting ``lost_at`` is only a
+    bookkeeping step; it does not update ``heartbeat_at`` or the anchor.
+    """
+
+    if task.task_type not in _SEGMENT_RUNTIME_TASK_TYPES or task.entity_id is None:
+        return False
+    marker = _segment_runtime_marker_load(store, task.root, task.entity_id)
+    if str(marker.get("status") or "").strip().lower() != "running":
+        return False
+    try:
+        anchor = float(
+            marker.get("last_independent_at")
+            or marker.get("heartbeat_at")
+            or marker.get("started_at")
+            or task.started_at
+        )
+    except (TypeError, ValueError):
+        anchor = float(task.started_at or now_ts)
+    try:
+        lost_at = float(marker.get("lost_at") or anchor)
+    except (TypeError, ValueError):
+        lost_at = anchor
+    if not marker.get("lost_at"):
+        marker["lost_at"] = float(lost_at)
+        marker["updated_at"] = float(now_ts)
+        store.put_runtime_sync(_segment_runtime_marker_key(task.root, int(task.entity_id)), marker)
+    return float(now_ts) - lost_at <= max(1, int(grace_sec or 1))
 
 
 def _segment_cycle_sync(
@@ -10062,6 +10176,7 @@ def _submit_if_slot_uncoordinated(
         stderr_path=stderr_path,
     )
     task.row_id = store.add_running(task)
+    _segment_runtime_marker_write(store, task, status="running", now_ts=task.started_at)
     running[key] = task
     if baseline_admission:
         _mark_scheduler_baseline_launch(str(baseline_lane), task.started_at)
@@ -10141,6 +10256,7 @@ def _respawn_task(
             stderr_path=task.stderr_path,
         )
         next_task.row_id = store.add_running(next_task)
+        _segment_runtime_marker_write(store, next_task, status="running", now_ts=next_task.started_at)
         running[next_task.task_key] = next_task
         popens[next_task.task_key] = proc
         logging.warning(
@@ -10294,11 +10410,64 @@ def _monitor_running(
     mautic_timezones_by_root: dict[str, str | None] | None = None,
     campaign_progress_watchdog: dict[str, dict[str, object]] | None = None,
     segment_terminal_callback: Callable[[RunningTask, bool, str | None], None] | None = None,
+    segment_liveness_probe: Callable[[RunningTask], Mapping[str, object] | bool] | None = None,
 ) -> None:
     now = time.time()
     db_configs = db_configs_by_root or {}
     tz_by_root = mautic_timezones_by_root or {}
     progress_watchdog = campaign_progress_watchdog if campaign_progress_watchdog is not None else {}
+
+    def _segment_liveness_evidence(task: RunningTask) -> dict[str, object]:
+        if task.task_type not in _SEGMENT_RUNTIME_TASK_TYPES:
+            return {}
+        evidence: Mapping[str, object] | bool = {}
+        if segment_liveness_probe is not None:
+            try:
+                evidence = segment_liveness_probe(task)
+            except Exception as exc:
+                logging.debug(
+                    "[%s] segment liveness probe failed entity=%s: %s",
+                    task.root,
+                    task.entity_id,
+                    exc,
+                )
+                evidence = {}
+        if isinstance(evidence, Mapping):
+            result = {str(key): value for key, value in evidence.items()}
+        else:
+            result = {"active": bool(evidence)}
+
+        # Marker-only state is a bounded restart bridge, never a heartbeat.
+        independent = any(
+            bool(result.get(key))
+            for key in ("active", "process", "db", "db_process", "runtime_confirmed", "completed")
+        )
+        if independent:
+            _segment_runtime_marker_write(store, task, status="running", now_ts=now)
+            result["active"] = True
+            return result
+        if _segment_runtime_marker_orphan_active(store, task, now_ts=now):
+            result["marker"] = True
+            result["active"] = True
+        return result
+
+    def _finish_reconciled_segment_success(task: RunningTask, key: str) -> None:
+        _segment_runtime_marker_write(store, task, status="terminal", now_ts=now, note=None)
+        store.finish(task.row_id, state="done", rc=0, note=None)
+        progress_watchdog.pop(key, None)
+        if task.task_type == "segment":
+            _mark_segment_finished(task.root, task.entity_id, now_ts=now)
+        running.pop(key, None)
+        popens.pop(key, None)
+        if task.manual_request_id is not None:
+            store.finish_manual_request(task.manual_request_id, "done", None)
+        if (
+            segment_terminal_callback is not None
+            and task.task_type == "segment"
+            and task.entity_id is not None
+        ):
+            segment_terminal_callback(task, True, None)
+
     for key, task in list(running.items()):
         _plugin_operation_runtime_heartbeat(store, task, now)
         if bool(getattr(task, "external", False)):
@@ -10331,6 +10500,9 @@ def _monitor_running(
                 lock_busy = rc == _TASK_LOCK_BUSY_RC
                 state = "done" if rc == 0 or lock_busy else "failed"
                 note = "task_lock_busy" if lock_busy else (None if rc == 0 else "non_zero_exit")
+                if rc != 0 and task.task_type in _SEGMENT_RUNTIME_TASK_TYPES:
+                    note = "mautic_failed"
+                _segment_runtime_marker_write(store, task, status="terminal", now_ts=now, note=note)
                 store.finish(task.row_id, state=state, rc=rc, note=note)
                 _plugin_operation_runtime_finish(
                     store,
@@ -10398,7 +10570,21 @@ def _monitor_running(
 
         alive = _is_pid_alive(task.pid)
         if alive and proc is None and not _pid_matches_task_command(task.pid, task.command_str):
-            store.finish(task.row_id, state="lost", rc=None, note="pid_cmd_mismatch")
+            evidence = _segment_liveness_evidence(task)
+            if bool(evidence.get("completed")):
+                _finish_reconciled_segment_success(task, key)
+                continue
+            if bool(evidence.get("active")):
+                logging.info(
+                    "[%s] %s entity=%s command mismatch deferred while runtime evidence remains active",
+                    task.root,
+                    task.task_type,
+                    task.entity_id,
+                )
+                continue
+            loss_note = "scheduler_error" if task.task_type in _SEGMENT_RUNTIME_TASK_TYPES else "pid_cmd_mismatch"
+            _segment_runtime_marker_write(store, task, status="terminal", now_ts=now, note=loss_note)
+            store.finish(task.row_id, state="lost", rc=None, note=loss_note)
             _plugin_operation_runtime_finish(
                 store,
                 task,
@@ -10412,13 +10598,13 @@ def _monitor_running(
             running.pop(key, None)
             popens.pop(key, None)
             if task.manual_request_id is not None:
-                store.finish_manual_request(task.manual_request_id, "lost", "pid_cmd_mismatch")
+                store.finish_manual_request(task.manual_request_id, "lost", loss_note)
             if (
                 segment_terminal_callback is not None
                 and task.task_type == "segment"
                 and task.entity_id is not None
             ):
-                segment_terminal_callback(task, False, "pid_cmd_mismatch")
+                segment_terminal_callback(task, False, loss_note)
             logging.warning(
                 "[%s] %s entity=%s pid=%s command-mismatch detected, marking lost",
                 task.root,
@@ -10455,6 +10641,7 @@ def _monitor_running(
             timeout_threshold = None
 
         if alive and (timeout_threshold is None or elapsed <= timeout_threshold):
+            _segment_runtime_marker_write(store, task, status="running", now_ts=now)
             continue
 
         if alive and timeout_threshold is not None and elapsed > timeout_threshold:
@@ -10467,6 +10654,7 @@ def _monitor_running(
                     timeout_threshold,
                 )
             _kill_pid(task.pid, config.segment_kill_grace_sec)
+            _segment_runtime_marker_write(store, task, status="terminal", now_ts=now, note="killed_by_timeout")
             store.finish(task.row_id, state="timeout", rc=None, note="killed_by_timeout")
             progress_watchdog.pop(key, None)
             running.pop(key, None)
@@ -10491,6 +10679,20 @@ def _monitor_running(
             continue
 
         if not alive:
+            evidence = _segment_liveness_evidence(task)
+            if bool(evidence.get("completed")):
+                _finish_reconciled_segment_success(task, key)
+                continue
+            if bool(evidence.get("active")):
+                logging.info(
+                    "[%s] %s entity=%s pid lost; keeping claim during bounded runtime reconciliation",
+                    task.root,
+                    task.task_type,
+                    task.entity_id,
+                )
+                continue
+            loss_note = "scheduler_error" if task.task_type in _SEGMENT_RUNTIME_TASK_TYPES else "pid_not_alive"
+            _segment_runtime_marker_write(store, task, status="terminal", now_ts=now, note=loss_note)
             if task.task_type == "segment":
                 logging.warning(
                     "[%s] segment scheduler exit id=%s outcome=lost runtime_sec=%.3f",
@@ -10498,7 +10700,7 @@ def _monitor_running(
                     task.entity_id,
                     max(0.0, elapsed),
                 )
-            store.finish(task.row_id, state="lost", rc=None, note="pid_not_alive")
+            store.finish(task.row_id, state="lost", rc=None, note=loss_note)
             _plugin_operation_runtime_finish(
                 store,
                 task,
@@ -10514,14 +10716,21 @@ def _monitor_running(
             running.pop(key, None)
             popens.pop(key, None)
             if task.manual_request_id is not None:
-                store.finish_manual_request(task.manual_request_id, "lost", "pid_not_alive")
+                store.finish_manual_request(task.manual_request_id, "lost", loss_note)
             if (
                 segment_terminal_callback is not None
                 and task.task_type == "segment"
                 and task.entity_id is not None
             ):
-                segment_terminal_callback(task, False, "pid_not_alive")
-            logging.warning("[%s] %s entity=%s pid_lost=%s", task.root, task.task_type, task.entity_id, task.pid)
+                segment_terminal_callback(task, False, loss_note)
+            logging.warning(
+                "[%s] %s entity=%s pid_lost=%s note=%s",
+                task.root,
+                task.task_type,
+                task.entity_id,
+                task.pid,
+                loss_note,
+            )
 
 
 def _running_task_from_row(row: dict[str, object]) -> RunningTask:
@@ -10545,6 +10754,7 @@ def _reconcile_running_state(
     store: TaskStore,
     running: dict[str, RunningTask],
     popens: dict[str, subprocess.Popen[bytes]],
+    segment_liveness_probe: Callable[[RunningTask], Mapping[str, object] | bool] | None = None,
 ) -> dict[str, int]:
     stats = {
         "tracked_total": 0,
@@ -10566,14 +10776,50 @@ def _reconcile_running_state(
         return stats
 
     valid_by_key: dict[str, RunningTask] = {}
+
+    def _liveness_active(task: RunningTask) -> bool:
+        if task.task_type not in _SEGMENT_RUNTIME_TASK_TYPES:
+            return False
+        evidence: Mapping[str, object] | bool = {}
+        if segment_liveness_probe is not None:
+            try:
+                evidence = segment_liveness_probe(task)
+            except Exception:
+                evidence = {}
+        if isinstance(evidence, Mapping):
+            if any(
+                bool(evidence.get(key))
+                for key in ("active", "process", "db", "db_process", "runtime_confirmed", "completed")
+            ):
+                _segment_runtime_marker_write(store, task, status="running", now_ts=time.time())
+                return True
+        elif bool(evidence):
+            _segment_runtime_marker_write(store, task, status="running", now_ts=time.time())
+            return True
+        return _segment_runtime_marker_orphan_active(store, task, now_ts=time.time())
+
     for row in rows:
         task = _running_task_from_row(row)
         if not _is_pid_alive(task.pid):
-            store.finish(task.row_id, state="lost", rc=None, note="pid_not_alive")
+            if _liveness_active(task):
+                valid_by_key[task.task_key] = task
+                stats.setdefault("deferred_liveness", 0)
+                stats["deferred_liveness"] += 1
+                continue
+            loss_note = "scheduler_error" if task.task_type in _SEGMENT_RUNTIME_TASK_TYPES else "pid_not_alive"
+            _segment_runtime_marker_write(store, task, status="terminal", now_ts=time.time(), note=loss_note)
+            store.finish(task.row_id, state="lost", rc=None, note=loss_note)
             stats["lost_pid"] += 1
             continue
         if not _pid_matches_task_command(task.pid, task.command_str):
-            store.finish(task.row_id, state="lost", rc=None, note="pid_cmd_mismatch")
+            if _liveness_active(task):
+                valid_by_key[task.task_key] = task
+                stats.setdefault("deferred_liveness", 0)
+                stats["deferred_liveness"] += 1
+                continue
+            loss_note = "scheduler_error" if task.task_type in _SEGMENT_RUNTIME_TASK_TYPES else "pid_cmd_mismatch"
+            _segment_runtime_marker_write(store, task, status="terminal", now_ts=time.time(), note=loss_note)
+            store.finish(task.row_id, state="lost", rc=None, note=loss_note)
             stats["lost_cmd"] += 1
             continue
 
@@ -11024,6 +11270,42 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
     _sync_segment_whitelist_file(config, installs)
     _refresh_instance_db_maps(installs, db_configs_by_root, mautic_timezones_by_root)
     _apply_instance_runtime_guard(installs, reason="startup")
+
+    def _segment_liveness_probe(task: RunningTask) -> Mapping[str, object]:
+        """Collect read-only Mautic/DB evidence before expiring a lost claim."""
+
+        if task.entity_id is None or task.task_type not in _SEGMENT_RUNTIME_TASK_TYPES:
+            return {}
+        sid = int(task.entity_id)
+        db_cfg = db_configs_by_root.get(str(task.root))
+        db_active = False
+        db_completed = False
+        if db_cfg is not None:
+            try:
+                for row in MauticDB(db_cfg).fetch_processlist(limit=200):
+                    info = str(row.get("Info") or row.get("info") or "").strip().lower()
+                    command = str(row.get("Command") or row.get("command") or "").strip().lower()
+                    if command and command not in {"query", "execute"}:
+                        continue
+                    if "lead_lists" not in info and "leadlist" not in info and "segment" not in info:
+                        continue
+                    if re.search(rf"(?<!\d){sid}(?!\d)", info):
+                        db_active = True
+                        break
+            except Exception:
+                db_active = False
+            try:
+                rows = MauticDB(db_cfg).fetch_segment_definitions([sid])
+                for row in rows:
+                    built_raw = row.get("last_built_date") if isinstance(row, Mapping) else None
+                    built_at = _parse_mysql_datetime_ts(str(built_raw or ""))
+                    if built_at is not None and built_at >= float(task.started_at) - 0.5:
+                        db_completed = True
+                        break
+            except Exception:
+                db_completed = False
+        return {"db": db_active, "completed": db_completed}
+
     _sync_and_publish_form_embed_status(config, installs, reason="startup")
     retired_zabbix_probe = retire_zabbix_mautic_version_userparameter()
     if bool(retired_zabbix_probe.get("changed", False)):
@@ -11861,10 +12143,16 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
             mautic_timezones_by_root=mautic_timezones_by_root,
             campaign_progress_watchdog=campaign_progress_watchdog,
             segment_terminal_callback=_segment_terminal_callback,
+            segment_liveness_probe=_segment_liveness_probe,
         )
         now = time.time()
         if now >= next_scheduler_reconcile_at:
-            rec = _reconcile_running_state(store=store, running=running, popens=popens)
+            rec = _reconcile_running_state(
+                store=store,
+                running=running,
+                popens=popens,
+                segment_liveness_probe=_segment_liveness_probe,
+            )
             if any(int(rec.get(k, 0) or 0) > 0 for k in ("adopted", "lost_pid", "lost_cmd", "duplicate", "shadow_replaced")):
                 logging.warning(
                     "scheduler reconcile: tracked=%s kept=%s adopted=%s lost_pid=%s lost_cmd=%s duplicate=%s shadow_replaced=%s",
