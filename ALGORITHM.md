@@ -198,6 +198,41 @@ Host fairness работает поверх этого правила: кажд�
 item до начала следующего cycle. Ни один active cycle с `pending > 0` и
 `running = 0` не может оставаться только из-за порядка dispatch или pressure.
 
+Import — отдельный host-wide singleton worker. Независимо от количества
+instances одновременно допускается максимум один `task_type=import`; он
+занимает ровно один общий segment slot. Pending imports наблюдаются в FIFO
+порядке: первый eligible import получает первый освободившийся slot, а
+остальные roots ждут в очереди. `scheduler_pause`, import route, DB
+capacity, duplicate/task lock и instance guard остаются обязательными.
+
+Этот singleton не превращает import в host-wide pause: остальные свободные
+slots продолжают принимать segment/SQL/dependency closure work. Import не
+подчиняется generic `command_timeout_sec` или `worker_watchdog_sec` и не имеет
+hard total-duration cap: штатный импорт может работать часами. Его единственный
+таймер — profile-managed `runtime.import_stall_timeout_sec` (по умолчанию
+1800 секунд, с безопасным минимумом 60 секунд), который измеряет отсутствие
+независимых признаков прогресса. Lease продлевают изменения Mautic import
+status/counters или активный DB import query, движение upload/log file/offset,
+либо изменение kernel CPU/IO counters процесса. Один только PID, живое дерево
+процессов или persisted self-marker не являются heartbeat. После превышения
+stall timeout MCD делает grace/recheck; только повторное отсутствие сигналов
+позволяет kill/reap и terminalizes import как
+`timeout/killed_by_import_stall_watchdog`. Terminal process/DB outcome,
+failed, cancelled/stopped и lost-PID освобождают singleton slot немедленно;
+failed/timeout не порождают stale follow-up или автоматический duplicate
+retry. После terminal следующий FIFO import может быть admitted. Completed
+import follow-up оставляет минимум один slot для unrelated ordinary/closure
+work, когда такой work уже pending. Daemon restart сначала reconcile/adopt-ит
+живой import; при adoption текущий независимый сигнал создаёт новый stall
+lease, а lost PID закрывается как terminal/lost и не оставляет permanent slot,
+lock или PID ownership.
+
+`import_stall_timeout_sec` проходит через обычный runtime contract: он входит в
+`AgentConfig`, `_RUNTIME_TO_ATTR`, profile-managed/locked runtime keys и
+`PROFILE_MANAGED_RUNTIME_KEYS`. Поэтому profile → local runtime и MCC/local
+last-writer-wins reconciliation используют один и тот же ключ; ручное значение
+не может незаметно пережить profile authority.
+
 Ручной MCC `segments:update -i <id>` не является четвёртой линией. До spawn
 MCD фиксирует observed fingerprint/generation цели и dependency closure,
 атомарно claim-ит существующий элемент ordinary/priority/super, если он есть,

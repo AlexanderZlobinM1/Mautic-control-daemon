@@ -654,6 +654,7 @@ class AgentConfig:
     import_limit: int
     enable_import_polling: bool
     import_poll_interval_sec: int
+    import_stall_timeout_sec: int
     queue_throttle_threshold: int
     queue_throttle_window_min: int
     sql_mail_queue_count: str
@@ -2317,6 +2318,7 @@ _RUNTIME_TO_ATTR: dict[str, str] = {
     "import_limit": "import_limit",
     "enable_import_polling": "enable_import_polling",
     "import_poll_interval_sec": "import_poll_interval_sec",
+    "import_stall_timeout_sec": "import_stall_timeout_sec",
     "queue_throttle_threshold": "queue_throttle_threshold",
     "queue_throttle_window_min": "queue_throttle_window_min",
     "mcd_update_notify": "mcd_update_notify",
@@ -2453,6 +2455,7 @@ _PROFILE_LOCKED_RUNTIME_KEYS = {
     "disable_throttle",
     "disable_whitelist",
     "enable_import_polling",
+    "import_stall_timeout_sec",
     "enable_campaign_rebuild",
     "segment_priority_weight_threshold",
     "segment_priority_size",
@@ -3305,6 +3308,7 @@ def _load_config_inner(path: str) -> AgentConfig:
         import_limit=int(runtime.get("import_limit", 1000)),
         enable_import_polling=bool(runtime.get("enable_import_polling", True)),
         import_poll_interval_sec=int(runtime.get("import_poll_interval_sec", 15)),
+        import_stall_timeout_sec=max(60, int(runtime.get("import_stall_timeout_sec", 1800) or 1800)),
         queue_throttle_threshold=int(runtime.get("queue_throttle_threshold", 200)),
         queue_throttle_window_min=int(runtime.get("queue_throttle_window_min", 5)),
         sql_mail_queue_count=str(sql.get("mail_queue_count", "SELECT COUNT(*) AS cnt FROM {prefix}message_queue WHERE status = 'pending'")),

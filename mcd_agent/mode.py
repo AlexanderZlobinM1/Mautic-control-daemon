@@ -1154,6 +1154,7 @@ PROFILE_MANAGED_RUNTIME_KEYS = (
     "disable_throttle",
     "disable_whitelist",
     "enable_import_polling",
+    "import_stall_timeout_sec",
     "enable_campaign_rebuild",
     "segment_priority_weight_threshold",
     "segment_priority_size",

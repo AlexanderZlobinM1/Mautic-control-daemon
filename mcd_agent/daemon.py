@@ -9526,6 +9526,128 @@ def _running_count(running: dict[str, RunningTask], root: str, task_type_prefix:
     return sum(1 for t in running.values() if t.root == root and t.task_type.startswith(task_type_prefix))
 
 
+def _import_process_liveness_signal(pid: int) -> dict[str, object]:
+    """Read independent CPU/IO counters for one live import process.
+
+    A PID and the scheduler's own runtime marker are ownership evidence, not
+    progress evidence.  These kernel counters are independent of MCD state
+    and therefore may extend an import lease when they advance.
+    """
+
+    if int(pid or 0) <= 0:
+        return {}
+    signal: dict[str, object] = {}
+    try:
+        stat_raw = Path(f"/proc/{int(pid)}/stat").read_text(encoding="utf-8", errors="replace")
+        stat_tail = stat_raw.rsplit(")", 1)[-1].split()
+        if len(stat_tail) > 12:
+            signal["cpu_progress"] = (int(stat_tail[11]), int(stat_tail[12]))
+    except (OSError, TypeError, ValueError, IndexError):
+        pass
+    try:
+        io_values: dict[str, int] = {}
+        for line in Path(f"/proc/{int(pid)}/io").read_text(encoding="utf-8", errors="replace").splitlines():
+            name, sep, raw_value = line.partition(":")
+            if not sep or name.strip() not in {"read_bytes", "write_bytes", "rchar", "wchar"}:
+                continue
+            try:
+                io_values[name.strip()] = int(raw_value.strip())
+            except ValueError:
+                continue
+        if io_values:
+            signal["io_progress"] = tuple(sorted(io_values.items()))
+    except OSError:
+        pass
+    return signal
+
+
+def _import_path_liveness_signal(root: str, command_str: str) -> dict[str, object]:
+    """Read upload/log file counters without treating MCD markers as progress."""
+
+    candidates: list[Path] = [Path(root) / "var" / "import", Path(root) / "var" / "logs"]
+    try:
+        command_args = shlex.split(str(command_str or ""))
+    except ValueError:
+        command_args = []
+    for raw_arg in command_args:
+        value = str(raw_arg or "").strip()
+        if not value or value.startswith("-"):
+            continue
+        candidate = Path(value)
+        if not candidate.is_absolute():
+            candidate = Path(root) / candidate
+        if candidate.exists():
+            candidates.append(candidate)
+
+    fingerprints: list[tuple[str, int, int, int]] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        try:
+            resolved = str(candidate.resolve())
+        except OSError:
+            resolved = str(candidate)
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        try:
+            stat = candidate.stat()
+        except OSError:
+            continue
+        fingerprints.append((resolved, int(stat.st_mtime_ns), int(stat.st_size), int(stat.st_mode)))
+        if not candidate.is_dir():
+            continue
+        try:
+            entries = list(os.scandir(candidate))
+        except OSError:
+            continue
+        for entry in entries[:512]:
+            try:
+                entry_stat = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if not entry.is_file(follow_symlinks=False):
+                continue
+            fingerprints.append(
+                (
+                    str(Path(candidate) / entry.name),
+                    int(entry_stat.st_mtime_ns),
+                    int(entry_stat.st_size),
+                    int(entry_stat.st_mode),
+                )
+            )
+    if not fingerprints:
+        return {}
+    fingerprints.sort()
+    return {"file_progress": tuple(fingerprints)}
+
+
+def _host_running_import_count(running: dict[str, RunningTask]) -> int:
+    """Return the number of active import workers across the whole host.
+
+    Import polling is performed once per install, but the import worker uses
+    one host-wide shared slot.  A per-root check is therefore insufficient:
+    two otherwise idle instances must not start two imports concurrently.
+    ``running`` is the reconciled scheduler state, so this also covers a
+    daemon restart after a live import was adopted.
+    """
+
+    return sum(1 for task in running.values() if str(task.task_type or "").strip().lower() == "import")
+
+
+def _host_has_live_import_process(running: dict[str, RunningTask]) -> bool:
+    """Fail closed when an untracked Mautic import is already running."""
+
+    if _host_running_import_count(running) > 0:
+        return True
+    try:
+        proc = subprocess.run(["ps", "-eo", "pid=,args="], capture_output=True, text=True, timeout=5)
+    except Exception:
+        return True
+    if proc.returncode != 0:
+        return True
+    return any("mautic:import" in line.lower() for line in (proc.stdout or "").splitlines())
+
+
 def _running_campaign_total(running: dict[str, RunningTask], root: str) -> int:
     return sum(
         1
@@ -9613,6 +9735,7 @@ def _fairness_promotion_log_due(
 def _pending_import_first_dispatch_installs(
     installs: list[object],
     pending_by_root: dict[str, int],
+    pending_order: list[str] | tuple[str, ...] | None = None,
 ) -> list[object]:
     if not installs or not pending_by_root:
         return list(installs)
@@ -9625,6 +9748,9 @@ def _pending_import_first_dispatch_installs(
         except (TypeError, ValueError):
             has_pending_import = False
         (pending if has_pending_import else remaining).append(inst)
+    if pending_order:
+        order = {str(root): index for index, root in enumerate(pending_order)}
+        pending.sort(key=lambda inst: order.get(str(getattr(inst, "root", "") or ""), len(order)))
     return pending + remaining
 
 
@@ -9750,6 +9876,21 @@ def _segment_task_limit_after_import(
     return max(0, max(0, int(segment_slot_limit or 0)) - _running_count(running, root, "import"))
 
 
+def _import_followup_slot_limit(
+    running: dict[str, RunningTask],
+    root: str,
+    segment_slot_limit: int,
+    *,
+    ordinary_segment_pending: bool = False,
+) -> int:
+    """Leave one slot for unrelated segment work when followups are queued."""
+
+    limit = _segment_task_limit_after_import(running, root, segment_slot_limit)
+    if ordinary_segment_pending:
+        return max(0, limit - 1)
+    return limit
+
+
 def _submit_import_if_segment_slot(
     *,
     config: AgentConfig,
@@ -9769,6 +9910,7 @@ def _submit_import_if_segment_slot(
         or int(import_pending_count or 0) <= 0
         or _import_in_settle(root, now_ts)
         or _running_count(running, root, "import") > 0
+        or _host_has_live_import_process(running)
     ):
         return False
     if _segment_shared_slots_available(
@@ -10170,6 +10312,12 @@ def _submit_if_slot_uncoordinated(
         return False
     if store.has_running_task_key(key):
         return False
+    # Imports are the one host-wide singleton worker.  Keep this guard at the
+    # common submit boundary as well as in the polling helper so a manual or
+    # future dispatch path cannot accidentally create a second import on
+    # another instance.
+    if str(task_type or "").strip().lower() == "import" and _host_has_live_import_process(running):
+        return False
     if manual_request_id is None and not bypass_repeat_guard and not _launch_allowed(config, root, task_type, entity_id):
         return False
     if manual_request_id is None and not bypass_repeat_guard:
@@ -10270,6 +10418,12 @@ def _respawn_task(
     popens: dict[str, subprocess.Popen[bytes]],
     task: RunningTask,
 ) -> bool:
+    if str(task.task_type or "").strip().lower() == "import" and _host_has_live_import_process(running):
+        logging.warning(
+            "[%s] import retry deferred: host-wide import worker already active",
+            task.root,
+        )
+        return False
     # task_retry_max semantics:
     # - <= 0 : unlimited retries
     # - 1    : no retry (initial run only), unless a targeted campaign trigger override applies
@@ -10466,13 +10620,16 @@ def _monitor_running(
     db_configs_by_root: dict[str, object] | None = None,
     mautic_timezones_by_root: dict[str, str | None] | None = None,
     campaign_progress_watchdog: dict[str, dict[str, object]] | None = None,
+    import_progress_watchdog: dict[str, dict[str, object]] | None = None,
     segment_terminal_callback: Callable[[RunningTask, bool, str | None], None] | None = None,
     segment_liveness_probe: Callable[[RunningTask], Mapping[str, object] | bool] | None = None,
+    import_liveness_probe: Callable[[RunningTask], Mapping[str, object] | bool] | None = None,
 ) -> None:
     now = time.time()
     db_configs = db_configs_by_root or {}
     tz_by_root = mautic_timezones_by_root or {}
     progress_watchdog = campaign_progress_watchdog if campaign_progress_watchdog is not None else {}
+    import_watchdog = import_progress_watchdog if import_progress_watchdog is not None else {}
 
     def _segment_liveness_evidence(task: RunningTask) -> dict[str, object]:
         if task.task_type not in _SEGMENT_RUNTIME_TASK_TYPES:
@@ -10507,6 +10664,108 @@ def _monitor_running(
             result["marker"] = True
             result["active"] = True
         return result
+
+    def _import_liveness_evidence(task: RunningTask) -> dict[str, object]:
+        if task.task_type != "import":
+            return {}
+        evidence: Mapping[str, object] | bool = {}
+        if import_liveness_probe is not None:
+            try:
+                evidence = import_liveness_probe(task)
+            except Exception as exc:
+                logging.debug(
+                    "[%s] import liveness probe failed pid=%s: %s",
+                    task.root,
+                    task.pid,
+                    exc,
+                )
+                evidence = {}
+        if isinstance(evidence, Mapping):
+            return {str(key): value for key, value in evidence.items()}
+        return {"active": bool(evidence)}
+
+    def _import_watchdog_keepalive(task: RunningTask, key: str, evidence: Mapping[str, object]) -> bool:
+        """Apply the import stall watchdog; return True while the lease is kept."""
+
+        state = import_watchdog.setdefault(key, {})
+        independent_fields = {
+            field: evidence.get(field)
+            for field in (
+                "db_progress",
+                "db_query_progress",
+                "db_active",
+                "active_db",
+                "file_progress",
+                "file_offset",
+                "log_progress",
+                "cpu_progress",
+                "io_progress",
+            )
+            if field in evidence
+        }
+        signal_fingerprint = repr(sorted(independent_fields.items(), key=lambda item: item[0]))
+        signal_changed = bool(independent_fields) and signal_fingerprint != state.get("signal_fingerprint")
+        if independent_fields:
+            state["signal_fingerprint"] = signal_fingerprint
+
+        active_db = bool(evidence.get("db_active") or evidence.get("active_db"))
+        if signal_changed or active_db:
+            state["last_progress_at"] = float(now)
+            state.pop("stall_observed_at", None)
+        elif "last_progress_at" not in state:
+            # On restart/adoption, a current independent signal establishes a
+            # fresh lease.  With no signal, the task's persisted start time is
+            # the conservative baseline.
+            state["last_progress_at"] = float(task.started_at or now)
+
+        stall_timeout = max(
+            1.0,
+            float(getattr(config, "import_stall_timeout_sec", 1800) or 1800),
+        )
+        last_progress_at = float(state.get("last_progress_at") or task.started_at or now)
+        if now - last_progress_at <= stall_timeout:
+            return True
+
+        observed_at = state.get("stall_observed_at")
+        if observed_at is None:
+            state["stall_observed_at"] = float(now)
+            logging.warning(
+                "[%s] import pid=%s has no independent progress for %.1fs; starting stall recheck grace",
+                task.root,
+                task.pid,
+                max(0.0, now - last_progress_at),
+            )
+            return True
+        grace_sec = max(1.0, min(30.0, stall_timeout / 10.0))
+        if now - float(observed_at) <= grace_sec:
+            return True
+
+        _kill_pid(task.pid, int(getattr(config, "segment_kill_grace_sec", 10) or 10))
+        note = "killed_by_import_stall_watchdog"
+        _segment_runtime_marker_write(store, task, status="terminal", now_ts=now, note=note)
+        store.finish(task.row_id, state="timeout", rc=None, note=note)
+        _plugin_operation_runtime_finish(
+            store,
+            task,
+            state="timeout",
+            rc=None,
+            skipped_reason=note,
+            stale=True,
+            now_ts=now,
+        )
+        import_watchdog.pop(key, None)
+        running.pop(key, None)
+        popens.pop(key, None)
+        _mark_import_settle(config, task.root, now, elapsed_sec=now - float(task.started_at))
+        if task.manual_request_id is not None:
+            store.finish_manual_request(task.manual_request_id, "timeout", note)
+        logging.warning(
+            "[%s] import entity=%s killed by stall watchdog after %.1fs without independent progress",
+            task.root,
+            task.entity_id,
+            max(0.0, now - last_progress_at),
+        )
+        return False
 
     def _finish_reconciled_segment_success(task: RunningTask, key: str) -> None:
         _segment_runtime_marker_write(store, task, status="terminal", now_ts=now, note=None)
@@ -10570,6 +10829,7 @@ def _monitor_running(
                     now_ts=now,
                 )
                 progress_watchdog.pop(key, None)
+                import_watchdog.pop(key, None)
                 if rc == 0 and task.task_type == "segment":
                     _mark_segment_finished(task.root, task.entity_id, now_ts=now)
                 if task.task_type == "segment":
@@ -10606,7 +10866,12 @@ def _monitor_running(
                 running.pop(key, None)
                 popens.pop(key, None)
                 respawned = False
-                if rc != 0 and not lock_busy:
+                # A failed import is terminal for this queued item.  Retrying
+                # it from the monitor can duplicate a partially applied CSV
+                # and races the next FIFO item; the next poll/reconciliation
+                # owns any deliberate retry decision.  Explicit retry calls
+                # still pass through _respawn_task's host-wide singleton.
+                if rc != 0 and not lock_busy and task.task_type != "import":
                     logging.warning("[%s] %s entity=%s failed rc=%s", task.root, task.task_type, task.entity_id, rc)
                     retry_max = _effective_task_retry_max(config, task)
                     retry_enabled = (retry_max <= 0) or (retry_max > 1)
@@ -10652,6 +10917,7 @@ def _monitor_running(
                 now_ts=now,
             )
             progress_watchdog.pop(key, None)
+            import_watchdog.pop(key, None)
             running.pop(key, None)
             popens.pop(key, None)
             if task.manual_request_id is not None:
@@ -10685,6 +10951,13 @@ def _monitor_running(
         ):
             continue
 
+        if alive and task.task_type == "import":
+            # Imports deliberately bypass the generic command/worker timeout.
+            # They may run for hours; only a bounded absence of independent
+            # progress evidence is actionable.
+            _import_watchdog_keepalive(task, key, _import_liveness_evidence(task))
+            continue
+
         elapsed = now - task.started_at
         timeout_threshold: int | None = None
         if task.timeout_sec > 0 and config.worker_watchdog_sec > 0:
@@ -10714,6 +10987,7 @@ def _monitor_running(
             _segment_runtime_marker_write(store, task, status="terminal", now_ts=now, note="killed_by_timeout")
             store.finish(task.row_id, state="timeout", rc=None, note="killed_by_timeout")
             progress_watchdog.pop(key, None)
+            import_watchdog.pop(key, None)
             running.pop(key, None)
             popens.pop(key, None)
             logging.warning("[%s] %s entity=%s timeout=%ss", task.root, task.task_type, task.entity_id, int(timeout_threshold))
@@ -11294,6 +11568,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
     db_configs_by_root: dict[str, object] = {}
     mautic_timezones_by_root: dict[str, str | None] = {}
     campaign_progress_watchdog: dict[str, dict[str, object]] = {}
+    import_progress_watchdog: dict[str, dict[str, object]] = {}
 
     identity = resolve_agent_identity(config)
     if bool(identity.get("clone_detected", False)):
@@ -11363,6 +11638,46 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                 db_completed = False
         return {"db": db_active, "completed": db_completed}
 
+    def _import_liveness_probe(task: RunningTask) -> Mapping[str, object]:
+        """Collect independent Mautic import progress signals.
+
+        The persisted scheduler marker is intentionally absent here.  Import
+        leases may be extended only by Mautic/DB status changes, upload/log
+        file movement, or kernel CPU/IO counters from the owned process.
+        """
+
+        evidence: dict[str, object] = {}
+        monitor = import_monitor_cache.get(str(task.root))
+        if isinstance(monitor, dict):
+            monitor_view = {
+                "queued": list(monitor.get("queued") or []),
+                "running": list(monitor.get("running") or []),
+                "done": list(monitor.get("done") or []),
+                "item_statuses": dict(monitor.get("item_statuses") or {}),
+            }
+            if any(monitor_view.values()):
+                evidence["db_progress"] = json.dumps(monitor_view, sort_keys=True, default=str)
+        db_cfg = db_configs_by_root.get(str(task.root))
+        if db_cfg is not None:
+            try:
+                query_fingerprint: list[str] = []
+                for row in MauticDB(db_cfg).fetch_processlist(limit=200):
+                    info = str(row.get("Info") or row.get("info") or "").strip()
+                    command = str(row.get("Command") or row.get("command") or "").strip().lower()
+                    if command and command not in {"query", "execute"}:
+                        continue
+                    if not re.search(r"(?:^|[^a-z])(imports?|lead_import|mautic_import)(?:[^a-z]|$)", info, re.IGNORECASE):
+                        continue
+                    query_fingerprint.append(info[:500])
+                if query_fingerprint:
+                    evidence["db_active"] = True
+                    evidence["db_query_progress"] = tuple(sorted(query_fingerprint))
+            except Exception:
+                pass
+        evidence.update(_import_process_liveness_signal(task.pid))
+        evidence.update(_import_path_liveness_signal(task.root, task.command_str))
+        return evidence
+
     _sync_and_publish_form_embed_status(config, installs, reason="startup")
     retired_zabbix_probe = retire_zabbix_mautic_version_userparameter()
     if bool(retired_zabbix_probe.get("changed", False)):
@@ -11405,6 +11720,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
     last_import_poll_ts: dict[str, float] = {}
     last_import_activity_ts: dict[str, float] = {}
     import_pending_cache: dict[str, int] = {}
+    import_pending_order: list[str] = []
     import_monitor_cache: dict[str, dict[str, object]] = {}
     import_completed_segment_followups: dict[str, set[int]] = {}
     import_completed_segment_followup_queued_at: dict[str, dict[int, float]] = {}
@@ -12201,8 +12517,10 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
             db_configs_by_root=db_configs_by_root,
             mautic_timezones_by_root=mautic_timezones_by_root,
             campaign_progress_watchdog=campaign_progress_watchdog,
+            import_progress_watchdog=import_progress_watchdog,
             segment_terminal_callback=_segment_terminal_callback,
             segment_liveness_probe=_segment_liveness_probe,
+            import_liveness_probe=_import_liveness_probe,
         )
         now = time.time()
         if now >= next_scheduler_reconcile_at:
@@ -14722,12 +15040,24 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
             )
         )
         _set_scheduler_priority_pending_roots(priority_pending_roots)
+        pending_import_roots = {
+            str(getattr(inst, "root", "") or "").strip()
+            for inst in installs
+            if str(getattr(inst, "root", "") or "").strip()
+            and max(0, int(import_pending_cache.get(str(getattr(inst, "root", "") or "").strip(), 0) or 0)) > 0
+        }
+        import_pending_order[:] = [root for root in import_pending_order if root in pending_import_roots]
+        for inst in installs:
+            root = str(getattr(inst, "root", "") or "").strip()
+            if root and root in pending_import_roots and root not in import_pending_order:
+                import_pending_order.append(root)
         dispatch_installs = _pending_import_first_dispatch_installs(
             _priority_interleaved_dispatch_installs(
                 _rotated_dispatch_installs(installs, dispatch_instance_cursor),
                 config,
             ),
             import_pending_cache,
+            import_pending_order,
         )
         for progressed_root in _take_scheduler_fairness_claimed_roots():
             scheduler_pending_since_by_root.pop(progressed_root, None)
@@ -15283,10 +15613,19 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                 segment_launched_this_tick += 1
 
             import_followup_ids = set(import_completed_segment_followups.get(root, set()))
-            import_followup_limit = _segment_task_limit_after_import(
+            ordinary_segment_pending = bool(
+                persisted_pending_cycle_ids
+                or seg_sql_long_ring
+                or seg_sql_ring
+                or segment_resume_ring
+                or seg_prio_ring
+                or seg_reg_ring
+            )
+            import_followup_limit = _import_followup_slot_limit(
                 running,
                 root,
                 segment_slot_limit,
+                ordinary_segment_pending=ordinary_segment_pending,
             )
             if (
                 cluster_cron_allowed
@@ -15300,7 +15639,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                     import_completed_segment_followups.setdefault(root, set()).discard(sid)
                     _mark_segment_cycle(sid)
 
-                segment_launched_this_tick += _fill_from_ring(
+                _fill_from_ring(
                     ring=import_followup_ring,
                     ring_limit=import_followup_limit,
                     total_limit=import_followup_limit,

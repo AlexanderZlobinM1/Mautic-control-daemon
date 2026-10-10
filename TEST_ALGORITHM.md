@@ -63,3 +63,77 @@ read-only real-MCC verification. Receipt обязан содержать commit/
 major, cycle/task IDs, PID, `started_at`, `finished_at`, claim/terminal states,
 guard reason и результат каждого gate. Любое расхождение между этим
 алгоритмом, source, tests и runtime receipt блокирует push/install acceptance.
+
+## Import liveness matrix
+
+Все import fixtures и real-command rows запускаются только в owner-labelled
+disposable Mautic 6/7 sandboxes. Production не используется даже для fake
+state. Для host с несколькими instances receipt обязан подтверждать:
+
+1. `max_concurrent_imports == 1` по всему host, включая imports на разных
+   instances; второй pending import остаётся FIFO pending.
+2. Pending, healthy-running, completed, paused, cancelled/stopped,
+   failed/broken, retry/recovery и invalid/missing DB-row outcomes с exact
+   TaskStore state, PID, timestamps, slot count и terminal reason.
+3. Generic `command_timeout_sec`/`worker_watchdog_sec` не останавливают import:
+   long-running import с progress signal может идти дольше старого timeout и
+   даже часами. Stall watchdog использует только независимые signals:
+   Mautic counters/status or active DB query, upload/log file movement/offset,
+   kernel CPU/IO counters. PID/process tree и persisted self-marker отдельно
+   не считаются heartbeat. Live import без сигналов дольше configurable
+   `import_stall_timeout_sec` проходит grace/recheck и получает
+   `timeout/killed_by_import_stall_watchdog`; terminal rc/error освобождает
+   slot немедленно. Ни один outcome не оставляет stale import follow-up,
+   automatic duplicate retry, lock или PID leak.
+4. Во время active/hung import другие свободные slots запускают manual
+   segment N+1 и dependency closures. Completed follow-up оставляет один slot
+   для unrelated ordinary work. После terminal следующий FIFO import получает
+   первый свободный slot.
+5. Restart/reconcile живого import сохраняет singleton; исчезнувший PID
+   закрывается и не блокирует следующий import. M6 и M7 повторяют одну и ту
+   же матрицу.
+
+Карта disposable M6/M7 rows (каждая строка выполняется для обоих major):
+
+| Row | Проверка |
+|---|---|
+| 1 | pending imports FIFO и первый eligible получает host-wide slot |
+| 2 | active import на одном root блокирует другой root |
+| 3 | healthy import не допускает второй process-level `mautic:import` |
+| 4 | completed import немедленно освобождает slot |
+| 5 | paused route не запускает import |
+| 6 | cancelled/stopped row снова виден как pending |
+| 7 | failed/broken DB row terminalizes без host lock |
+| 8 | missing/invalid DB rows не создают phantom worker |
+| 9 | long import переживает generic command/worker timeout при DB progress |
+| 10 | hours-old import с active DB signal сохраняет lease |
+| 11 | CPU/IO или file/log progress обновляет lease до stall threshold |
+| 12 | live PID без progress после stall timeout проходит grace/recheck и kill |
+| 13 | progress resume до recheck отменяет kill |
+| 14 | stale self-marker не продлевает lease |
+| 15 | terminal non-zero rc освобождает slot без automatic duplicate retry |
+| 16 | restart/adopt живого import сохраняет singleton и heartbeat lease |
+| 17 | lost PID/reconcile закрывает ownership и разрешает следующий FIFO import |
+| 18 | active import оставляет slots для manual segment/dependency/follow-up |
+
+Runtime/profile contract row дополнительно проверяет, что
+`import_stall_timeout_sec` присутствует в config attribute mapping, profile
+managed keys и двунаправленной local/MCC runtime reconciliation; отсутствие
+ключа или несовпадение default/minimum блокирует acceptance.
+
+Минимальный локальный import gate:
+
+```text
+python3 -m unittest tests.test_import_liveness
+python3 -m pytest -q tests/test_import_liveness.py tests/test_segment_liveness.py tests/test_campaign_ring_dispatch.py tests/test_segment_admission.py
+```
+
+Disposable real-command rows должны использовать штатную Mautic import
+команду в M6/M7 runtime и owner-labelled malformed fixtures: malformed CSV /
+unclosed quote, invalid bytes or encoding, missing/unreadable upload,
+invalid/missing mapping/header, parser/validation failure, hung watchdog и
+mid-import process crash. Для каждого row сохраняются exact source SHA/path,
+Mautic major, fixture IDs, command, PID/timeline, TaskStore/DB terminal state,
+slot timeline и cleanup proof. Приёмка запрещена, если matrix не показывает
+`PASS` по обеим major, не подтверждает `1` active import globally или
+переиспользует старый receipt/source.

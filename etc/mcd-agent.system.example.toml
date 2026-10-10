@@ -169,6 +169,9 @@ import_limit = 1000
 enable_import_polling = true
 # Import polling interval, sec.
 import_poll_interval_sec = 15
+# Kill an import only after this much time without independent progress
+# evidence; there is no hard total-duration cap for imports.
+import_stall_timeout_sec = 1800
 # Check MCC for newer MCD versions and show notify in operations.
 mcd_update_notify = true
 # Enable automatic MCD self-update from MCC.
