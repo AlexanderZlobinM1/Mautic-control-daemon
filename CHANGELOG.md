@@ -1,3 +1,10 @@
+## 1.5.72 - 2026-10-10
+
+- Persist canonical instance desired-state rows received from MCC before
+  refreshing the local runtime baseline; qualified instance lane maps now
+  survive startup/restart without being flattened away by profile-shaped
+  effective config persistence.
+
 ## 1.5.71 - 2026-10-10
 
 - Preserve the full fresh MCC instance desired-state snapshot during a local

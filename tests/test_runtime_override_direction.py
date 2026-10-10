@@ -457,6 +457,96 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             {"segments": [201, 202], "slots_override": 1},
         )
 
+    def test_remote_instance_state_persists_through_restart_without_clearing_push(self) -> None:
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        cfg = SimpleNamespace(mcc_url="https://mcc.example", mcc_token="token")
+        install = SimpleNamespace(
+            instance_uid="generic.sales-snap.com",
+            root="/var/www/generic/public_html",
+            name="generic",
+            primary_domain="generic.sales-snap.com",
+            domains=["generic.sales-snap.com"],
+        )
+        qualified_uid = "generic.sales-snap.com@MauticFarm-02"
+        remote_states = {
+            qualified_uid: {
+                "revision": 5,
+                "runtime_overrides": {
+                    "segment_special_rings_v1": {
+                        "priority": [],
+                        "super_priority": {"segments": [101, 102], "slots_override": 1},
+                    },
+                },
+            },
+        }
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "mcd.toml"
+            path.write_text('[profile]\nname = "farm-hiload"\n', encoding="utf-8")
+            cfg_loaded = load_config(str(path), allow_recover_from_mcc=False)
+
+            # The persistence call intentionally has no applied host keys. It
+            # must still materialize the canonical instance row from MCC.
+            daemon._persist_stable_backup_runtime_to_config(
+                cfg_loaded,
+                [],
+                [install],
+                instance_states=remote_states,
+            )
+            restarted = load_config(str(path), allow_recover_from_mcc=False)
+            persisted = local_runtime_overrides(restarted)
+            self.assertEqual(
+                persisted["segment_super_priority_instance_settings"][qualified_uid],
+                {"segments": [101, 102], "slots_override": 1},
+            )
+            self.assertEqual(
+                persisted["segment_priority_instance_settings"][qualified_uid],
+                {"segments": []},
+            )
+
+            merged = merge_instance_desired_states({}, remote_states)
+            applied = apply_remote_overrides(restarted, merged)
+            self.assertEqual(
+                daemon._segment_super_priority_effective_setting(applied["config"], install),
+                {101, 102},
+            )
+            self.assertEqual(
+                daemon._segment_static_lane_parallel_limit(applied["config"], install, super_priority=True),
+                1,
+            )
+
+            with patch("mcd_agent.daemon.fetch_runtime_overrides", return_value={
+                "status": "ok",
+                "runtime_overrides": {},
+                "instance_desired_states": remote_states,
+                "desired_state": {"revision": 7},
+            }), patch(
+                "mcd_agent.daemon.push_runtime_overrides",
+                return_value={"status": "ok"},
+            ) as push:
+                result = daemon._push_local_runtime_change(
+                    cfg,
+                    persisted,
+                    persisted,
+                    [install],
+                    desired_revision=6,
+                    instance_revisions={qualified_uid: 5},
+                )
+
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(
+                push.call_args.kwargs["instance_desired_states"][qualified_uid][
+                    "segment_super_priority_instance_settings"
+                ],
+                {"segments": [101, 102], "slots_override": 1},
+            )
+            self.assertEqual(
+                push.call_args.kwargs["instance_desired_state_revisions"],
+                {qualified_uid: 5},
+            )
+
     def test_suffixed_mcc_response_maps_rings_and_acks_exact_revision(self) -> None:
         base_uid = "generic.sales-snap.com"
         qualified_uid = f"{base_uid}@MauticFarm-02"

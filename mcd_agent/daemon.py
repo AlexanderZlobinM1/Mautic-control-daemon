@@ -2679,13 +2679,24 @@ def _persist_stable_backup_runtime_to_config(
     config: AgentConfig,
     applied_keys: list[str],
     installs: list[object] | None = None,
+    *,
+    instance_states: object = None,
 ) -> None:
-    stable_keys = sorted(set(applied_keys) & _STABLE_RUNTIME_KEYS)
+    stable_keys = set(applied_keys) & _STABLE_RUNTIME_KEYS
+    eff_runtime = runtime_effective_map(config)
+    if isinstance(instance_states, dict):
+        # ``runtime_effective_map`` is a profile-shaped view and can omit
+        # instance-scoped maps (for example while a named profile is being
+        # rebased).  Desired instance rows are canonical and must be merged
+        # into the persistence view before writing the mutable config.
+        canonical_instance_runtime = merge_instance_desired_states({}, instance_states)
+        eff_runtime = merge_instance_desired_states(eff_runtime, instance_states)
+        stable_keys.update(set(canonical_instance_runtime) & _STABLE_RUNTIME_KEYS)
     if not stable_keys:
         return
-    eff_runtime = runtime_effective_map(config)
+    stable_keys_sorted = sorted(stable_keys)
     updates: dict[str, object] = {}
-    for key in stable_keys:
+    for key in stable_keys_sorted:
         if key in eff_runtime:
             updates[key] = eff_runtime[key]
     if not updates:
@@ -2696,7 +2707,7 @@ def _persist_stable_backup_runtime_to_config(
             logging.info(
                 "runtime-overrides persisted to config (%s): keys=%s",
                 path,
-                ",".join(stable_keys),
+                ",".join(stable_keys_sorted),
             )
     except Exception as e:
         logging.warning("runtime-overrides persist to config failed: %s", e)
@@ -10934,6 +10945,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                             next_cfg if isinstance(next_cfg, AgentConfig) else config,
                             applied_keys,
                             installs,
+                            instance_states=instance_states,
                         )
                     # Persisted MCC values are not a new local operator edit.
                     # Refresh the local fingerprint so the next tick does not

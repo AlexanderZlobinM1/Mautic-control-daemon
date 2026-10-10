@@ -4,7 +4,7 @@
 фактическую схему после исправления admission и должен обновляться вместе с
 кодом, тестами и runtime receipt. Документ не является разрешением на
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.71 (прямой follow-up от 1.5.70).
+Актуальная редакция этого канона — MCD 1.5.72 (прямой follow-up от 1.5.71).
 
 Для instance-scoped desired state локальный inventory UID является стабильной
 основой, но transport запрашивает также динамически полученный
@@ -20,6 +20,13 @@ instance-rows, которых нет в локальном delta. Сравнен
 этот ключ. Поэтому restart/trigger не стирает удалённое кольцо, а прямое
 локальное добавление и явное удаление проходят одним и тем же безопасным
 rebased payload.
+
+После startup/poll persistence строится также из canonical MCC
+`instance_desired_states`, а не только из profile-shaped effective config.
+Qualified UID и его priority/super-priority lane maps сначала materialize-ся в
+локальном runtime, затем именно этот snapshot становится baseline; restart не
+создаёт ложную local deletion и не отправляет пустой instance-row обратно в
+MCC.
 
 ## 1. Область и границы
 
