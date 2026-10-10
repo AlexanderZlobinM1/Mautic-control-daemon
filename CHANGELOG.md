@@ -1,3 +1,8 @@
+## 1.5.65 - 2026-10-10
+
+- Add persisted ordinary segment-cycle admission with deterministic never-built/changed/stale ordering, retry retention, and same-state manual admissions.
+- Add canonical super-priority and priority segment lanes with dependency-aware claims, shared host capacity, terminal wake-up, and release-line compatibility guards.
+
 ## 1.5.64 - 2026-10-09
 
 - Finalize the image-install bootstrap and cache-clear correction for the
