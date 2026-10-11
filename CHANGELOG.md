@@ -1,3 +1,9 @@
+## 1.5.95 - 2026-10-12
+
+- Align the packaged patch-resolution contract minimum agent version with the
+  release identity so exact archives reproduce the same contract checks as the
+  source tree.
+
 ## 1.5.94 - 2026-10-12
 
 - Dispatch every unfinished item in the durable current segment cycle through
