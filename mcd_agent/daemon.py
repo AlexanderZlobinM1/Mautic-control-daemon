@@ -9440,7 +9440,7 @@ def _import_in_settle(root: str, now_ts: float | None = None) -> bool:
     return False
 
 
-def _root_has_live_import_process(root: str, running: dict[str, RunningTask]) -> bool:
+def _root_has_live_import_process(running: dict[str, RunningTask], root: str) -> bool:
     if _running_count(running, root, "import") > 0:
         return True
     console = str(Path(root) / "bin" / "console")
@@ -9496,7 +9496,7 @@ def _recover_orphaned_imports_if_safe(
     *,
     grace_sec: int = 60,
 ) -> int:
-    if _root_has_live_import_process(root, running):
+    if _root_has_live_import_process(running, root):
         return 0
     try:
         recovered = db.recover_orphaned_imports(str(Path(root) / "var" / "import"), grace_sec=grace_sec)
@@ -9783,30 +9783,6 @@ def _host_running_import_count(running: dict[str, RunningTask]) -> int:
     """Return the number of active import workers across the host for metrics."""
 
     return sum(1 for task in running.values() if str(task.task_type or "").strip().lower() == "import")
-
-
-def _root_has_live_import_process(running: dict[str, RunningTask], root: str) -> bool:
-    """Fail closed only when an import is already live for this instance root."""
-
-    root_value = _normalize_root_path(root)
-    if any(
-        str(task.task_type or "").strip().lower() == "import"
-        and _normalize_root_path(task.root) == root_value
-        for task in running.values()
-    ):
-        return True
-    try:
-        proc = subprocess.run(["ps", "-eo", "pid=,args="], capture_output=True, text=True, timeout=5)
-    except Exception:
-        return True
-    if proc.returncode != 0:
-        return True
-    root_tokens = {root_value, str(root or "").strip()}
-    return any(
-        "mautic:import" in line.lower()
-        and any(token and token in line for token in root_tokens)
-        for line in (proc.stdout or "").splitlines()
-    )
 
 
 def _running_campaign_total(running: dict[str, RunningTask], root: str) -> int:

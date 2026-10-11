@@ -2371,6 +2371,13 @@ class CampaignRingDispatchTests(unittest.TestCase):
         self.assertEqual(recovered, 0)
         db.recover_orphaned_imports.assert_not_called()
 
+    def test_orphaned_import_recovery_accepts_string_root_without_type_error(self) -> None:
+        db = SimpleNamespace(recover_orphaned_imports=Mock(return_value=0))
+        with patch("mcd_agent.daemon._root_has_live_import_process", return_value=False):
+            recovered = _recover_orphaned_imports_if_safe(db, "/var/www/mautic", {})
+        self.assertEqual(recovered, 0)
+        db.recover_orphaned_imports.assert_called_once()
+
     def test_orphaned_import_recovery_requeues_when_cli_worker_is_absent(self) -> None:
         db = SimpleNamespace(recover_orphaned_imports=Mock(return_value=2))
 
