@@ -1,4 +1,4 @@
-## 1.5.92 - 2026-10-11
+## 1.5.93 - 2026-10-12
 
 - Build host runtime ACK evidence from the canonical desired-state envelope,
   keeping desired and effective values separate when MCC returns a materialized

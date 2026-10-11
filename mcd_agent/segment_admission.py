@@ -311,8 +311,10 @@ def _new_cycle(
         "errors": [],
         "error_notes": {},
         "baseline": _normalize_baseline(baseline),
+        "applied_state": _normalize_baseline(baseline),
         "baseline_ready": bool(baseline_ready),
         "baseline_generation": max(0, int(baseline_generation or 0)),
+        "applied_generation": max(0, int(baseline_generation or 0)),
         "cycle_baseline": cycle_snapshot,
         "observed_snapshot": observed,
         "observed_generation": max(0, int(observed_generation or 0)),
@@ -335,6 +337,7 @@ def normalize_state(raw: Mapping[str, Any] | None) -> dict[str, object]:
     if status not in {"active", "terminal"}:
         status = "active"
     baseline = _normalize_baseline(source.get("baseline"))
+    applied_state = _normalize_baseline(source.get("applied_state", baseline))
     cycle_baseline = _normalize_baseline(source.get("cycle_baseline"))
     observed_snapshot = _normalize_baseline(
         source.get("observed_snapshot", source.get("observed"))
@@ -353,8 +356,13 @@ def normalize_state(raw: Mapping[str, Any] | None) -> dict[str, object]:
         "errors": errors,
         "error_notes": dict(source.get("error_notes") or {}) if isinstance(source.get("error_notes"), dict) else {},
         "baseline": baseline,
+        "applied_state": applied_state,
         "baseline_ready": baseline_ready,
         "baseline_generation": max(0, int(source.get("baseline_generation") or 0)),
+        "applied_generation": max(
+            0,
+            int(source.get("applied_generation", source.get("baseline_generation")) or 0),
+        ),
         "cycle_baseline": cycle_baseline,
         "observed_snapshot": observed_snapshot,
         "observed_generation": max(0, int(source.get("observed_generation") or 0)),
@@ -422,6 +430,7 @@ def _commit_terminal_baseline(state: dict[str, object]) -> None:
         # A successful item whose row disappeared from the latest read must
         # not erase prior history.
     state["baseline"] = _normalize_baseline(applied)
+    state["applied_state"] = _normalize_baseline(applied)
     state["baseline_ready"] = True
     if not errors and (not state.get("items") or done):
         state["baseline_generation"] = max(
@@ -433,6 +442,10 @@ def _commit_terminal_baseline(state: dict[str, object]) -> None:
         state["baseline_generation"] = max(
             0, int(state.get("baseline_generation") or 0)
         ) + 1
+    state["applied_generation"] = max(
+        int(state.get("applied_generation") or 0),
+        int(state.get("baseline_generation") or 0),
+    )
 
 
 def manual_admission_info(

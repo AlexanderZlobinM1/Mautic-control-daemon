@@ -340,6 +340,8 @@ class SegmentAdmissionTests(unittest.TestCase):
         self.assertEqual(state["cycle_baseline"], initial_snapshot)
         self.assertEqual(state["observed_snapshot"], changed_snapshot)
         self.assertEqual(state["baseline_generation"], 0)
+        self.assertEqual(state["applied_generation"], 0)
+        self.assertEqual(state["applied_state"], {})
 
     def test_manual_pending_claim_replaces_automatic_claim(self) -> None:
         state, _added, _started = sync_cycle(
@@ -597,6 +599,8 @@ class SegmentAdmissionTests(unittest.TestCase):
             "baseline": previous_snapshot,
             "baseline_ready": True,
             "baseline_generation": 7,
+            "applied_generation": 7,
+            "applied_state": previous_snapshot,
             "observed_snapshot": previous_snapshot,
         }
         state, _added, started = sync_cycle(
@@ -609,10 +613,12 @@ class SegmentAdmissionTests(unittest.TestCase):
         )
         self.assertTrue(started)
         self.assertEqual(state["baseline_generation"], 7)
+        self.assertEqual(state["applied_generation"], 7)
 
         state = mark_terminal(state, entity_id=1, success=True, now_ts=2001.0)
         self.assertEqual(state["status"], "active")
         self.assertEqual(state["baseline_generation"], 7)
+        self.assertEqual(state["applied_generation"], 7)
         self.assertEqual(state["baseline"], previous_snapshot)
         partial_restart = normalize_state(state)
         self.assertEqual(partial_restart["baseline_generation"], 7)
@@ -627,6 +633,8 @@ class SegmentAdmissionTests(unittest.TestCase):
         )
         self.assertEqual(state["status"], "terminal")
         self.assertEqual(state["baseline_generation"], 8)
+        self.assertEqual(state["applied_generation"], 8)
+        self.assertEqual(state["applied_state"], state["baseline"])
         self.assertEqual(state["baseline"]["1"], current_snapshot["1"])
         self.assertEqual(state["baseline"]["2"], previous_snapshot["2"])
 
@@ -639,6 +647,8 @@ class SegmentAdmissionTests(unittest.TestCase):
             source_snapshot=current_snapshot,
         )[0]
         self.assertEqual(restarted["baseline_generation"], 8)
+        self.assertEqual(restarted["applied_generation"], 8)
+        self.assertEqual(restarted["applied_state"], restarted["baseline"])
         self.assertEqual(restarted["cycle_baseline"], current_snapshot)
         self.assertEqual(restarted["observed_snapshot"], current_snapshot)
         self.assertEqual(
