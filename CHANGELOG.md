@@ -1,3 +1,8 @@
+## 1.5.87 - 2026-10-11
+
+- Reissue the MCC-bounded runtime ACK chunk fix on the canonical 1.5.85
+  lineage; no execution behavior changes beyond the corrected release identity.
+
 ## 1.5.86 - 2026-10-11
 
 - Add deterministic host/instance runtime ACK chunking for MCC's strict
