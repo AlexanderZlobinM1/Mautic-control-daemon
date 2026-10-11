@@ -663,6 +663,42 @@ class SegmentAdmissionTests(unittest.TestCase):
             [2],
         )
 
+    def test_failed_new_id_is_not_added_to_applied_projection(self):
+        previous_snapshot = source_baseline(
+            [{"id": 10, "name": "stable", "updated_at": "2026-01-01T00:00:00+00:00"}]
+        )
+        current_snapshot = source_baseline(
+            [
+                {"id": 10, "name": "stable", "updated_at": "2026-01-01T00:00:00+00:00"},
+                {"id": 30, "name": "new", "updated_at": "2026-01-02T00:00:00+00:00"},
+            ]
+        )
+        prior_terminal = {
+            "status": "terminal",
+            "items": [10],
+            "done": [10],
+            "baseline": previous_snapshot,
+            "baseline_ready": True,
+            "baseline_generation": 0,
+            "applied_generation": 0,
+            "applied_state": previous_snapshot,
+            "observed_snapshot": previous_snapshot,
+        }
+        state, _, _ = sync_cycle(
+            prior_terminal,
+            planned_ids=[10, 30],
+            never_built=[],
+            running_ids=[10],
+            now_ts=100.0,
+            source_snapshot=current_snapshot,
+        )
+        state = mark_terminal(state, entity_id=10, success=True, now_ts=101.0)
+        state = mark_terminal(state, entity_id=30, success=False, note="failed", now_ts=102.0)
+
+        self.assertEqual(state["applied_generation"], 1)
+        self.assertEqual(state["applied_state"], {"10": current_snapshot["10"]})
+        self.assertNotIn("30", state["applied_state"])
+
     def test_concurrent_claim_deduplicates_same_entity(self) -> None:
         state, _added, _started = sync_cycle(
             None,

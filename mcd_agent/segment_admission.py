@@ -415,7 +415,13 @@ def _commit_terminal_baseline(state: dict[str, object]) -> None:
     observed = _normalize_baseline(
         state.get("observed_snapshot") or state.get("cycle_baseline")
     )
-    errors = set(normalize_ids(state.get("errors"))) | set(normalize_ids(state.get("manual_retry_ids")))
+    errors = {
+        str(sid)
+        for sid in (
+            set(normalize_ids(state.get("errors")))
+            | set(normalize_ids(state.get("manual_retry_ids")))
+        )
+    }
     done = set(normalize_ids(state.get("done")))
     if not state.get("items") and not errors:
         # An empty terminal cycle still establishes that the full read-only
