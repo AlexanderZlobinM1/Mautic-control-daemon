@@ -1,3 +1,9 @@
+## 1.5.94 - 2026-10-12
+
+- Dispatch every unfinished item in the durable current segment cycle through
+  the immediate pending path when capacity is available, so newly planned
+  work cannot be stranded behind the baseline cadence without a TaskStore row.
+
 ## 1.5.93 - 2026-10-12
 
 - Build host runtime ACK evidence from the canonical desired-state envelope,

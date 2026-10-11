@@ -4,7 +4,7 @@
 фактическую схему после исправления admission и должен обновляться вместе с
 кодом, тестами и runtime receipt. Документ не является разрешением на
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.93 (follow-up после immutable
+Актуальная редакция этого канона — MCD 1.5.94 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями.
@@ -275,15 +275,16 @@ pending ring после bounded grace.
 Для ordinary cycle есть два разных решения, которые нельзя смешивать:
 `admission` добавляет новые IDs в persisted cycle, а `dispatch` запускает уже
 сохранённые pending IDs. Campaign/queue pressure блокирует только первое:
-при active pressure новый snapshot не расширяет active cycle, но его уже
+при active pressure новый snapshot не расширяет active cycle, но каждый
 сохранённый pending cursor продолжает dispatch. Если обычный ring временно
 получил нулевой throttled limit, для такого cursor сохраняется один shared
 slot при его фактической доступности.
 
 Глобальный пятисекундный baseline cadence относится к новым baseline
-admissions. Pending item, который существовал до текущего plan refresh,
-атомарно проходит `claim -> start` на следующем dispatch без ожидания чужого
-root/instance baseline. Этот запуск не продвигает global baseline timestamp:
+admissions, но не к unfinished item текущего durable cycle: и newly planned,
+и ранее сохранённый pending item атомарно проходит `claim -> start` на
+следующем dispatch без ожидания чужого root/instance baseline. Этот запуск не
+продвигает global baseline timestamp:
 следующий новый admission не теряет свою собственную cadence. При этом
 persisted cycle claim, dependency/conflict, host/instance capacity, TaskStore
 duplicate, repeat interval и OS execution lock остаются обязательными.

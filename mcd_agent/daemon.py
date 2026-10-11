@@ -14073,7 +14073,6 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                     if not isinstance(previous_cycle_payload, Mapping):
                         previous_cycle_payload = {}
                     previous_cycle_items = set(_normalize_segment_ids(previous_cycle_payload.get("items")))
-                    previous_cycle_pending_ids = _segment_cycle_pending_ids(previous_cycle_payload)
                     # Bootstrap is fail-open: without a completed baseline,
                     # every observed built candidate is eligible for the
                     # nearest ordinary cycle. The baseline is persisted only
@@ -14211,8 +14210,14 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                         now_ts=float(now),
                         source_snapshot=source_snapshot,
                     )
+                    # Every unfinished item in the durable current cycle is
+                    # already admitted work. Dispatch it through the pending
+                    # path immediately when a slot is free; restricting this
+                    # to the previous tick's intersection lets newly planned
+                    # items fall into the ordinary baseline cadence and leaves
+                    # a plan with no TaskStore row or runtime marker.
                     segment_persisted_pending_ids[root] = (
-                        previous_cycle_pending_ids & _segment_cycle_pending_ids(cycle_state)
+                        _segment_cycle_pending_ids(cycle_state)
                     )
                     if cycle_added_ids:
                         logging.info(
