@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import unittest
 import json
+import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -18,6 +18,7 @@ from mcd_agent.runtime_overrides import (
     overrides_fingerprint,
     push_runtime_overrides,
     runtime_key_observation,
+    _runtime_observation_chunks,
     desired_profile_from_runtime_response,
 )
 from mcd_agent.config import (
@@ -30,6 +31,110 @@ from mcd_agent import daemon
 
 
 class RuntimeOverrideDirectionTests(unittest.TestCase):
+    def test_179_key_runtime_observation_is_deterministically_chunked(self) -> None:
+        keys = {f"runtime_key_{index}": index for index in range(179)}
+        observation = {
+            "schema": "mcd-runtime-key-observation-v1",
+            "profile": "custom",
+            "keys": {
+                key: {
+                    "status": "unchanged",
+                    "desired": value,
+                    "effective": value,
+                    "source": "mcc",
+                    "revision": 94,
+                    "reason": "already_effective",
+                }
+                for key, value in keys.items()
+            },
+            "effective_runtime": keys,
+        }
+        batch_id = "a" * 64
+        chunks = _runtime_observation_chunks(observation, batch_id=batch_id)
+        self.assertGreater(len(chunks), 1)
+        self.assertEqual([chunk["part"] for chunk in chunks], list(range(len(chunks))))
+        self.assertTrue(all(chunk["total"] == len(chunks) for chunk in chunks))
+        self.assertEqual(
+            set().union(*(set(chunk["runtime"]["keys"]) for chunk in chunks)),
+            set(keys),
+        )
+        for chunk in chunks:
+            encoded = json.dumps({"runtime_chunk": chunk}, separators=(",", ":")).encode()
+            self.assertLessEqual(len(chunk["runtime"]["keys"]), 128)
+            self.assertLessEqual(len(encoded), 240 * 1024)
+
+    def test_chunk_ack_retries_missing_parts_and_reuses_batch_id_after_restart(self) -> None:
+        keys = {f"runtime_key_{index}": index for index in range(179)}
+        cfg = SimpleNamespace(mcc_url="https://mcc.example", mcc_token="token", profile_name="custom")
+
+        class MemoryStore:
+            def __init__(self, values=None):
+                self.values = dict(values or {})
+
+            def get_runtime_sync(self, key):
+                return self.values.get(key)
+
+            def put_runtime_sync(self, key, value):
+                self.values[key] = dict(value)
+
+        with patch("mcd_agent.runtime_overrides.runtime_supported_keys", return_value=set(keys)), patch(
+            "mcd_agent.runtime_overrides.runtime_remote_allowed_keys", return_value=set(keys)
+        ), patch("mcd_agent.runtime_overrides.runtime_effective_map", return_value=keys), patch(
+            "mcd_agent.runtime_overrides.acknowledge_runtime_state",
+            side_effect=[{"status": "ok"}, {"status": "conflict", "reason": "conflicting-part-fixture"}],
+        ) as acknowledge:
+            first = MemoryStore()
+            failed = acknowledge_desired_runtime_states(
+                cfg,
+                first,
+                desired_state={"scope_key": "MauticFarm-02", "revision": 94},
+                host_runtime=keys,
+                instance_states={},
+                runtime_fingerprint="stable",
+            )
+        self.assertEqual(len(failed), 1)
+        saved = first.values["mcc_runtime_acknowledged"]["host"]
+        self.assertEqual(saved["parts"], [0])
+        first_call = acknowledge.call_args_list[0]
+        first_batch = first_call.kwargs["observed"]["runtime_chunk"]
+
+        resumed_store = MemoryStore(first.values)
+        with patch("mcd_agent.runtime_overrides.runtime_supported_keys", return_value=set(keys)), patch(
+            "mcd_agent.runtime_overrides.runtime_remote_allowed_keys", return_value=set(keys)
+        ), patch("mcd_agent.runtime_overrides.runtime_effective_map", return_value=keys), patch(
+            "mcd_agent.runtime_overrides.acknowledge_runtime_state", return_value={"status": "ok"}
+        ) as resumed_ack:
+            resumed = acknowledge_desired_runtime_states(
+                cfg,
+                resumed_store,
+                desired_state={"scope_key": "MauticFarm-02", "revision": 94},
+                host_runtime=keys,
+                instance_states={},
+                runtime_fingerprint="stable",
+            )
+        self.assertEqual(resumed, [])
+        self.assertTrue(resumed_ack.call_count >= 1)
+        self.assertNotEqual(resumed_ack.call_args.kwargs["observed"]["runtime_chunk"]["part"], 0)
+        self.assertEqual(resumed_ack.call_args.kwargs["observed"]["runtime_chunk"]["batch_id"], first_batch["batch_id"])
+
+        with patch("mcd_agent.runtime_overrides.runtime_supported_keys", return_value=set(keys)), patch(
+            "mcd_agent.runtime_overrides.runtime_remote_allowed_keys", return_value=set(keys)
+        ), patch("mcd_agent.runtime_overrides.runtime_effective_map", return_value=keys), patch(
+            "mcd_agent.runtime_overrides.acknowledge_runtime_state", return_value={"status": "ok"}
+        ) as duplicate_ack:
+            self.assertEqual(
+                acknowledge_desired_runtime_states(
+                    cfg,
+                    resumed_store,
+                    desired_state={"scope_key": "MauticFarm-02", "revision": 94},
+                    host_runtime=keys,
+                    instance_states={},
+                    runtime_fingerprint="stable",
+                ),
+                [],
+            )
+        duplicate_ack.assert_not_called()
+
     def test_runtime_ack_is_compact_and_contains_no_whole_runtime_dump(self) -> None:
         cfg = SimpleNamespace(mcc_url="https://mcc.example", mcc_token="token")
         identity = {

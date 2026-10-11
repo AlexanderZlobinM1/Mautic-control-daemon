@@ -4,8 +4,8 @@
 фактическую схему после исправления admission и должен обновляться вместе с
 кодом, тестами и runtime receipt. Документ не является разрешением на
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.85 (follow-up после immutable
-1.5.84). В этой редакции startup/profile rebase не считается локальной
+Актуальная редакция этого канона — MCD 1.5.86 (follow-up после immutable
+1.5.85). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями.
 
@@ -228,8 +228,12 @@ reason. ACK содержит только запрошенные keys; `effectiv
 Profile-locked workload keys retain the selected profile as authority
 and report the effective profile value; they are never labelled as applied from
 MCC. `jobs_max_workers` and other hot-effective keys are read back from the
-effective runtime map. The top-level ACK is `applied` only when every requested
-key is effective; a profile discrepancy or rejection remains visible to MCC.
+effective runtime map. When a scope has more than 128 requested keys or the
+bounded ACK would exceed MCC's byte limit, MCD emits deterministic
+`mcd-runtime-key-observation-chunk-v1` parts with a stable batch ID and resumes
+only missing parts after restart. The top-level ACK is `applied` only when
+every requested key is effective; a profile discrepancy or rejection remains
+visible to MCC.
 
 Перед spawn worker атомарно claim-ит следующий eligible item из persisted
 cycle или статической queue. Claim проверяет `done/errors/claimed/running`,

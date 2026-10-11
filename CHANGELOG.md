@@ -1,3 +1,9 @@
+## 1.5.86 - 2026-10-11
+
+- Add deterministic host/instance runtime ACK chunking for MCC's strict
+  `mcd-runtime-key-observation-chunk-v1` contract: stable batch IDs, bounded
+  parts, idempotent duplicate handling, and durable retry/resume per part.
+
 ## 1.5.85 - 2026-10-11
 
 - Bound every runtime ACK to the requested host/instance keys while retaining

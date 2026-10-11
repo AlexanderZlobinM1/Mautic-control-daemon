@@ -21,6 +21,12 @@ from mcd_agent.config import (
 from mcd_agent.host_identity import resolve_agent_identity
 
 
+_RUNTIME_ACK_CHUNK_SCHEMA = "mcd-runtime-key-observation-chunk-v1"
+_RUNTIME_ACK_MAX_BYTES = 256 * 1024
+_RUNTIME_ACK_SAFE_BYTES = 240 * 1024
+_RUNTIME_ACK_MAX_KEYS = 128
+
+
 def _post_json(url: str, payload: dict[str, Any], token: str | None, timeout_sec: int = 12) -> dict[str, Any]:
     data = json.dumps(payload, ensure_ascii=True).encode("utf-8")
     req = request.Request(url=url, data=data, method="POST", headers={"Content-Type": "application/json"})
@@ -657,6 +663,79 @@ def runtime_key_observation(
     }
 
 
+def _runtime_observation_chunks(
+    observation: dict[str, Any],
+    *,
+    batch_id: str,
+) -> list[dict[str, Any]]:
+    """Partition a runtime observation deterministically under MCC limits."""
+    keys = observation.get("keys")
+    effective = observation.get("effective_runtime")
+    if not isinstance(keys, dict) or not isinstance(effective, dict):
+        return []
+    ordered = sorted(str(key) for key in keys)
+    if len(ordered) <= _RUNTIME_ACK_MAX_KEYS:
+        encoded = json.dumps({"runtime": observation}, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+        if len(encoded) <= _RUNTIME_ACK_SAFE_BYTES:
+            return []
+
+    parts: list[list[str]] = []
+    current: list[str] = []
+    for key in ordered:
+        candidate = [*current, key]
+        runtime = {
+            "schema": observation.get("schema"),
+            "profile": observation.get("profile"),
+            "keys": {name: keys[name] for name in candidate},
+            "effective_runtime": {name: effective.get(name) for name in candidate},
+        }
+        probe = {
+            "runtime_chunk": {
+                "schema": _RUNTIME_ACK_CHUNK_SCHEMA,
+                "batch_id": batch_id,
+                "part": 0,
+                "total": 1,
+                "runtime": runtime,
+            }
+        }
+        encoded = json.dumps(probe, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+        if current and (len(candidate) > _RUNTIME_ACK_MAX_KEYS or len(encoded) > _RUNTIME_ACK_SAFE_BYTES):
+            parts.append(current)
+            current = [key]
+        else:
+            current = candidate
+        single = json.dumps(
+            {"runtime_chunk": {"schema": _RUNTIME_ACK_CHUNK_SCHEMA, "batch_id": batch_id,
+                               "part": 0, "total": 1,
+                               "runtime": {"schema": observation.get("schema"),
+                                           "profile": observation.get("profile"),
+                                           "keys": {key: keys[key]},
+                                           "effective_runtime": {key: effective.get(key)}}}},
+            ensure_ascii=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if len(single) > _RUNTIME_ACK_SAFE_BYTES:
+            raise ValueError(f"runtime key {key} exceeds MCC ACK chunk limit")
+    if current:
+        parts.append(current)
+    total = len(parts)
+    return [
+        {
+            "schema": _RUNTIME_ACK_CHUNK_SCHEMA,
+            "batch_id": batch_id,
+            "part": index,
+            "total": total,
+            "runtime": {
+                "schema": observation.get("schema"),
+                "profile": observation.get("profile"),
+                "keys": {key: keys[key] for key in part_keys},
+                "effective_runtime": {key: effective.get(key) for key in part_keys},
+            },
+        }
+        for index, part_keys in enumerate(parts)
+    ]
+
+
 def acknowledge_runtime_state(
     cfg: AgentConfig,
     *,
@@ -761,37 +840,76 @@ def acknowledge_desired_runtime_states(
         else:
             instances = acknowledged.get("instances")
             previous = instances.get(scope_key) if isinstance(instances, dict) else None
-        if (
+        batch_id = hashlib.sha256(
+            f"{scope}|{scope_key}|{revision}|{content_sha256}".encode("utf-8")
+        ).hexdigest()
+        try:
+            chunks = _runtime_observation_chunks(key_observation, batch_id=batch_id) if normalized_runtime else []
+        except ValueError as exc:
+            failures.append(f"{scope}:{scope_key}:{revision}:{exc}")
+            return
+        previous_parts = set()
+        if isinstance(previous, dict) and previous.get("batch_id") == batch_id:
+            raw_parts = previous.get("parts")
+            if isinstance(raw_parts, list):
+                previous_parts = {int(part) for part in raw_parts if isinstance(part, int) and not isinstance(part, bool)}
+        previous_matches = (
             isinstance(previous, dict)
             and previous.get("scope_key") == scope_key
             and previous.get("revision") == revision
             and previous.get("content_sha256") == content_sha256
-        ):
+        )
+        if previous_matches and (not chunks or set(range(len(chunks))) <= previous_parts):
             return
-
         observed = {
             "runtime_fingerprint": runtime_fingerprint,
             "content_sha256": content_sha256,
         }
-        if normalized_runtime:
+        if normalized_runtime and not chunks:
             observed["runtime"] = key_observation
-        result = acknowledge_runtime_state(
-            cfg,
-            scope=scope,
-            scope_key=scope_key,
-            revision=revision,
-            status=ack_status,
-            observed=observed,
-        )
-        if str(result.get("status", "")).lower() != "ok":
-            failures.append(f"{scope}:{scope_key}:{revision}:{result.get('reason', 'unknown')}")
-            return
+        if chunks:
+            outbound = [(index, {"runtime_chunk": chunk}) for index, chunk in enumerate(chunks)]
+        else:
+            outbound = [(None, observed)]
+        completed_parts = set(previous_parts)
+        for part, part_observed in outbound:
+            if part is not None and part in completed_parts:
+                continue
+            result = acknowledge_runtime_state(
+                cfg,
+                scope=scope,
+                scope_key=scope_key,
+                revision=revision,
+                status=ack_status,
+                observed=part_observed,
+            )
+            if str(result.get("status", "")).lower() != "ok":
+                failures.append(f"{scope}:{scope_key}:{revision}:{result.get('reason', 'unknown')}")
+                return
+            if part is not None:
+                completed_parts.add(part)
+                part_entry = {
+                    "scope_key": scope_key,
+                    "revision": revision,
+                    "content_sha256": content_sha256,
+                    "batch_id": batch_id,
+                    "parts": sorted(completed_parts),
+                }
+                if scope == "host":
+                    acknowledged["host"] = part_entry
+                else:
+                    updated_parts = dict(acknowledged.get("instances") or {})
+                    updated_parts[scope_key] = part_entry
+                    acknowledged["instances"] = updated_parts
+                store.put_runtime_sync("mcc_runtime_acknowledged", acknowledged)
 
         entry = {
             "scope_key": scope_key,
             "revision": revision,
             "content_sha256": content_sha256,
         }
+        if chunks:
+            entry.update({"batch_id": batch_id, "parts": sorted(completed_parts)})
         if scope == "host":
             acknowledged["host"] = entry
         else:
