@@ -192,6 +192,22 @@ duplicate.
 
 ## 4. Claim, worker и slots
 
+### Import lifecycle and segment ownership
+
+Import ownership is based on lifecycle evidence, not on numeric status alone.
+For Mautic 4-7 a non-empty `date_ended` is terminal evidence and overrides
+stale queued or running status values. Failed, paused, cancelled and completed
+imports remain observable in the `done` lane, but their target segments do not
+enter `active_import_target_ids` and cannot block an ordinary segment or an
+import follow-up. The pending-import SQL count also requires
+`date_ended IS NULL`.
+
+Only imports classified as queued or running with no terminal date may reserve
+their explicit `defaults.list` segment targets. This preserves FIFO ordering
+among eligible imports while allowing a historical row such as status `1` with
+`date_ended` to release its singleton. Retry/recovery remains governed by the
+existing import recovery path and its independent process evidence.
+
 Перед spawn worker атомарно claim-ит следующий eligible item из persisted
 cycle или статической queue. Claim проверяет `done/errors/claimed/running`,
 глобальную dependency closure, failure cooldown, host slots, instance lane

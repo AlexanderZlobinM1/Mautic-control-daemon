@@ -1,3 +1,10 @@
+## 1.5.82 - 2026-10-11
+
+- Treat non-empty import `date_ended` as terminal lifecycle evidence across
+  Mautic 4-7, even when a stale numeric status remains queued or running.
+  Historical imports no longer reserve target segments or inflate the pending
+  import count; eligible imports retain FIFO target ownership.
+
 ## 1.5.81 - 2026-10-11
 
 - Reconcile persisted static priority and super-priority claims against live

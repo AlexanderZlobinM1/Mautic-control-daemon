@@ -1716,6 +1716,7 @@ _SQL_IMPORT_PENDING_STATUS_COUNT = (
     "WHERE is_published = 1 "
     "AND (status IN (1,7) "
     "OR LOWER(CAST(status AS CHAR)) IN ('queued','pending','delayed')) "
+    "AND date_ended IS NULL "
     "AND (date_started IS NULL "
     "OR CAST(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(properties, '$.line')), '0') AS UNSIGNED) < line_count)"
 )
@@ -9525,6 +9526,15 @@ def _has_import_date_value(raw: object) -> bool:
 
 
 def _classify_import_monitor_row(row: dict[str, object]) -> tuple[str, str, str]:
+    # date_ended is authoritative terminal evidence across Mautic 4-7. It
+    # wins over stale numeric status values such as status=1.
+    if _has_import_date_value(row.get("date_ended")):
+        status_raw = str(row.get("status", "") or "").strip().lower()
+        if status_raw in {"4", "failed", "error"}:
+            return "done", "", "error"
+        if status_raw in {"5", "stopped", "cancelled", "canceled", "paused"}:
+            return "done", "stopped", "stopped"
+        return "done", "", "success"
     status_raw = str(row.get("status", "") or "").strip().lower()
     status_raw = status_raw.replace(" ", "_").replace("-", "_")
     if status_raw in {"2", "6", "in_progress", "processing", "running", "manual"}:
@@ -9538,8 +9548,6 @@ def _classify_import_monitor_row(row: dict[str, object]) -> tuple[str, str, str]
     if status_raw in {"5", "stopped", "cancelled", "canceled"}:
         return "queued", "stopped", "stopped"
     if status_raw in {"3", "imported", "completed", "complete", "done", "success"}:
-        return "done", "", "success"
-    if _has_import_date_value(row.get("date_ended")):
         return "done", "", "success"
     return "queued", "", "queued"
 

@@ -2279,6 +2279,45 @@ class CampaignRingDispatchTests(unittest.TestCase):
         self.assertEqual(_classify_import_monitor_row({"status": 6}), ("running", "", "processing"))
         self.assertEqual(_classify_import_monitor_row({"status": 7}), ("queued", "delayed", "delayed"))
 
+    def test_terminal_date_ended_overrides_stale_queued_status_for_m6_and_m7(self) -> None:
+        for status in (1, "queued", 7, "delayed"):
+            self.assertEqual(
+                _classify_import_monitor_row(
+                    {"status": status, "date_ended": "2026-07-10 09:55:14"}
+                ),
+                ("done", "", "success"),
+            )
+
+    def test_terminal_date_ended_paused_cancelled_and_failed_do_not_hold_target(self) -> None:
+        for status, expected in ((5, ("done", "stopped", "stopped")), (4, ("done", "", "error"))):
+            self.assertEqual(
+                _classify_import_monitor_row(
+                    {"status": status, "date_ended": "2026-07-10 09:55:14"}
+                ),
+                expected,
+            )
+            monitor = {
+                "queued": [], "running": [], "done": [186],
+                "item_statuses": {"186": expected[2]},
+                "target_segments_by_import": {"186": [63]},
+            }
+            self.assertEqual(
+                _import_monitor_target_segment_ids(monitor, lanes={"queued", "running"}), {}
+            )
+
+    def test_active_target_filter_keeps_eligible_and_healthy_imports_fifo(self) -> None:
+        monitor = {
+            "queued": [101, 102], "running": [103], "done": [104],
+            "item_statuses": {"101": "queued", "102": "queued", "103": "processing", "104": "success"},
+            "target_segments_by_import": {
+                "101": [63], "102": [64], "103": [65], "104": [66],
+            },
+        }
+        self.assertEqual(
+            _import_monitor_target_segment_ids(monitor, lanes={"queued", "running"}),
+            {101: [63], 102: [64], 103: [65]},
+        )
+
     def test_import_target_segment_uses_explicit_default_list_not_import_id(self) -> None:
         payload = '{"defaults":{"list":"25","tags":["import-15"]}}'
 
