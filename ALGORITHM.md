@@ -4,7 +4,7 @@
 фактическую схему после исправления admission и должен обновляться вместе с
 кодом, тестами и runtime receipt. Документ не является разрешением на
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.89 (follow-up после immutable
+Актуальная редакция этого канона — MCD 1.5.90 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями.
@@ -225,6 +225,20 @@ reason. ACK содержит только запрошенные keys; `effectiv
 только как per-key readback с теми же keys и не является whole-host snapshot,
 поэтому размер остаётся в пределах лимита MCC. Пустой instance desired state
 получает `unverified` ACK без runtime dump.
+Для host ACK MCD берёт запрошенные значения из canonical
+`desired_state.runtime_overrides`, если этот envelope присутствует в ответе
+MCC; top-level `runtime_overrides` не является заменой desired map, потому что
+может содержать уже materialized effective values. Поэтому, например,
+`desired.plugin_operations = {}` остаётся `{}` в evidence, даже если live
+effective `plugin_operations` содержит большой structured payload; digest/bytes
+вычисляются отдельно для каждого из этих двух значений.
+Для host ACK MCD берёт запрошенные значения из canonical
+`desired_state.runtime_overrides`, если этот envelope присутствует в ответе
+MCC; top-level `runtime_overrides` не является заменой desired map, потому что
+может содержать уже materialized effective values. Поэтому, например,
+`desired.plugin_operations = {}` остаётся `{}` в evidence, даже если live
+effective `plugin_operations` содержит большой structured payload; digest/bytes
+вычисляются отдельно для каждого из этих двух значений.
 Если отдельное `desired` или `effective` значение само превышает safety
 budget, оно заменяется строго проверяемой ссылкой
 `{encoding:"canonical-json-sha256",sha256,bytes}`; key не отбрасывается.

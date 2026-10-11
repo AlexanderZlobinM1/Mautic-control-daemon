@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from contextlib import ExitStack
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -26,18 +28,24 @@ class RuntimeAckDaemonIntegrationTests(TestCase):
                 encoding="utf-8",
             )
             config = load_config(str(config_path), allow_recover_from_mcc=False)
-            host_runtime = {f"runtime_key_{index:03d}": index for index in range(182)}
-            host_runtime["segment_recurring_priority_v1"] = {
+            desired_runtime = {f"runtime_key_{index:03d}": index for index in range(181)}
+            desired_runtime["segment_recurring_priority_v1"] = {
                 "app.example": {"segments": [7], "max_interval_sec": 60},
             }
+            desired_runtime["plugin_operations"] = {}
+            effective_plugin_operations = {
+                "app.example": [{"name": "segment", "payload": "x" * 300_000}],
+            }
+            effective_runtime = dict(desired_runtime)
+            effective_runtime["plugin_operations"] = effective_plugin_operations
             instance_uid = "app.example@MauticFarm-02"
             response = {
                 "status": "ok",
-                "runtime_overrides": host_runtime,
+                "runtime_overrides": effective_runtime,
                 "desired_state": {
                     "scope_key": "MauticFarm-02",
                     "revision": 100,
-                    "runtime_overrides": host_runtime,
+                    "runtime_overrides": desired_runtime,
                 },
                 "instance_desired_states": {
                     instance_uid: {"revision": 7, "runtime_overrides": {"jobs_max_workers": 2}},
@@ -90,6 +98,9 @@ class RuntimeAckDaemonIntegrationTests(TestCase):
                     stack.enter_context(patch.object(daemon, target, return_value=value))
                 stack.enter_context(patch.object(daemon, "InstanceInventory", EmptyInventory))
                 stack.enter_context(patch.object(daemon, "MCCStatePusher", DisabledPusher))
+                stack.enter_context(patch.object(runtime_overrides, "runtime_supported_keys", return_value=set(desired_runtime)))
+                stack.enter_context(patch.object(runtime_overrides, "runtime_remote_allowed_keys", return_value=set(desired_runtime)))
+                stack.enter_context(patch.object(runtime_overrides, "runtime_effective_map", return_value=effective_runtime))
                 stack.enter_context(patch.object(runtime_overrides, "_post_json", side_effect=capture_post))
                 daemon.run_loop(config, single_cycle=True)
 
@@ -100,7 +111,28 @@ class RuntimeAckDaemonIntegrationTests(TestCase):
             self.assertTrue(all("runtime_chunk" in observed and "runtime" not in observed for observed in host_posts))
             self.assertEqual(
                 set().union(*(set(observed["runtime_chunk"]["runtime"]["keys"]) for observed in host_posts)),
-                set(host_runtime),
+                set(desired_runtime),
+            )
+            plugin_row = next(
+                observed["runtime_chunk"]["runtime"]["keys"]["plugin_operations"]
+                for observed in host_posts
+                if "plugin_operations" in observed["runtime_chunk"]["runtime"]["keys"]
+            )
+            canonical_effective = json.dumps(
+                effective_plugin_operations,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+            self.assertEqual(plugin_row["desired"], {})
+            self.assertEqual(
+                plugin_row["effective"],
+                {
+                    "encoding": "canonical-json-sha256",
+                    "sha256": hashlib.sha256(canonical_effective).hexdigest(),
+                    "bytes": len(canonical_effective),
+                },
             )
             self.assertIn("runtime", instance_posts[0])
 

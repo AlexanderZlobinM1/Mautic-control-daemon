@@ -13187,7 +13187,18 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                     # operator-owned structured keys. Chunking bounds the
                     # transport; projecting to desired_state.runtime_overrides
                     # here would silently drop keys that MCC still expects.
-                    desired_host_runtime = overrides_raw if isinstance(overrides_raw, dict) else {}
+                    desired_state_runtime = (
+                        desired_state.get("runtime_overrides")
+                        if isinstance(desired_state, dict)
+                        else None
+                    )
+                    # ACK evidence must describe the canonical desired
+                    # envelope; effective values are read back from config.
+                    desired_host_runtime = (
+                        desired_state_runtime
+                        if isinstance(desired_state_runtime, dict)
+                        else overrides_raw if isinstance(overrides_raw, dict) else {}
+                    )
                     for failure in acknowledge_desired_runtime_states(
                         config,
                         store,
