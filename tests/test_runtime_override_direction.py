@@ -118,6 +118,8 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
         self.assertTrue(resumed_ack.call_count >= 1)
         self.assertNotEqual(resumed_ack.call_args.kwargs["observed"]["runtime_chunk"]["part"], 0)
         self.assertEqual(resumed_ack.call_args.kwargs["observed"]["runtime_chunk"]["batch_id"], first_batch["batch_id"])
+        self.assertTrue(all("runtime_chunk" in call.kwargs["observed"] for call in resumed_ack.call_args_list))
+        self.assertTrue(all("runtime" not in call.kwargs["observed"] for call in resumed_ack.call_args_list))
 
         with patch("mcd_agent.runtime_overrides.runtime_supported_keys", return_value=set(keys)), patch(
             "mcd_agent.runtime_overrides.runtime_remote_allowed_keys", return_value=set(keys)
@@ -136,6 +138,40 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
                 [],
             )
         duplicate_ack.assert_not_called()
+
+    def test_183_key_host_ack_never_falls_back_to_normal_runtime_envelope(self) -> None:
+        keys = {f"runtime_key_{index}": index for index in range(182)}
+        keys["segment_recurring_priority_v1"] = {
+            "app.example": {"segments": [{"id": 7, "max_interval_sec": 60}]}
+        }
+        cfg = SimpleNamespace(mcc_url="https://mcc.example", mcc_token="token", profile_name="custom")
+        store = SimpleNamespace(values={})
+        store.get_runtime_sync = lambda name: store.values.get(name)
+        store.put_runtime_sync = lambda name, item: store.values.__setitem__(name, dict(item))
+        with patch("mcd_agent.runtime_overrides.runtime_supported_keys", return_value=set(keys)), patch(
+            "mcd_agent.runtime_overrides.runtime_remote_allowed_keys", return_value=set(keys)
+        ), patch("mcd_agent.runtime_overrides.runtime_effective_map", return_value=keys), patch(
+            "mcd_agent.runtime_overrides.acknowledge_runtime_state", return_value={"status": "ok"}
+        ) as acknowledge:
+            failures = acknowledge_desired_runtime_states(
+                cfg,
+                store,
+                desired_state={"scope_key": "MauticFarm-02", "revision": 100},
+                host_runtime=keys,
+                instance_states={},
+                runtime_fingerprint="stable",
+            )
+        self.assertEqual(failures, [])
+        self.assertGreater(acknowledge.call_count, 1)
+        seen = set()
+        for call in acknowledge.call_args_list:
+            observed = call.kwargs["observed"]
+            self.assertIn("runtime_chunk", observed)
+            self.assertNotIn("runtime", observed)
+            chunk = observed["runtime_chunk"]
+            seen.update(chunk["runtime"]["keys"])
+            self.assertLessEqual(len(chunk["runtime"]["keys"]), 128)
+        self.assertEqual(seen, set(keys))
 
     def test_runtime_ack_is_compact_and_contains_no_whole_runtime_dump(self) -> None:
         cfg = SimpleNamespace(mcc_url="https://mcc.example", mcc_token="token")

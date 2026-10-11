@@ -1,3 +1,8 @@
+## 1.5.89 - 2026-10-11
+
+- Fail closed against normal runtime ACK envelopes whenever requested key
+  count exceeds MCC's 128-key limit; all such revisions must use chunk parts.
+
 ## 1.5.88 - 2026-10-11
 
 - Preserve the complete host ACK key union, including operator-owned structured

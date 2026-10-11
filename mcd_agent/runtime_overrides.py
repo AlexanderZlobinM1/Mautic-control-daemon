@@ -851,6 +851,11 @@ def acknowledge_desired_runtime_states(
         except ValueError as exc:
             failures.append(f"{scope}:{scope_key}:{revision}:{exc}")
             return
+        if len(key_observation.get("keys", {})) > _RUNTIME_ACK_MAX_KEYS and not chunks:
+            failures.append(
+                f"{scope}:{scope_key}:{revision}:runtime ACK chunk selection produced no chunks"
+            )
+            return
         previous_parts = set()
         if isinstance(previous, dict) and previous.get("batch_id") == batch_id:
             raw_parts = previous.get("parts")
