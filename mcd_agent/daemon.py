@@ -9780,22 +9780,20 @@ def _import_path_liveness_signal(root: str, command_str: str) -> dict[str, objec
 
 
 def _host_running_import_count(running: dict[str, RunningTask]) -> int:
-    """Return the number of active import workers across the whole host.
-
-    Import polling is performed once per install, but the import worker uses
-    one host-wide shared slot.  A per-root check is therefore insufficient:
-    two otherwise idle instances must not start two imports concurrently.
-    ``running`` is the reconciled scheduler state, so this also covers a
-    daemon restart after a live import was adopted.
-    """
+    """Return the number of active import workers across the host for metrics."""
 
     return sum(1 for task in running.values() if str(task.task_type or "").strip().lower() == "import")
 
 
-def _host_has_live_import_process(running: dict[str, RunningTask]) -> bool:
-    """Fail closed when an untracked Mautic import is already running."""
+def _root_has_live_import_process(running: dict[str, RunningTask], root: str) -> bool:
+    """Fail closed only when an import is already live for this instance root."""
 
-    if _host_running_import_count(running) > 0:
+    root_value = _normalize_root_path(root)
+    if any(
+        str(task.task_type or "").strip().lower() == "import"
+        and _normalize_root_path(task.root) == root_value
+        for task in running.values()
+    ):
         return True
     try:
         proc = subprocess.run(["ps", "-eo", "pid=,args="], capture_output=True, text=True, timeout=5)
@@ -9803,7 +9801,12 @@ def _host_has_live_import_process(running: dict[str, RunningTask]) -> bool:
         return True
     if proc.returncode != 0:
         return True
-    return any("mautic:import" in line.lower() for line in (proc.stdout or "").splitlines())
+    root_tokens = {root_value, str(root or "").strip()}
+    return any(
+        "mautic:import" in line.lower()
+        and any(token and token in line for token in root_tokens)
+        for line in (proc.stdout or "").splitlines()
+    )
 
 
 def _running_campaign_total(running: dict[str, RunningTask], root: str) -> int:
@@ -10068,7 +10071,7 @@ def _submit_import_if_segment_slot(
         or int(import_pending_count or 0) <= 0
         or _import_in_settle(root, now_ts)
         or _running_count(running, root, "import") > 0
-        or _host_has_live_import_process(running)
+        or _root_has_live_import_process(running, root)
     ):
         return False
     if _segment_shared_slots_available(
@@ -10470,11 +10473,10 @@ def _submit_if_slot_uncoordinated(
         return False
     if store.has_running_task_key(key):
         return False
-    # Imports are the one host-wide singleton worker.  Keep this guard at the
-    # common submit boundary as well as in the polling helper so a manual or
-    # future dispatch path cannot accidentally create a second import on
-    # another instance.
-    if str(task_type or "").strip().lower() == "import" and _host_has_live_import_process(running):
+    # Imports are singleton per instance/root. Keep this guard at the common
+    # submit boundary so manual and future dispatch paths cannot overlap an
+    # import on the same instance while other instances use free host slots.
+    if str(task_type or "").strip().lower() == "import" and _root_has_live_import_process(running, root):
         return False
     if manual_request_id is None and not bypass_repeat_guard and not _launch_allowed(config, root, task_type, entity_id):
         return False
@@ -10576,9 +10578,9 @@ def _respawn_task(
     popens: dict[str, subprocess.Popen[bytes]],
     task: RunningTask,
 ) -> bool:
-    if str(task.task_type or "").strip().lower() == "import" and _host_has_live_import_process(running):
+    if str(task.task_type or "").strip().lower() == "import" and _root_has_live_import_process(running, task.root):
         logging.warning(
-            "[%s] import retry deferred: host-wide import worker already active",
+            "[%s] import retry deferred: instance import worker already active",
             task.root,
         )
         return False

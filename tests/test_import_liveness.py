@@ -110,26 +110,31 @@ class ImportLivenessMatrixTests(unittest.TestCase):
                 self.assertEqual([inst.root for inst in ordered], roots)
                 self.assertEqual(daemon._host_running_import_count({}), 0)
 
-    def test_healthy_running_import_blocks_same_root_and_other_root(self) -> None:
+    def test_healthy_running_import_blocks_same_root_but_not_other_root(self) -> None:
         running = {
             "m6": self._task("/disposable/m6/a", "import", 6001),
         }
         self.assertEqual(daemon._host_running_import_count(running), 1)
-        for root in ("/disposable/m6/a", "/disposable/m7/b"):
-            with self.subTest(root=root), patch.object(daemon, "_submit_if_slot") as submit:
-                launched = daemon._submit_import_if_segment_slot(
-                    config=self._config(),
-                    store=SimpleNamespace(),
-                    running=running,
-                    popens={},
-                    root=root,
-                    cluster_import_allowed=True,
-                    import_pending_count=1,
-                    segment_slot_limit=4,
-                    now_ts=100.0,
+        with patch.object(daemon, "_submit_if_slot") as submit:
+            self.assertFalse(
+                daemon._submit_import_if_segment_slot(
+                    config=self._config(), store=SimpleNamespace(), running=running, popens={},
+                    root="/disposable/m6/a", cluster_import_allowed=True, import_pending_count=1,
+                    segment_slot_limit=4, now_ts=100.0,
                 )
-            self.assertFalse(launched)
+            )
             submit.assert_not_called()
+        with patch.object(daemon, "render_mautic_command", return_value=["fixture", "import"]), patch.object(
+            daemon, "_submit_if_slot", return_value=True
+        ) as submit:
+            self.assertTrue(
+                daemon._submit_import_if_segment_slot(
+                    config=self._config(), store=SimpleNamespace(), running=running, popens={},
+                    root="/disposable/m7/b", cluster_import_allowed=True, import_pending_count=1,
+                    segment_slot_limit=4, now_ts=100.0,
+                )
+            )
+            submit.assert_called_once()
 
     def test_completed_import_releases_slot_without_followup_lock(self) -> None:
         root = "/disposable/m6/completed"
@@ -390,25 +395,21 @@ class ImportLivenessMatrixTests(unittest.TestCase):
         self.assertEqual(daemon._host_running_import_count(running), 1)
         self.assertEqual(daemon._segment_shared_slots_available(running, root, 4), 3)
 
-    def test_imports_different_instances_are_host_wide_singleton(self) -> None:
+    def test_imports_different_instances_are_concurrent(self) -> None:
         running = {
             "m6": self._task("/disposable/m6/a", "import", 6101),
         }
-        with patch.object(daemon, "_submit_if_slot") as submit:
-            self.assertFalse(
+        with patch.object(daemon, "render_mautic_command", return_value=["fixture", "import"]), patch.object(
+            daemon, "_submit_if_slot", return_value=True
+        ) as submit:
+            self.assertTrue(
                 daemon._submit_import_if_segment_slot(
-                    config=self._config(),
-                    store=SimpleNamespace(),
-                    running=running,
-                    popens={},
-                    root="/disposable/m7/b",
-                    cluster_import_allowed=True,
-                    import_pending_count=1,
-                    segment_slot_limit=4,
-                    now_ts=100.0,
+                    config=self._config(), store=SimpleNamespace(), running=running, popens={},
+                    root="/disposable/m7/b", cluster_import_allowed=True, import_pending_count=1,
+                    segment_slot_limit=4, now_ts=100.0,
                 )
             )
-        submit.assert_not_called()
+        submit.assert_called_once()
 
     def test_restart_adopts_live_import_and_keeps_singleton(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mcd-import-adopt-") as td:
