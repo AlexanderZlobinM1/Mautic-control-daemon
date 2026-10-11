@@ -2279,6 +2279,79 @@ class CampaignRingDispatchTests(unittest.TestCase):
         self.assertEqual(_classify_import_monitor_row({"status": 6}), ("running", "", "processing"))
         self.assertEqual(_classify_import_monitor_row({"status": 7}), ("queued", "delayed", "delayed"))
 
+    def test_stale_queued_import_with_end_time_is_terminal_and_not_active(self) -> None:
+        row = {
+            "status": 1,
+            "date_ended": "2026-07-10 09:55:14",
+            "properties": '{"defaults":{"list":63}}',
+        }
+
+        self.assertEqual(
+            _classify_import_monitor_row(row),
+            ("done", "stale_completed", "success"),
+        )
+
+        db = SimpleNamespace(fetch_rows=Mock(return_value=[{"id": 186, **row}]))
+        snapshot = _fetch_import_monitor_snapshot(
+            db,
+            "/var/www/forzatravel/public_html",
+            {"now_utc": "2026-10-11 05:00:00"},
+        )
+
+        self.assertEqual(snapshot["queued"], [])
+        self.assertEqual(snapshot["running"], [])
+        self.assertEqual(snapshot["done"], [186])
+        self.assertEqual(snapshot["item_variants"], {"stale_completed": [186]})
+        self.assertEqual(
+            _import_monitor_target_segment_ids(snapshot, lanes={"queued", "running"}),
+            {},
+        )
+        self.assertEqual(
+            _import_monitor_target_segment_ids(snapshot, lanes={"done"}, successful_only=True),
+            {186: [63]},
+        )
+
+    def test_genuine_queued_and_running_imports_still_block_target_segments(self) -> None:
+        db = SimpleNamespace(
+            fetch_rows=Mock(
+                return_value=[
+                    {
+                        "id": 201,
+                        "status": 1,
+                        "date_ended": None,
+                        "properties": '{"defaults":{"list":63}}',
+                    },
+                    {
+                        "id": 202,
+                        "status": 2,
+                        "date_ended": None,
+                        "properties": '{"defaults":{"list":64}}',
+                    },
+                ]
+            )
+        )
+
+        snapshot = _fetch_import_monitor_snapshot(
+            db,
+            "/var/www/forzatravel/public_html",
+            {"now_utc": "2026-10-11 05:00:00"},
+        )
+
+        self.assertEqual(snapshot["queued"], [201])
+        self.assertEqual(snapshot["running"], [202])
+        self.assertEqual(
+            _import_monitor_target_segment_ids(snapshot, lanes={"queued", "running"}),
+            {201: [63], 202: [64]},
+        )
+
+    def test_running_import_with_end_time_keeps_live_status_authority(self) -> None:
+        self.assertEqual(
+            _classify_import_monitor_row(
+                {"status": 2, "date_ended": "2026-07-10 09:55:14"}
+            ),
+            ("running", "", "processing"),
+        )
+
     def test_import_target_segment_uses_explicit_default_list_not_import_id(self) -> None:
         payload = '{"defaults":{"list":"25","tags":["import-15"]}}'
 

@@ -9532,6 +9532,13 @@ def _classify_import_monitor_row(row: dict[str, object]) -> tuple[str, str, str]
     if status_raw in {"7", "delayed"}:
         return "queued", "delayed", "delayed"
     if status_raw in {"1", "queued", "pending"}:
+        # Mautic can leave a row in the queued status after its terminal
+        # timestamp has been written.  It is a historical monitor row, not a
+        # live import lease; keeping its explicit target in the active lanes
+        # would block that segment forever.  Keep genuine queued rows (and
+        # running rows above) unchanged.
+        if _has_import_date_value(row.get("date_ended")):
+            return "done", "stale_completed", "success"
         return "queued", "", "queued"
     if status_raw in {"4", "failed", "error"}:
         return "done", "", "error"

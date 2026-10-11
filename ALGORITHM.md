@@ -4,10 +4,13 @@
 фактическую схему после исправления admission и должен обновляться вместе с
 кодом, тестами и runtime receipt. Документ не является разрешением на
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.81 (follow-up после immutable
-1.5.80). В этой редакции исправлено execution behavior статических priority и
+Актуальная редакция этого канона — MCD 1.5.82 (follow-up после immutable
+1.5.81). В этой редакции исправлено execution behavior статических priority и
 super-priority очередей после restart/update: persisted claim больше не
-считается доказательством живого worker.
+считается доказательством живого worker. Кроме того, import monitor не считает
+queued/pending строку с заполненным `date_ended` активным lease: такая строка
+публикуется как `done` с вариантом `stale_completed`, тогда как настоящие
+queued и running строки по-прежнему блокируют только свои явные segment IDs.
 
 Для instance-scoped desired state локальный inventory UID является стабильной
 основой, но transport запрашивает также динамически полученный

@@ -1,3 +1,12 @@
+## 1.5.82 - 2026-10-11
+
+- Fix import-monitor admission for stale Mautic rows that remain in queued or
+  pending status after `date_ended` is populated. Such rows are classified as
+  terminal `stale_completed` evidence, so their target segments are no longer
+  held out of the persisted segment ring forever.
+- Preserve genuine queued and running import blocking, and expose the stale
+  classification in the monitor variant for an explicit skip/defer reason.
+
 ## 1.5.81 - 2026-10-11
 
 - Reconcile persisted static priority and super-priority claims against live
