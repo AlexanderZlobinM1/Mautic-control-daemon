@@ -587,6 +587,28 @@ def _record_local_runtime_changes(
     return out
 
 
+def _has_authoritative_local_runtime_edit(
+    metadata: Mapping[str, Any],
+    previous_runtime: Mapping[str, Any],
+    current_runtime: Mapping[str, Any],
+) -> bool:
+    """Return true only for a durable non-bootstrap MCD mutation."""
+    before = _runtime_snapshot_fields(previous_runtime)
+    after = _runtime_snapshot_fields(current_runtime)
+    for path in set(before) | set(after):
+        if before.get(path) == after.get(path):
+            continue
+        scope, key, uid = path
+        stamp = _runtime_metadata_get(metadata, scope, key, uid)
+        if not isinstance(stamp, dict):
+            continue
+        if str(stamp.get("source", "")).strip().lower() == "mcd" and not str(
+            stamp.get("event_id", "")
+        ).startswith("bootstrap:"):
+            return True
+    return False
+
+
 def _runtime_stamp_order(stamp: Mapping[str, Any]) -> tuple[Any, ...]:
     """Compare saved event stamps; MCC wins an exact deterministic tie."""
     updated_at = _runtime_metadata_number(stamp.get("updated_at"))
@@ -1227,22 +1249,27 @@ def _initialize_local_runtime_baseline(config: AgentConfig, store: object) -> tu
     _persist_recovered_instance_runtime(config, current, recovered)
     current = recovered
 
-    metadata = _runtime_metadata_for_snapshot(
-        store.get_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY),
-        stored,
-        source="mcd",
-    )
-    if current != stored:
+    raw_metadata = _runtime_metadata_normalize(store.get_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY))
+    local_edit = _has_authoritative_local_runtime_edit(raw_metadata, stored, current)
+    metadata = _runtime_metadata_for_snapshot(raw_metadata, stored, source="mcd")
+    if current != stored and local_edit:
         metadata = _record_local_runtime_changes(metadata, stored, current)
     store.put_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY, metadata)
 
     missing_remote = _missing_instance_runtime_values(current, remote_for_recovery)
-    if missing_remote or current != stored:
+    if missing_remote or (current != stored and local_edit):
         previous = _remove_instance_runtime_values(stored, missing_remote)
         pending = {"previous": previous, "current": deepcopy(current)}
         store.put_runtime_sync(_LOCAL_RUNTIME_PUSH_PENDING_KEY, pending)
         store.put_runtime_sync("local_runtime", previous)
         return previous, overrides_fingerprint(previous)
+    if current != stored and not local_edit:
+        # A restart/profile rebase can legitimately materialize values that
+        # differ from the old local snapshot. Without durable operator
+        # provenance this is not a local-wins event and must not create a
+        # revision push back to MCC.
+        store.put_runtime_sync("local_runtime", current)
+        return dict(current), overrides_fingerprint(current)
     return dict(stored), overrides_fingerprint(stored)
 
 

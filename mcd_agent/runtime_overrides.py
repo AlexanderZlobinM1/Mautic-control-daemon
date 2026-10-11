@@ -651,7 +651,6 @@ def runtime_key_observation(
         "schema": "mcd-runtime-key-observation-v1",
         "profile": profile or None,
         "keys": observations,
-        "effective_runtime": {key: effective.get(key) for key in normalized},
     }
 
 

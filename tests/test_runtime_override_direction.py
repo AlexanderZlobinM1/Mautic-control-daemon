@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import unittest
+import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from mcd_agent.runtime_overrides import (
     acknowledge_desired_runtime_states,
+    acknowledge_runtime_state,
     apply_remote_overrides,
     canonical_profile_from_runtime_response,
     fetch_runtime_overrides,
@@ -28,6 +30,41 @@ from mcd_agent import daemon
 
 
 class RuntimeOverrideDirectionTests(unittest.TestCase):
+    def test_runtime_ack_is_compact_and_contains_no_aggregate_effective_map(self) -> None:
+        cfg = SimpleNamespace(mcc_url="https://mcc.example", mcc_token="token")
+        identity = {
+            "effective_hostname": "host-1",
+            "effective_mcc_host_name": "MauticFarm-02",
+            "local_hostname": "host-1",
+            "configured_host_name": "MauticFarm-02",
+        }
+        observed = runtime_key_observation(
+            SimpleNamespace(profile_name="custom", jobs_max_workers=6),
+            {"jobs_max_workers": 6},
+            revision=92,
+            source="mcc",
+        )
+        with patch(
+            "mcd_agent.runtime_overrides.resolve_agent_identity",
+            return_value=identity,
+        ), patch("mcd_agent.runtime_overrides._post_json", return_value={"status": "ok"}) as post:
+            result = acknowledge_runtime_state(
+                cfg,
+                scope="host",
+                scope_key="MauticFarm-02",
+                revision=92,
+                status="applied",
+                observed=observed,
+            )
+
+        self.assertEqual(result["status"], "ok")
+        payload = post.call_args.args[1]
+        encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+        self.assertLess(len(encoded), 64 * 1024)
+        ack_observed = payload["desired_state_ack"]["observed"]
+        self.assertNotIn("effective_runtime", ack_observed)
+        self.assertEqual(set(ack_observed["keys"]), {"jobs_max_workers"})
+
     def test_runtime_key_observation_reports_profile_lock_and_effective_readback(self) -> None:
         cfg = SimpleNamespace(
             profile_name="farm-hiload",
@@ -71,7 +108,7 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
         self.assertEqual(store.values["local_runtime"], {"segment_recurring_priority_v1": {}})
         push.assert_not_called()
 
-    def test_restart_preserves_pending_local_runtime_baseline(self) -> None:
+    def test_restart_without_local_provenance_rebases_runtime_baseline(self) -> None:
         class MemoryStore:
             def __init__(self):
                 self.values = {"local_runtime": {"scheduler_host_max_parallel": 4}}
@@ -90,9 +127,47 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
         ):
             baseline, fingerprint = daemon._initialize_local_runtime_baseline(cfg, store)
 
-        self.assertEqual(baseline, {"scheduler_host_max_parallel": 4})
+        self.assertEqual(baseline, {"scheduler_host_max_parallel": 6})
         self.assertEqual(fingerprint, overrides_fingerprint(baseline))
-        self.assertEqual(store.values["local_runtime"], {"scheduler_host_max_parallel": 4})
+        self.assertEqual(store.values["local_runtime"], {"scheduler_host_max_parallel": 6})
+
+    def test_restart_profile_snapshot_without_local_provenance_does_not_push(self) -> None:
+        class MemoryStore:
+            def __init__(self):
+                self.values = {
+                    "local_runtime": {"jobs_max_workers": 2},
+                    "local_runtime_metadata": {
+                        "schema": "mcd-runtime-sync-metadata-v1",
+                        "clock": 0,
+                        "host": {
+                            "jobs_max_workers": {
+                                "source": "mcc",
+                                "event_id": "remote:host:jobs_max_workers",
+                                "updated_at": 10,
+                                "revision": 91,
+                                "tombstone": False,
+                            }
+                        },
+                        "instances": {},
+                    },
+                }
+
+            def get_runtime_sync(self, key):
+                return self.values.get(key)
+
+            def put_runtime_sync(self, key, value):
+                self.values[key] = value
+
+        cfg = SimpleNamespace(config_file_path="/tmp/mcd-profile-rebase.toml")
+        store = MemoryStore()
+        with patch(
+            "mcd_agent.daemon.local_runtime_overrides",
+            return_value={"jobs_max_workers": 6},
+        ):
+            baseline, _ = daemon._initialize_local_runtime_baseline(cfg, store)
+        self.assertEqual(baseline, {"jobs_max_workers": 6})
+        self.assertIsNone(daemon._read_local_runtime_push_pending(store))
+        self.assertEqual(store.values["local_runtime"], {"jobs_max_workers": 6})
 
     def test_local_delta_survives_same_loop_remote_refresh_and_pushes_once(self) -> None:
         class MemoryStore:

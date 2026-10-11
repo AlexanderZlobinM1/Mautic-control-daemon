@@ -4,10 +4,10 @@
 фактическую схему после исправления admission и должен обновляться вместе с
 кодом, тестами и runtime receipt. Документ не является разрешением на
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.81 (follow-up после immutable
-1.5.80). В этой редакции исправлено execution behavior статических priority и
-super-priority очередей после restart/update: persisted claim больше не
-считается доказательством живого worker.
+Актуальная редакция этого канона — MCD 1.5.84 (follow-up после immutable
+1.5.83). В этой редакции startup/profile rebase не считается локальной
+операторской правкой без durable provenance, а runtime ACK ограничен
+запрошенными per-key наблюдениями.
 
 Для instance-scoped desired state локальный inventory UID является стабильной
 основой, но transport запрашивает также динамически полученный
@@ -36,6 +36,14 @@ event: сначала сравнивается `updated_at`, при отсутс
 в config MCD. Отсутствие поля в старом/неполном snapshot не удаляет значение;
 удаление действительно только при явном более новом tombstone. Accepted merge
 сохраняет metadata и следующий poll не создаёт ping-pong или duplicate push.
+
+При startup/restart MCD сначала сохраняет исходную durable metadata и только
+потом нормализует новый локальный snapshot. Разница, возникшая из-за profile
+rebase, восстановления config или применения MCC desired state, не получает
+новый `source=mcd` event и не становится local-wins push. Такой snapshot
+становится baseline без новой revision. Local push разрешён только для
+реального изменения с сохранённым non-bootstrap MCD event; повторный natural
+poll после этого не создаёт второй push.
 
 Перед отправкой `desired` envelope MCD проецирует host- и instance-runtime
 только через canonical authority contract `runtime_remote_allowed_keys()`.
@@ -213,7 +221,9 @@ existing import recovery path and its independent process evidence.
 Runtime ACKs are per-key observations, not an echo of the requested payload.
 Each key reports `status` (`applied`, `profile_locked`, `rejected`, or
 `unchanged`), `desired`, `effective`, `source`, `revision`, and an explicit
-reason. Profile-locked workload keys retain the selected profile as authority
+reason. ACK содержит только запрошенные keys и не включает aggregate
+`effective_runtime`, поэтому его размер остаётся в пределах лимита MCC.
+Profile-locked workload keys retain the selected profile as authority
 and report the effective profile value; they are never labelled as applied from
 MCC. `jobs_max_workers` and other hot-effective keys are read back from the
 effective runtime map. The top-level ACK is `applied` only when every requested

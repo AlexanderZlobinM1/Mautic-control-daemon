@@ -1,3 +1,11 @@
+## 1.5.84 - 2026-10-11
+
+- Do not classify a restart/profile rebase snapshot as an operator-authored
+  local runtime edit; only durable non-bootstrap MCD provenance may create a
+  local-wins push back to MCC.
+- Keep runtime ACKs bounded to the requested per-key observations and omit the
+  aggregate effective runtime map, preventing MCC HTTP 413 responses.
+
 ## 1.5.83 - 2026-10-11
 
 - Make runtime override acknowledgements reflect per-key effective state.
