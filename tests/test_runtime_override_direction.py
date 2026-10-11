@@ -15,6 +15,7 @@ from mcd_agent.runtime_overrides import (
     normalize_segment_special_rings,
     overrides_fingerprint,
     push_runtime_overrides,
+    runtime_key_observation,
     desired_profile_from_runtime_response,
 )
 from mcd_agent.config import (
@@ -27,6 +28,26 @@ from mcd_agent import daemon
 
 
 class RuntimeOverrideDirectionTests(unittest.TestCase):
+    def test_runtime_key_observation_reports_profile_lock_and_effective_readback(self) -> None:
+        cfg = SimpleNamespace(
+            profile_name="farm-hiload",
+            scheduler_host_max_parallel=12,
+            jobs_max_workers=6,
+            config_file_path="",
+        )
+        observed = runtime_key_observation(
+            cfg,
+            {"scheduler_host_max_parallel": 6, "jobs_max_workers": 6},
+            revision=91,
+            source="mcc",
+        )
+        self.assertEqual(observed["keys"]["scheduler_host_max_parallel"]["status"], "profile_locked")
+        self.assertEqual(observed["keys"]["scheduler_host_max_parallel"]["effective"], 12)
+        self.assertEqual(observed["keys"]["scheduler_host_max_parallel"]["source"], "profile")
+        self.assertEqual(observed["keys"]["jobs_max_workers"]["status"], "unchanged")
+        self.assertEqual(observed["keys"]["jobs_max_workers"]["effective"], 6)
+        self.assertEqual(observed["keys"]["jobs_max_workers"]["revision"], 91)
+
     def test_profile_recovery_updates_local_baseline_without_pushing(self) -> None:
         class MemoryStore:
             def __init__(self):
@@ -1111,7 +1132,15 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
         self.assertNotIn("segment_special_rings_v1", applied["unsupported_keys"])
 
         store = MemoryStore()
-        cfg_for_ack = SimpleNamespace(mcc_url="https://mcc.example", mcc_token="token")
+        cfg_for_ack = SimpleNamespace(
+            mcc_url="https://mcc.example",
+            mcc_token="token",
+            profile_name="farm-hiload",
+            segment_priority_instance_settings={uid: {"segments": []}},
+            segment_super_priority_instance_settings={
+                uid: {"segments": [101, 102], "slots_override": 1}
+            },
+        )
         with patch(
             "mcd_agent.runtime_overrides.acknowledge_runtime_state",
             return_value={"status": "ok"},

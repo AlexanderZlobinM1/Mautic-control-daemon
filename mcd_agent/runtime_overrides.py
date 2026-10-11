@@ -11,8 +11,10 @@ from urllib.error import HTTPError, URLError
 from mcd_agent import __version__
 from mcd_agent.config import (
     AgentConfig,
+    _PROFILE_LOCKED_RUNTIME_KEYS,
     apply_runtime_overrides,
     runtime_overrides_from_config_file,
+    runtime_effective_map,
     runtime_remote_allowed_keys,
     runtime_supported_keys,
 )
@@ -613,6 +615,46 @@ def apply_remote_overrides(base_cfg: AgentConfig, overrides: dict[str, Any]) -> 
     }
 
 
+def runtime_key_observation(
+    cfg: AgentConfig,
+    runtime: dict[str, Any],
+    *,
+    revision: int,
+    source: str = "mcd",
+) -> dict[str, Any]:
+    """Return truthful per-key desired/effective runtime status for ACKs."""
+    normalized, compatibility_unsupported = normalize_runtime_override_payload(runtime)
+    effective = runtime_effective_map(cfg)
+    profile = str(getattr(cfg, "profile_name", "") or "").strip().lower()
+    observations: dict[str, dict[str, Any]] = {}
+    for key, desired in normalized.items():
+        effective_value = effective.get(key)
+        if key in compatibility_unsupported or key not in runtime_supported_keys():
+            status, origin, reason = "rejected", "none", "unsupported_key"
+        elif key not in runtime_remote_allowed_keys():
+            status, origin, reason = "rejected", "none", "remote_blocked"
+        elif key in _PROFILE_LOCKED_RUNTIME_KEYS and profile not in {"", "custom"}:
+            status, origin, reason = "profile_locked", "profile", "profile_authority"
+        elif effective_value == desired:
+            status, origin, reason = "unchanged", source, "already_effective"
+        else:
+            status, origin, reason = "rejected", source, "effective_value_mismatch"
+        observations[key] = {
+            "status": status,
+            "desired": desired,
+            "effective": effective_value,
+            "source": origin,
+            "revision": int(revision),
+            "reason": reason,
+        }
+    return {
+        "schema": "mcd-runtime-key-observation-v1",
+        "profile": profile or None,
+        "keys": observations,
+        "effective_runtime": {key: effective.get(key) for key in normalized},
+    }
+
+
 def acknowledge_runtime_state(
     cfg: AgentConfig,
     *,
@@ -698,6 +740,23 @@ def acknowledge_desired_runtime_states(
             return
 
         content_sha256 = overrides_fingerprint(normalized_runtime)
+        key_observation = runtime_key_observation(
+            cfg,
+            normalized_runtime,
+            revision=revision,
+            source="mcc",
+        )
+        key_rows = key_observation.get("keys", {})
+        statuses = {str(row.get("status")) for row in key_rows.values() if isinstance(row, dict)}
+        all_effective = not statuses or statuses <= {"applied", "unchanged"}
+        if "profile_locked" in statuses and statuses <= {"profile_locked", "unchanged"}:
+            ack_status = "profile_locked"
+        elif "rejected" in statuses:
+            ack_status = "rejected"
+        elif not all_effective:
+            ack_status = "partial"
+        else:
+            ack_status = "applied"
         if scope == "host":
             previous = acknowledged.get("host")
         else:
@@ -716,11 +775,11 @@ def acknowledge_desired_runtime_states(
             scope=scope,
             scope_key=scope_key,
             revision=revision,
-            status="applied",
+            status=ack_status,
             observed={
                 "runtime_fingerprint": runtime_fingerprint,
                 "content_sha256": content_sha256,
-                "effective_runtime": normalized_runtime,
+                "runtime": key_observation,
             },
         )
         if str(result.get("status", "")).lower() != "ok":

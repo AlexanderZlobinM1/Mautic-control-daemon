@@ -208,6 +208,17 @@ among eligible imports while allowing a historical row such as status `1` with
 `date_ended` to release its singleton. Retry/recovery remains governed by the
 existing import recovery path and its independent process evidence.
 
+### Runtime override ACK truthfulness
+
+Runtime ACKs are per-key observations, not an echo of the requested payload.
+Each key reports `status` (`applied`, `profile_locked`, `rejected`, or
+`unchanged`), `desired`, `effective`, `source`, `revision`, and an explicit
+reason. Profile-locked workload keys retain the selected profile as authority
+and report the effective profile value; they are never labelled as applied from
+MCC. `jobs_max_workers` and other hot-effective keys are read back from the
+effective runtime map. The top-level ACK is `applied` only when every requested
+key is effective; a profile discrepancy or rejection remains visible to MCC.
+
 Перед spawn worker атомарно claim-ит следующий eligible item из persisted
 cycle или статической queue. Claim проверяет `done/errors/claimed/running`,
 глобальную dependency closure, failure cooldown, host slots, instance lane

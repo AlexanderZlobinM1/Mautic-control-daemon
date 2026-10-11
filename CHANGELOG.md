@@ -1,3 +1,10 @@
+## 1.5.83 - 2026-10-11
+
+- Make runtime override acknowledgements reflect per-key effective state.
+  Profile-locked values are reported as `profile_locked` with profile source
+  and effective value; rejected and unchanged keys are explicit, so a desired
+  revision is not falsely reported as fully applied.
+
 ## 1.5.82 - 2026-10-11
 
 - Treat non-empty import `date_ended` as terminal lifecycle evidence across
