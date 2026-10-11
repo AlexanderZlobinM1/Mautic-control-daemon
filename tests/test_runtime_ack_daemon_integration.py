@@ -135,4 +135,3 @@ class RuntimeAckDaemonIntegrationTests(TestCase):
                 },
             )
             self.assertIn("runtime", instance_posts[0])
-
