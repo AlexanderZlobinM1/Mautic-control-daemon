@@ -4,8 +4,8 @@
 фактическую схему после исправления admission и должен обновляться вместе с
 кодом, тестами и runtime receipt. Документ не является разрешением на
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.87 (follow-up после immutable
-1.5.86). В этой редакции startup/profile rebase не считается локальной
+Актуальная редакция этого канона — MCD 1.5.88 (follow-up после immutable
+1.5.87). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями.
 
@@ -225,6 +225,9 @@ reason. ACK содержит только запрошенные keys; `effectiv
 только как per-key readback с теми же keys и не является whole-host snapshot,
 поэтому размер остаётся в пределах лимита MCC. Пустой instance desired state
 получает `unverified` ACK без runtime dump.
+Если отдельное `desired` или `effective` значение само превышает safety
+budget, оно заменяется строго проверяемой ссылкой
+`{encoding:"canonical-json-sha256",sha256,bytes}`; key не отбрасывается.
 Profile-locked workload keys retain the selected profile as authority
 and report the effective profile value; they are never labelled as applied from
 MCC. `jobs_max_workers` and other hot-effective keys are read back from the

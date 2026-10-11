@@ -25,6 +25,7 @@ _RUNTIME_ACK_CHUNK_SCHEMA = "mcd-runtime-key-observation-chunk-v1"
 _RUNTIME_ACK_MAX_BYTES = 256 * 1024
 _RUNTIME_ACK_SAFE_BYTES = 240 * 1024
 _RUNTIME_ACK_MAX_KEYS = 128
+_RUNTIME_DIGEST_ENCODING = "canonical-json-sha256"
 
 
 def _post_json(url: str, payload: dict[str, Any], token: str | None, timeout_sec: int = 12) -> dict[str, Any]:
@@ -647,8 +648,8 @@ def runtime_key_observation(
             status, origin, reason = "rejected", source, "effective_value_mismatch"
         observations[key] = {
             "status": status,
-            "desired": desired,
-            "effective": effective_value,
+            "desired": _runtime_evidence_value(desired),
+            "effective": _runtime_evidence_value(effective_value),
             "source": origin,
             "revision": int(revision),
             "reason": reason,
@@ -660,6 +661,27 @@ def runtime_key_observation(
         # MCC validates this map against the exact observed keys. It is a
         # bounded per-requested-key readback, not the whole effective runtime.
         "effective_runtime": {key: row.get("effective") for key, row in observations.items()},
+    }
+
+
+def _runtime_evidence_value(value: object) -> object:
+    """Keep small JSON values inline and digest oversized values canonically."""
+    try:
+        encoded = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError):
+        return value
+    if len(encoded) <= _RUNTIME_ACK_SAFE_BYTES:
+        return value
+    return {
+        "encoding": _RUNTIME_DIGEST_ENCODING,
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+        "bytes": len(encoded),
     }
 
 
@@ -800,25 +822,6 @@ def acknowledge_desired_runtime_states(
         unknown_keys = sorted(set(normalized_runtime) - runtime_supported_keys())
         blocked_keys = sorted(set(normalized_runtime) - runtime_remote_allowed_keys())
         rejected_keys = sorted(set([*compatibility_unsupported, *unknown_keys, *blocked_keys]))
-        if rejected_keys:
-            result = acknowledge_runtime_state(
-                cfg,
-                scope=scope,
-                scope_key=scope_key,
-                revision=revision,
-                status="rejected",
-                error="unsupported runtime keys: " + ",".join(rejected_keys),
-                observed={
-                    "runtime_fingerprint": runtime_fingerprint,
-                    "unsupported_keys": rejected_keys,
-                },
-            )
-            failures.append(
-                f"{scope}:{scope_key}:{revision}:rejected:{','.join(rejected_keys)}"
-                if str(result.get("status", "")).lower() == "ok"
-                else f"{scope}:{scope_key}:{revision}:{result.get('reason', 'rejected')}"
-            )
-            return
 
         content_sha256 = overrides_fingerprint(normalized_runtime)
         key_observation = runtime_key_observation(cfg, normalized_runtime, revision=revision, source="mcc")
@@ -829,7 +832,7 @@ def acknowledge_desired_runtime_states(
             ack_status = "unverified"
         elif "profile_locked" in statuses and statuses <= {"profile_locked", "unchanged"}:
             ack_status = "profile_locked"
-        elif "rejected" in statuses:
+        elif rejected_keys or "rejected" in statuses:
             ack_status = "rejected"
         elif not all_effective:
             ack_status = "partial"

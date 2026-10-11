@@ -13183,11 +13183,11 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                         },
                     )
                 if not local_runtime_push_pending:
-                    desired_host_runtime = {}
-                    if isinstance(desired_state, dict) and isinstance(desired_state.get("runtime_overrides"), dict):
-                        desired_host_runtime = desired_state["runtime_overrides"]
-                    elif isinstance(overrides_raw, dict):
-                        desired_host_runtime = overrides_raw
+                    # ACK the complete MCC-requested host map, including
+                    # operator-owned structured keys. Chunking bounds the
+                    # transport; projecting to desired_state.runtime_overrides
+                    # here would silently drop keys that MCC still expects.
+                    desired_host_runtime = overrides_raw if isinstance(overrides_raw, dict) else {}
                     for failure in acknowledge_desired_runtime_states(
                         config,
                         store,

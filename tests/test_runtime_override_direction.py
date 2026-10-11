@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import unittest
 from types import SimpleNamespace
@@ -18,6 +19,7 @@ from mcd_agent.runtime_overrides import (
     overrides_fingerprint,
     push_runtime_overrides,
     runtime_key_observation,
+    _runtime_evidence_value,
     _runtime_observation_chunks,
     desired_profile_from_runtime_response,
 )
@@ -170,6 +172,25 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
         self.assertEqual(set(ack_observed["effective_runtime"]), {"jobs_max_workers"})
         self.assertEqual(set(ack_observed["keys"]), {"jobs_max_workers"})
 
+    def test_large_nested_runtime_value_uses_verifiable_canonical_digest(self) -> None:
+        value = {"plugin": [{"name": "x", "payload": "z" * 300_000}]}
+        evidence = _runtime_evidence_value(value)
+        canonical = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        self.assertEqual(
+            evidence,
+            {
+                "encoding": "canonical-json-sha256",
+                "sha256": hashlib.sha256(canonical).hexdigest(),
+                "bytes": len(canonical),
+            },
+        )
+
     def test_runtime_key_observation_reports_profile_lock_and_effective_readback(self) -> None:
         cfg = SimpleNamespace(
             profile_name="farm-hiload",
@@ -215,6 +236,35 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
         self.assertEqual(failures, [])
         self.assertEqual(acknowledge.call_args.kwargs["status"], "unverified")
         self.assertNotIn("runtime", acknowledge.call_args.kwargs["observed"])
+
+    def test_blocked_structured_key_remains_in_exact_runtime_ack(self) -> None:
+        key = "segment_recurring_priority_v1"
+        value = {"app.example": {"segments": [{"id": 7, "max_interval_sec": 60}]}}
+        cfg = SimpleNamespace(
+            profile_name="custom",
+            segment_recurring_priority_v1=value,
+        )
+        store = SimpleNamespace(values={})
+        store.get_runtime_sync = lambda name: store.values.get(name)
+        store.put_runtime_sync = lambda name, item: store.values.__setitem__(name, dict(item))
+        with patch(
+            "mcd_agent.runtime_overrides.acknowledge_runtime_state",
+            return_value={"status": "ok"},
+        ) as acknowledge:
+            failures = acknowledge_desired_runtime_states(
+                cfg,
+                store,
+                desired_state={"scope_key": "MauticFarm-02", "revision": 113},
+                host_runtime={key: value},
+                instance_states={},
+                runtime_fingerprint="stable",
+            )
+        self.assertEqual(failures, [])
+        observed = acknowledge.call_args.kwargs["observed"]["runtime"]
+        self.assertEqual(set(observed["keys"]), {key})
+        self.assertEqual(set(observed["effective_runtime"]), {key})
+        self.assertEqual(observed["keys"][key]["status"], "unchanged")
+        self.assertEqual(acknowledge.call_args.kwargs["status"], "applied")
 
     def test_host_and_instance_ack_routes_emit_bounded_requested_key_bytes(self) -> None:
         class MemoryStore:
@@ -1470,9 +1520,11 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
                 runtime_fingerprint="aggregate",
             )
 
-        self.assertEqual(len(failures), 1)
+        self.assertEqual(failures, [])
         self.assertEqual(acknowledge.call_args.kwargs["status"], "rejected")
-        self.assertNotIn("mcc_runtime_acknowledged", store.values)
+        observed = acknowledge.call_args.kwargs["observed"]["runtime"]
+        self.assertEqual(set(observed["keys"]), {"segment_special_rings_v1"})
+        self.assertEqual(set(observed["effective_runtime"]), set(observed["keys"]))
 
     def test_special_ring_validation_does_not_drop_bad_ids_or_unknown_fields(self) -> None:
         self.assertIsNone(

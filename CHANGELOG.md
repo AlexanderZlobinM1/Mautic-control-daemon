@@ -1,3 +1,10 @@
+## 1.5.88 - 2026-10-11
+
+- Preserve the complete host ACK key union, including operator-owned structured
+  runtime keys, and encode oversized desired/effective values as MCC-verifiable
+  canonical JSON SHA256 references instead of dropping keys or exceeding the
+  request limit.
+
 ## 1.5.87 - 2026-10-11
 
 - Reissue the MCC-bounded runtime ACK chunk fix on the canonical 1.5.85
