@@ -1,3 +1,12 @@
+## 1.5.85 - 2026-10-11
+
+- Bound every runtime ACK to the requested host/instance keys while retaining
+  the MCC-required per-key `effective_runtime` readback; empty instance state
+  ACKs are accepted as `unverified` instead of falsely claiming `applied`.
+- Prevent pre-poll, in-flight-poll, and late-poll profile rebases from becoming
+  local-runtime pushes; only the normal loop's real local edit path may create
+  unproven local provenance.
+
 ## 1.5.84 - 2026-10-11
 
 - Do not classify a restart/profile rebase snapshot as an operator-authored

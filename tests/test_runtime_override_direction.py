@@ -30,7 +30,7 @@ from mcd_agent import daemon
 
 
 class RuntimeOverrideDirectionTests(unittest.TestCase):
-    def test_runtime_ack_is_compact_and_contains_no_aggregate_effective_map(self) -> None:
+    def test_runtime_ack_is_compact_and_contains_no_whole_runtime_dump(self) -> None:
         cfg = SimpleNamespace(mcc_url="https://mcc.example", mcc_token="token")
         identity = {
             "effective_hostname": "host-1",
@@ -62,7 +62,7 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
         encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
         self.assertLess(len(encoded), 64 * 1024)
         ack_observed = payload["desired_state_ack"]["observed"]
-        self.assertNotIn("effective_runtime", ack_observed)
+        self.assertEqual(set(ack_observed["effective_runtime"]), {"jobs_max_workers"})
         self.assertEqual(set(ack_observed["keys"]), {"jobs_max_workers"})
 
     def test_runtime_key_observation_reports_profile_lock_and_effective_readback(self) -> None:
@@ -84,6 +84,81 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
         self.assertEqual(observed["keys"]["jobs_max_workers"]["status"], "unchanged")
         self.assertEqual(observed["keys"]["jobs_max_workers"]["effective"], 6)
         self.assertEqual(observed["keys"]["jobs_max_workers"]["revision"], 91)
+        self.assertEqual(observed["effective_runtime"], {
+            "scheduler_host_max_parallel": 12,
+            "jobs_max_workers": 6,
+        })
+
+    def test_empty_instance_ack_is_unverified_and_compact(self) -> None:
+        store = SimpleNamespace(values={})
+        store.get_runtime_sync = lambda key: store.values.get(key)
+        store.put_runtime_sync = lambda key, value: store.values.__setitem__(key, dict(value))
+        cfg = SimpleNamespace(mcc_url="https://mcc.example", mcc_token="token")
+        uid = "empty.example@MauticFarm-02"
+        with patch(
+            "mcd_agent.runtime_overrides.acknowledge_runtime_state",
+            return_value={"status": "ok"},
+        ) as acknowledge:
+            failures = acknowledge_desired_runtime_states(
+                cfg,
+                store,
+                desired_state=None,
+                host_runtime={},
+                instance_states={uid: {"revision": 94, "runtime_overrides": {}}},
+                runtime_fingerprint="stable",
+            )
+        self.assertEqual(failures, [])
+        self.assertEqual(acknowledge.call_args.kwargs["status"], "unverified")
+        self.assertNotIn("runtime", acknowledge.call_args.kwargs["observed"])
+
+    def test_host_and_instance_ack_routes_emit_bounded_requested_key_bytes(self) -> None:
+        class MemoryStore:
+            def __init__(self):
+                self.values = {}
+
+            def get_runtime_sync(self, key):
+                return self.values.get(key)
+
+            def put_runtime_sync(self, key, value):
+                self.values[key] = dict(value)
+
+        cfg = SimpleNamespace(
+            mcc_url="https://mcc.example",
+            mcc_token="token",
+            profile_name="custom",
+            jobs_max_workers=6,
+        )
+        identity = {
+            "effective_hostname": "host-1",
+            "effective_mcc_host_name": "MauticFarm-02",
+            "local_hostname": "host-1",
+            "configured_host_name": "MauticFarm-02",
+        }
+        uid = "app.example@MauticFarm-02"
+        with patch(
+            "mcd_agent.runtime_overrides.resolve_agent_identity",
+            return_value=identity,
+        ), patch("mcd_agent.runtime_overrides._post_json", return_value={"status": "ok"}) as post:
+            failures = acknowledge_desired_runtime_states(
+                cfg,
+                MemoryStore(),
+                desired_state={
+                    "scope_key": "MauticFarm-02",
+                    "revision": 94,
+                },
+                host_runtime={"jobs_max_workers": 6},
+                instance_states={uid: {"revision": 94, "runtime_overrides": {"jobs_max_workers": 6}}},
+                runtime_fingerprint="stable",
+            )
+        self.assertEqual(failures, [])
+        self.assertEqual(post.call_count, 2)
+        for call in post.call_args_list:
+            payload = call.args[1]
+            encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+            self.assertLess(len(encoded), 256 * 1024)
+            runtime = payload["desired_state_ack"]["observed"]["runtime"]
+            self.assertEqual(set(runtime["keys"]), {"jobs_max_workers"})
+            self.assertEqual(set(runtime["effective_runtime"]), {"jobs_max_workers"})
 
     def test_profile_recovery_updates_local_baseline_without_pushing(self) -> None:
         class MemoryStore:
@@ -168,6 +243,26 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
         self.assertEqual(baseline, {"jobs_max_workers": 6})
         self.assertIsNone(daemon._read_local_runtime_push_pending(store))
         self.assertEqual(store.values["local_runtime"], {"jobs_max_workers": 6})
+
+    def test_poll_rebase_without_provenance_does_not_queue_local_delta(self) -> None:
+        class MemoryStore:
+            def __init__(self):
+                self.values = {"local_runtime": {"jobs_max_workers": 2}}
+
+            def get_runtime_sync(self, key):
+                return self.values.get(key)
+
+            def put_runtime_sync(self, key, value):
+                self.values[key] = value
+
+        store = MemoryStore()
+        pending = daemon._queue_local_runtime_delta(
+            store,
+            {"jobs_max_workers": 6},
+            allow_unproven=False,
+        )
+        self.assertIsNone(pending)
+        self.assertIsNone(daemon._read_local_runtime_push_pending(store))
 
     def test_local_delta_survives_same_loop_remote_refresh_and_pushes_once(self) -> None:
         class MemoryStore:

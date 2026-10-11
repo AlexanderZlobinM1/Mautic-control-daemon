@@ -651,6 +651,9 @@ def runtime_key_observation(
         "schema": "mcd-runtime-key-observation-v1",
         "profile": profile or None,
         "keys": observations,
+        # MCC validates this map against the exact observed keys. It is a
+        # bounded per-requested-key readback, not the whole effective runtime.
+        "effective_runtime": {key: row.get("effective") for key, row in observations.items()},
     }
 
 
@@ -739,16 +742,13 @@ def acknowledge_desired_runtime_states(
             return
 
         content_sha256 = overrides_fingerprint(normalized_runtime)
-        key_observation = runtime_key_observation(
-            cfg,
-            normalized_runtime,
-            revision=revision,
-            source="mcc",
-        )
+        key_observation = runtime_key_observation(cfg, normalized_runtime, revision=revision, source="mcc")
         key_rows = key_observation.get("keys", {})
         statuses = {str(row.get("status")) for row in key_rows.values() if isinstance(row, dict)}
         all_effective = not statuses or statuses <= {"applied", "unchanged"}
-        if "profile_locked" in statuses and statuses <= {"profile_locked", "unchanged"}:
+        if not normalized_runtime:
+            ack_status = "unverified"
+        elif "profile_locked" in statuses and statuses <= {"profile_locked", "unchanged"}:
             ack_status = "profile_locked"
         elif "rejected" in statuses:
             ack_status = "rejected"
@@ -769,17 +769,19 @@ def acknowledge_desired_runtime_states(
         ):
             return
 
+        observed = {
+            "runtime_fingerprint": runtime_fingerprint,
+            "content_sha256": content_sha256,
+        }
+        if normalized_runtime:
+            observed["runtime"] = key_observation
         result = acknowledge_runtime_state(
             cfg,
             scope=scope,
             scope_key=scope_key,
             revision=revision,
             status=ack_status,
-            observed={
-                "runtime_fingerprint": runtime_fingerprint,
-                "content_sha256": content_sha256,
-                "runtime": key_observation,
-            },
+            observed=observed,
         )
         if str(result.get("status", "")).lower() != "ok":
             failures.append(f"{scope}:{scope_key}:{revision}:{result.get('reason', 'unknown')}")

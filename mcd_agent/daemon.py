@@ -1086,8 +1086,10 @@ def _clear_local_runtime_push_pending(store: object) -> None:
 def _queue_local_runtime_delta(
     store: object,
     current_local_runtime: Mapping[str, Any],
+    *,
+    allow_unproven: bool = True,
 ) -> dict[str, dict[str, Any]] | None:
-    """Persist a local edit before any MCC poll may refresh its baseline."""
+    """Persist a local edit before MCC poll; poll rebase is never an edit."""
     current = deepcopy(dict(current_local_runtime))
     baseline = store.get_runtime_sync("local_runtime")
     baseline = baseline if isinstance(baseline, dict) else {}
@@ -1100,6 +1102,10 @@ def _queue_local_runtime_delta(
             _clear_local_runtime_push_pending(store)
             pending = None
         return pending
+    if not allow_unproven and pending is None and not _has_authoritative_local_runtime_edit(
+        metadata, baseline, current
+    ):
+        return None
     metadata = _record_local_runtime_changes(metadata, baseline, current)
     store.put_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY, metadata)
     previous = pending["previous"] if pending is not None else deepcopy(baseline)
@@ -12807,7 +12813,11 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
         local_fp = overrides_fingerprint(local_runtime)
         pending_local_runtime = None
         if config.mcc_url and config.mcc_token:
-            pending_local_runtime = _queue_local_runtime_delta(store, local_runtime)
+            pending_local_runtime = _queue_local_runtime_delta(
+                store,
+                local_runtime,
+                allow_unproven=not startup_runtime_sync_pending,
+            )
             if pending_local_runtime is not None:
                 local_runtime_push_pending = True
         if config.mcc_url and config.mcc_token and (
@@ -12819,7 +12829,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                 if local_runtime == previous_local_runtime:
                     last_local_runtime_fp = local_fp
                 else:
-                    pending_local_runtime = _queue_local_runtime_delta(store, local_runtime)
+                    pending_local_runtime = _queue_local_runtime_delta(store, local_runtime, allow_unproven=True)
                     local_runtime_push_pending = pending_local_runtime is not None
             if pending_local_runtime is not None:
                 previous_local_runtime = pending_local_runtime["previous"]
@@ -12916,7 +12926,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
             # arrive after the normal local-change block above; queue it
             # durably before the poll may refresh the baseline.
             pre_poll_runtime = local_runtime_overrides(config)
-            if _queue_local_runtime_delta(store, pre_poll_runtime) is not None:
+            if _queue_local_runtime_delta(store, pre_poll_runtime, allow_unproven=False) is not None:
                 local_runtime_push_pending = True
         if config.mcc_url and config.mcc_token and (
             (startup_runtime_sync_pending or runtime_overrides_sync_requested or should_runtime_poll)
@@ -12934,7 +12944,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                 # applying/persisting that response until the local delta is
                 # accepted.
                 during_poll_runtime = local_runtime_overrides(config)
-                if _queue_local_runtime_delta(store, during_poll_runtime) is not None:
+                if _queue_local_runtime_delta(store, during_poll_runtime, allow_unproven=False) is not None:
                     local_runtime_push_pending = True
                     status = "deferred_local_delta"
             if status == "ok" and not local_runtime_push_pending:
@@ -13130,7 +13140,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                     # unchanged. A file edit after the earlier race check
                     # must never be absorbed into the new baseline.
                     late_local_runtime = local_runtime_overrides(config)
-                    if _queue_local_runtime_delta(store, late_local_runtime) is not None:
+                    if _queue_local_runtime_delta(store, late_local_runtime, allow_unproven=False) is not None:
                         local_runtime_push_pending = True
                     if fp != last_runtime_overrides_fp and not local_runtime_push_pending:
                         _persist_resolved_runtime_to_config(
@@ -13173,11 +13183,16 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                         },
                     )
                 if not local_runtime_push_pending:
+                    desired_host_runtime = {}
+                    if isinstance(desired_state, dict) and isinstance(desired_state.get("runtime_overrides"), dict):
+                        desired_host_runtime = desired_state["runtime_overrides"]
+                    elif isinstance(overrides_raw, dict):
+                        desired_host_runtime = overrides_raw
                     for failure in acknowledge_desired_runtime_states(
                         config,
                         store,
                         desired_state=desired_state,
-                        host_runtime=overrides_raw if isinstance(overrides_raw, dict) else {},
+                        host_runtime=desired_host_runtime,
                         instance_states=instance_states,
                         runtime_fingerprint=fp,
                     ):
