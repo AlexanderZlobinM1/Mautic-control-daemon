@@ -2602,6 +2602,27 @@ def normalize_runtime_overrides(raw: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def profile_locked_runtime_keys(profile_name: object, runtime: object) -> list[str]:
+    """Return runtime keys that a named profile keeps authoritative.
+
+    MCC may publish a complete runtime envelope for compatibility and
+    observability, but profile-owned capacity/tuning keys must remain at the
+    selected named profile values.  Keep this classification explicit so
+    callers do not report those values as applied merely because they were
+    present in the payload.
+    """
+
+    profile = str(profile_name or "").strip().lower()
+    if profile in {"", "custom"} or not isinstance(runtime, dict):
+        return []
+    normalized = normalize_runtime_overrides(runtime)
+    return sorted(
+        key
+        for key in normalized
+        if key in _PROFILE_LOCKED_RUNTIME_KEYS and key in _RUNTIME_TO_ATTR
+    )
+
+
 def apply_runtime_overrides(
     cfg: AgentConfig,
     runtime: dict[str, Any],
@@ -2616,11 +2637,15 @@ def apply_runtime_overrides(
     applicable: dict[str, Any] = {}
     unsupported: list[str] = []
     blocked: list[str] = []
+    profile_locked = set(profile_locked_runtime_keys(getattr(cfg, "profile_name", ""), normalized))
     for raw_key, raw_val in normalized.items():
         if raw_key not in _RUNTIME_TO_ATTR:
             unsupported.append(raw_key)
             continue
         if allowed_keys is not None and raw_key not in allowed_keys:
+            blocked.append(raw_key)
+            continue
+        if raw_key in profile_locked:
             blocked.append(raw_key)
             continue
         applicable[raw_key] = raw_val

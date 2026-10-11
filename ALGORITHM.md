@@ -113,7 +113,10 @@ MCC может передать per-instance envelope `segment_special_rings_v1`
 применяется к соответствующей static lane. Невалидная форма или неизвестное
 runtime key остаётся rejected и не получает applied revision; `applied`
 acknowledgement отправляется только для принятого effective payload и содержит
-его digest/снимок.
+его digest/снимок. Ключи, принадлежащие выбранному named profile, не считаются
+применёнными: они публикуются как `profile_locked_keys`, их effective значения
+остаются profile-owned, а ACK получает статус `deferred` до смены profile
+authority.
 
 Профиль является отдельной canonical authority. При каждом runtime poll или
 trigger MCD сначала сохраняет выбранный MCC profile, затем rebases свежий

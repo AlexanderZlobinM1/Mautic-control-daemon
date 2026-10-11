@@ -1,3 +1,11 @@
+## 1.5.83 - 2026-10-11
+
+- Report MCC runtime values that a named profile owns as explicitly deferred
+  profile-locked keys instead of claiming them as applied. Runtime ACKs now
+  expose the effective subset and use `deferred` status until profile
+  authority changes; active runtime state and daemon journals preserve the
+  same applied-versus-deferred distinction.
+
 ## 1.5.82 - 2026-10-11
 
 - Fix import-monitor admission for stale Mautic rows that remain in queued or

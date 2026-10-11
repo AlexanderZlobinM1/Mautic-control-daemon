@@ -13046,15 +13046,26 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                     applied_keys = list(applied.get("applied_keys", []))
                     unsupported_keys = list(applied.get("unsupported_keys", []))
                     blocked_keys = list(applied.get("blocked_keys", []))
+                    profile_locked_keys = list(applied.get("profile_locked_keys", []))
+                    profile_locked_set = set(profile_locked_keys)
                     if unsupported_keys:
                         logging.warning(
                             "runtime-overrides ignored unsupported keys: %s",
                             ",".join(str(x) for x in unsupported_keys),
                         )
-                    if blocked_keys:
+                    if profile_locked_keys:
+                        logging.info(
+                            "runtime-overrides deferred profile-locked keys: profile=%s keys=%s",
+                            (profile_authority or config.profile_name or "-").strip().lower(),
+                            ",".join(str(x) for x in profile_locked_keys),
+                        )
+                    non_profile_blocked_keys = [
+                        key for key in blocked_keys if key not in profile_locked_set
+                    ]
+                    if non_profile_blocked_keys:
                         logging.warning(
                             "runtime-overrides ignored blocked keys (restart/static-only): %s",
-                            ",".join(str(x) for x in blocked_keys),
+                            ",".join(str(x) for x in non_profile_blocked_keys),
                         )
                     if next_cfg != config:
                         old_profile = (config.profile_name or "").strip().lower()
@@ -13068,15 +13079,17 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                             campaign_whitelist = set()
                         new_profile = (config.profile_name or "").strip().lower()
                         logging.info(
-                            "runtime-overrides applied from MCC: keys=%s profile=%s->%s",
+                            "runtime-overrides applied from MCC: keys=%s deferred_profile_keys=%s profile=%s->%s",
                             ",".join(applied_keys) if applied_keys else "-",
+                            ",".join(profile_locked_keys) if profile_locked_keys else "-",
                             old_profile or "-",
                             new_profile or "-",
                         )
                     else:
                         logging.info(
-                            "runtime-overrides synced from MCC: no effective change (keys=%s)",
+                            "runtime-overrides synced from MCC: no effective change (keys=%s deferred_profile_keys=%s)",
                             ",".join(applied_keys) if applied_keys else "-",
+                            ",".join(profile_locked_keys) if profile_locked_keys else "-",
                         )
                     if set(applied_keys) & _SERVICE_CLEANUP_RUNTIME_KEYS:
                         # A Save in MCC must be visible to the next scheduler
@@ -13141,6 +13154,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                             "profile_authority": profile_authority,
                             "applied_keys": applied_keys,
                             "blocked_keys": blocked_keys,
+                            "profile_locked_keys": profile_locked_keys,
                             "unsupported_keys": unsupported_keys,
                         },
                     )

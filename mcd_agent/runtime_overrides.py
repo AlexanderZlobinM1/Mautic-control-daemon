@@ -12,6 +12,7 @@ from mcd_agent import __version__
 from mcd_agent.config import (
     AgentConfig,
     apply_runtime_overrides,
+    profile_locked_runtime_keys,
     runtime_overrides_from_config_file,
     runtime_remote_allowed_keys,
     runtime_supported_keys,
@@ -600,6 +601,7 @@ def consume_poll_trigger(cfg: AgentConfig) -> bool:
 
 def apply_remote_overrides(base_cfg: AgentConfig, overrides: dict[str, Any]) -> dict[str, Any]:
     normalized, compatibility_unsupported = normalize_runtime_override_payload(overrides)
+    profile_locked = profile_locked_runtime_keys(getattr(base_cfg, "profile_name", ""), normalized)
     cfg2, applied, unsupported, blocked = apply_runtime_overrides(
         base_cfg,
         normalized,
@@ -610,6 +612,7 @@ def apply_remote_overrides(base_cfg: AgentConfig, overrides: dict[str, Any]) -> 
         "applied_keys": applied,
         "unsupported_keys": sorted(set([*unsupported, *compatibility_unsupported])),
         "blocked_keys": blocked,
+        "profile_locked_keys": profile_locked,
     }
 
 
@@ -697,6 +700,15 @@ def acknowledge_desired_runtime_states(
             )
             return
 
+        profile_locked_keys = profile_locked_runtime_keys(
+            getattr(cfg, "profile_name", ""),
+            normalized_runtime,
+        )
+        profile_locked_set = set(profile_locked_keys)
+        effective_runtime = {
+            key: value for key, value in normalized_runtime.items() if key not in profile_locked_set
+        }
+        ack_status = "deferred" if profile_locked_keys else "applied"
         content_sha256 = overrides_fingerprint(normalized_runtime)
         if scope == "host":
             previous = acknowledged.get("host")
@@ -708,6 +720,8 @@ def acknowledge_desired_runtime_states(
             and previous.get("scope_key") == scope_key
             and previous.get("revision") == revision
             and previous.get("content_sha256") == content_sha256
+            and str(previous.get("status", "applied") or "applied").strip().lower() == ack_status
+            and sorted(previous.get("profile_locked_keys", [])) == profile_locked_keys
         ):
             return
 
@@ -716,11 +730,17 @@ def acknowledge_desired_runtime_states(
             scope=scope,
             scope_key=scope_key,
             revision=revision,
-            status="applied",
+            status=ack_status,
+            error=(
+                "profile authority locks runtime keys: " + ",".join(profile_locked_keys)
+                if profile_locked_keys
+                else ""
+            ),
             observed={
                 "runtime_fingerprint": runtime_fingerprint,
                 "content_sha256": content_sha256,
-                "effective_runtime": normalized_runtime,
+                "effective_runtime": effective_runtime,
+                **({"profile_locked_keys": profile_locked_keys} if profile_locked_keys else {}),
             },
         )
         if str(result.get("status", "")).lower() != "ok":
@@ -732,6 +752,9 @@ def acknowledge_desired_runtime_states(
             "revision": revision,
             "content_sha256": content_sha256,
         }
+        if profile_locked_keys:
+            entry["status"] = ack_status
+            entry["profile_locked_keys"] = profile_locked_keys
         if scope == "host":
             acknowledged["host"] = entry
         else:

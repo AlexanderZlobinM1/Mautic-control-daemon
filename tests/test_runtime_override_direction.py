@@ -291,6 +291,117 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
         self.assertNotIn("poll_interval_sec", runtime)
         self.assertNotIn("php_bin", runtime)
 
+    def test_named_profile_separates_profile_locked_runtime_keys_from_applied(self) -> None:
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "mcd.toml"
+            path.write_text('[profile]\nname = "farm-hiload"\n', encoding="utf-8")
+            cfg = load_config(str(path), allow_recover_from_mcc=False)
+            baseline = {
+                "scheduler_host_max_parallel": cfg.scheduler_host_max_parallel,
+                "scheduler_instance_max_parallel": cfg.scheduler_instance_max_parallel,
+                "segment_priority_parallel_idle": cfg.segment_priority_parallel_idle,
+            }
+            applied = apply_remote_overrides(
+                cfg,
+                {
+                    "jobs_max_workers": 6,
+                    "scheduler_host_max_parallel": 6,
+                    "scheduler_instance_max_parallel": 0,
+                    "segment_priority_parallel_idle": 3,
+                },
+            )
+
+        self.assertEqual(applied["applied_keys"], ["jobs_max_workers"])
+        self.assertEqual(
+            applied["profile_locked_keys"],
+            [
+                "scheduler_host_max_parallel",
+                "scheduler_instance_max_parallel",
+                "segment_priority_parallel_idle",
+            ],
+        )
+        self.assertEqual(
+            set(applied["blocked_keys"]),
+            set(applied["profile_locked_keys"]),
+        )
+        self.assertEqual(applied["config"].jobs_max_workers, 6)
+        self.assertEqual(
+            {
+                "scheduler_host_max_parallel": applied["config"].scheduler_host_max_parallel,
+                "scheduler_instance_max_parallel": applied["config"].scheduler_instance_max_parallel,
+                "segment_priority_parallel_idle": applied["config"].segment_priority_parallel_idle,
+            },
+            baseline,
+        )
+
+    def test_profile_locked_desired_state_ack_is_deferred_and_observably_not_applied(self) -> None:
+        class MemoryStore:
+            def __init__(self):
+                self.values = {}
+
+            def get_runtime_sync(self, key):
+                return self.values.get(key)
+
+            def put_runtime_sync(self, key, value):
+                self.values[key] = dict(value)
+
+        cfg = SimpleNamespace(
+            mcc_url="https://mcc.example",
+            mcc_token="token",
+            profile_name="farm-hiload",
+        )
+        runtime = {
+            "jobs_max_workers": 6,
+            "scheduler_host_max_parallel": 6,
+        }
+        store = MemoryStore()
+        with patch(
+            "mcd_agent.runtime_overrides.acknowledge_runtime_state",
+            return_value={"status": "ok"},
+        ) as acknowledge:
+            failures = acknowledge_desired_runtime_states(
+                cfg,
+                store,
+                desired_state={"scope_key": "MauticFarm-02", "revision": 91},
+                host_runtime=runtime,
+                instance_states={},
+                runtime_fingerprint="aggregate",
+            )
+
+            self.assertEqual(failures, [])
+            self.assertEqual(acknowledge.call_args.kwargs["status"], "deferred")
+            self.assertEqual(
+                acknowledge.call_args.kwargs["observed"]["effective_runtime"],
+                {"jobs_max_workers": 6},
+            )
+            self.assertEqual(
+                acknowledge.call_args.kwargs["observed"]["profile_locked_keys"],
+                ["scheduler_host_max_parallel"],
+            )
+            self.assertIn(
+                "profile authority locks runtime keys: scheduler_host_max_parallel",
+                acknowledge.call_args.kwargs["error"],
+            )
+
+            entry = store.values["mcc_runtime_acknowledged"]["host"]
+            self.assertEqual(entry["status"], "deferred")
+            self.assertEqual(entry["profile_locked_keys"], ["scheduler_host_max_parallel"])
+
+            # The same deferred revision is not posted repeatedly, but a
+            # profile change or a new MCC revision will be eligible again.
+            acknowledge_desired_runtime_states(
+                cfg,
+                store,
+                desired_state={"scope_key": "MauticFarm-02", "revision": 91},
+                host_runtime=runtime,
+                instance_states={},
+                runtime_fingerprint="aggregate",
+            )
+            self.assertEqual(acknowledge.call_count, 1)
+
     def test_desired_push_projects_host_and_instance_payloads_through_contract(self) -> None:
         cfg = SimpleNamespace(mcc_url="https://mcc.example", mcc_token="token")
         identity = {
