@@ -437,6 +437,43 @@ class ImportLivenessMatrixTests(unittest.TestCase):
             self.assertEqual(sorted(task.root for task in running.values()), ["/disposable/m6/a", "/disposable/m7/b"])
             store.close()
 
+    def test_manual_requests_are_singleton_per_instance_on_real_submit_path(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mcd-manual-admission-") as td:
+            store = TaskStore(str(Path(td) / "tasks.sqlite3"))
+            running: dict[str, RunningTask] = {}
+            with patch.object(
+                daemon, "_spawn_command", side_effect=[SimpleNamespace(pid=8201), SimpleNamespace(pid=8202)]
+            ), patch.object(daemon, "_task_locked_args", side_effect=lambda _key, args, **_kwargs: args):
+                self.assertTrue(
+                    daemon._submit_if_slot_uncoordinated(
+                        config=self._config(), store=store, running=running,
+                        root="/disposable/m6/a", task_type="segment", entity_id=1,
+                        args=["fixture", "segment", "1"], timeout_sec=60,
+                        max_parallel_for_type=1, popens={}, manual_request_id=101,
+                        bypass_repeat_guard=True, bypass_baseline_admission=True,
+                    )
+                )
+                self.assertFalse(
+                    daemon._submit_if_slot_uncoordinated(
+                        config=self._config(), store=store, running=running,
+                        root="/disposable/m6/a", task_type="segment", entity_id=2,
+                        args=["fixture", "segment", "2"], timeout_sec=60,
+                        max_parallel_for_type=1, popens={}, manual_request_id=102,
+                        bypass_repeat_guard=True, bypass_baseline_admission=True,
+                    )
+                )
+                self.assertTrue(
+                    daemon._submit_if_slot_uncoordinated(
+                        config=self._config(), store=store, running=running,
+                        root="/disposable/m7/b", task_type="segment", entity_id=3,
+                        args=["fixture", "segment", "3"], timeout_sec=60,
+                        max_parallel_for_type=1, popens={}, manual_request_id=103,
+                        bypass_repeat_guard=True, bypass_baseline_admission=True,
+                    )
+                )
+            self.assertEqual(sorted(task.manual_request_id for task in running.values()), [101, 103])
+            store.close()
+
     def test_restart_adopts_live_import_and_keeps_singleton(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mcd-import-adopt-") as td:
             root = Path(td)

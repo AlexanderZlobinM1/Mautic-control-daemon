@@ -10473,6 +10473,11 @@ def _submit_if_slot_uncoordinated(
         return False
     if store.has_running_task_key(key):
         return False
+    if manual_request_id is not None and any(
+        task.root == root and task.manual_request_id is not None
+        for task in running.values()
+    ):
+        return False
     # Imports are singleton per instance/root. Keep this guard at the common
     # submit boundary so manual and future dispatch paths cannot overlap an
     # import on the same instance while other instances use free host slots.
