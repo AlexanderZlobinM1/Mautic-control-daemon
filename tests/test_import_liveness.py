@@ -411,6 +411,32 @@ class ImportLivenessMatrixTests(unittest.TestCase):
             )
         submit.assert_called_once()
 
+    def test_cross_instance_import_uses_real_submit_path_without_baseline_cooldown(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mcd-import-baseline-") as td:
+            store = TaskStore(str(Path(td) / "tasks.sqlite3"))
+            running: dict[str, RunningTask] = {}
+            with patch.object(daemon, "_scheduler_baseline_launch_due", return_value=False), patch.object(
+                daemon, "_spawn_command", side_effect=[SimpleNamespace(pid=8101), SimpleNamespace(pid=8102)]
+            ), patch.object(daemon, "_task_locked_args", side_effect=lambda _key, args, **_kwargs: args):
+                self.assertTrue(
+                    daemon._submit_if_slot_uncoordinated(
+                        config=self._config(), store=store, running=running,
+                        root="/disposable/m6/a", task_type="import", entity_id=None,
+                        args=["fixture", "import", "8101"], timeout_sec=60,
+                        max_parallel_for_type=1, popens={}, bypass_repeat_guard=True,
+                    )
+                )
+                self.assertTrue(
+                    daemon._submit_if_slot_uncoordinated(
+                        config=self._config(), store=store, running=running,
+                        root="/disposable/m7/b", task_type="import", entity_id=None,
+                        args=["fixture", "import", "8102"], timeout_sec=60,
+                        max_parallel_for_type=1, popens={}, bypass_repeat_guard=True,
+                    )
+                )
+            self.assertEqual(sorted(task.root for task in running.values()), ["/disposable/m6/a", "/disposable/m7/b"])
+            store.close()
+
     def test_restart_adopts_live_import_and_keeps_singleton(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mcd-import-adopt-") as td:
             root = Path(td)

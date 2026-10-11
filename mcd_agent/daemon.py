@@ -10488,6 +10488,8 @@ def _submit_if_slot_uncoordinated(
                 return False
     baseline_lane = _scheduler_baseline_lane(task_type)
     baseline_admission = bool(
+        str(task_type or "").strip().lower() != "import"
+        and
         baseline_lane is not None
         and _scheduler_root_lane_running_count(running, root, baseline_lane) <= 0
     )
