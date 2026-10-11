@@ -814,7 +814,13 @@ def acknowledge_desired_runtime_states(
     acknowledged = dict(saved) if isinstance(saved, dict) else {}
     failures: list[str] = []
 
-    def send(scope: str, scope_key: str, revision: int, runtime: dict[str, Any]) -> None:
+    def send(
+        scope: str,
+        scope_key: str,
+        revision: int,
+        runtime: dict[str, Any],
+        accepted_observation_revision: int | None = None,
+    ) -> None:
         normalized_runtime, compatibility_unsupported = normalize_runtime_override_payload(
             runtime,
             instance_uid=scope_key if scope == "instance" else None,
@@ -846,6 +852,34 @@ def acknowledge_desired_runtime_states(
         batch_id = hashlib.sha256(
             f"{scope}|{scope_key}|{revision}|{content_sha256}".encode("utf-8")
         ).hexdigest()
+        previous_parts: set[int] = set()
+        previous_batch_id = ""
+        previous_matches_scope = (
+            isinstance(previous, dict)
+            and previous.get("scope_key") == scope_key
+            and previous.get("revision") == revision
+        )
+        if previous_matches_scope:
+            previous_batch_id = str(previous.get("batch_id") or "").strip()
+            raw_parts = previous.get("parts")
+            if isinstance(raw_parts, list):
+                previous_parts = {
+                    int(part)
+                    for part in raw_parts
+                    if isinstance(part, int) and not isinstance(part, bool) and part >= 0
+                }
+        # MCC keeps an incomplete observation batch for a desired revision.
+        # When the desired envelope is corrected without advancing that
+        # revision, a new content-derived batch id is rejected as a second
+        # pending batch. Continue the existing batch and send only its missing
+        # parts; the next fresh revision still gets a new deterministic id.
+        if (
+            previous_matches_scope
+            and previous_batch_id
+            and previous_parts
+            and accepted_observation_revision != revision
+        ):
+            batch_id = previous_batch_id
         try:
             chunks = _runtime_observation_chunks(key_observation, batch_id=batch_id) if normalized_runtime else []
         except ValueError as exc:
@@ -856,11 +890,6 @@ def acknowledge_desired_runtime_states(
                 f"{scope}:{scope_key}:{revision}:runtime ACK chunk selection produced no chunks"
             )
             return
-        previous_parts = set()
-        if isinstance(previous, dict) and previous.get("batch_id") == batch_id:
-            raw_parts = previous.get("parts")
-            if isinstance(raw_parts, list):
-                previous_parts = {int(part) for part in raw_parts if isinstance(part, int) and not isinstance(part, bool)}
         previous_matches = (
             isinstance(previous, dict)
             and previous.get("scope_key") == scope_key
@@ -902,6 +931,8 @@ def acknowledge_desired_runtime_states(
                     "content_sha256": content_sha256,
                     "batch_id": batch_id,
                     "parts": sorted(completed_parts),
+                    "total": len(chunks),
+                    "complete": False,
                 }
                 if scope == "host":
                     acknowledged["host"] = part_entry
@@ -917,7 +948,14 @@ def acknowledge_desired_runtime_states(
             "content_sha256": content_sha256,
         }
         if chunks:
-            entry.update({"batch_id": batch_id, "parts": sorted(completed_parts)})
+            entry.update(
+                {
+                    "batch_id": batch_id,
+                    "parts": sorted(completed_parts),
+                    "total": len(chunks),
+                    "complete": True,
+                }
+            )
         if scope == "host":
             acknowledged["host"] = entry
         else:
@@ -930,11 +968,20 @@ def acknowledge_desired_runtime_states(
     if isinstance(desired_state, dict):
         revision = desired_state.get("revision")
         if isinstance(revision, int) and not isinstance(revision, bool):
+            apply_state = desired_state.get("apply")
+            accepted_revision = (
+                apply_state.get("accepted_observation_revision")
+                if isinstance(apply_state, dict)
+                else None
+            )
+            if not isinstance(accepted_revision, int) or isinstance(accepted_revision, bool):
+                accepted_revision = None
             send(
                 "host",
                 str(desired_state.get("scope_key", "") or ""),
                 revision,
                 host_runtime if isinstance(host_runtime, dict) else {},
+                accepted_revision,
             )
     if isinstance(instance_states, dict):
         for uid, item in instance_states.items():
@@ -944,7 +991,15 @@ def acknowledge_desired_runtime_states(
             runtime = item.get("runtime_overrides")
             if not isinstance(revision, int) or isinstance(revision, bool) or not isinstance(runtime, dict):
                 continue
-            send("instance", str(uid), revision, runtime)
+            apply_state = item.get("apply")
+            accepted_revision = (
+                apply_state.get("accepted_observation_revision")
+                if isinstance(apply_state, dict)
+                else None
+            )
+            if not isinstance(accepted_revision, int) or isinstance(accepted_revision, bool):
+                accepted_revision = None
+            send("instance", str(uid), revision, runtime, accepted_revision)
     return failures
 
 

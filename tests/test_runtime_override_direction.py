@@ -173,6 +173,61 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             self.assertLessEqual(len(chunk["runtime"]["keys"]), 128)
         self.assertEqual(seen, set(keys))
 
+    def test_corrected_same_revision_reuses_pending_batch_and_preserves_recurring_priority(self) -> None:
+        old_keys = {f"runtime_key_{index}": index for index in range(182)}
+        keys = dict(old_keys)
+        keys["segment_recurring_priority_v1"] = {
+            "app.example": {"segments": [{"id": 7, "max_interval_sec": 60}]}
+        }
+        cfg = SimpleNamespace(mcc_url="https://mcc.example", mcc_token="token", profile_name="custom")
+        pending_batch_id = "b" * 64
+        store = SimpleNamespace(
+            values={
+                "mcc_runtime_acknowledged": {
+                    "host": {
+                        "scope_key": "MauticFarm-02",
+                        "revision": 106,
+                        "content_sha256": overrides_fingerprint(old_keys),
+                        "batch_id": pending_batch_id,
+                        "parts": [0],
+                    }
+                }
+            }
+        )
+        store.get_runtime_sync = lambda name: store.values.get(name)
+        store.put_runtime_sync = lambda name, item: store.values.__setitem__(name, dict(item))
+
+        with patch("mcd_agent.runtime_overrides.runtime_supported_keys", return_value=set(keys)), patch(
+            "mcd_agent.runtime_overrides.runtime_remote_allowed_keys", return_value=set(keys)
+        ), patch("mcd_agent.runtime_overrides.runtime_effective_map", return_value=keys), patch(
+            "mcd_agent.runtime_overrides.acknowledge_runtime_state", return_value={"status": "ok"}
+        ) as acknowledge:
+            failures = acknowledge_desired_runtime_states(
+                cfg,
+                store,
+                desired_state={
+                    "scope_key": "MauticFarm-02",
+                    "revision": 106,
+                    "apply": {"accepted_observation_revision": 91},
+                },
+                host_runtime=keys,
+                instance_states={},
+                runtime_fingerprint="stable",
+            )
+
+        self.assertEqual(failures, [])
+        self.assertEqual(acknowledge.call_count, 1)
+        observed_chunk = acknowledge.call_args.kwargs["observed"]["runtime_chunk"]
+        self.assertEqual(observed_chunk["batch_id"], pending_batch_id)
+        self.assertEqual(observed_chunk["part"], 1)
+        self.assertIn("segment_recurring_priority_v1", observed_chunk["runtime"]["keys"])
+        saved = store.values["mcc_runtime_acknowledged"]["host"]
+        self.assertEqual(saved["batch_id"], pending_batch_id)
+        self.assertEqual(saved["parts"], [0, 1])
+        self.assertEqual(saved["total"], 2)
+        self.assertTrue(saved["complete"])
+        self.assertEqual(saved["content_sha256"], overrides_fingerprint(keys))
+
     def test_runtime_ack_is_compact_and_contains_no_whole_runtime_dump(self) -> None:
         cfg = SimpleNamespace(mcc_url="https://mcc.example", mcc_token="token")
         identity = {
