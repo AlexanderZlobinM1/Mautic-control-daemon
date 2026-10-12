@@ -1,3 +1,9 @@
+## 1.5.114 - 2026-10-12
+
+- Observe the advertised read-only `segment_lazy_update_enabled` capability
+  as its supported false state in ACK evidence without making it mutable;
+  unsupported-key rejection is removed only for this capability.
+
 ## 1.5.113 - 2026-10-12
 
 - Dispatch the next eligible item from a persisted ordinary cycle whenever a

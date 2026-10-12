@@ -349,6 +349,18 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             },
         )
 
+    def test_lazy_scheduler_capability_false_is_observable_not_unsupported(self) -> None:
+        observed = runtime_key_observation(
+            SimpleNamespace(profile_name="custom"),
+            {"segment_lazy_update_enabled": False},
+            revision=196,
+            source="mcc",
+        )
+        row = observed["keys"]["segment_lazy_update_enabled"]
+        self.assertEqual(row["status"], "unchanged")
+        self.assertEqual(row["effective"], False)
+        self.assertEqual(row["reason"], "already_effective")
+
     def test_rejected_nonempty_ack_is_retried_after_effective_value_is_fixed(self) -> None:
         class MemoryStore:
             def __init__(self):

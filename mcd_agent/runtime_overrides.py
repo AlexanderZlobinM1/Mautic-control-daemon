@@ -61,6 +61,7 @@ _INSTANCE_RUNTIME_KEYS = {
 }
 
 _SPECIAL_RING_RUNTIME_KEY = "segment_special_rings_v1"
+_RUNTIME_CAPABILITY_KEYS = frozenset({"segment_lazy_update_enabled"})
 _SPECIAL_RING_TARGET_KEYS = {
     "priority": "segment_priority_instance_settings",
     "super_priority": "segment_super_priority_instance_settings",
@@ -645,7 +646,7 @@ def runtime_key_observation(
                 desired = desired
             else:
                 desired = {}
-        effective_value = effective.get(key)
+        effective_value = False if key in _RUNTIME_CAPABILITY_KEYS else effective.get(key)
         if scope_key and key.endswith("_instance_settings") and isinstance(effective_value, dict):
             if scope_key in effective_value:
                 effective_value = effective_value[scope_key]
@@ -661,7 +662,12 @@ def runtime_key_observation(
                 str(uid): effective_value.get(uid, {})
                 for uid in desired
             }
-        if key in compatibility_unsupported or key not in runtime_supported_keys():
+        if key in _RUNTIME_CAPABILITY_KEYS:
+            if effective_value == desired:
+                status, origin, reason = "unchanged", "capability", "already_effective"
+            else:
+                status, origin, reason = "rejected", "capability", "effective_value_mismatch"
+        elif key in compatibility_unsupported or key not in runtime_supported_keys():
             status, origin, reason = "rejected", "none", "unsupported_key"
         elif key not in runtime_remote_allowed_keys():
             status, origin, reason = "rejected", "none", "remote_blocked"
@@ -850,8 +856,12 @@ def acknowledge_desired_runtime_states(
             runtime,
             instance_uid=scope_key if scope == "instance" else None,
         )
-        unknown_keys = sorted(set(normalized_runtime) - runtime_supported_keys())
-        blocked_keys = sorted(set(normalized_runtime) - runtime_remote_allowed_keys())
+        unknown_keys = sorted(
+            set(normalized_runtime) - runtime_supported_keys() - _RUNTIME_CAPABILITY_KEYS
+        )
+        blocked_keys = sorted(
+            set(normalized_runtime) - runtime_remote_allowed_keys() - _RUNTIME_CAPABILITY_KEYS
+        )
         rejected_keys = sorted(set([*compatibility_unsupported, *unknown_keys, *blocked_keys]))
 
         content_sha256 = overrides_fingerprint(normalized_runtime)
