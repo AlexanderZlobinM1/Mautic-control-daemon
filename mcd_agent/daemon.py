@@ -13248,14 +13248,26 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                             )
                             logging.info("runtime-overrides accepted segment lanes applied during local-delta retry")
                 accepted_desired = store.get_runtime_sync("mcc_runtime_desired_state") or {}
-                if isinstance(accepted_desired, dict):
-                    accepted_instance_states = accepted_desired.get("instance_desired_states")
-                    if not isinstance(accepted_instance_states, dict):
-                        accepted_instance_states = instance_desired_states(accepted_runtime, installs)
+                ack_desired = (
+                    accepted_desired
+                    if isinstance(accepted_desired, dict)
+                    and isinstance(accepted_desired.get("revision"), int)
+                    else desired_state if isinstance(desired_state, dict) else {}
+                )
+                if isinstance(ack_desired, dict) and isinstance(ack_desired.get("revision"), int):
+                    accepted_instance_states = ack_desired.get("instance_desired_states")
+                    if not isinstance(accepted_instance_states, dict) or any(
+                        not isinstance(item, dict) or not isinstance(item.get("runtime_overrides"), dict)
+                        for item in accepted_instance_states.values()
+                    ):
+                        accepted_instance_states = (
+                            instance_states if isinstance(instance_states, dict)
+                            else instance_desired_states(accepted_runtime, installs)
+                        )
                     ack_failures = acknowledge_desired_runtime_states(
                         config,
                         store,
-                        desired_state=accepted_desired,
+                        desired_state=ack_desired,
                         host_runtime=accepted_runtime,
                         instance_states=accepted_instance_states,
                         runtime_fingerprint=overrides_fingerprint(accepted_runtime),

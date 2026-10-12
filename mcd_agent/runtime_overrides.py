@@ -879,6 +879,11 @@ def acknowledge_desired_runtime_states(
             and previous.get("scope_key") == scope_key
             and previous.get("revision") == revision
         )
+        previous_is_current_schema = (
+            isinstance(previous, dict)
+            and str(previous.get("agent_version", "")) == __version__
+            and str(previous.get("ack_schema", "")) == "mcd-runtime-key-observation-v1"
+        )
         if previous_matches_scope:
             previous_batch_id = str(previous.get("batch_id") or "").strip()
             raw_parts = previous.get("parts")
@@ -919,6 +924,7 @@ def acknowledge_desired_runtime_states(
         previous_ack_status = str(previous.get("ack_status", "applied")).strip().lower() if isinstance(previous, dict) else ""
         if (
             previous_matches
+            and previous_is_current_schema
             and previous_ack_status in {"applied", "unchanged"}
             and (not chunks or set(range(len(chunks))) <= previous_parts)
         ):
@@ -971,6 +977,8 @@ def acknowledge_desired_runtime_states(
             "scope_key": scope_key,
             "revision": revision,
             "content_sha256": content_sha256,
+            "agent_version": __version__,
+            "ack_schema": "mcd-runtime-key-observation-v1",
         }
         # Empty desired scopes are intentionally unverified and retain the
         # legacy successful receipt shape; non-empty rejected receipts must

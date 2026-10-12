@@ -6,6 +6,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from mcd_agent import __version__
 from mcd_agent.runtime_overrides import (
     acknowledge_desired_runtime_states,
     acknowledge_runtime_state,
@@ -1530,7 +1531,13 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             )
             self.assertEqual(
                 restarted.values["mcc_runtime_acknowledged"]["instances"][uid],
-                {"scope_key": uid, "revision": 2, "content_sha256": overrides_fingerprint({})},
+                {
+                    "scope_key": uid,
+                    "revision": 2,
+                    "content_sha256": overrides_fingerprint({}),
+                    "agent_version": __version__,
+                    "ack_schema": "mcd-runtime-key-observation-v1",
+                },
             )
             acknowledge_desired_runtime_states(
                 cfg, restarted, desired_state=None, host_runtime={},

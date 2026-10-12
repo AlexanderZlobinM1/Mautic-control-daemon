@@ -1,3 +1,9 @@
+## 1.5.111 - 2026-10-12
+
+- Retry instance ACK publication from the current canonical response when a
+  durable snapshot contains only revision markers; invalidate old-agent or
+  old-schema ACK receipts without synthesizing success.
+
 ## 1.5.110 - 2026-10-12
 
 - Preserve canonical instance desired rows in durable accepted snapshots and
