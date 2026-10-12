@@ -141,6 +141,18 @@ TaskStore fixture должен сохранять `cycle_id`, `updated_at` и sp
     history обязаны показать attempts `1..3` и terminal callback после третьего
     неуспешного запуска, после чего следующий item получает admission.
 
+12. Проверяется distinction между диагностикой и результатом выполнения:
+    heuristic `segment_filter_safety` (например, `today -1`) только пишется
+    как hint и не удаляет executable segment до profile-bound Mautic start;
+    настоящий non-zero Mautic rc проходит обычный retry/terminal path. Для
+    proven topology fixture `bad parent ↔ bad parent`, его published
+    descendant и healthy tail должны получить соответственно
+    `data_error:dependency_cycle` terminal receipts для bad branch, успешный
+    terminal для healthy tail, полный root `status=terminal`, после чего
+    следующий planning snapshot создаёт новый `cycle_id`. Ни один bad ID не
+    может остаться assigned `pending` навсегда, а topology data-error не
+    является self-update barrier.
+
 ## Guard assertions
 
 Для pending cycle bypass-ится только global new-admission baseline cadence.
@@ -202,6 +214,7 @@ barrier остаются обязательными.
 | manual N+1 override — per-instance exception без host-wide overflow и с сохранением locks | `_submit_if_slot_uncoordinated`, manual admission path | `tests/test_segment_admission.py` cap-4→5→4→3 и per-instance `11+3→14→...→10→11` receipts |
 | M6 closure занимает один worker/PID, M7 covered roots не параллелятся | `dependency_execution_chains`, `_segment_chain_command_args`, `_segment_chain_runtime_*`, static closure lock | `tests/test_segment_chain_runtime.py` actual TaskStore/PID receipt + fresh M6/M7 sandbox evidence |
 | M7 native parent coverage дедуплицируется через capability-backed `--exclude` | `_segment_native_coverage_*`, `_segment_native_exclude_capability`, `_append_segment_native_excludes` | read-only `help ... --format=json` receipt + actual parent-count/PID receipt |
+| filter hints не подменяют Mautic rc; unsafe topology terminalizes explicitly | `segment_filter_safety.py`, `logical_issues.py`, `_terminalize_segment_data_errors` | `test_topology_data_errors_finish_root_and_allow_next_cycle` + filter-hint regression |
 
 ## Acceptance gate
 

@@ -20,6 +20,7 @@ from mcd_agent.segment_filter_safety import segment_invalid_filter_issues
 
 LOGICAL_ISSUES_SCHEMA = "mcd-logical-issues-v1"
 SUPPORTED_REMEDIATIONS = {"disable_segments"}
+TOPOLOGY_TERMINAL_CODES = frozenset({"dependency_cycle", "self_reference"})
 
 
 def _utc_iso(ts: float | None = None) -> str:
@@ -257,12 +258,16 @@ def detect_segment_logical_issues(rows: list[dict[str, Any]]) -> list[LogicalIss
                 component="segments",
                 entity_type="segment",
                 code="invalid_filter",
-                severity="error",
-                title="Invalid segment filter",
-                reason=f"Segment {segment_id} contains filter values that Mautic cannot evaluate safely.",
+                severity="warning",
+                title="Possible invalid segment filter",
+                reason=(
+                    f"MCD detected a possible unsafe filter expression on segment {segment_id}; "
+                    "this is a diagnostic hint only and does not replace the Mautic command result."
+                ),
                 entity_ids=[segment_id],
-                blocked_entity_ids=[segment_id],
+                blocked_entity_ids=[],
                 evidence={"segment_id": segment_id, "filters": details},
+                recommended_action="",
             )
         )
 
@@ -572,6 +577,37 @@ def logical_issue_blocked_segment_ids(snapshot: dict[str, Any]) -> set[int]:
             continue
         blocked.update(_positive_ids(issue.get("blocked_entity_ids")))
     return blocked
+
+
+def logical_issue_terminal_segment_notes(snapshot: dict[str, Any]) -> dict[int, str]:
+    """Return explicit data-error notes for topology that cannot be run safely.
+
+    Dependency cycles and self-references are structural topology failures,
+    not ordinary Mautic command results.  They must not remain in an admitted
+    cycle as indefinitely blocked work.  Filter-safety hints deliberately do
+    not appear here: the normal profile-bound Mautic command remains the
+    source of truth for those expressions.
+    """
+
+    issues = snapshot.get("issues") if isinstance(snapshot.get("issues"), list) else []
+    notes: dict[int, str] = {}
+    for issue in issues:
+        if not isinstance(issue, dict) or str(issue.get("status") or "active") != "active":
+            continue
+        code = str(issue.get("code") or "").strip().lower()
+        if code not in TOPOLOGY_TERMINAL_CODES:
+            continue
+        note = f"data_error:{code}"
+        for segment_id in _positive_ids(issue.get("blocked_entity_ids")):
+            notes.setdefault(segment_id, note)
+
+    # ``snapshot`` preserves the aggregate blocked projection beyond the
+    # bounded visible issue list.  Current producers only populate it from
+    # topology-terminal issues, so retain those IDs with a generic explicit
+    # data-error note when their detailed issue is outside the display limit.
+    for segment_id in _positive_ids(snapshot.get("blocked_segment_ids")):
+        notes.setdefault(segment_id, "data_error:logical_issue")
+    return notes
 
 
 def _segment_audit_rows(value: object) -> list[dict[str, Any]]:

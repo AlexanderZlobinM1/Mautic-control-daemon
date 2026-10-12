@@ -4,7 +4,7 @@
 фактическую схему после исправления admission и должен обновляться вместе с
 кодом, тестами и runtime receipt. Документ не является разрешением на
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.137 (follow-up после immutable
+Актуальная редакция этого канона — MCD 1.5.138 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам
@@ -259,9 +259,18 @@ config на его profile baseline и только после этого при
    claim path до атомарной записи; он остаётся кандидатом следующего
    планирования, а не orphan ring entry. После restart порядок обеих очередей
    сохраняется.
-5. Invalid filters, logical issues, failure cooldown и DB/backup/scheduler
-   pause являются блокираторами admission, а не поводом пересортировать или
-   потерять persisted cycle.
+5. Эвристика `segment_filter_safety` (например, `today -1` или `now -N`)
+   является только diagnostic hint: она не исключает segment из ordinary
+   ring, не ставит его terminal до запуска и не подменяет фактический rc
+   profile-bound Mautic-команды. Обычный отказ Mautic проходит честный
+   `TaskStore` start/retry и красный terminal receipt, после чего healthy tail
+   продолжает цикл. Исключение только для доказуемо небезопасной topology:
+   `dependency_cycle`/`self_reference` и их опубликованные descendants уже
+   после durable admission получают явный terminal error с note
+   `data_error:<code>`, поэтому root не остаётся навечно `blocked/pending`;
+   это data-error задачи, а не MCD self-update blocker. Failure cooldown и
+   DB/backup/scheduler pause являются временными admission gates и не должны
+   пересортировать или потерять persisted cycle.
    Campaign pressure может удержать только новую admission; уже pending
    durable cycle продолжает dispatch при доступном slot. Global scheduler/
    backup pause, cluster cron-route mismatch и root-local DB circuit-breaker

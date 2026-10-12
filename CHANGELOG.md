@@ -1,3 +1,12 @@
+## 1.5.138 - 2026-10-12
+
+- Keep Mautic filter-safety heuristics diagnostic-only: a possible date
+  expression no longer removes an executable segment or terminalizes it before
+  Mautic returns an actual command result. Proven dependency cycles and
+  self-references now close already-admitted pending items as explicit
+  `data_error:<code>` terminal receipts, allowing the healthy tail and the
+  next root cycle to proceed.
+
 ## 1.5.137 - 2026-10-12
 
 - Report the actual effective `segment_lazy_update_enabled` host setting in

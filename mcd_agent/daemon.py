@@ -87,6 +87,7 @@ from mcd_agent.mautic_version_cache import confirmed_mautic_major, retire_zabbix
 from mcd_agent.mautic_core_restore import restore_retired_mcd_core_patches
 from mcd_agent.logical_issues import (
     logical_issue_blocked_segment_ids,
+    logical_issue_terminal_segment_notes,
     prune_logical_issue_snapshots,
     read_logical_issues_snapshot,
     scan_install_logical_issues,
@@ -3064,6 +3065,42 @@ def _segment_cycle_terminal(
         )
         store.put_runtime_sync(key, state)
     _refresh_scheduler_important_root(store, root)
+
+
+def _terminalize_segment_data_errors(
+    store: "TaskStore",
+    *,
+    root: str,
+    state: Mapping[str, object] | None,
+    terminal_notes: Mapping[int, str] | None,
+    excluded_ids: list[int] | tuple[int, ...] | set[int] | None = None,
+    now_ts: float,
+) -> tuple[dict[str, object], list[int]]:
+    """Close admitted unsafe topology instead of leaving it blocked forever.
+
+    This is deliberately narrower than the normal blocked-id admission path:
+    only already-admitted pending items with an explicit topology data-error
+    note are terminalized.  Ordinary Mautic/PHP work is still launched and
+    receives its retry/error result from the actual command.
+    """
+
+    if not isinstance(state, Mapping) or not terminal_notes:
+        return dict(state) if isinstance(state, Mapping) else {}, []
+    pending = _segment_cycle_pending_order(state, excluded_ids=excluded_ids)
+    targets = [int(sid) for sid in pending if int(sid) in terminal_notes]
+    for sid in targets:
+        _segment_cycle_terminal(
+            store,
+            root=root,
+            entity_id=int(sid),
+            success=False,
+            note=str(terminal_notes.get(int(sid)) or "data_error:logical_issue"),
+            now_ts=float(now_ts),
+        )
+    if not targets:
+        return dict(state), []
+    updated = store.get_runtime_sync(_segment_cycle_key(root))
+    return (dict(updated) if isinstance(updated, Mapping) else {}), targets
 
 
 def _manual_static_lane_for_ids(
@@ -13669,9 +13706,9 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
     segment_sql_auto_signatures: dict[str, tuple[int, ...]] = {}
     segment_dependencies_by_root: dict[str, dict[int, set[int]]] = {}
     segment_parents_by_root: dict[str, dict[int, set[int]]] = {}
-    segment_invalid_filter_sets: dict[str, set[int]] = {}
     segment_failure_blocked_sets: dict[str, set[int]] = {}
     segment_logical_issue_blocked_sets: dict[str, set[int]] = {}
+    segment_logical_data_error_notes: dict[str, dict[int, str]] = {}
     last_logical_issue_scan_ts: dict[str, float] = {}
     segment_prio_rings: dict[str, deque[int]] = {}
     segment_reg_rings: dict[str, deque[int]] = {}
@@ -14133,26 +14170,22 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                 remaining_ids=[sid for sid in cycle_planned if sid in remaining_ids],
             )
             pending = _segment_cycle_pending_order(cycle_state, excluded_ids=static_excluded)
-            invalid_ids: set[int] = set()
+            filter_hint_ids: set[int] = set()
             if pending:
                 try:
-                    invalid_ids = set(segment_invalid_filter_issues(db.fetch_segment_definitions(pending)))
+                    invalid_issues = segment_invalid_filter_issues(db.fetch_segment_definitions(pending))
+                    filter_hint_ids = set(invalid_issues)
+                    if filter_hint_ids:
+                        _log_invalid_segment_filters(
+                            root,
+                            format_segment_filter_issues(invalid_issues),
+                        )
                 except Exception as exc:
-                    logging.warning("[%s] root-local terminal filter validation failed: %s", root, exc)
-            segment_invalid_filter_sets[root] = invalid_ids
-            for invalid_id in sorted(invalid_ids):
-                _segment_cycle_terminal(
-                    store,
-                    root=root,
-                    entity_id=invalid_id,
-                    success=False,
-                    note="invalid_segment_filter",
-                    now_ts=now_plan,
-                )
+                    logging.warning("[%s] root-local filter hint inspection failed: %s", root, exc)
             failure_blocked = _segment_failure_blocked_ids(store, root)
             segment_failure_blocked_sets[root] = failure_blocked
             logical_blocked = set(segment_logical_issue_blocked_sets.get(root, set()))
-            blocked_ids = invalid_ids | failure_blocked | logical_blocked
+            blocked_ids = failure_blocked | logical_blocked
             static_state = store.get_runtime_sync(_static_lane_state_key(root)) or {}
             static_active: set[int] = set()
             lanes = static_state.get("lanes") if isinstance(static_state, Mapping) else {}
@@ -16762,6 +16795,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                         )
                     logical_blocked_ids = logical_issue_blocked_segment_ids(logical_snapshot)
                     segment_logical_issue_blocked_sets[root] = logical_blocked_ids
+                    segment_logical_data_error_notes[root] = logical_issue_terminal_segment_notes(logical_snapshot)
                     if logical_blocked_ids and logical_scan_due:
                         logging.warning(
                             "[%s] logical issue guard blocked segment ids=%s",
@@ -17341,37 +17375,19 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                         excluded_ids=static_excluded_ids,
                     )
                     segment_definition_rows: list[dict[str, object]] = []
-                    invalid_filter_ids: set[int] = set()
+                    filter_hint_ids: set[int] = set()
                     if standard_segment_ids:
                         try:
                             segment_definition_rows = db.fetch_segment_definitions(standard_segment_ids)
                             invalid_issues = segment_invalid_filter_issues(segment_definition_rows)
-                            invalid_filter_ids = set(invalid_issues)
-                            if invalid_filter_ids:
+                            filter_hint_ids = set(invalid_issues)
+                            if filter_hint_ids:
                                 _log_invalid_segment_filters(
                                     root,
                                     format_segment_filter_issues(invalid_issues),
                                 )
-                                standard_segment_ids = [
-                                    sid for sid in standard_segment_ids if sid not in invalid_filter_ids
-                                ]
-                                segment_definition_rows = [
-                                    row
-                                    for row in segment_definition_rows
-                                    if int(row.get("id") or 0) not in invalid_filter_ids
-                                ]
                         except Exception as e:
-                            logging.warning("[%s] segment filter validation failed: %s", root, e)
-                    segment_invalid_filter_sets[root] = invalid_filter_ids
-                    for invalid_id in sorted(invalid_filter_ids):
-                        _segment_cycle_terminal(
-                            store,
-                            root=root,
-                            entity_id=int(invalid_id),
-                            success=False,
-                            note="invalid_segment_filter",
-                            now_ts=float(now),
-                        )
+                            logging.warning("[%s] segment filter hint inspection failed: %s", root, e)
                     failure_blocked_ids = _segment_failure_blocked_ids(store, root)
                     for sid in sorted(set(standard_segment_ids) & failure_blocked_ids)[:20]:
                         _log_segment_failure_cooldown(root, sid)
@@ -17581,7 +17597,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                             sorted(segment_full_scan_pending.get(root, set()))[:100],
                             list(segment_prio_rings[root])[:100],
                             list(segment_reg_rings[root])[:100],
-                            sorted(invalid_filter_ids)[:100],
+                            sorted(filter_hint_ids)[:100],
                             sorted(segment_logical_issue_blocked_sets.get(root, set()))[:100],
                         )
                 else:
@@ -18536,7 +18552,6 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                 running=running,
                 recently_finished=_recent_finished_segment_ids(root, now),
             )
-            segment_blocked_ids |= set(segment_invalid_filter_sets.get(root, set()))
             segment_blocked_ids |= set(segment_failure_blocked_sets.get(root, set()))
             segment_blocked_ids |= set(segment_logical_issue_blocked_sets.get(root, set()))
             segment_blocked_ids |= {entry.segment_id for entry in recurring_priority_entries}
@@ -18552,6 +18567,21 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
             segment_cycle_payload = store.get_runtime_sync(_segment_cycle_key(root)) or {}
             if not isinstance(segment_cycle_payload, Mapping):
                 segment_cycle_payload = {}
+            segment_cycle_payload, terminalized_data_errors = _terminalize_segment_data_errors(
+                store,
+                root=root,
+                state=segment_cycle_payload,
+                terminal_notes=segment_logical_data_error_notes.get(root, {}),
+                excluded_ids=sql_managed_segment_ids | set(segment_static_ids_for_inst),
+                now_ts=time.time(),
+            )
+            if terminalized_data_errors:
+                segment_blocked_ids.difference_update(terminalized_data_errors)
+                logging.error(
+                    "[%s] terminalized unsafe segment topology as data_error ids=%s",
+                    root,
+                    ",".join(str(sid) for sid in terminalized_data_errors),
+                )
             _refresh_scheduler_important_root(
                 store,
                 root,

@@ -21,6 +21,7 @@ from mcd_agent.daemon import (
     _segment_cycle_release,
     _segment_cycle_running,
     _segment_cycle_terminal,
+    _terminalize_segment_data_errors,
     _active_persisted_segment_cycle_roots,
     _effective_segment_regular_slot_limit,
     _segment_pending_dispatch_limits,
@@ -38,7 +39,17 @@ from mcd_agent.segment_admission import (
     ordinary_snapshot_order,
     sync_cycle,
 )
+from mcd_agent.logical_issues import detect_segment_logical_issues, logical_issue_terminal_segment_notes
 from mcd_agent.daemon import RunningTask
+
+
+def _leadlist_filter(segment_id: int) -> str:
+    value = str(int(segment_id))
+    return (
+        'a:1:{i:0;a:5:{s:5:"field";s:8:"leadlist";s:4:"type";s:8:"leadlist";'
+        's:8:"operator";s:2:"in";s:6:"filter";a:1:{'
+        f'i:0;s:{len(value)}:"{value}";}}}}'
+    )
 
 
 class SegmentLivenessTests(unittest.TestCase):
@@ -265,6 +276,76 @@ class SegmentLivenessTests(unittest.TestCase):
             pressure=False,
         )
         self.assertEqual(cycle_planned, [151])
+
+    def test_topology_data_errors_finish_root_and_allow_next_cycle(self) -> None:
+        root = "/var/www/topology-data-error/public_html"
+        store = TaskStore(":memory:")
+        logical_issues = detect_segment_logical_issues(
+            [
+                {"id": 101, "is_published": 1, "filters": _leadlist_filter(102)},
+                {"id": 102, "is_published": 1, "filters": _leadlist_filter(101)},
+                {"id": 103, "is_published": 1, "filters": _leadlist_filter(101)},
+                {"id": 104, "is_published": 1, "filters": "a:0:{}"},
+            ]
+        )
+        topology_notes = logical_issue_terminal_segment_notes(
+            {"issues": [issue.payload() for issue in logical_issues]}
+        )
+        self.assertEqual(
+            topology_notes,
+            {
+                101: "data_error:dependency_cycle",
+                102: "data_error:dependency_cycle",
+                103: "data_error:dependency_cycle",
+            },
+        )
+        state, _added, started_new = sync_cycle(
+            None,
+            planned_ids=[101, 102, 103, 104],
+            never_built=[],
+            running_ids=[],
+            now_ts=100.0,
+        )
+        self.assertTrue(started_new)
+        store.put_runtime_sync(cycle_key(root), state)
+
+        updated, terminalized = _terminalize_segment_data_errors(
+            store,
+            root=root,
+            state=state,
+            terminal_notes=topology_notes,
+            now_ts=101.0,
+        )
+        self.assertEqual(terminalized, [101, 102, 103])
+        self.assertEqual(updated["status"], "active")
+        self.assertEqual(updated["errors"], [101, 102, 103])
+        self.assertEqual(_segment_cycle_pending_ids(updated), {104})
+        self.assertEqual(updated["error_notes"]["101"], "data_error:dependency_cycle")
+
+        _segment_cycle_terminal(
+            store,
+            root=root,
+            entity_id=104,
+            success=True,
+            note=None,
+            now_ts=102.0,
+        )
+        terminal = store.get_runtime_sync(cycle_key(root))
+        self.assertEqual(terminal["status"], "terminal")
+        self.assertEqual(terminal["errors"], [101, 102, 103])
+        self.assertEqual(terminal["done"], [104])
+
+        next_cycle, _added, next_started = sync_cycle(
+            terminal,
+            planned_ids=[101, 102, 103, 104],
+            never_built=[],
+            running_ids=[],
+            now_ts=103.0,
+        )
+        self.assertTrue(next_started)
+        self.assertNotEqual(next_cycle["cycle_id"], terminal["cycle_id"])
+        self.assertEqual(next_cycle["items"], [101, 102, 103, 104])
+        store.close()
 
     def test_pressure_held_candidate_never_enters_orphan_ordinary_ring(self) -> None:
         state, _added, _started = sync_cycle(

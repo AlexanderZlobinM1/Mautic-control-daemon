@@ -15,6 +15,21 @@ receipt all agree with both documents.
 - A running application PID must never be killed or waited on merely because
   an MCD update is being installed.
 
+## Scheduler result semantics
+
+- `segment_filter_safety` is diagnostic-only. A heuristic such as `today -1`
+  is not a Mautic return code and must not silently remove an executable
+  segment from the ring or mark it terminal before the profile-bound command
+  starts. Normal Mautic refusal follows the ordinary `TaskStore` start/retry
+  path and ends in a red terminal receipt.
+- Only proven unsafe segment topology (`dependency_cycle` or
+  `self_reference`, including their published descendants) is converted to an
+  explicit terminal data error after durable admission, with
+  `data_error:<code>`. The healthy tail must continue, the root must reach
+  terminal, and the next cycle must be independently admitted. This is a task
+  data error, never an MCD update barrier or a reason to leave assigned work
+  pending forever.
+
 ## Durable state and adoption
 
 The update/restart/reinstall path must preserve and re-adopt, without reset or

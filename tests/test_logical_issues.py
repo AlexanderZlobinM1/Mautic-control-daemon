@@ -10,6 +10,7 @@ from mcd_agent.logical_issues import (
     LogicalIssueStore,
     detect_segment_logical_issues,
     logical_issue_blocked_segment_ids,
+    logical_issue_terminal_segment_notes,
     prune_logical_issue_snapshots,
     remediate_logical_issue,
     remediate_logical_issues,
@@ -185,9 +186,17 @@ class LogicalIssueDetectionTests(unittest.TestCase):
             {"missing_dependency", "unpublished_dependency", "self_reference", "invalid_filter"},
         )
         warnings = [issue for issue in issues if issue.severity == "warning"]
-        self.assertEqual({issue.code for issue in warnings}, {"missing_dependency", "unpublished_dependency"})
+        self.assertEqual(
+            {issue.code for issue in warnings},
+            {"missing_dependency", "unpublished_dependency", "invalid_filter"},
+        )
         self.assertTrue(all(issue.blocked_entity_ids == [] for issue in warnings))
         self.assertTrue(all(issue.recommended_action == "" for issue in warnings))
+        self.assertEqual(logical_issue_blocked_segment_ids({"issues": [issue.payload() for issue in issues]}), {4})
+        self.assertEqual(
+            logical_issue_terminal_segment_notes({"issues": [issue.payload() for issue in issues]}),
+            {4: "data_error:self_reference"},
+        )
 
     def test_store_resolves_missing_issue_and_keeps_action_history(self) -> None:
         rows = [
