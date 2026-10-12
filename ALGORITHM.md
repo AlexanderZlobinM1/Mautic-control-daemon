@@ -4,7 +4,7 @@
 фактическую схему после исправления admission и должен обновляться вместе с
 кодом, тестами и runtime receipt. Документ не является разрешением на
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.146 (follow-up после immutable
+Актуальная редакция этого канона — MCD 1.5.147 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам
@@ -358,15 +358,19 @@ config на его profile baseline и только после этого при
    guard может ограничивать списки до 100 элементов, authoritative context —
    нет. Непрерывный persisted refill worker обслуживает каждый root
    независимо, использует тот же monitor/claim/spawn/terminal lifecycle и
-   уступает только короткому lock-gated проходу main dispatcher; slow root не
-   останавливает другие roots, а global all-roots barrier запрещён. Main
+   не уступает main dispatcher: пока он планирует тот же root, уже admitted
+   pending item может быть запущен тем же canonical claim/submit lifecycle;
+   slow root не останавливает другие roots, а global all-roots barrier
+   запрещён. Main
    dispatcher помечает busy только текущий root через
    `_iter_instances_with_root_dispatch_gate`; canonical lifecycle monitor и
    persisted refill запускаются root-local slices через отдельные executors,
    а `_SCHEDULER_RUNTIME_LOCK`/`_SchedulerRuntimeRegistry` сериализуют только
-   claim-to-spawn и общий running registry, не planning/DB работу. Terminal
-   callback немедленно будит refill, поэтому slow probe одного root не может
-   удерживать terminal/adoption/refill другого.
+   claim-to-spawn и общий running registry, не planning/DB работу. Refill
+   уступает только короткому root-local проходу lifecycle monitor, пока он
+   владеет running snapshot. Terminal callback немедленно будит refill,
+   поэтому slow probe одного root не может удерживать
+   terminal/adoption/refill другого.
 
 Статические queues строятся отдельно: общие dependencies двух линий принадлежат
 линии с более высоким precedence и выполняются ровно один раз. Например,

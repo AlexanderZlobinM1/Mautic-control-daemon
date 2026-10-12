@@ -1,3 +1,11 @@
+## 1.5.147 - 2026-10-12
+
+- Keep the persisted ordinary refill worker eligible while the main dispatcher
+  is planning the same root. A slow Mautic/DB planning pass can no longer hold
+  an already-admitted ordinary item for the next main-loop pass; the canonical
+  claim, duplicate, capacity, execution-lock and lifecycle-monitor guards
+  remain unchanged.
+
 ## 1.5.146 - 2026-10-12
 
 - Bind the complete delayed static-lane callback bundle, including its marker

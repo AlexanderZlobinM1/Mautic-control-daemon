@@ -14906,11 +14906,12 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
         ``_monitor_running`` path.  Lifecycle monitoring runs in separate
         root-local slices using that same canonical implementation; a slow
         liveness/import probe must never be placed in this shared refill path.
-        The refill worker runs continuously for already-admitted
-        persisted work, yielding only for the root currently owned by the
-        main dispatcher.  It therefore keeps ordinary queues moving during
-        slow planning without creating a second lifecycle or competing with
-        the main dispatcher.
+        The refill worker runs continuously for already-admitted persisted
+        work, including while the main dispatcher is planning the same root.
+        It therefore keeps ordinary queues moving during slow planning
+        without creating a second lifecycle or competing with the main
+        dispatcher: the shared claim/submit boundary remains the sole
+        execution hand-off.
         """
 
         last_error_log = 0.0
@@ -15031,7 +15032,14 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                         root = str(getattr(inst, "root", "") or "").strip()
                         if not root or not getattr(inst, "db", None):
                             continue
-                        if root in main_dispatch_busy_roots or root in lifecycle_monitor_busy_roots:
+                        # Planning ownership is not an execution barrier. An
+                        # admitted persisted item must be refillable while the
+                        # main dispatcher is inside this root's slow Mautic/
+                        # DB work. Keep the lifecycle-monitor gate: terminal
+                        # reconciliation owns that root's running snapshot;
+                        # the next wakeup retries after its short root-local
+                        # slice completes.
+                        if root in lifecycle_monitor_busy_roots:
                             continue
                         state = store.get_runtime_sync(_segment_cycle_key(root)) or {}
                         if not isinstance(state, Mapping):
