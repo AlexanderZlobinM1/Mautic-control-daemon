@@ -1631,6 +1631,126 @@ class SegmentLivenessTests(unittest.TestCase):
             self.assertEqual(_segment_cycle_pending_order(cold_state), list(range(2001, 2040)))
             check_store.close()
 
+    def test_lifecycle_gate_waits_for_taskstore_terminal_before_refill(self) -> None:
+        """An empty in-memory registry cannot race a monitor-owned TaskStore row."""
+
+        root = "/var/www/monitor-race/public_html"
+        store = TaskStore(":memory:")
+        task = RunningTask(
+            row_id=0,
+            root=root,
+            task_key=f"{root}|segment|153",
+            task_type="segment",
+            entity_id=153,
+            command_str="php segments:update 153",
+            timeout_sec=3600,
+            attempts=1,
+            started_at=time.time(),
+            pid=73001,
+        )
+        task.row_id = store.add_running(task)
+        busy_roots = {root}
+        self.assertTrue(
+            daemon._scheduler_root_lifecycle_gate_active(
+                store,
+                {},
+                busy_roots,
+                root,
+            )
+        )
+        # The monitor's terminal transition is the point at which refill may
+        # observe an empty authoritative TaskStore root and try the next
+        # durable item; before that point it must not submit another closure.
+        store.finish(task.row_id, state="done", rc=0, note="fixture_terminal")
+        self.assertFalse(
+            daemon._scheduler_root_lifecycle_gate_active(
+                store,
+                {},
+                busy_roots,
+                root,
+            )
+        )
+        store.close()
+
+    def test_dependency_refresh_merges_newer_policy_without_overwriting_it(self) -> None:
+        """A slow root-local read cannot restore an older pause/capacity snapshot."""
+
+        with tempfile.TemporaryDirectory() as td:
+            root = "/var/www/context-merge/public_html"
+            state_path = Path(td) / "state.db"
+            config_path = Path(td) / "mcd.toml"
+            config_path.write_text(
+                "[profile]\nname = \"custom\"\n"
+                f"[runtime]\nstate_db_path = \"{state_path}\"\n"
+                f"scheduler_pause_flag_path = \"{Path(td) / 'scheduler.pause'}\"\n",
+                encoding="utf-8",
+            )
+            config = load_config(str(config_path), allow_recover_from_mcc=False)
+            store = TaskStore(str(state_path), config)
+            cycle = {"schema": "mcd-segment-cycle-v1", "cycle_id": "cycle-old", "status": "active"}
+            store.put_runtime_sync(cycle_key(root), cycle)
+            context = {
+                "schema": "mcd-segment-dispatch-context-v1",
+                "root": root,
+                "mautic_major": 6,
+                "cycle_id": "cycle-old",
+                "cycle_status": "active",
+                "parents_by_child": {},
+                "children_by_parent": {},
+                "throttled_active": False,
+                "priority_pending": False,
+                "segment_slot_limit": 11,
+                "dispatch_pause": False,
+            }
+            store.put_runtime_sync(daemon._segment_dispatch_context_key(root), context)
+            db_started = threading.Event()
+            db_release = threading.Event()
+
+            class SlowMauticDB:
+                def __init__(self, _cfg: object) -> None:
+                    pass
+
+                def fetch_published_segment_filters(self) -> list[dict[str, object]]:
+                    db_started.set()
+                    self_assert = db_release.wait(timeout=2.0)
+                    if not self_assert:
+                        raise AssertionError("fixture DB refresh did not release")
+                    return [{"id": 1, "filters": "a:0:{}"}]
+
+            errors: list[BaseException] = []
+
+            def refresh() -> None:
+                try:
+                    daemon._rehydrate_segment_dispatch_context(
+                        store,
+                        root=root,
+                        db_config=object(),
+                        cycle_state=cycle,
+                        context=context,
+                        config=config,
+                        mautic_major=6,
+                    )
+                except BaseException as exc:
+                    errors.append(exc)
+
+            with patch.object(daemon, "MauticDB", SlowMauticDB):
+                thread = threading.Thread(target=refresh, daemon=True)
+                thread.start()
+                self.assertTrue(db_started.wait(timeout=1.0))
+                newer_context = dict(context)
+                newer_context["segment_slot_limit"] = 7
+                newer_context["dispatch_pause"] = True
+                store.put_runtime_sync(daemon._segment_dispatch_context_key(root), newer_context)
+                db_release.set()
+                thread.join(timeout=2.0)
+
+            self.assertEqual(errors, [])
+            merged = store.get_runtime_sync(daemon._segment_dispatch_context_key(root))
+            self.assertEqual(merged["segment_slot_limit"], 7)
+            self.assertTrue(merged["dispatch_pause"])
+            self.assertTrue(merged["dependency_snapshot_authoritative"])
+            store.close()
+
     def test_restart_rehydrates_frozen_full_cycle_without_resetting_claims_or_closure(self) -> None:
         """A stale context must recover the live graph before one M7 worker starts."""
 
@@ -1695,9 +1815,6 @@ class SegmentLivenessTests(unittest.TestCase):
                 "db_pause_until": 0.0,
                 "cluster_cron_allowed": True,
                 "cluster_import_allowed": True,
-                "throttled_active": False,
-                "priority_pending": False,
-                "segment_slot_limit": 11,
             }
             store.put_runtime_sync(daemon._segment_dispatch_context_key(root), stale_context)
             before_cycle = deepcopy(cycle)
@@ -1733,6 +1850,13 @@ class SegmentLivenessTests(unittest.TestCase):
                     context=stale_context,
                     config=config,
                     mautic_major=7,
+                    recovery_policy={
+                        "throttled_active": False,
+                        "priority_pending": False,
+                        "segment_slot_limit": 11,
+                        "cluster_cron_allowed": True,
+                        "cluster_import_allowed": True,
+                    },
                 )
 
             after_cycle = store.get_runtime_sync(cycle_key(root))
@@ -1744,6 +1868,9 @@ class SegmentLivenessTests(unittest.TestCase):
             self.assertEqual(refreshed["children_by_parent"]["153"], [154])
             self.assertTrue(refreshed["dependency_snapshot_authoritative"])
             self.assertTrue(refreshed["native_segment_exclude_supported"])
+            self.assertEqual(refreshed["segment_slot_limit"], 11)
+            self.assertFalse(refreshed["throttled_active"])
+            self.assertFalse(refreshed["priority_pending"])
 
             pending = _segment_cycle_pending_order(after_cycle)
             self.assertIn(153, pending)
@@ -1752,6 +1879,14 @@ class SegmentLivenessTests(unittest.TestCase):
                 daemon._segment_chain_from_dispatch_context(store, root, pending, 154),
                 [154, 146, 149, 152, 153],
             )
+            m6_context = dict(refreshed)
+            m6_context["mautic_major"] = 6
+            store.put_runtime_sync(daemon._segment_dispatch_context_key(root), m6_context)
+            self.assertEqual(
+                daemon._segment_chain_from_dispatch_context(store, root, pending, 154),
+                [146, 149, 152, 153, 154],
+            )
+            store.put_runtime_sync(daemon._segment_dispatch_context_key(root), refreshed)
 
             class FakeProcess:
                 _next_pid = 72000

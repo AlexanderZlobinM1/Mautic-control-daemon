@@ -245,6 +245,27 @@ _SEGMENT_DISPATCH_CONTEXT_PREFIX = "segment_dispatch_context:"
 _SCHEDULER_RUNTIME_LOCK = threading.RLock()
 
 
+def _scheduler_root_lifecycle_gate_active(
+    store: "TaskStore",
+    running: Mapping[str, "RunningTask"],
+    lifecycle_monitor_busy_roots: set[str],
+    root: str,
+) -> bool:
+    """Keep refill behind a root monitor while any authoritative task exists."""
+
+    root_value = str(root or "").strip()
+    if root_value not in lifecycle_monitor_busy_roots:
+        return False
+    if any(str(task.root or "").strip() == root_value for task in running.values()):
+        return True
+    try:
+        return bool(store.running_rows_for_root(root_value))
+    except Exception:
+        # A failed authoritative check is fail-closed while the lifecycle
+        # monitor owns the root; a false negative could duplicate a closure.
+        return True
+
+
 def _scheduler_runtime_serialized(method: Callable[..., Any]) -> Callable[..., Any]:
     """Serialize shared running/popens lifecycle transitions."""
 
@@ -2491,6 +2512,9 @@ def _segment_dispatch_context_needs_dependency_refresh(
         return True
     if not bool(context.get("dependency_snapshot_authoritative")):
         return True
+    for policy_key in ("throttled_active", "priority_pending", "segment_slot_limit"):
+        if policy_key not in context or context.get(policy_key) is None:
+            return True
 
     cycle_id = str((cycle_state or {}).get("cycle_id") or "").strip()
     context_cycle_id = str(context.get("cycle_id") or "").strip()
@@ -2514,6 +2538,10 @@ def _segment_dispatch_context_needs_dependency_refresh(
     return bool(interval > 0 and float(now_ts) - refreshed_at >= float(interval))
 
 
+class _SegmentDispatchContextGenerationChanged(RuntimeError):
+    """A root's active cycle changed while its read-only refresh was running."""
+
+
 def _rehydrate_segment_dispatch_context(
     store: "TaskStore",
     *,
@@ -2523,6 +2551,7 @@ def _rehydrate_segment_dispatch_context(
     context: Mapping[str, object] | None,
     config: AgentConfig,
     mautic_major: int,
+    recovery_policy: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Rebuild one root's dependency/capability context without touching work.
 
@@ -2537,15 +2566,35 @@ def _rehydrate_segment_dispatch_context(
     rows = MauticDB(db_config).fetch_published_segment_filters()
     dependency_children, dependency_parents = segment_dependency_maps(rows)
     refreshed_at = float(time.time())
-    refreshed = dict(context) if isinstance(context, Mapping) else {}
+    captured_cycle_id = str((cycle_state or {}).get("cycle_id") or "").strip()
+    current_cycle = store.get_runtime_sync(_segment_cycle_key(str(root))) or {}
+    current_cycle_id = str(current_cycle.get("cycle_id") or "").strip() if isinstance(current_cycle, Mapping) else ""
+    if captured_cycle_id and current_cycle_id != captured_cycle_id:
+        raise _SegmentDispatchContextGenerationChanged(
+            f"active cycle changed during dependency refresh: {captured_cycle_id} -> {current_cycle_id}"
+        )
+    current_context = store.get_runtime_sync(_segment_dispatch_context_key(str(root))) or {}
+    if isinstance(current_context, Mapping):
+        current_context_cycle_id = str(current_context.get("cycle_id") or "").strip()
+        if current_context_cycle_id and captured_cycle_id and current_context_cycle_id != captured_cycle_id:
+            raise _SegmentDispatchContextGenerationChanged(
+                f"dispatch context changed during dependency refresh: {captured_cycle_id} -> {current_context_cycle_id}"
+            )
+    # Merge into the latest context, not the snapshot captured before the DB
+    # read.  The planner may have published a newer pause/capacity/lane policy
+    # while this root-local refresh was in flight; only graph/capability
+    # metadata is replaced below.
+    refreshed = dict(current_context) if isinstance(current_context, Mapping) else {}
+    if not refreshed and isinstance(context, Mapping):
+        refreshed.update(context)
     refreshed.update(
         {
             "schema": "mcd-segment-dispatch-context-v1",
             "root": str(root),
             "mautic_major": int(mautic_major or 0),
             "updated_at": refreshed_at,
-            "cycle_id": (cycle_state or {}).get("cycle_id"),
-            "cycle_status": str((cycle_state or {}).get("status") or ""),
+            "cycle_id": (current_cycle or cycle_state or {}).get("cycle_id"),
+            "cycle_status": str((current_cycle or cycle_state or {}).get("status") or ""),
             "parents_by_child": {
                 str(int(child)): sorted(int(parent) for parent in parents if int(parent) > 0)
                 for child, parents in dependency_parents.items()
@@ -2566,6 +2615,9 @@ def _rehydrate_segment_dispatch_context(
             ),
         }
     )
+    for key, value in (recovery_policy or {}).items():
+        if key not in refreshed or refreshed.get(key) is None:
+            refreshed[key] = value
 
     # Mautic 7's native exclude capability is part of the same execution
     # contract.  Probe it once per root/capability generation, outside the
@@ -9625,6 +9677,29 @@ class TaskStore:
         return self._sqlite_fetchall_dicts("SELECT * FROM tasks WHERE state='running' ORDER BY id ASC")
 
     @_task_store_serialized
+    def running_rows_for_root(self, root: str) -> list[dict[str, object]]:
+        """Return running TaskStore rows for one root without a host-wide scan."""
+
+        root_value = str(root or "").strip()
+        if not root_value:
+            return []
+        if self._mysql_mode:
+            tasks_table = self._mysql_tables.get("tasks", "")
+            if tasks_table and self._mysql_available():
+                try:
+                    return self._mysql_query(
+                        f"SELECT * FROM `{tasks_table}` "
+                        "WHERE host_name=%s AND root=%s AND state='running' ORDER BY id ASC",
+                        (self._node_id, root_value),
+                    )
+                except Exception:
+                    pass
+        return self._sqlite_fetchall_dicts(
+            "SELECT * FROM tasks WHERE root=? AND state='running' ORDER BY id ASC",
+            (root_value,),
+        )
+
+    @_task_store_serialized
     def running_count(self) -> int:
         if self._mysql_mode:
             tasks_table = self._mysql_tables.get("tasks", "")
@@ -15292,10 +15367,13 @@ def run_loop(
                             refresh_root,
                             exc,
                         )
-                        retry_interval = max(
-                            float(getattr(config, "dispatch_interval_sec", 1) or 1),
-                            float(getattr(config, "segment_full_scan_interval_sec", 0) or 0),
-                        )
+                        if isinstance(exc, _SegmentDispatchContextGenerationChanged):
+                            retry_interval = max(0.2, float(getattr(config, "dispatch_interval_sec", 1) or 1))
+                        else:
+                            retry_interval = max(
+                                float(getattr(config, "dispatch_interval_sec", 1) or 1),
+                                float(getattr(config, "segment_full_scan_interval_sec", 0) or 0),
+                            )
                         dependency_refresh_retry_at[refresh_root] = time.time() + retry_interval
                 with _SCHEDULER_RUNTIME_LOCK:
                     if not cluster_route_allows(config, "cron"):
@@ -15326,9 +15404,13 @@ def run_loop(
                         # live task there is no transition to protect, and a
                         # stuck monitor must not starve an already-admitted
                         # durable item.
-                        if root in lifecycle_monitor_busy_roots:
-                            if any(task.root == root for task in running.values()):
-                                continue
+                        if _scheduler_root_lifecycle_gate_active(
+                            store,
+                            running,
+                            lifecycle_monitor_busy_roots,
+                            root,
+                        ):
+                            continue
                         state = store.get_runtime_sync(_segment_cycle_key(root)) or {}
                         if not isinstance(state, Mapping):
                             continue
@@ -15380,6 +15462,63 @@ def run_loop(
                             if now_root < float(dependency_refresh_retry_at.get(root, 0.0) or 0.0):
                                 continue
                             if root not in dependency_refresh_futures:
+                                static_policy_state = store.get_runtime_sync(_static_lane_state_key(root)) or {}
+                                static_policy_pending = False
+                                static_policy_lanes = (
+                                    static_policy_state.get("lanes")
+                                    if isinstance(static_policy_state, Mapping)
+                                    else {}
+                                )
+                                if isinstance(static_policy_lanes, Mapping):
+                                    static_policy_pending = any(
+                                        bool(
+                                            _normalize_segment_ids(lane_payload.get("queued"))
+                                            + _normalize_segment_ids(lane_payload.get("claimed"))
+                                            + _normalize_segment_ids(lane_payload.get("running"))
+                                        )
+                                        for lane_payload in static_policy_lanes.values()
+                                        if isinstance(lane_payload, Mapping)
+                                    )
+                                recovery_throttled = context.get("throttled_active")
+                                if recovery_throttled is None:
+                                    recovery_throttled = _campaign_pressure_active(
+                                        config,
+                                        running,
+                                        root,
+                                        trigger_prio_ring=deque(),
+                                        trigger_reg_ring=deque(),
+                                        rebuild_prio_ring=deque(),
+                                        rebuild_reg_ring=deque(),
+                                        now_ts=now_root,
+                                    )
+                                recovery_priority = context.get("priority_pending")
+                                if recovery_priority is None:
+                                    recovery_priority = bool(static_policy_pending)
+                                recovery_slot_limit = context.get("segment_slot_limit")
+                                if recovery_slot_limit is None:
+                                    recovery_slot_limit = _effective_segment_slot_limit(
+                                        config,
+                                        bool(recovery_throttled),
+                                    )
+                                recovery_policy = {
+                                    "scheduler_pause": bool(context.get("scheduler_pause", False)),
+                                    "backup_pause": bool(context.get("backup_pause", False)),
+                                    "backup_pause_reason": str(context.get("backup_pause_reason") or ""),
+                                    "dispatch_pause": bool(context.get("dispatch_pause", False)),
+                                    "db_pause_until": float(context.get("db_pause_until") or 0.0),
+                                    "db_pause_reason": str(context.get("db_pause_reason") or ""),
+                                    "cluster_cron_allowed": bool(context.get("cluster_cron_allowed", True)),
+                                    "cluster_import_allowed": bool(
+                                        context.get("cluster_import_allowed", cluster_import_allowed)
+                                    ),
+                                    "throttled_active": bool(recovery_throttled),
+                                    "priority_pending": bool(recovery_priority),
+                                    "segment_slot_limit": max(0, int(recovery_slot_limit or 0)),
+                                    "segment_lazy_update_enabled": _segment_lazy_update_effective_setting(
+                                        config,
+                                        inst,
+                                    ),
+                                }
                                 dependency_refresh_executors.setdefault(
                                     root,
                                     ThreadPoolExecutor(
@@ -15403,6 +15542,7 @@ def run_loop(
                                         or getattr(inst, "mautic_major", 0)
                                         or 0
                                     ),
+                                    recovery_policy=recovery_policy,
                                 )
                             continue
                         throttled_raw = context.get("throttled_active")
