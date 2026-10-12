@@ -13224,6 +13224,18 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                                 store.get_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY) or {},
                             )
                             logging.info("runtime-overrides accepted segment lanes applied during local-delta retry")
+                accepted_desired = store.get_runtime_sync("mcc_runtime_desired_state") or {}
+                if isinstance(accepted_desired, dict) and accepted_lanes:
+                    ack_failures = acknowledge_desired_runtime_states(
+                        config,
+                        store,
+                        desired_state=accepted_desired,
+                        host_runtime=accepted_runtime,
+                        instance_states=instance_desired_states(accepted_runtime, installs),
+                        runtime_fingerprint=overrides_fingerprint(accepted_runtime),
+                    )
+                    for failure in ack_failures:
+                        logging.warning("runtime desired-state ACK retry failed: %s", failure)
                 startup_runtime_sync_pending = True
                 runtime_overrides_sync_requested = True
                 next_runtime_overrides_poll_at = 0.0

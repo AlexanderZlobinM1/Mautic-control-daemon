@@ -1,3 +1,8 @@
+## 1.5.103 - 2026-10-12
+
+- Retry durable runtime ACK publication from the accepted desired snapshot
+  while unrelated local runtime reconciliation remains pending.
+
 ## 1.5.102 - 2026-10-12
 
 - Apply accepted canonical segment lane maps while unrelated local runtime
