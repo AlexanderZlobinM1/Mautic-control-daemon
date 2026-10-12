@@ -25,7 +25,13 @@ from mcd_agent.hardware_profile import capture_profile_authority, restore_profil
 from mcd_agent.host_identity import resolve_agent_identity
 from mcd_agent.state_backend import mysql_state_connection, mysql_state_enabled, mysql_state_table_names
 from mcd_agent.version_identity import agent_version_payload, installed_agent_version, package_agent_version, source_version
-from mcd_agent.update_admission import scheduler_admission_lock, scheduler_pause_path
+from mcd_agent.update_admission import (
+    create_update_admission_barrier,
+    recover_stale_update_admission_barrier,
+    remove_update_admission_barrier,
+    scheduler_admission_lock,
+    scheduler_pause_path,
+)
 
 try:
     import fcntl
@@ -1920,6 +1926,28 @@ def maybe_auto_update(cfg: AgentConfig, *, force: bool = False) -> tuple[str | N
     cleanup_state_changed = _maybe_run_update_cleanup(cfg, state, now_s=now_s)
     auto = bool(cfg.mcd_auto_update_enabled) and _update_policy(cfg) != "off"
     cluster_update_mode = auto and _cluster_update_enabled(cfg)
+    barrier_recovery: dict[str, Any] = {}
+    # Recover an orphaned updater barrier even while MCC polling is inside its
+    # normal backoff window. A backup lock remains authoritative and therefore
+    # suppresses recovery until that critical operation ends.
+    barrier_recovery_allowed = True
+    if cfg.backup_enabled and not cluster_update_mode:
+        try:
+            barrier_recovery_allowed = not backup_lock_active(cfg)
+        except Exception as e:
+            barrier_recovery_allowed = False
+            logging.warning("MCD update admission recovery backup-lock check failed: %s", e)
+    if barrier_recovery_allowed:
+        try:
+            barrier_recovery = recover_stale_update_admission_barrier(cfg)
+            if barrier_recovery.get("recovered"):
+                state["last_barrier_recovery"] = barrier_recovery.get("reason", "recovered")
+                state["last_barrier_recovery_ts"] = now_s
+                cleanup_state_changed = True
+        except Exception as e:
+            # Recovery is deliberately conservative: an observation failure
+            # must leave the barrier in place and never turn into a bypass.
+            logging.warning("MCD update admission recovery failed: %s", e)
     next_allowed = int(state.get("next_check_ts", 0) or 0)
     if not force and now_s < next_allowed:
         # A cluster rollout is coordinated through the shared Galera state and
@@ -1980,19 +2008,31 @@ def maybe_auto_update(cfg: AgentConfig, *, force: bool = False) -> tuple[str | N
 
     update_barrier = False
     pause_flag = scheduler_pause_path(cfg)
+
+    def release_update_barrier() -> None:
+        nonlocal update_barrier
+        if not update_barrier:
+            return
+        try:
+            remove_update_admission_barrier(cfg)
+        except OSError:
+            logging.warning("MCD update admission barrier cleanup failed: %s", pause_flag)
+        finally:
+            update_barrier = False
+
     if status in {"update", "update_available"} and bool(decision.get("target")):
         # Acquire the same admission lock used by the daemon's final submit
         # boundary before publishing the barrier. Once this returns, no new
         # task can pass the final check and spawn after the barrier timestamp.
         with scheduler_admission_lock(cfg):
             if not pause_flag.exists():
-                pause_flag.parent.mkdir(parents=True, exist_ok=True)
-                pause_flag.write_text("mcd-update-admission\n", encoding="utf-8")
+                create_update_admission_barrier(cfg, target=str(decision.get("target") or ""))
                 update_barrier = True
 
     if cluster_update_mode:
         handled, cluster_msg, cluster_retry = maybe_cluster_auto_update(cfg, decision, now_s=now_s)
         if handled:
+            release_update_barrier()
             state2 = _read_state(cfg)
             state2["last_check_ts"] = now_s
             state2["last_check_status"] = status or "unknown"
@@ -2002,6 +2042,7 @@ def maybe_auto_update(cfg: AgentConfig, *, force: bool = False) -> tuple[str | N
             _write_state(cfg, state2)
             return cluster_msg, int(state2["next_check_ts"]) - now_s
         if status in {"update", "update_available"}:
+            release_update_barrier()
             retry_sec = max(60, int(cfg.mcd_update_wait_retry_sec or retry_after or 60))
             msg = "MCD cluster update deferred: shared cluster coordinator is unavailable"
             state["last_cluster_update_result"] = msg
@@ -2052,23 +2093,27 @@ def maybe_auto_update(cfg: AgentConfig, *, force: bool = False) -> tuple[str | N
                     f"running={__version__}{repair_note}; service restart scheduled"
                 )
                 _clear_active_campaign_process_state(state)
+                release_update_barrier()
                 state["next_check_ts"] = now_s + max(60, int(cfg.mcd_update_wait_retry_sec or 60))
                 _write_state(cfg, state)
                 return str(state["last_result"]), int(state["next_check_ts"]) - now_s
             state["next_check_ts"] = now_s + max(60, int(cfg.mcd_update_check_interval_sec))
             _clear_active_campaign_process_state(state)
+            release_update_barrier()
             _write_state(cfg, state)
             return None, int(state["next_check_ts"]) - now_s
         if status == "update_available" and not auto:
+            release_update_barrier()
             state["next_check_ts"] = now_s + max(60, int(cfg.mcd_update_check_interval_sec))
             _write_state(cfg, state)
             return f"MCD update available: current={current_installed} target={target}", int(state["next_check_ts"]) - now_s
-        ok, msg = apply_update(cfg, decision)
-        if ok and update_barrier:
-            try:
-                pause_flag.unlink(missing_ok=True)
-            except OSError:
-                logging.warning("MCD update admission barrier cleanup failed: %s", pause_flag)
+        try:
+            ok, msg = apply_update(cfg, decision)
+        finally:
+            # A failed or interrupted source operation must not leave a
+            # scheduler-wide MCD barrier behind. The source-operation lock and
+            # owner metadata make the recovery path safe across a crash.
+            release_update_barrier()
         # apply_update() persists result fields (last_status/last_result/...).
         # Re-read to avoid overwriting them with stale pre-apply state.
         state2 = _read_state(cfg)

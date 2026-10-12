@@ -300,8 +300,12 @@ config на его profile baseline и только после этого при
    restart сохраняет их через `KillMode=process`, а startup re-adopts их из
    TaskStore. Update повторяет попытку только для явных MCD-owned barriers
    (backup/source/update/migration), а не ждёт завершения app process. Barrier
-   переживает scheduler tick и restart и снимается только после успешного
-   apply либо штатной terminal-cleanup операции.
+   переживает scheduler tick и restart. Новый update barrier обязан сохранять
+   operation/PID/PID-start identity; после успешного или неуспешного terminal
+   apply он снимается штатной cleanup-операцией. После crash legacy или
+   orphaned `mcd-update-admission` flag снимается только если owner не жив и
+   source/update lease свободен; `paused` и прочие manual/maintenance flags
+   не трогаются recovery-кодом.
 7. Обязательная граница self-update: живой обычный PHP/Mautic console process
    (`segments`, `campaigns`, `import` и любой другой application command) не
    является blocker-ом. Он должен пережить restart/reinstall MCD, сохранить

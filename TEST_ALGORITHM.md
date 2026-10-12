@@ -24,6 +24,10 @@ package/runtime SHA и реальный MCC/package/install receipt.
    PID adoption/terminal receipt и каждый MCD-owned critical barrier. Любое
    расхождение source ↔ tests ↔ systemd ↔ receipt блокирует push/install
    acceptance.
+4. `scheduler.pause` проверяется по владельцу, а не по факту существования
+   файла: новый update barrier содержит operation/PID/PID-start identity;
+   живой owner или source/update lease сохраняет barrier, orphaned legacy
+   `mcd-update-admission` восстанавливается, а ручной `paused` не удаляется.
 
 ## State fixture
 
@@ -217,6 +221,7 @@ barrier остаются обязательными.
 | Обязательное правило | Канонический код | Проверка и live evidence |
 |---|---|---|
 | ordinary Mautic/PHP work не блокирует update; MCD critical barriers блокируют | `mcd_agent/self_update.py`, `mcd_agent/daemon.py`, `systemd/mcd.service` | self-update lifecycle tests + fresh M6/M7 receipt with worker PID adoption and barrier reasons |
+| stale scheduler admission не превращается в вечный blocker | `mcd_agent/update_admission.py`, `mcd_agent/self_update.py` | owner/lease/recovery tests in `tests/test_update_admission_race.py` + read-only stale-barrier receipt |
 | TaskStore/runtime_sync queues, claims/running/follow-up/retry/monitor state переживают restart/reinstall | `mcd_agent/task_store.py`, `mcd_agent/daemon.py` | restart/adoption tests + fresh M6/M7 seeded-cycle receipt |
 | roots/instances независимы; нет all-roots barrier/loop одного root | `_iter_instances_with_root_dispatch_gate`, root-local monitor/refill workers | `tests/test_segment_liveness.py` + fresh M6/M7 receipt with every B/C root cycle_count and terminal seeded IDs |
 | explicit caps, sliding fairness и dedicated super lane считают правильный budget | `_scheduler_host_slots_available`, `_scheduler_instance_slots_available`, `_scheduler_round_robin_order` | `tests/test_campaign_ring_dispatch.py` hard-cap/3+ root/40+12/4-outside-11 rows + fresh aggregate slot receipt |

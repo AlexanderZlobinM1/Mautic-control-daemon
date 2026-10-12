@@ -12,6 +12,12 @@ receipt all agree with both documents.
 - Only an explicit MCD-owned critical barrier may defer an update: backup,
   source/update lease, deployment, migration, or another barrier added to the
   MCD lock contract with a durable reason and retry state.
+- The updater's `scheduler.pause` is not itself proof of an active critical
+  operation. A new update barrier records its operation, PID, and PID-start
+  identity beside the flag; a legacy/orphaned `mcd-update-admission` flag is
+  recovered only while the source/update lease is free. Active owner/lease
+  evidence keeps the barrier, while manual/maintenance values such as
+  `paused` are never removed by updater recovery.
 - A running application PID must never be killed or waited on merely because
   an MCD update is being installed.
 

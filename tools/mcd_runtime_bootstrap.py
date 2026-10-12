@@ -458,7 +458,13 @@ def _scheduler_status(install_dir: Path, config: Path) -> dict[str, Any] | None:
         return None
     python = _venv_python(install_dir)
     proc = _run(
-        [str(python), "-m", "mcd_agent.cli", "scheduler", "--config", str(config), "status", "--verbose", "--json"],
+        # ``mcd_agent.cli`` is the implementation module and deliberately has
+        # no module-level ``__main__`` dispatch.  Calling it with ``-m`` can
+        # therefore exit successfully without emitting JSON, which makes a
+        # live bridge receipt report ``invalid_json`` even though the probe
+        # never ran.  Use the shipped entry point so the receipt observes the
+        # actual scheduler state.
+        [str(python), "-m", "mcd_agent", "scheduler", "--config", str(config), "status", "--verbose", "--json"],
         cwd=install_dir,
         check=False,
     )
