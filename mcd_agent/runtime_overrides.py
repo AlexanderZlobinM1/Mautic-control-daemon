@@ -698,7 +698,9 @@ def runtime_key_observation(
         if key == "segment_whitelist_instance_settings":
             # Legacy whitelist is the wire alias of canonical priority; it is
             # not an independent scheduler lane.
-            effective_value = effective.get("segment_priority_instance_settings")
+            effective_value = effective.get("segment_whitelist_instance_settings")
+            if not isinstance(effective_value, dict) or not effective_value:
+                effective_value = effective.get("segment_priority_instance_settings")
             effective_value = _canonical_legacy_whitelist_value(effective_value)
         else:
             effective_value = False if key in _RUNTIME_CAPABILITY_KEYS else effective.get(key)

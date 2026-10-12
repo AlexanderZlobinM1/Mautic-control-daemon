@@ -2142,7 +2142,12 @@ def runtime_effective_map(cfg: AgentConfig) -> dict[str, Any]:
     priority = out.get("segment_priority_instance_settings")
     if isinstance(legacy, dict) and isinstance(priority, dict):
         merged = dict(priority)
+        legacy_projection: dict[str, Any] = {}
         for uid, raw in legacy.items():
+            legacy_value = raw
+            if isinstance(legacy_value, dict) and "segment_whitelist" in legacy_value:
+                legacy_value = {"segments": _normalize_int_list(legacy_value.get("segment_whitelist"))}
+            legacy_projection[str(uid)] = legacy_value
             if str(uid) in merged:
                 # Explicit modern priority rows, including empty tombstones,
                 # have precedence over the legacy alias.
@@ -2151,7 +2156,7 @@ def runtime_effective_map(cfg: AgentConfig) -> dict[str, Any]:
                 raw = {"segments": _normalize_int_list(raw.get("segment_whitelist"))}
             merged[str(uid)] = raw
         out["segment_priority_instance_settings"] = merged
-        out["segment_whitelist_instance_settings"] = merged
+        out["segment_whitelist_instance_settings"] = legacy_projection or merged
     return out
 
 

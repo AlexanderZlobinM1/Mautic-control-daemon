@@ -1,3 +1,8 @@
+## 1.5.127 - 2026-10-12
+
+- Preserve the legacy whitelist projection for alias ACK ordering while
+  retaining merged canonical priority effective state for scheduler reads.
+
 ## 1.5.126 - 2026-10-12
 
 - Resolve qualified instance ACK scopes against base-UID effective projections

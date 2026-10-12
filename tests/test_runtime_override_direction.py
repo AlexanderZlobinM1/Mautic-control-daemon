@@ -2206,6 +2206,33 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
         row = observed["keys"]["segment_priority_instance_settings"]
         self.assertEqual(row["effective"], {"segments": [23, 86]})
         self.assertEqual(row["status"], "unchanged")
+
+    def test_legacy_alias_ack_preserves_legacy_projection_order(self) -> None:
+        cfg = SimpleNamespace(profile_name="custom")
+        with patch(
+            "mcd_agent.runtime_overrides.runtime_effective_map",
+            return_value={
+                "segment_priority_instance_settings": {"proda": {"segments": [23, 44, 55, 61]}},
+                "segment_whitelist_instance_settings": {"proda": {"segments": [23, 44, 61, 55]}},
+            },
+        ), patch(
+            "mcd_agent.runtime_overrides.runtime_supported_keys",
+            return_value={"segment_whitelist_instance_settings"},
+        ), patch(
+            "mcd_agent.runtime_overrides.runtime_remote_allowed_keys",
+            return_value={"segment_whitelist_instance_settings"},
+        ):
+            observed = runtime_overrides.runtime_key_observation(
+                cfg,
+                {"segment_whitelist_instance_settings": {
+                    "proda@Farm02": {"segment_whitelist": [23, 44, 61, 55]},
+                }},
+                revision=185,
+                scope_key="proda@Farm02",
+            )
+        row = observed["keys"]["segment_whitelist_instance_settings"]
+        self.assertEqual(row["effective"], {"segments": [23, 44, 61, 55]})
+        self.assertEqual(row["status"], "unchanged")
         self.assertEqual(
             desired_profile_from_runtime_response(
                 {
