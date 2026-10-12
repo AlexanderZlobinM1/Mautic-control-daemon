@@ -1,3 +1,10 @@
+## 1.5.145 - 2026-10-12
+
+- Bind delayed static-lane start/complete callbacks to the root, task type and
+  command they created. A callback that runs after the dispatcher advances to
+  another instance can no longer write a foreign-root chain marker or command;
+  the current-root marker is created and closed for the original task.
+
 ## 1.5.144 - 2026-10-12
 
 - Freeze the ordinary-application/non-blocking update rule as a mandatory,

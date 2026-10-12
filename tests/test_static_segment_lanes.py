@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ast
+import inspect
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -27,6 +29,28 @@ from mcd_agent.static_segment_lanes import (
 
 
 class StaticSegmentLaneTests(unittest.TestCase):
+    def test_delayed_static_callbacks_bind_creation_root_and_command(self) -> None:
+        """A callback may run after the dispatcher has advanced to another root."""
+        tree = ast.parse(inspect.getsource(daemon.run_loop))
+        functions = {
+            node.name: node
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name in {"_static_segment_started", "_static_segment_complete"}
+        }
+        for name in ("_static_segment_started", "_static_segment_complete"):
+            with self.subTest(callback=name):
+                defaults = {
+                    arg.arg: ast.unparse(default)
+                    for arg, default in zip(
+                        functions[name].args.kwonlyargs,
+                        functions[name].args.kw_defaults,
+                    )
+                    if default is not None
+                }
+                self.assertEqual(defaults.get("root"), "root")
+                self.assertEqual(defaults.get("command_str"), "static_command_str")
+
     def test_whitelist_is_only_priority_migration_alias(self) -> None:
         config = SimpleNamespace(
             disable_whitelist=False,

@@ -15672,6 +15672,8 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                         def _static_segment_started(
                             pid: int,
                             *,
+                            root: str = root,
+                            command_str: str = static_command_str,
                             started_at: float = static_started_at,
                             chain_ids: tuple[int, ...] = tuple(static_chain_ids),
                             owner_id: int = int(segment_id),
@@ -15685,7 +15687,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                                     status="running",
                                     now_ts=marker_at,
                                     pid=int(pid),
-                                    command_str=static_command_str,
+                                    command_str=command_str,
                                 )
                             _segment_chain_runtime_write(
                                 store,
@@ -15694,13 +15696,14 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                                 entity_ids=chain_ids,
                                 status="running",
                                 now_ts=marker_at,
-                                task=_static_segment_marker_task(pid),
+                                task=_static_segment_marker_task(pid, command_str=command_str),
                             )
 
                         def _static_segment_complete(
                             rc: int | None,
                             *,
                             root: str = root,
+                            command_str: str = static_command_str,
                             lane_name: str = lane_name,
                             segment_id: int = int(segment_id),
                             chain_ids: tuple[int, ...] = tuple(static_chain_ids),
@@ -15717,7 +15720,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                                     now_ts=terminal_at,
                                     note=note,
                                     pid=0,
-                                    command_str=static_command_str,
+                                    command_str=command_str,
                                 )
                                 _static_lane_terminal(
                                     store,
@@ -15736,7 +15739,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                                 entity_ids=chain_ids,
                                 status="terminal",
                                 now_ts=terminal_at,
-                                task=_static_segment_marker_task(0),
+                                task=_static_segment_marker_task(0, command_str=command_str),
                             )
                             segment_dispatch_wakeup.set()
 
