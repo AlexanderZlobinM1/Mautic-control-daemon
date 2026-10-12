@@ -1,3 +1,12 @@
+## 1.5.130 - 2026-10-12
+
+- Make the default ordinary planner a full published-segment cycle; the
+  explicit lazy runtime flag opts into due-only planning without deleting
+  already persisted remaining work. Import singleton scope is per instance,
+  allowing parallel imports across instances within profile capacity.
+- Reconcile the canonical algorithm and acceptance matrix with the published
+  per-instance import rule and the ordinary-worker self-update lifecycle.
+
 ## 1.5.129 - 2026-10-12
 
 - Make self-update admission lock/barrier based: ordinary Mautic/PHP console
@@ -8,10 +17,6 @@
 - Change the shipped systemd unit to `KillMode=process` and add mandatory
   lifecycle acceptance coverage for worker survival, state preservation and
   critical-operation barriers.
-- Make the default ordinary planner a full published-segment cycle; the
-  explicit lazy runtime flag opts into due-only planning without deleting
-  already persisted remaining work. Import singleton scope is per instance,
-  allowing parallel imports across instances within profile capacity.
 
 ## 1.5.128 - 2026-10-12
 
