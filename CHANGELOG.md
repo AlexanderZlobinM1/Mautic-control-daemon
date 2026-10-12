@@ -8,6 +8,10 @@
 - Change the shipped systemd unit to `KillMode=process` and add mandatory
   lifecycle acceptance coverage for worker survival, state preservation and
   critical-operation barriers.
+- Make the default ordinary planner a full published-segment cycle; the
+  explicit lazy runtime flag opts into due-only planning without deleting
+  already persisted remaining work. Import singleton scope is per instance,
+  allowing parallel imports across instances within profile capacity.
 
 ## 1.5.128 - 2026-10-12
 

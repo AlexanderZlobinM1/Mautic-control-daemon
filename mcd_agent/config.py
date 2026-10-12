@@ -1823,7 +1823,8 @@ def _auto_migrate_legacy_runtime_keys(config_path: str) -> int:
 
 def _auto_migrate_legacy_sql_defaults(config_path: str) -> int:
     """
-    Upgrade legacy SQL defaults in mutable config to current due-only defaults.
+    Upgrade legacy SQL defaults in mutable config to the current SQL shape.
+    Planner mode is selected separately by ``segment_lazy_update_enabled``.
     """
     p = _resolve_mutable_config_path(config_path)
     if not p.exists():
@@ -3088,7 +3089,10 @@ def _load_config_inner(path: str) -> AgentConfig:
         segment_regular_parallel_idle=int(runtime.get("segment_regular_parallel_idle", 1)),
         segment_full_scan_interval_sec=int(runtime.get("segment_full_scan_interval_sec", 300)),
         segment_periodic_full_scan_enabled=bool(runtime.get("segment_periodic_full_scan_enabled", False)),
-        segment_lazy_update_enabled=bool(runtime.get("segment_lazy_update_enabled", True)),
+        # Full published-segment cycles are the safe default.  The explicit
+        # lazy flag opts into due-only planning and must not erase durable
+        # remaining work already admitted in TaskStore.
+        segment_lazy_update_enabled=bool(runtime.get("segment_lazy_update_enabled", False)),
         segment_cycles_per_tick=int(runtime.get("segment_cycles_per_tick", 1)),
         segment_priority_parallel_throttled=int(runtime.get("segment_priority_parallel_throttled", 2)),
         segment_regular_parallel_throttled=int(runtime.get("segment_regular_parallel_throttled", 0)),

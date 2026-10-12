@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from mcd_agent import daemon
+from mcd_agent.config import load_config
 from mcd_agent.daemon import (
     TaskStore,
     _segment_cycle_admission_inputs,
@@ -37,6 +38,20 @@ class SegmentLivenessTests(unittest.TestCase):
             scheduler_elastic_slots_enabled=True,
             scheduler_emergency_reserved_slots=1,
         )
+
+    def test_full_cycle_is_default_and_lazy_flag_is_explicit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "mcd.toml"
+            config_path.write_text("[runtime]\n", encoding="utf-8")
+            default_cfg = load_config(str(config_path), allow_recover_from_mcc=False)
+            self.assertFalse(default_cfg.segment_lazy_update_enabled)
+
+            config_path.write_text(
+                "[runtime]\nsegment_lazy_update_enabled = true\n",
+                encoding="utf-8",
+            )
+            lazy_cfg = load_config(str(config_path), allow_recover_from_mcc=False)
+            self.assertTrue(lazy_cfg.segment_lazy_update_enabled)
 
     def test_recurring_priority_leaves_slot_for_admitted_ordinary_cycle(self) -> None:
         root = "/srv/mautic"

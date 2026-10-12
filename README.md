@@ -512,6 +512,18 @@ Important:
   - explicit old enabled/disabled state and every other mapped field are
     canonicalized before cron migration; a cron enables the operation only
     when no older state exists.
+- Segment planning:
+  - `runtime.segment_lazy_update_enabled = false` is the default and plans a
+    full published-segment cycle; `true` explicitly opts into due-only lazy
+    planning and excludes fresh/current remaining IDs from new admission.
+  - The lazy flag never deletes or rebuilds durable `cycle.items`, `follow_up`,
+    claims, running rows, or queue state already held by TaskStore.
+- Import and retry invariants:
+  - Imports are singleton per instance/root, while different instances may
+    import in parallel within host/profile capacity.
+  - `runtime.segment_retry_count` is the number of retries after the initial
+    launch; total starts are exactly `segment_retry_count + 1` (approved
+    default: three starts).
 - Self-update safety:
   - Ordinary Mautic/PHP console workers (`segments`, `campaigns`, `import`, and
     other application commands) are not self-update blockers. They survive the

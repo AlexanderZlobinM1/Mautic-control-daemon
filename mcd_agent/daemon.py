@@ -11150,7 +11150,7 @@ def _monitor_running(
                 # it from the monitor can duplicate a partially applied CSV
                 # and races the next FIFO item; the next poll/reconciliation
                 # owns any deliberate retry decision.  Explicit retry calls
-                # still pass through _respawn_task's host-wide singleton.
+                # still pass through _respawn_task's per-instance singleton.
                 if rc != 0 and not lock_busy and task.task_type != "import":
                     logging.warning("[%s] %s entity=%s failed rc=%s", task.root, task.task_type, task.entity_id, rc)
                     retry_max = _effective_task_retry_max(config, task)
@@ -14137,14 +14137,14 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                     force_segment_full_scan = True
                 if cluster_cron_allowed:
                     try:
-                        if force_segment_full_scan or not bool(getattr(config, "segment_lazy_update_enabled", True)):
+                        if force_segment_full_scan or not bool(getattr(config, "segment_lazy_update_enabled", False)):
                             segment_ids = db.fetch_ids(_SQL_SEGMENTS_ALL_PUBLISHED, limit=5000, context=sql_ctx)
                             segment_last_full_scan_ts[root] = now
                             logging.info(
                                 "[%s] segment full-scan planned (reason=%s pending_imports=%s interval=%ss)",
                                 root,
                                 "import_activity" if now < import_force_until else (
-                                    "full_cycle" if not bool(getattr(config, "segment_lazy_update_enabled", True))
+                                    "full_cycle" if not bool(getattr(config, "segment_lazy_update_enabled", False))
                                     else "periodic_full_scan"
                                 ),
                                 import_pending_now,

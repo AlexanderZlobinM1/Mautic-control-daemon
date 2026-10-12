@@ -155,8 +155,13 @@ config на его profile baseline и только после этого при
 
 ## 3. Построение ordinary cycle и порядок
 
-1. Планировщик получает due IDs или bounded full snapshot опубликованных
-   сегментов и удаляет union статических `priority`/`super-priority` IDs.
+1. По умолчанию (`segment_lazy_update_enabled = false`) планировщик получает
+   bounded full snapshot опубликованных сегментов; он удаляет union статических
+   `priority`/`super-priority` IDs и строит полный текущий ordinary cycle.
+   Явный lazy-флаг `segment_lazy_update_enabled = true` переключает только
+   новый план на due-only SQL и исключает fresh/current remaining IDs из этого
+   нового admission. Он никогда не удаляет и не пересобирает уже сохранённые
+   `cycle.items`, `follow_up`, claims или running state в TaskStore.
 2. Read-only definitions добавляют опубликованные never-built IDs, которых не
    было в due query. Ordinary snapshot строится строго по категориям:
    `never-built → changed → stale`, где stale threshold берётся из выбранного
@@ -302,13 +307,6 @@ MCC; top-level `runtime_overrides` не является заменой desired 
 `desired.plugin_operations = {}` остаётся `{}` в evidence, даже если live
 effective `plugin_operations` содержит большой structured payload; digest/bytes
 вычисляются отдельно для каждого из этих двух значений.
-Для host ACK MCD берёт запрошенные значения из canonical
-`desired_state.runtime_overrides`, если этот envelope присутствует в ответе
-MCC; top-level `runtime_overrides` не является заменой desired map, потому что
-может содержать уже materialized effective values. Поэтому, например,
-`desired.plugin_operations = {}` остаётся `{}` в evidence, даже если live
-effective `plugin_operations` содержит большой structured payload; digest/bytes
-вычисляются отдельно для каждого из этих двух значений.
 Если отдельное `desired` или `effective` значение само превышает safety
 budget, оно заменяется строго проверяемой ссылкой
 `{encoding:"canonical-json-sha256",sha256,bytes}`; key не отбрасывается.
@@ -369,12 +367,14 @@ Host fairness работает поверх этого правила: кажд�
 item до начала следующего cycle. Ни один active cycle с `pending > 0` и
 `running = 0` не может оставаться только из-за порядка dispatch или pressure.
 
-Import — отдельный host-wide singleton worker. Независимо от количества
-instances одновременно допускается максимум один `task_type=import`; он
-занимает ровно один общий segment slot. Pending imports наблюдаются в FIFO
-порядке: первый eligible import получает первый освободившийся slot, а
-остальные roots ждут в очереди. `scheduler_pause`, import route, DB
-capacity, duplicate/task lock и instance guard остаются обязательными.
+Import — отдельный singleton worker на каждый instance/root. На одном instance
+одновременно допускается максимум один `task_type=import`; imports разных
+instances могут идти параллельно в пределах общей host/profile capacity. Каждый
+import занимает ровно один общий segment slot своего instance. Pending imports
+одного instance наблюдаются в FIFO порядке: первый eligible получает первый
+освободившийся slot, а другие instances используют свободную capacity. При
+этом `scheduler_pause`, import route, DB capacity, duplicate/task lock и
+instance guard остаются обязательными.
 
 Этот singleton не превращает import в host-wide pause: остальные свободные
 slots продолжают принимать segment/SQL/dependency closure work. Import не
