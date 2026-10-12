@@ -28,6 +28,15 @@ The supervisor unit uses the installed venv package and `KillMode=process`.
 After restart, the daemon adopts surviving application workers from TaskStore;
 source-tree paths are not used as worker identity.
 
+For UID-scoped runtime policy, a partial instance record is merged into that
+UID's canonical row. An omitted UID or omitted field is not an intentional
+clear. Removing the last local field must publish an explicit empty
+`instance_desired_states[uid]` row with the current per-instance revision;
+otherwise a replace request can preserve an old MCC sparse map and resurrect
+the supposedly deleted override after the next rebase. A native clear of the
+whole sparse map is likewise represented by an explicit empty map, never by
+omission.
+
 ## Runtime-only release payload
 
 The production MCD archive is runtime-only. It may contain the importable

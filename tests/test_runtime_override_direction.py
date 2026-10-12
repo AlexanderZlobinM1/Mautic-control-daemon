@@ -1192,6 +1192,56 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             {"segments": [909]},
         )
 
+    def test_last_local_instance_removal_publishes_explicit_empty_uid_row(self) -> None:
+        """A last local clear must not omit the UID and resurrect MCC state."""
+        cfg = SimpleNamespace(mcc_url="https://mcc.example", mcc_token="token")
+        install = SimpleNamespace(
+            instance_uid="generic.sales-snap.com",
+            root="/var/www/generic/public_html",
+            name="generic",
+            primary_domain="generic.sales-snap.com",
+            domains=["generic.sales-snap.com"],
+        )
+        qualified_uid = "generic.sales-snap.com@MauticFarm-02"
+        previous = {
+            "segment_lazy_update_instance_settings": {
+                "generic.sales-snap.com": {"enabled": False},
+            },
+        }
+        current = {}
+        fresh = {
+            "status": "ok",
+            "runtime_overrides": {},
+            "instance_desired_states": {},
+            "desired_state": {"revision": 12},
+        }
+        with patch("mcd_agent.daemon.fetch_runtime_overrides", return_value=fresh), patch(
+            "mcd_agent.daemon.push_runtime_overrides",
+            return_value={"status": "ok"},
+        ) as push:
+            result = daemon._push_local_runtime_change(
+                cfg,
+                previous,
+                current,
+                [install],
+                desired_revision=11,
+                instance_revisions={qualified_uid: 7},
+            )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(
+            push.call_args.kwargs["instance_desired_states"],
+            {qualified_uid: {}},
+        )
+        self.assertEqual(
+            push.call_args.kwargs["instance_desired_state_revisions"],
+            {qualified_uid: 7},
+        )
+        self.assertEqual(
+            push.call_args.args[1]["segment_lazy_update_instance_settings"],
+            {},
+        )
+
     def test_direct_local_instance_add_is_sent_without_dropping_remote_fields(self) -> None:
         cfg = SimpleNamespace(mcc_url="https://mcc.example", mcc_token="token")
         install = SimpleNamespace(

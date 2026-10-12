@@ -170,6 +170,10 @@ config на его profile baseline и только после этого при
    `segment_lazy_update_instance_settings` переопределяет host default по
    immutable instance UID и его допустимым root/name/domain или
    `<uid>@<mcc-host>` alias; при отсутствии строки действует host default.
+   Частичная UID-запись мержится транзакционно; пропуск UID или поля не
+   означает clear. При удалении последнего локального поля MCD обязан
+   отправить явную пустую `instance_desired_states[uid]` с текущей revision,
+   иначе replace-публикация может воскресить старую sparse map MCC.
    Поэтому один host может одновременно иметь `lazy=true`, `false`, `true`
    для трёх разных roots. Явный lazy-флаг instance `true` переключает только
    новый план этого root на due-only SQL и исключает fresh/current remaining

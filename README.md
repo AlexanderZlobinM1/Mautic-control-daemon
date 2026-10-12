@@ -556,6 +556,9 @@ Important:
     row falls back to the host-level flag. Mixed roots on one host therefore
     keep independent lazy/full policy. A policy change never resets a frozen
     active cycle; only that root's next cycle uses the new effective value.
+    Partial UID rows merge transactionally; omission is not a clear. Removing
+    the last local field publishes an explicit empty UID row with its current
+    revision so a replace push cannot resurrect an old MCC sparse map.
   - The lazy flag never deletes or rebuilds durable `cycle.items`, `follow_up`,
     claims, running rows, or queue state already held by TaskStore.
   - During an active cycle, newly created or pre-existing never-built segments

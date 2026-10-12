@@ -1,3 +1,10 @@
+## 1.5.136 - 2026-10-12
+
+- Preserve the UID row when the last local per-instance override is removed:
+  native desired replace now publishes an explicit empty row with the current
+  instance revision instead of omitting the map and allowing an old MCC value
+  to resurrect. Add regression coverage for the clear/revision contract.
+
 ## 1.5.135 - 2026-10-12
 
 - Make segment lazy planning an explicit per-instance policy: immutable UID,

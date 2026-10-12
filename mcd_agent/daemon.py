@@ -1550,6 +1550,7 @@ def _rebase_local_instance_runtime_states(
     previous_local_runtime: Mapping[str, Any],
     current_local_runtime: Mapping[str, Any],
     installs: list[object],
+    canonical_uids: object = None,
 ) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
     """Apply field-level local instance deltas to a fresh MCC snapshot.
 
@@ -1585,8 +1586,21 @@ def _rebase_local_instance_runtime_states(
                 # Only an explicit removal from a baseline that contained the
                 # key is a deletion.  Unseen remote keys remain untouched.
                 row.pop(key, None)
-        if remote_present or row or after:
+        # A last local instance override removed from the persisted baseline
+        # is an intentional native clear. Keep an explicit empty row in the
+        # replace payload even when MCC has no row in the fresh snapshot;
+        # omitting the UID would preserve MCC's old sparse map and resurrect
+        # the deleted override on the next rebase. A missing local field that
+        # was never present in the baseline still remains an omission.
+        if remote_present or row or after or (uid in previous_rows and not after):
             final_rows[uid] = row
+
+    # A fresh response can legitimately omit a row while a local removal is
+    # being published. Prefer the stable host-qualified revision key when it
+    # is already known, so the explicit empty row is checked against the
+    # current per-instance revision rather than an unqualified alias.
+    if isinstance(canonical_uids, (list, tuple, set, dict)):
+        final_rows = associate_instance_desired_states(final_rows, canonical_uids)
 
     rebased = _rebase_local_runtime_payload(
         latest_runtime,
@@ -1594,6 +1608,21 @@ def _rebase_local_instance_runtime_states(
         current_local_runtime,
     )
     rebased = merge_instance_desired_states(rebased, final_rows)
+    # MCC replace semantics preserve an omitted sparse map. When the local
+    # edit removed the last baseline row, retain an explicit empty map in the
+    # host payload so that the native clear is not resurrected on rebase.
+    for runtime_key in ("segment_lazy_update_instance_settings",):
+        before = previous_local_runtime.get(runtime_key)
+        after = current_local_runtime.get(runtime_key)
+        if (
+            not isinstance(before, dict)
+            or not before
+            or (isinstance(after, dict) and after)
+        ):
+            continue
+        effective = rebased.get(runtime_key)
+        if not isinstance(effective, dict) or not effective:
+            rebased[runtime_key] = {}
     return rebased, final_rows
 
 
@@ -1617,6 +1646,7 @@ def _retry_local_runtime_push_after_conflict(
     current_local_runtime: Mapping[str, Any],
     installs: list[object],
     runtime_metadata: Mapping[str, Any] | None = None,
+    instance_revisions: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Fetch current MCC state and retry the local delta on its new revision."""
     instance_uids = sorted(
@@ -1640,6 +1670,7 @@ def _retry_local_runtime_push_after_conflict(
         previous_local_runtime,
         current_local_runtime,
         installs,
+        canonical_uids=set(instance_revisions or {}),
     )
 
     desired_state = fresh.get("desired_state")
@@ -1647,6 +1678,13 @@ def _retry_local_runtime_push_after_conflict(
     if not isinstance(desired_revision, int):
         desired_revision = None
     desired_uids = set(desired_instances)
+    fresh_instance_revisions = _instance_state_revisions(
+        latest_instance_states,
+        desired_uids,
+    )
+    for uid, revision in (instance_revisions or {}).items():
+        if uid in desired_uids and uid not in fresh_instance_revisions and isinstance(revision, int):
+            fresh_instance_revisions[str(uid)] = int(revision)
     return push_runtime_overrides(
         config,
         rebased,
@@ -1654,10 +1692,7 @@ def _retry_local_runtime_push_after_conflict(
         target="desired",
         desired_state_revision=desired_revision,
         instance_desired_states=desired_instances,
-        instance_desired_state_revisions=_instance_state_revisions(
-            latest_instance_states,
-            desired_uids,
-        ),
+        instance_desired_state_revisions=fresh_instance_revisions,
         runtime_change_metadata=dict(runtime_metadata) if isinstance(runtime_metadata, Mapping) else None,
     )
 
@@ -1694,6 +1729,7 @@ def _push_local_runtime_change(
         previous_local_runtime,
         current_local_runtime,
         installs,
+        canonical_uids=set(instance_revisions),
     )
     fresh_desired_state = fresh.get("desired_state")
     fresh_desired_revision = (
@@ -1731,6 +1767,7 @@ def _push_local_runtime_change(
         current_local_runtime,
         installs,
         runtime_metadata=runtime_metadata,
+        instance_revisions=instance_revisions,
     )
     result = dict(rebased)
     result["_local_rebase_attempted"] = True

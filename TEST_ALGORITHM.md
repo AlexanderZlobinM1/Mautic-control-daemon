@@ -123,7 +123,11 @@ TaskStore fixture должен сохранять `cycle_id`, `updated_at` и sp
    разрешённых slots. Toggle во время active cycle не меняет frozen
    `cycle.items`, claims, running или follow-up; только следующий cycle этого
    root использует новое значение. После restart/reconcile UID-scoped desired
-   row и host fallback восстанавливаются без сброса очереди.
+   row и host fallback восстанавливаются без сброса очереди. Отдельно
+   проверяется clear-контракт: удаление последнего локального поля публикует
+   явную пустую UID-строку с текущей revision; простое отсутствие UID не
+   используется как команда очистки и не должно воскресить старую MCC sparse
+   map.
 
 10. Проверяется dedicated super lane: четыре enabled super-instance worker-а
    работают outside shared regular `11` capacity (`4 outside 11`), не
