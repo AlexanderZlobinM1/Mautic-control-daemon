@@ -64,6 +64,15 @@ free slot. A profile value such as the historical 300-second default cannot
 justify a hot root receiving repeated turns while another ready root is
 waiting in the canonical served-root round.
 
+The persisted `mcd-segment-dispatch-context-v1` is authoritative execution
+state, not display telemetry. If an active cycle survives restart/update with a
+missing, old, or empty dependency graph, the refill worker performs a
+root-local read-only refresh from that Mautic root's published definitions and
+native capability before launching another segment. A failed or incomplete
+refresh holds only that root; it must never treat the graph as independent and
+must never reset the cycle, cursor, claims, running rows, follow-ups, retries,
+or terminal receipts. Other ready roots continue to use their profile slots.
+
 Persisted segment-chain reverse indexes are scoped by canonical root, task-key
 owner, closure membership, and cycle generation. A legacy or foreign reverse
 index is metadata only: it cannot keep a different root claimed or defer its

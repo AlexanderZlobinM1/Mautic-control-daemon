@@ -4,7 +4,7 @@
 фактическую схему после исправления admission и должен обновляться вместе с
 кодом, тестами и runtime receipt. Документ не является разрешением на
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.150 (follow-up после immutable
+Актуальная редакция этого канона — MCD 1.5.151 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам
@@ -245,6 +245,14 @@ config на его profile baseline и только после этого при
    закрывается terminal receipt без нового процесса, а failed/timeout root не
    добавляет coverage. Если capability явно не подтверждена, пересечение
    fail-closed ждёт свежего read-only probe, а не повторяет parent молча.
+   `mcd-segment-dispatch-context-v1` хранит признак authoritative dependency
+   snapshot и generation. После restart/update active cycle со старым или
+   пустым context не трактует graph как пустой: root-local refill перечитывает
+   опубликованные definitions того же Mautic-root и capability, сохраняет
+   новый context только после успешного read-only чтения и не меняет
+   `cycle.items`, cursor, claims, running или terminal receipts.
+   Недоступный/неполный graph удерживает только этот root до retry; другие
+   ready roots продолжают dispatch в своих profile slots.
 4. Новый/never-built ID не ждёт нового frozen snapshot. Если он найден
    уже после admission active ordinary cycle, `cycle.items` и его cursor не
    меняются: ID атомарно добавляется в durable FIFO `follow_up`. Follow-up
@@ -367,8 +375,9 @@ config на его profile baseline и только после этого при
    persisted refill запускаются root-local slices через отдельные executors,
    а `_SCHEDULER_RUNTIME_LOCK`/`_SchedulerRuntimeRegistry` сериализуют только
    claim-to-spawn и общий running registry, не planning/DB работу. Refill
-   уступает только короткому root-local проходу lifecycle monitor, пока он
-   владеет running snapshot. Terminal callback немедленно будит refill,
+   уступает короткому root-local проходу lifecycle monitor только пока тот
+   действительно владеет live running snapshot; пустой snapshot не может
+   превратиться в starvation gate. Terminal callback немедленно будит refill,
    поэтому slow probe одного root не может удерживать
    terminal/adoption/refill другого.
 

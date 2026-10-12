@@ -2462,6 +2462,130 @@ def _segment_dispatch_context_parts(
     )
 
 
+def _segment_dispatch_context_needs_dependency_refresh(
+    context: Mapping[str, object] | None,
+    cycle_state: Mapping[str, object] | None,
+    *,
+    config: AgentConfig,
+    mautic_major: int,
+    now_ts: float,
+) -> bool:
+    """Require a root-local definition refresh before refilling a cycle.
+
+    ``parents_by_child`` and ``children_by_parent`` are execution policy, not
+    optional telemetry.  A context written by an older daemon (or one written
+    before a restart completed its first planner pass) may contain empty maps
+    even though the live Mautic database has a dependency graph.  Treat that
+    context as stale instead of allowing Mautic 6/7 children to look
+    independent and overlap their parent closure.
+
+    The refresh interval is the existing profile full-scan interval.  A zero
+    interval means "do not periodically refresh" once a current authoritative
+    snapshot exists; a missing snapshot or a cycle-generation mismatch always
+    refreshes immediately.
+    """
+
+    if not isinstance(context, Mapping):
+        return True
+    if context.get("schema") != "mcd-segment-dispatch-context-v1":
+        return True
+    if not bool(context.get("dependency_snapshot_authoritative")):
+        return True
+
+    cycle_id = str((cycle_state or {}).get("cycle_id") or "").strip()
+    context_cycle_id = str(context.get("cycle_id") or "").strip()
+    if cycle_id and context_cycle_id and cycle_id != context_cycle_id:
+        return True
+
+    if int(mautic_major or 0) >= 7 and not isinstance(
+        context.get("native_segment_exclude_supported"), bool
+    ):
+        # Capability is also root-local read-only state.  Resolve it in the
+        # same refresh future, outside the shared scheduler runtime lock.
+        return True
+
+    try:
+        refreshed_at = float(context.get("dependency_snapshot_updated_at") or 0.0)
+    except (TypeError, ValueError):
+        refreshed_at = 0.0
+    if refreshed_at <= 0.0:
+        return True
+    interval = max(0, int(getattr(config, "segment_full_scan_interval_sec", 0) or 0))
+    return bool(interval > 0 and float(now_ts) - refreshed_at >= float(interval))
+
+
+def _rehydrate_segment_dispatch_context(
+    store: "TaskStore",
+    *,
+    root: str,
+    db_config: object,
+    cycle_state: Mapping[str, object] | None,
+    context: Mapping[str, object] | None,
+    config: AgentConfig,
+    mautic_major: int,
+) -> dict[str, object]:
+    """Rebuild one root's dependency/capability context without touching work.
+
+    This is deliberately a root-local read-only recovery operation.  It does
+    not alter the durable cycle items, generation, cursor, claims, running
+    rows, or terminal receipts.  Only the runtime dispatch context is
+    replaced, and it is written only after the live published definitions have
+    been read successfully.  An empty dependency graph is authoritative only
+    when the same-root definition query itself completed successfully.
+    """
+
+    rows = MauticDB(db_config).fetch_published_segment_filters()
+    dependency_children, dependency_parents = segment_dependency_maps(rows)
+    refreshed_at = float(time.time())
+    refreshed = dict(context) if isinstance(context, Mapping) else {}
+    refreshed.update(
+        {
+            "schema": "mcd-segment-dispatch-context-v1",
+            "root": str(root),
+            "mautic_major": int(mautic_major or 0),
+            "updated_at": refreshed_at,
+            "cycle_id": (cycle_state or {}).get("cycle_id"),
+            "cycle_status": str((cycle_state or {}).get("status") or ""),
+            "parents_by_child": {
+                str(int(child)): sorted(int(parent) for parent in parents if int(parent) > 0)
+                for child, parents in dependency_parents.items()
+            },
+            "children_by_parent": {
+                str(int(parent)): sorted(int(child) for child in children if int(child) > 0)
+                for parent, children in dependency_children.items()
+            },
+            "dependency_snapshot_authoritative": True,
+            "dependency_snapshot_source": "mautic_published_segment_filters",
+            "dependency_snapshot_updated_at": refreshed_at,
+            "dependency_snapshot_segment_count": len(
+                {
+                    int(row.get("id") or 0)
+                    for row in rows
+                    if isinstance(row, Mapping) and int(row.get("id") or 0) > 0
+                }
+            ),
+        }
+    )
+
+    # Mautic 7's native exclude capability is part of the same execution
+    # contract.  Probe it once per root/capability generation, outside the
+    # shared runtime lock, so one slow help command cannot stall other roots.
+    if int(mautic_major or 0) >= 7 and not isinstance(
+        refreshed.get("native_segment_exclude_supported"), bool
+    ):
+        refreshed["native_segment_exclude_supported"] = bool(
+            _segment_native_exclude_capability(
+                store,
+                root=str(root),
+                config=config,
+                mautic_major=int(mautic_major),
+            )
+        )
+
+    store.put_runtime_sync(_segment_dispatch_context_key(str(root)), refreshed)
+    return refreshed
+
+
 def _segment_native_coverage_load(
     store: "TaskStore",
     root: str,
@@ -14062,6 +14186,12 @@ def run_loop(
 ) -> None:
     global _ACTIVE_PRIORITY_EXECUTOR, _SEGMENT_DISPATCH_WAKEUP
     logging.info("MCD loop started")
+    # Per-root context metadata is reset before each root pass below.  Keep a
+    # function-scope default as well because the first pass may reach the
+    # context publisher through an early planner branch.
+    dependency_snapshot_read_ok = False
+    dependency_snapshot_updated_at = 0.0
+    dependency_snapshot_segment_count = 0
     base_config = config
     profile_authority = str(getattr(config, "profile_name", "") or "").strip().lower()
 
@@ -14764,6 +14894,12 @@ def run_loop(
                 "active_import_target_ids": sorted(import_targets),
                 "parents_by_child": {str(k): sorted(v) for k, v in dependency_parents.items()},
                 "children_by_parent": {str(k): sorted(v) for k, v in dependency_children.items()},
+                "dependency_snapshot_authoritative": True,
+                "dependency_snapshot_source": "mautic_published_segment_filters",
+                "dependency_snapshot_updated_at": float(time.time()),
+                "dependency_snapshot_segment_count": len(
+                    {int(row.get("id") or 0) for row in dep_rows if int(row.get("id") or 0) > 0}
+                ),
                 "scheduler_pause": False,
                 "backup_pause": False,
                 "backup_pause_reason": "",
@@ -14777,6 +14913,13 @@ def run_loop(
                 "segment_slot_limit": slot_limit,
                 "segment_lazy_update_enabled": bool(lazy_segment_plan),
             }
+            previous_dispatch_context = store.get_runtime_sync(_segment_dispatch_context_key(root)) or {}
+            if isinstance(previous_dispatch_context, Mapping) and isinstance(
+                previous_dispatch_context.get("native_segment_exclude_supported"), bool
+            ):
+                context["native_segment_exclude_supported"] = bool(
+                    previous_dispatch_context.get("native_segment_exclude_supported")
+                )
             store.put_runtime_sync(_segment_dispatch_context_key(root), context)
             pending_after = _segment_cycle_pending_order(cycle_state, excluded_ids=static_excluded)
             store.put_runtime_sync(
@@ -15027,6 +15170,12 @@ def run_loop(
         """
 
         last_error_log = 0.0
+        # Dependency/capability recovery is root-local.  Keep one future per
+        # root so a slow or unavailable Mautic database cannot turn context
+        # recovery into a host-wide scheduler barrier.
+        dependency_refresh_futures: dict[str, Future[dict[str, object]]] = {}
+        dependency_refresh_executors: dict[str, ThreadPoolExecutor] = {}
+        dependency_refresh_retry_at: dict[str, float] = {}
 
         def _relation_map(raw: object) -> dict[int, set[int]]:
             if not isinstance(raw, Mapping):
@@ -15123,6 +15272,31 @@ def run_loop(
 
         while _test_stop_event is None or not _test_stop_event.is_set():
             try:
+                for refresh_root, refresh_future in list(dependency_refresh_futures.items()):
+                    if not refresh_future.done():
+                        continue
+                    dependency_refresh_futures.pop(refresh_root, None)
+                    try:
+                        refresh_future.result()
+                        dependency_refresh_retry_at.pop(refresh_root, None)
+                        logging.info(
+                            "[%s] persisted segment dispatch context rehydrated from live Mautic definitions",
+                            refresh_root,
+                        )
+                    except Exception as exc:
+                        # Keep the stale context non-dispatchable.  The next
+                        # root-local future may retry, but an unavailable or
+                        # partial graph is never treated as independence.
+                        logging.warning(
+                            "[%s] persisted segment dispatch context rehydration failed: %s",
+                            refresh_root,
+                            exc,
+                        )
+                        retry_interval = max(
+                            float(getattr(config, "dispatch_interval_sec", 1) or 1),
+                            float(getattr(config, "segment_full_scan_interval_sec", 0) or 0),
+                        )
+                        dependency_refresh_retry_at[refresh_root] = time.time() + retry_interval
                 with _SCHEDULER_RUNTIME_LOCK:
                     if not cluster_route_allows(config, "cron"):
                         continue
@@ -15147,12 +15321,14 @@ def run_loop(
                         # Planning ownership is not an execution barrier. An
                         # admitted persisted item must be refillable while the
                         # main dispatcher is inside this root's slow Mautic/
-                        # DB work. Keep the lifecycle-monitor gate: terminal
-                        # reconciliation owns that root's running snapshot;
-                        # the next wakeup retries after its short root-local
-                        # slice completes.
+                        # DB work. A lifecycle slice only retains this gate
+                        # while it owns a live shared task snapshot; with no
+                        # live task there is no transition to protect, and a
+                        # stuck monitor must not starve an already-admitted
+                        # durable item.
                         if root in lifecycle_monitor_busy_roots:
-                            continue
+                            if any(task.root == root for task in running.values()):
+                                continue
                         state = store.get_runtime_sync(_segment_cycle_key(root)) or {}
                         if not isinstance(state, Mapping):
                             continue
@@ -15161,25 +15337,23 @@ def run_loop(
                         if not active_cycle and import_pending <= 0:
                             continue
                         context = store.get_runtime_sync(_segment_dispatch_context_key(root)) or {}
-                        if (
-                            not isinstance(context, Mapping)
-                            or context.get("schema") != "mcd-segment-dispatch-context-v1"
-                        ):
-                            # No authoritative snapshot yet: let the normal
-                            # planner establish one instead of guessing from
-                            # diagnostic telemetry.
-                            continue
+                        if not isinstance(context, Mapping) or context.get("schema") != "mcd-segment-dispatch-context-v1":
+                            # An active durable cycle may outlive the context
+                            # written by the previous daemon generation.  Use
+                            # the root-local rehydration path below; never
+                            # guess dependency independence from telemetry.
+                            context = {}
                         try:
                             context_updated = float(context.get("updated_at") or 0.0)
                         except Exception:
                             context_updated = 0.0
-                        if context_updated <= 0.0:
+                        now_root = time.time()
+                        if context_updated <= 0.0 and not active_cycle:
                             continue
                         db_pause_until = max(
                             float(context.get("db_pause_until") or 0.0),
                             float(db_dispatch_pause_until.get(root, 0.0) or 0.0),
                         )
-                        now_root = time.time()
                         if db_pause_until > now_root:
                             continue
                         if not bool(context.get("cluster_cron_allowed", True)):
@@ -15196,6 +15370,41 @@ def run_loop(
                             if active_cycle
                             else []
                         )
+                        if active_cycle and pending_order and _segment_dispatch_context_needs_dependency_refresh(
+                            context,
+                            state,
+                            config=config,
+                            mautic_major=int(context.get("mautic_major") or getattr(inst, "mautic_major", 0) or 0),
+                            now_ts=now_root,
+                        ):
+                            if now_root < float(dependency_refresh_retry_at.get(root, 0.0) or 0.0):
+                                continue
+                            if root not in dependency_refresh_futures:
+                                dependency_refresh_executors.setdefault(
+                                    root,
+                                    ThreadPoolExecutor(
+                                        max_workers=1,
+                                        thread_name_prefix=(
+                                            "mcd-root-context-"
+                                            + hashlib.sha1(root.encode("utf-8")).hexdigest()[:8]
+                                        ),
+                                    ),
+                                )
+                                dependency_refresh_futures[root] = dependency_refresh_executors[root].submit(
+                                    _rehydrate_segment_dispatch_context,
+                                    store,
+                                    root=root,
+                                    db_config=getattr(inst, "db"),
+                                    cycle_state=state,
+                                    context=context,
+                                    config=config,
+                                    mautic_major=int(
+                                        context.get("mautic_major")
+                                        or getattr(inst, "mautic_major", 0)
+                                        or 0
+                                    ),
+                                )
+                            continue
                         throttled_raw = context.get("throttled_active")
                         priority_raw = context.get("priority_pending")
                         slot_raw = context.get("segment_slot_limit")
@@ -17624,6 +17833,9 @@ def run_loop(
                 if campaign_rebuild_ids is not None and (config.profile_name or "").strip().lower() == "tiny":
                     campaign_rebuild_ids = sorted(list(dict.fromkeys(campaign_rebuild_ids)), reverse=True)
 
+                dependency_snapshot_read_ok = False
+                dependency_snapshot_updated_at = 0.0
+                dependency_snapshot_segment_count = 0
                 if segment_ids is not None:
                     observed_segment_ids = list(dict.fromkeys(segment_ids))
                     standard_segment_ids = list(observed_segment_ids)
@@ -17662,6 +17874,9 @@ def run_loop(
                     try:
                         dep_rows = db.fetch_published_segment_filters()
                         published_segment_ids = {int(row["id"]) for row in dep_rows}
+                        dependency_snapshot_read_ok = True
+                        dependency_snapshot_updated_at = float(time.time())
+                        dependency_snapshot_segment_count = len(published_segment_ids)
                         source_snapshot = _ordinary_segment_source_baseline(dep_rows)
                         never_built_segment_ids = _never_built_segment_ids(dep_rows)
                         dependency_children, dependency_parents = segment_dependency_maps(dep_rows)
@@ -19485,6 +19700,22 @@ def run_loop(
                     str(int(parent)): sorted(int(child) for child in child_ids if int(child) > 0)
                     for parent, child_ids in segment_dependencies_by_root.get(root, {}).items()
                 }
+                previous_context = store.get_runtime_sync(_segment_dispatch_context_key(root)) or {}
+                previous_snapshot_authoritative = (
+                    bool(previous_context.get("dependency_snapshot_authoritative"))
+                    if isinstance(previous_context, Mapping)
+                    else False
+                )
+                previous_snapshot_updated_at = (
+                    float(previous_context.get("dependency_snapshot_updated_at") or 0.0)
+                    if isinstance(previous_context, Mapping)
+                    else 0.0
+                )
+                previous_snapshot_segment_count = (
+                    int(previous_context.get("dependency_snapshot_segment_count") or 0)
+                    if isinstance(previous_context, Mapping)
+                    else 0
+                )
                 context = {
                     "schema": "mcd-segment-dispatch-context-v1",
                     "root": root,
@@ -19499,6 +19730,16 @@ def run_loop(
                     "active_import_target_ids": sorted(int(value) for value in active_import_target_ids if int(value) > 0),
                     "parents_by_child": parents,
                     "children_by_parent": children,
+                    "dependency_snapshot_authoritative": bool(
+                        dependency_snapshot_read_ok or previous_snapshot_authoritative
+                    ),
+                    "dependency_snapshot_source": "mautic_published_segment_filters",
+                    "dependency_snapshot_updated_at": float(
+                        dependency_snapshot_updated_at or previous_snapshot_updated_at
+                    ),
+                    "dependency_snapshot_segment_count": int(
+                        dependency_snapshot_segment_count or previous_snapshot_segment_count
+                    ),
                     "scheduler_pause": bool(scheduler_dispatch_pause),
                     "backup_pause": bool(backup_dispatch_pause),
                     "backup_pause_reason": str(backup_pause_reason or ""),
@@ -19512,6 +19753,12 @@ def run_loop(
                     "segment_slot_limit": segment_slot_limit,
                     "segment_lazy_update_enabled": _segment_lazy_update_effective_setting(config, inst),
                 }
+                if isinstance(previous_context, Mapping) and isinstance(
+                    previous_context.get("native_segment_exclude_supported"), bool
+                ):
+                    context["native_segment_exclude_supported"] = bool(
+                        previous_context.get("native_segment_exclude_supported")
+                    )
                 store.put_runtime_sync(_segment_dispatch_context_key(root), context)
 
             def _record_segment_pending_guard(

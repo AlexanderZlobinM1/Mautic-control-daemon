@@ -1,3 +1,15 @@
+## 1.5.151 - 2026-10-13
+
+- Rehydrate stale active-cycle dependency contexts from same-root published
+  Mautic definitions and the Mautic 7 native capability before persisted refill
+  dispatch. Empty or unavailable graphs no longer become independent launches;
+  the active cycle, cursor, claims, running state, follow-ups, retries, and
+  terminal receipts remain untouched.
+- Keep that recovery root-local and let other ready roots continue using their
+  profile capacity. A lifecycle monitor with no live task snapshot no longer
+  turns into a refill starvation gate; add a frozen 150-item M7 restart fixture
+  covering 153/154 closure claims and terminal reconciliation.
+
 ## 1.5.150 - 2026-10-12
 
 - Repair the canonical served-root round and persisted refill admission so a

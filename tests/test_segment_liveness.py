@@ -884,6 +884,8 @@ class SegmentLivenessTests(unittest.TestCase):
                     "active_import_target_ids": [],
                     "parents_by_child": {},
                     "children_by_parent": {},
+                    "dependency_snapshot_authoritative": True,
+                    "dependency_snapshot_updated_at": time.time(),
                     "scheduler_pause": False,
                     "backup_pause": False,
                     "dispatch_pause": False,
@@ -1353,6 +1355,8 @@ class SegmentLivenessTests(unittest.TestCase):
                         "active_import_target_ids": [],
                         "parents_by_child": {},
                         "children_by_parent": {},
+                        "dependency_snapshot_authoritative": True,
+                        "dependency_snapshot_updated_at": time.time(),
                         "scheduler_pause": False,
                         "backup_pause": False,
                         "dispatch_pause": False,
@@ -1626,6 +1630,220 @@ class SegmentLivenessTests(unittest.TestCase):
             self.assertEqual(cold_state["running"], [2000])
             self.assertEqual(_segment_cycle_pending_order(cold_state), list(range(2001, 2040)))
             check_store.close()
+
+    def test_restart_rehydrates_frozen_full_cycle_without_resetting_claims_or_closure(self) -> None:
+        """A stale context must recover the live graph before one M7 worker starts."""
+
+        with tempfile.TemporaryDirectory() as td:
+            root = "/var/www/frozen-b2bss/public_html"
+            state_path = Path(td) / "state.db"
+            config_path = Path(td) / "mcd.toml"
+            config_path.write_text(
+                "[profile]\nname = \"custom\"\n"
+                "[daemon]\ndispatch_interval_sec = 0.05\n"
+                f"[runtime]\nstate_db_path = \"{state_path}\"\n"
+                f"scheduler_pause_flag_path = \"{Path(td) / 'scheduler.pause'}\"\n"
+                "scheduler_host_max_parallel = 11\n"
+                "scheduler_instance_max_parallel = 11\n"
+                "segment_full_scan_interval_sec = 300\n"
+                "segment_mode = \"farm\"\n",
+                encoding="utf-8",
+            )
+            config = load_config(str(config_path), allow_recover_from_mcc=False)
+            store = TaskStore(str(state_path), config)
+
+            # 150 published IDs, with the frozen tail 153/154 present.  The
+            # child 154 depends on all four parents, so an empty persisted
+            # context would incorrectly make it an independent worker.
+            published_ids = [*range(1, 147), 149, 152, 153, 154]
+            cycle, _added, _started = sync_cycle(
+                None,
+                planned_ids=published_ids,
+                never_built=[],
+                running_ids=[],
+                now_ts=100.0,
+                important_ids=[],
+                remaining_ids=published_ids,
+                lazy_mode=False,
+            )
+            for entity_id in published_ids[:140]:
+                cycle = mark_terminal(
+                    cycle,
+                    entity_id=entity_id,
+                    success=True,
+                    note=None,
+                    now_ts=101.0,
+                )
+            store.put_runtime_sync(cycle_key(root), cycle)
+            stale_context = {
+                "schema": "mcd-segment-dispatch-context-v1",
+                "root": root,
+                "mautic_major": 7,
+                "updated_at": 102.0,
+                "cycle_id": cycle["cycle_id"],
+                "cycle_status": "active",
+                "blocked_ids": [],
+                "sql_managed_ids": [],
+                "static_configured_ids": [],
+                "static_active_ids": [],
+                "active_import_target_ids": [],
+                "parents_by_child": {},
+                "children_by_parent": {},
+                "scheduler_pause": False,
+                "backup_pause": False,
+                "dispatch_pause": False,
+                "db_pause_until": 0.0,
+                "cluster_cron_allowed": True,
+                "cluster_import_allowed": True,
+                "throttled_active": False,
+                "priority_pending": False,
+                "segment_slot_limit": 11,
+            }
+            store.put_runtime_sync(daemon._segment_dispatch_context_key(root), stale_context)
+            before_cycle = deepcopy(cycle)
+
+            rows = [
+                {
+                    "id": entity_id,
+                    "filters": "".join(
+                        _leadlist_filter(parent_id)
+                        for parent_id in ([146, 149, 152, 153] if entity_id == 154 else [])
+                    ),
+                }
+                for entity_id in published_ids
+            ]
+
+            class FakeMauticDB:
+                def __init__(self, _cfg: object) -> None:
+                    pass
+
+                def fetch_published_segment_filters(self) -> list[dict[str, object]]:
+                    return rows
+
+            with patch.object(daemon, "MauticDB", FakeMauticDB), patch.object(
+                daemon,
+                "_segment_native_exclude_capability",
+                return_value=True,
+            ):
+                refreshed = daemon._rehydrate_segment_dispatch_context(
+                    store,
+                    root=root,
+                    db_config=object(),
+                    cycle_state=cycle,
+                    context=stale_context,
+                    config=config,
+                    mautic_major=7,
+                )
+
+            after_cycle = store.get_runtime_sync(cycle_key(root))
+            self.assertEqual(
+                {key: after_cycle.get(key) for key in ("cycle_id", "items", "done", "claimed", "running")},
+                {key: before_cycle.get(key) for key in ("cycle_id", "items", "done", "claimed", "running")},
+            )
+            self.assertEqual(refreshed["parents_by_child"]["154"], [146, 149, 152, 153])
+            self.assertEqual(refreshed["children_by_parent"]["153"], [154])
+            self.assertTrue(refreshed["dependency_snapshot_authoritative"])
+            self.assertTrue(refreshed["native_segment_exclude_supported"])
+
+            pending = _segment_cycle_pending_order(after_cycle)
+            self.assertIn(153, pending)
+            self.assertIn(154, pending)
+            self.assertEqual(
+                daemon._segment_chain_from_dispatch_context(store, root, pending, 154),
+                [154, 146, 149, 152, 153],
+            )
+
+            class FakeProcess:
+                _next_pid = 72000
+
+                def __init__(self) -> None:
+                    type(self)._next_pid += 1
+                    self.pid = type(self)._next_pid
+                    self.finished = False
+
+                def poll(self) -> int | None:
+                    return 0 if self.finished else None
+
+                def wait(self) -> int:
+                    return 0
+
+            running: dict[str, daemon.RunningTask] = {}
+            popens: dict[str, FakeProcess] = {}
+            claimed_ids: list[int] = []
+
+            def claim(entity_id: int) -> bool:
+                claimed = _segment_cycle_claim(
+                    store,
+                    root=root,
+                    entity_id=int(entity_id),
+                    eligible_ids={146, 149, 152, 153, 154},
+                    blocked_ids=set(),
+                    running_ids=set(),
+                    now_ts=time.time(),
+                )
+                if claimed:
+                    claimed_ids.append(int(entity_id))
+                return claimed
+
+            with patch.object(
+                daemon,
+                "_spawn_command",
+                side_effect=lambda **_kwargs: FakeProcess(),
+            ):
+                launched = _fill_from_ring(
+                    ring=deque([154, 146, 149, 152, 153]),
+                    ring_limit=11,
+                    total_limit=11,
+                    root=root,
+                    task_type="segment",
+                    running=running,
+                    ring_entities={146, 149, 152, 153, 154},
+                    config=config,
+                    store=store,
+                    popens=popens,
+                    build_args=lambda sid: ["php", "segments:update", str(sid)],
+                    admission_claim=claim,
+                    admission_running=lambda sid: _segment_cycle_running(
+                        store,
+                        root=root,
+                        entity_id=int(sid),
+                        now_ts=time.time(),
+                    ),
+                    admission_release=lambda sid: _segment_cycle_release(
+                        store,
+                        root=root,
+                        entity_id=int(sid),
+                        now_ts=time.time(),
+                    ),
+                    remove_on_launch=True,
+                    bypass_repeat_guard_entities={146, 149, 152, 153, 154},
+                    bypass_baseline_admission=True,
+                    max_launches=1,
+                )
+
+            self.assertEqual(launched, 1)
+            self.assertEqual(claimed_ids, [154, 146, 149, 152, 153])
+            self.assertEqual(len(running), 1)
+            proc = next(iter(popens.values()))
+            proc.finished = True
+            daemon._monitor_running(
+                config=config,
+                store=store,
+                running=running,
+                popens=popens,
+                segment_terminal_callback=lambda task, success, note: daemon._segment_terminal_and_wake(
+                    store,
+                    threading.Event(),
+                    task,
+                    success,
+                    note,
+                ),
+            )
+            terminal_cycle = store.get_runtime_sync(cycle_key(root))
+            self.assertEqual(set(terminal_cycle.get("done") or []) & {146, 149, 152, 153, 154}, {146, 149, 152, 153, 154})
+            self.assertEqual(terminal_cycle.get("claimed"), [])
+            self.assertEqual(terminal_cycle.get("running"), [])
+            store.close()
 
     def test_daemon_reconciles_prior_terminal_marker_before_pending_projection(self) -> None:
         root = "/var/www/alex/public_html"
