@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import ast
-import inspect
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -29,27 +28,62 @@ from mcd_agent.static_segment_lanes import (
 
 
 class StaticSegmentLaneTests(unittest.TestCase):
-    def test_delayed_static_callbacks_bind_creation_root_and_command(self) -> None:
-        """A callback may run after the dispatcher has advanced to another root."""
-        tree = ast.parse(inspect.getsource(daemon.run_loop))
-        functions = {
-            node.name: node
-            for node in ast.walk(tree)
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and node.name in {"_static_segment_started", "_static_segment_complete"}
-        }
-        for name in ("_static_segment_started", "_static_segment_complete"):
-            with self.subTest(callback=name):
-                defaults = {
-                    arg.arg: ast.unparse(default)
-                    for arg, default in zip(
-                        functions[name].args.kwonlyargs,
-                        functions[name].args.kw_defaults,
-                    )
-                    if default is not None
-                }
-                self.assertEqual(defaults.get("root"), "root")
-                self.assertEqual(defaults.get("command_str"), "static_command_str")
+    def test_delayed_static_callbacks_keep_a_context_after_b_is_created(self) -> None:
+        """A delayed A callback must never write B's root or command markers."""
+        store = daemon.TaskStore(":memory:")
+        wakeup = threading.Event()
+        root_a = "/var/www/a/public_html"
+        root_b = "/var/www/b/public_html"
+        start_a, complete_a = daemon._make_static_segment_callbacks(
+            store=store,
+            root=root_a,
+            task_type="segment_priority",
+            lane_name=PRIORITY,
+            segment_id=10,
+            chain_ids=(10, 11),
+            started_at=10.0,
+            command_str="A-command",
+            timeout_sec=60,
+            segment_dispatch_wakeup=wakeup,
+        )
+        start_b, _complete_b = daemon._make_static_segment_callbacks(
+            store=store,
+            root=root_b,
+            task_type="segment_priority",
+            lane_name=PRIORITY,
+            segment_id=20,
+            chain_ids=(20, 21),
+            started_at=20.0,
+            command_str="B-command",
+            timeout_sec=60,
+            segment_dispatch_wakeup=wakeup,
+        )
+
+        with patch.object(daemon, "_pid_start_time", return_value=None):
+            start_b(202)
+            start_a(101)
+            complete_a(0)
+
+        for root, ids, command in (
+            (root_a, (10, 11), "A-command"),
+            (root_b, (20, 21), "B-command"),
+        ):
+            for entity_id in ids:
+                marker = store.get_runtime_sync(daemon._segment_runtime_marker_key(root, entity_id))
+                self.assertEqual(marker.get("root"), root)
+                self.assertEqual(marker.get("command_str"), command)
+                chain = store.get_runtime_sync(daemon._segment_chain_runtime_key(root, entity_id))
+                self.assertEqual(chain.get("root"), root)
+                self.assertEqual(
+                    chain.get("task_key"),
+                    daemon._task_key(root, "segment_priority", 10 if root == root_a else 20),
+                )
+                self.assertEqual(chain.get("command_str"), command)
+
+        self.assertIsNone(store.get_runtime_sync(daemon._segment_runtime_marker_key(root_b, 10)))
+        self.assertIsNone(store.get_runtime_sync(daemon._segment_chain_runtime_key(root_b, 10)))
+        self.assertTrue(wakeup.is_set())
+        store.close()
 
     def test_whitelist_is_only_priority_migration_alias(self) -> None:
         config = SimpleNamespace(

@@ -3958,6 +3958,117 @@ def _static_lane_terminal(
         store.put_runtime_sync(key, state)
 
 
+def _make_static_segment_callbacks(
+    *,
+    store: "TaskStore",
+    root: str,
+    task_type: str,
+    lane_name: str,
+    segment_id: int,
+    chain_ids: tuple[int, ...],
+    started_at: float,
+    command_str: str,
+    timeout_sec: int,
+    segment_dispatch_wakeup: threading.Event,
+) -> tuple[Callable[[int], None], Callable[[int | None], None]]:
+    """Bind one static lane's complete lifecycle to its creation context.
+
+    Static lanes are admitted while ``run_loop`` iterates roots. Their
+    executor callbacks can run much later, after that loop has advanced to a
+    different root and re-created similarly named local helpers. Keep every
+    value used by the callback, including the marker-task factory itself,
+    inside this factory so a delayed callback can only write its own root,
+    task key, command, and closure.
+    """
+
+    callback_root = str(root)
+    callback_task_type = str(task_type)
+    callback_lane = str(lane_name)
+    callback_owner_id = int(segment_id)
+    callback_chain_ids = tuple(int(value) for value in chain_ids)
+    callback_started_at = float(started_at)
+    callback_command = str(command_str)
+    callback_timeout = int(timeout_sec)
+
+    def marker_task(
+        pid: int,
+        *,
+        entity_id: int = callback_owner_id,
+        command_override: str = callback_command,
+    ) -> RunningTask:
+        return RunningTask(
+            row_id=0,
+            root=callback_root,
+            task_key=_task_key(callback_root, callback_task_type, int(entity_id)),
+            task_type=callback_task_type,
+            entity_id=int(entity_id),
+            command_str=str(command_override),
+            timeout_sec=callback_timeout,
+            attempts=1,
+            started_at=callback_started_at,
+            pid=int(pid),
+        )
+
+    def on_start(pid: int) -> None:
+        marker_at = max(callback_started_at, time.time())
+        for chain_id in callback_chain_ids:
+            _segment_runtime_marker_write(
+                store,
+                marker_task(pid, entity_id=int(chain_id)),
+                status="running",
+                now_ts=marker_at,
+                pid=int(pid),
+                command_str=callback_command,
+            )
+        _segment_chain_runtime_write(
+            store,
+            root=callback_root,
+            owner_id=callback_owner_id,
+            entity_ids=callback_chain_ids,
+            status="running",
+            now_ts=marker_at,
+            task=marker_task(pid, command_override=callback_command),
+        )
+
+    def on_complete(rc: int | None) -> None:
+        note = None if rc == 0 else (
+            "task_lock_busy" if rc == _TASK_LOCK_BUSY_RC else "static_segment_error"
+        )
+        terminal_at = time.time()
+        for chain_id in callback_chain_ids:
+            _segment_runtime_marker_write(
+                store,
+                marker_task(0, entity_id=int(chain_id)),
+                status="terminal",
+                now_ts=terminal_at,
+                note=note,
+                pid=0,
+                command_str=callback_command,
+            )
+            _static_lane_terminal(
+                store,
+                root=callback_root,
+                lane=callback_lane,
+                entity_id=int(chain_id),
+                success=bool(rc == 0),
+                note=note,
+                now_ts=terminal_at,
+            )
+            _mark_segment_finished(callback_root, int(chain_id), now_ts=terminal_at)
+        _segment_chain_runtime_write(
+            store,
+            root=callback_root,
+            owner_id=callback_owner_id,
+            entity_ids=callback_chain_ids,
+            status="terminal",
+            now_ts=terminal_at,
+            task=marker_task(0, command_override=callback_command),
+        )
+        segment_dispatch_wakeup.set()
+
+    return on_start, on_complete
+
+
 def _mark_campaign_rebuild_finished(root: str, campaign_id: int | None, now_ts: float | None = None) -> None:
     if campaign_id is None:
         return
@@ -15646,102 +15757,18 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                         )
                         static_command_str = shlex.join(static_args)
 
-                        def _static_segment_marker_task(
-                            pid: int,
-                            *,
-                            root: str = root,
-                            task_type: str = task_type,
-                            segment_id: int = int(segment_id),
-                            started_at: float = static_started_at,
-                            command_str: str = static_command_str,
-                            timeout_sec: int = static_timeout_sec,
-                        ) -> RunningTask:
-                            return RunningTask(
-                                row_id=0,
-                                root=root,
-                                task_key=_task_key(root, task_type, segment_id),
-                                task_type=task_type,
-                                entity_id=segment_id,
-                                command_str=command_str,
-                                timeout_sec=timeout_sec,
-                                attempts=1,
-                                started_at=started_at,
-                                pid=int(pid),
-                            )
-
-                        def _static_segment_started(
-                            pid: int,
-                            *,
-                            root: str = root,
-                            command_str: str = static_command_str,
-                            started_at: float = static_started_at,
-                            chain_ids: tuple[int, ...] = tuple(static_chain_ids),
-                            owner_id: int = int(segment_id),
-                        ) -> None:
-                            marker_at = max(float(started_at), time.time())
-                            for chain_id in chain_ids:
-                                task = _static_segment_marker_task(pid, segment_id=int(chain_id))
-                                _segment_runtime_marker_write(
-                                    store,
-                                    task,
-                                    status="running",
-                                    now_ts=marker_at,
-                                    pid=int(pid),
-                                    command_str=command_str,
-                                )
-                            _segment_chain_runtime_write(
-                                store,
-                                root=root,
-                                owner_id=owner_id,
-                                entity_ids=chain_ids,
-                                status="running",
-                                now_ts=marker_at,
-                                task=_static_segment_marker_task(pid, command_str=command_str),
-                            )
-
-                        def _static_segment_complete(
-                            rc: int | None,
-                            *,
-                            root: str = root,
-                            command_str: str = static_command_str,
-                            lane_name: str = lane_name,
-                            segment_id: int = int(segment_id),
-                            chain_ids: tuple[int, ...] = tuple(static_chain_ids),
-                        ) -> None:
-                            note = None if rc == 0 else (
-                                "task_lock_busy" if rc == _TASK_LOCK_BUSY_RC else "static_segment_error"
-                            )
-                            terminal_at = time.time()
-                            for chain_id in chain_ids:
-                                _segment_runtime_marker_write(
-                                    store,
-                                    _static_segment_marker_task(0, segment_id=int(chain_id)),
-                                    status="terminal",
-                                    now_ts=terminal_at,
-                                    note=note,
-                                    pid=0,
-                                    command_str=command_str,
-                                )
-                                _static_lane_terminal(
-                                    store,
-                                    root=root,
-                                    lane=lane_name,
-                                    entity_id=int(chain_id),
-                                    success=bool(rc == 0),
-                                    note=note,
-                                    now_ts=terminal_at,
-                                )
-                                _mark_segment_finished(root, int(chain_id), now_ts=terminal_at)
-                            _segment_chain_runtime_write(
-                                store,
-                                root=root,
-                                owner_id=segment_id,
-                                entity_ids=chain_ids,
-                                status="terminal",
-                                now_ts=terminal_at,
-                                task=_static_segment_marker_task(0, command_str=command_str),
-                            )
-                            segment_dispatch_wakeup.set()
+                        _static_segment_started, _static_segment_complete = _make_static_segment_callbacks(
+                            store=store,
+                            root=root,
+                            task_type=task_type,
+                            lane_name=lane_name,
+                            segment_id=int(segment_id),
+                            chain_ids=tuple(static_chain_ids),
+                            started_at=static_started_at,
+                            command_str=static_command_str,
+                            timeout_sec=static_timeout_sec,
+                            segment_dispatch_wakeup=segment_dispatch_wakeup,
+                        )
 
                         started = priority_executor.launch(
                             cfg,

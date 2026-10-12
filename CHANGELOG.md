@@ -1,3 +1,10 @@
+## 1.5.146 - 2026-10-12
+
+- Bind the complete delayed static-lane callback bundle, including its marker
+  task factory, to the creation root. Add a behavioral A/B delayed-callback
+  regression proving that runtime markers and chain reverse indexes cannot
+  cross roots or commands.
+
 ## 1.5.145 - 2026-10-12
 
 - Bind delayed static-lane start/complete callbacks to the root, task type and
