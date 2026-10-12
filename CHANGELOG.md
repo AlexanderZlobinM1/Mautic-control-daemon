@@ -1,3 +1,9 @@
+## 1.5.153 - 2026-10-13
+
+- Synchronize the packaged `mautic-patch-resolution-v1` contract's exact
+  `minimum_agent_version` with the agent release so the full source/package
+  regression gate cannot reject an otherwise valid runtime candidate.
+
 ## 1.5.152 - 2026-10-13
 
 - Close the delayed Mautic 7 capability-probe race in root-local dependency
