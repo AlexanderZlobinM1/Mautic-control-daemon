@@ -1,3 +1,9 @@
+## 1.5.99 - 2026-10-12
+
+- Accept a newer canonical host runtime revision even when native migration
+  has not yet rewritten every per-instance revision, preventing fresh lane maps
+  from being stranded behind an older accepted snapshot.
+
 ## 1.5.98 - 2026-10-12
 
 - Add an owned scheduler admission barrier when an executable MCD update is

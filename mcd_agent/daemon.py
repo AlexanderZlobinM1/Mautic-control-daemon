@@ -1149,15 +1149,28 @@ def _remote_runtime_response_is_stale(store: object, response: Mapping[str, Any]
     response_instances = response.get("instance_desired_states")
     if not isinstance(accepted_instances, dict):
         return False
+    # A newer canonical host revision supersedes the revision tuple captured
+    # by the previous accepted snapshot. Native MCC migrations can advance
+    # the host envelope before every instance row is rewritten; rejecting the
+    # whole response here would strand fresh operator lane maps forever.
+    host_is_newer = (
+        isinstance(accepted_host_revision, int)
+        and isinstance(response_host_revision, int)
+        and response_host_revision > accepted_host_revision
+    )
     response_instances = response_instances if isinstance(response_instances, dict) else {}
     for uid, accepted_revision in accepted_instances.items():
         if not isinstance(accepted_revision, int) or isinstance(accepted_revision, bool):
             continue
         matched_uid = _matching_instance_runtime_entry(response_instances, uid)
-        if matched_uid is None:
+        if matched_uid is None and not host_is_newer:
             return True
+        if matched_uid is None:
+            continue
         row = response_instances.get(matched_uid)
         response_revision = row.get("revision") if isinstance(row, dict) else None
+        if host_is_newer:
+            continue
         if not isinstance(response_revision, int) or isinstance(response_revision, bool):
             return True
         if response_revision < accepted_revision:
