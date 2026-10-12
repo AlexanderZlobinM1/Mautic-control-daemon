@@ -1,3 +1,9 @@
+## 1.5.100 - 2026-10-12
+
+- Preserve valid per-scope runtime updates when a newer canonical host
+  revision arrives with a lagging instance revision, while still rejecting
+  older host snapshots that could downgrade accepted state.
+
 ## 1.5.99 - 2026-10-12
 
 - Accept a newer canonical host runtime revision even when native migration
