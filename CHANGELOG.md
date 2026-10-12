@@ -1,3 +1,15 @@
+## 1.5.141 - 2026-10-12
+
+- Reconcile ordinary persisted segment claims against current-cycle identity
+  and independent TaskStore/executor/process evidence before dispatch. Stale
+  claims and prior-generation terminal markers are released in place without
+  reusing old `done` state; current-generation workers are adopted and
+  orphaned claims expire through bounded durable grace.
+- Persist ordinary `active_meta` and cycle identity in runtime markers, and
+  report honest pending-guard reasons instead of `cron_disallowed` when the
+  cluster route is allowed. Add the exact 132-item stale-claim fixture,
+  current-generation/next-cycle regression, and daemon integration coverage.
+
 ## 1.5.140 - 2026-10-12
 
 - Make MCD update admission barriers owner-aware: ordinary Mautic/PHP work

@@ -15,6 +15,17 @@ from typing import Any, Iterable, Mapping
 SCHEMA = "mcd-segment-cycle-v1"
 BASELINE_MAX_ENTRIES = 4096
 MANUAL_ADMISSIONS_MAX = 256
+ORPHAN_GRACE_SEC = 60
+_LIVE_EVIDENCE_KEYS = (
+    "active",
+    "db",
+    "db_process",
+    "executor_active",
+    "live",
+    "process",
+    "runtime_confirmed",
+    "taskstore_active",
+)
 
 
 def normalize_ids(values: Iterable[object] | None) -> list[int]:
@@ -30,6 +41,85 @@ def normalize_ids(values: Iterable[object] | None) -> list[int]:
         seen.add(value)
         out.append(value)
     return out
+
+
+def _timestamp(value: object) -> float | None:
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_active_meta(raw: object) -> dict[str, dict[str, object]]:
+    """Normalize restart-safe metadata for ordinary claimed items.
+
+    The metadata is deliberately small.  It records when a claim was made,
+    the last independent liveness observation, and the cycle identity of the
+    worker that produced that observation.  It is not a second queue: the
+    durable ``claimed``/``running`` lists remain the source of truth.
+    """
+
+    source = raw if isinstance(raw, Mapping) else {}
+    normalized: dict[str, dict[str, object]] = {}
+    for raw_sid, raw_meta in source.items():
+        try:
+            sid = int(raw_sid)
+        except (TypeError, ValueError):
+            continue
+        if sid <= 0 or not isinstance(raw_meta, Mapping):
+            continue
+        meta: dict[str, object] = {}
+        for field in (
+            "claimed_at",
+            "running_at",
+            "last_independent_at",
+            "orphan_since",
+            "started_at",
+        ):
+            value = _timestamp(raw_meta.get(field))
+            if value is not None:
+                meta[field] = value
+        cycle_id = str(raw_meta.get("cycle_id") or "").strip()
+        if cycle_id:
+            meta["cycle_id"] = cycle_id
+        if meta:
+            normalized[str(sid)] = meta
+    return normalized
+
+
+def _evidence_is_live(evidence: object) -> bool:
+    if isinstance(evidence, Mapping):
+        return any(bool(evidence.get(key)) for key in _LIVE_EVIDENCE_KEYS)
+    return bool(evidence) if isinstance(evidence, bool) else False
+
+
+def _evidence_timestamp(evidence: object, *fields: str) -> float | None:
+    if not isinstance(evidence, Mapping):
+        return None
+    for field in fields:
+        value = _timestamp(evidence.get(field))
+        if value is not None:
+            return value
+    return None
+
+
+def _evidence_generation_mismatch(
+    evidence: object,
+    *,
+    cycle_id: str,
+    admitted_at: float,
+) -> bool:
+    if not isinstance(evidence, Mapping):
+        return False
+    observed_cycle_id = str(evidence.get("cycle_id") or "").strip()
+    if observed_cycle_id and cycle_id and observed_cycle_id != cycle_id:
+        return True
+    started_at = _evidence_timestamp(evidence, "started_at", "admitted_at")
+    return bool(
+        started_at is not None
+        and admitted_at > 0
+        and started_at < admitted_at
+    )
 
 
 def cycle_key(root: str) -> str:
@@ -401,6 +491,7 @@ def _new_cycle(
         "importance_classified": True,
         "claimed": [],
         "running": [],
+        "active_meta": {},
         "done": [],
         "errors": [],
         "error_notes": {},
@@ -455,6 +546,13 @@ def normalize_state(raw: Mapping[str, Any] | None) -> dict[str, object]:
     if not observed_snapshot:
         observed_snapshot = dict(cycle_baseline)
     baseline_ready = bool(source.get("baseline_ready", bool(baseline)))
+    active_meta = _normalize_active_meta(source.get("active_meta"))
+    active_ids = set(claimed) | set(running)
+    active_meta = {
+        str(sid): dict(meta)
+        for sid, meta in active_meta.items()
+        if int(sid) in active_ids
+    }
     return {
         "schema": SCHEMA,
         "cycle_id": str(source.get("cycle_id") or ""),
@@ -467,6 +565,7 @@ def normalize_state(raw: Mapping[str, Any] | None) -> dict[str, object]:
         "importance_classified": bool(importance_classified),
         "claimed": claimed,
         "running": running,
+        "active_meta": active_meta,
         "done": done,
         "errors": errors,
         "error_notes": dict(source.get("error_notes") or {}) if isinstance(source.get("error_notes"), dict) else {},
@@ -498,6 +597,114 @@ def _mark_terminal_if_complete(state: dict[str, object]) -> None:
         state["status"] = "terminal"
     else:
         state["status"] = "active"
+
+
+def reconcile_active_claims(
+    raw: Mapping[str, Any] | None,
+    *,
+    active_evidence: Mapping[object, object] | None = None,
+    now_ts: float,
+    orphan_grace_sec: int = ORPHAN_GRACE_SEC,
+) -> tuple[dict[str, object], list[int]]:
+    """Reconcile ordinary claims without reusing a prior cycle's terminal.
+
+    A persisted claim is coordination state, not proof that a worker still
+    exists.  Current TaskStore/executor/process evidence keeps it adopted.  A
+    marker from another cycle, or a terminal marker from before this cycle was
+    admitted, releases the claim in place but never marks the item done.  A
+    claim with no independent evidence gets one bounded grace window so a
+    restart can adopt a worker that is between scheduler observations.
+    """
+
+    state = normalize_state(raw)
+    evidence = active_evidence if isinstance(active_evidence, Mapping) else {}
+    current_cycle_id = str(state.get("cycle_id") or "").strip()
+    admitted_at = float(state.get("admitted_at") or 0.0)
+    grace = max(1, int(orphan_grace_sec or ORPHAN_GRACE_SEC))
+    active_meta = _normalize_active_meta(state.get("active_meta"))
+    released: list[int] = []
+    active_ids = normalize_ids([*state.get("claimed", []), *state.get("running", [])])
+    claimed = set(normalize_ids(state.get("claimed")))
+    running = set(normalize_ids(state.get("running")))
+    for sid in active_ids:
+        item_evidence = evidence.get(sid, evidence.get(str(sid)))
+        prior = dict(active_meta.get(str(sid), {}))
+        generation_mismatch = _evidence_generation_mismatch(
+            item_evidence,
+            cycle_id=current_cycle_id,
+            admitted_at=admitted_at,
+        )
+        status = (
+            str(item_evidence.get("status") or "").strip().lower()
+            if isinstance(item_evidence, Mapping)
+            else ""
+        )
+        if _evidence_is_live(item_evidence) and not generation_mismatch:
+            independent_at = _evidence_timestamp(
+                item_evidence,
+                "independent_at",
+                "last_independent_at",
+                "observed_at",
+            )
+            prior.setdefault("claimed_at", float(now_ts))
+            if sid in running:
+                prior.setdefault("running_at", float(now_ts))
+            prior["last_independent_at"] = float(
+                independent_at
+                if independent_at is not None
+                else prior.get("last_independent_at") or now_ts
+            )
+            observed_cycle_id = str(
+                item_evidence.get("cycle_id") or current_cycle_id
+            ).strip()
+            if observed_cycle_id:
+                prior["cycle_id"] = observed_cycle_id
+            started_at = _evidence_timestamp(item_evidence, "started_at")
+            if started_at is not None:
+                prior["started_at"] = started_at
+            prior.pop("orphan_since", None)
+            active_meta[str(sid)] = prior
+            continue
+
+        # A terminal marker is an acknowledgement that the old executor is
+        # finished, not evidence that this cycle's item succeeded.  Release
+        # it so the current cycle can claim and execute it again.
+        if generation_mismatch or status in {"terminal", "done", "error", "lost"}:
+            released.append(sid)
+            claimed.discard(sid)
+            running.discard(sid)
+            active_meta.pop(str(sid), None)
+            continue
+
+        orphan_since = _timestamp(prior.get("orphan_since"))
+        if orphan_since is None:
+            orphan_since = (
+                _timestamp(prior.get("last_independent_at"))
+                or _timestamp(prior.get("running_at"))
+                or _timestamp(prior.get("claimed_at"))
+                or _evidence_timestamp(item_evidence, "started_at")
+                or float(now_ts)
+            )
+            prior["orphan_since"] = float(orphan_since)
+        if float(now_ts) - float(orphan_since) >= grace:
+            released.append(sid)
+            claimed.discard(sid)
+            running.discard(sid)
+            active_meta.pop(str(sid), None)
+        else:
+            active_meta[str(sid)] = prior
+
+    state["claimed"] = normalize_ids(claimed)
+    state["running"] = normalize_ids(running)
+    state["active_meta"] = {
+        str(sid): dict(meta)
+        for sid, meta in active_meta.items()
+        if sid in {str(value) for value in active_ids}
+        and int(sid) in set(state["claimed"]) | set(state["running"])
+    }
+    state["updated_at"] = float(now_ts)
+    _mark_terminal_if_complete(state)
+    return state, released
 
 
 def cycle_item_tier(raw: Mapping[str, Any] | None, entity_id: object) -> str | None:
@@ -889,6 +1096,12 @@ def sync_cycle(
         if sid in running_set and sid not in set(normalize_ids(state.get("done"))) and sid not in set(normalize_ids(state.get("errors")))
     ]
     state["claimed"] = normalize_ids([*state.get("claimed", []), *state["running"]])
+    active_ids = set(state["claimed"]) | set(state["running"])
+    state["active_meta"] = {
+        str(sid): dict(meta)
+        for sid, meta in _normalize_active_meta(state.get("active_meta")).items()
+        if int(sid) in active_ids
+    }
     state["updated_at"] = float(now_ts)
     previous_status = str(state.get("status") or "active")
     _mark_terminal_if_complete(state)
@@ -919,6 +1132,12 @@ def claim_item(
     ok = sid in items and sid in eligible and sid not in blocked and sid not in finished and sid not in claimed and sid not in running
     if ok:
         state["claimed"] = [*normalize_ids(state.get("claimed")), sid]
+        active_meta = _normalize_active_meta(state.get("active_meta"))
+        item_meta = dict(active_meta.get(str(sid), {}))
+        item_meta.setdefault("claimed_at", float(now_ts))
+        item_meta.pop("orphan_since", None)
+        active_meta[str(sid)] = item_meta
+        state["active_meta"] = active_meta
         state["updated_at"] = float(now_ts)
     return state, ok
 
@@ -929,6 +1148,14 @@ def mark_running(raw: Mapping[str, Any] | None, *, entity_id: int, now_ts: float
     if sid in set(normalize_ids(state.get("items"))) | set(normalize_ids(state.get("follow_up"))):
         state["claimed"] = normalize_ids([*state.get("claimed", []), sid])
         state["running"] = normalize_ids([*state.get("running", []), sid])
+        active_meta = _normalize_active_meta(state.get("active_meta"))
+        item_meta = dict(active_meta.get(str(sid), {}))
+        item_meta.setdefault("claimed_at", float(now_ts))
+        item_meta.setdefault("running_at", float(now_ts))
+        item_meta.setdefault("last_independent_at", float(now_ts))
+        item_meta.pop("orphan_since", None)
+        active_meta[str(sid)] = item_meta
+        state["active_meta"] = active_meta
         state["updated_at"] = float(now_ts)
         state["status"] = "active"
     return state
@@ -940,6 +1167,9 @@ def release_claim(raw: Mapping[str, Any] | None, *, entity_id: int, now_ts: floa
     sid = int(entity_id)
     state["claimed"] = [x for x in normalize_ids(state.get("claimed")) if x != sid]
     state["running"] = [x for x in normalize_ids(state.get("running")) if x != sid]
+    active_meta = _normalize_active_meta(state.get("active_meta"))
+    active_meta.pop(str(sid), None)
+    state["active_meta"] = active_meta
     state["updated_at"] = float(now_ts)
     _mark_terminal_if_complete(state)
     if previous_status != "terminal" and str(state.get("status") or "") == "terminal":
@@ -960,6 +1190,9 @@ def mark_terminal(
     sid = int(entity_id)
     state["claimed"] = [x for x in normalize_ids(state.get("claimed")) if x != sid]
     state["running"] = [x for x in normalize_ids(state.get("running")) if x != sid]
+    active_meta = _normalize_active_meta(state.get("active_meta"))
+    active_meta.pop(str(sid), None)
+    state["active_meta"] = active_meta
     state["done"] = [x for x in normalize_ids([*state.get("done", []), sid]) if success or x != sid]
     if success:
         state["errors"] = [x for x in normalize_ids(state.get("errors")) if x != sid]

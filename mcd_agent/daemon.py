@@ -157,6 +157,7 @@ from mcd_agent.segment_admission import (
     ordinary_snapshot_order as _ordinary_segment_snapshot_order,
     normalize_ids as _normalize_segment_ids,
     pending_important_ids as _segment_cycle_pending_important_ids,
+    reconcile_active_claims as _segment_cycle_reconcile_active_claims,
     release_claim as _segment_cycle_release_claim,
     source_baseline as _ordinary_segment_source_baseline,
     sync_cycle as _segment_cycle_sync_state,
@@ -2265,6 +2266,7 @@ def _segment_runtime_marker_write(
     if not hasattr(store, "get_runtime_sync") or not hasattr(store, "put_runtime_sync"):
         return
     marker = _segment_runtime_marker_load(store, task.root, task.entity_id)
+    cycle_state = store.get_runtime_sync(_segment_cycle_key(task.root))
     marker.update(
         {
             "schema": _SEGMENT_RUNTIME_MARKER_SCHEMA,
@@ -2280,6 +2282,14 @@ def _segment_runtime_marker_write(
         }
     )
     if status == "running":
+        if isinstance(cycle_state, Mapping):
+            cycle_id = str(cycle_state.get("cycle_id") or "").strip()
+            if cycle_id:
+                marker["cycle_id"] = cycle_id
+            try:
+                marker["cycle_admitted_at"] = float(cycle_state.get("admitted_at") or 0.0)
+            except (TypeError, ValueError):
+                marker.pop("cycle_admitted_at", None)
         marker["last_independent_at"] = float(now_ts)
         marker.pop("lost_at", None)
         marker.pop("terminal_at", None)
@@ -2670,6 +2680,16 @@ def _segment_chain_runtime_write(
             "updated_at": float(now_ts),
         }
     )
+    if str(status or "").strip().lower() in {"running", "admitting"}:
+        cycle_state = store.get_runtime_sync(_segment_cycle_key(root))
+        if isinstance(cycle_state, Mapping):
+            cycle_id = str(cycle_state.get("cycle_id") or "").strip()
+            if cycle_id:
+                payload["cycle_id"] = cycle_id
+            try:
+                payload["cycle_admitted_at"] = float(cycle_state.get("admitted_at") or 0.0)
+            except (TypeError, ValueError):
+                payload.pop("cycle_admitted_at", None)
     if task is not None:
         payload.update(
             {
@@ -2882,6 +2902,167 @@ def _segment_cycle_sync(
         )
         store.put_runtime_sync(key, state)
     return state, added, started_new
+
+
+def _segment_cycle_marker_process_live(marker: Mapping[str, object]) -> bool:
+    """Return process evidence for one persisted ordinary-cycle marker."""
+
+    try:
+        pid = int(marker.get("pid") or 0)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0 or not _is_pid_alive(pid):
+        return False
+    command = str(marker.get("command_str") or "").strip()
+    return not command or _pid_matches_task_command(pid, command)
+
+
+def _segment_cycle_active_evidence(
+    store: "TaskStore",
+    *,
+    root: str,
+    state: Mapping[str, object],
+    running: Mapping[str, "RunningTask"],
+) -> dict[int, dict[str, object]]:
+    """Build read-only evidence for claims in one ordinary cycle.
+
+    Runtime markers are useful for generation identity, but marker-only state
+    is never treated as live.  A current scheduler task or a live TaskStore
+    row must independently prove adoption; the same rule applies to a chain
+    marker.  This keeps ordinary Mautic/PHP work non-blocking without allowing
+    an old terminal marker to close a newer cycle.
+    """
+
+    active_ids = set(
+        _normalize_segment_ids(
+            [*(state.get("claimed") or []), *(state.get("running") or [])]
+        )
+    )
+    evidence: dict[int, dict[str, object]] = {}
+    cycle_id = str(state.get("cycle_id") or "").strip()
+
+    def _merge(sid: int, candidate: Mapping[str, object]) -> None:
+        previous = evidence.get(int(sid))
+        if previous is None:
+            evidence[int(sid)] = dict(candidate)
+            return
+        previous_live = any(
+            bool(previous.get(key))
+            for key in ("active", "executor_active", "live", "process", "runtime_confirmed", "taskstore_active")
+        )
+        candidate_live = any(
+            bool(candidate.get(key))
+            for key in ("active", "executor_active", "live", "process", "runtime_confirmed", "taskstore_active")
+        )
+        if candidate_live and not previous_live:
+            evidence[int(sid)] = dict(candidate)
+        elif candidate_live == previous_live:
+            merged = dict(previous)
+            merged.update(candidate)
+            evidence[int(sid)] = merged
+
+    for sid in sorted(active_ids):
+        marker = _segment_runtime_marker_load(store, root, sid)
+        if marker:
+            marker_evidence = dict(marker)
+            marker_evidence["live"] = (
+                str(marker.get("status") or "").strip().lower() == "running"
+                and _segment_cycle_marker_process_live(marker)
+            )
+            _merge(sid, marker_evidence)
+        chain_marker = _segment_chain_runtime_load(store, root, sid)
+        if chain_marker:
+            chain_evidence = dict(chain_marker)
+            chain_evidence["live"] = (
+                str(chain_marker.get("status") or "").strip().lower() in {"running", "admitting"}
+                and _segment_cycle_marker_process_live(chain_marker)
+            )
+            _merge(sid, chain_evidence)
+
+    for task in running.values():
+        if (
+            task.root != root
+            or task.entity_id is None
+            or int(task.entity_id) not in active_ids
+            or task.task_type not in _SEGMENT_RUNTIME_TASK_TYPES
+        ):
+            continue
+        marker = _segment_runtime_marker_load(store, root, int(task.entity_id))
+        task_evidence: dict[str, object] = {
+            "executor_active": True,
+            "taskstore_active": True,
+            "cycle_id": marker.get("cycle_id") if marker else cycle_id,
+            "started_at": marker.get("started_at", task.started_at) if marker else task.started_at,
+            "independent_at": time.time(),
+        }
+        _merge(int(task.entity_id), task_evidence)
+
+    try:
+        rows = store.running_rows()
+    except Exception:
+        rows = []
+    for row in rows:
+        if str(row.get("root") or "") != root:
+            continue
+        task_type = str(row.get("task_type") or "")
+        if task_type not in _SEGMENT_RUNTIME_TASK_TYPES:
+            continue
+        try:
+            sid = int(row.get("entity_id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if sid <= 0 or sid not in active_ids:
+            continue
+        try:
+            pid = int(row.get("pid") or 0)
+        except (TypeError, ValueError):
+            pid = 0
+        command = str(row.get("command_str") or "")
+        if pid <= 0 or not _is_pid_alive(pid) or (command and not _pid_matches_task_command(pid, command)):
+            continue
+        _merge(
+            sid,
+            {
+                "taskstore_active": True,
+                "process": True,
+                "cycle_id": _segment_runtime_marker_load(store, root, sid).get("cycle_id", cycle_id),
+                "started_at": row.get("started_at"),
+                "independent_at": time.time(),
+            },
+        )
+    return evidence
+
+
+def _segment_cycle_reconcile_orphans(
+    store: "TaskStore",
+    *,
+    root: str,
+    running: Mapping[str, "RunningTask"],
+    now_ts: float,
+) -> tuple[dict[str, object], list[int]]:
+    """Release only proven stale ordinary claims before pending projection."""
+
+    key = _segment_cycle_key(root)
+    with _SEGMENT_CYCLE_LOCK:
+        raw_state = store.get_runtime_sync(key)
+        if not isinstance(raw_state, Mapping):
+            return {}, []
+        evidence = _segment_cycle_active_evidence(
+            store,
+            root=root,
+            state=raw_state,
+            running=running,
+        )
+        state, released = _segment_cycle_reconcile_active_claims(
+            raw_state,
+            active_evidence=evidence,
+            now_ts=float(now_ts),
+        )
+        if state != dict(raw_state):
+            store.put_runtime_sync(key, state)
+    if released:
+        _refresh_scheduler_important_root(store, root)
+    return state, released
 
 
 def _segment_cycle_pending_ids(state: Mapping[str, object] | None) -> set[int]:
@@ -18571,6 +18752,18 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
             segment_cycle_payload = store.get_runtime_sync(_segment_cycle_key(root)) or {}
             if not isinstance(segment_cycle_payload, Mapping):
                 segment_cycle_payload = {}
+            segment_cycle_payload, reconciled_orphan_ids = _segment_cycle_reconcile_orphans(
+                store,
+                root=root,
+                running=running,
+                now_ts=time.time(),
+            )
+            if reconciled_orphan_ids:
+                logging.warning(
+                    "[%s] released stale ordinary segment claims from prior/missing workers ids=%s",
+                    root,
+                    ",".join(str(sid) for sid in reconciled_orphan_ids),
+                )
             segment_cycle_payload, terminalized_data_errors = _terminalize_segment_data_errors(
                 store,
                 root=root,
@@ -19355,7 +19548,17 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                     segment_slot_limit=segment_slot_limit,
                 )
             elif eligible_pending_cycle_ids or str(segment_cycle_payload.get("status") or "").lower() == "active":
-                _record_segment_pending_guard("cron_disallowed")
+                if not cluster_cron_allowed:
+                    pending_guard_reason = "cron_disallowed"
+                elif set(
+                    _normalize_segment_ids(
+                        [*(segment_cycle_payload.get("claimed") or []), *(segment_cycle_payload.get("running") or [])]
+                    )
+                ):
+                    pending_guard_reason = "cycle_claim_or_terminal_reconcile"
+                else:
+                    pending_guard_reason = "no_projected_pending"
+                _record_segment_pending_guard(pending_guard_reason)
 
             if (
                 segment_launched_this_tick <= 0

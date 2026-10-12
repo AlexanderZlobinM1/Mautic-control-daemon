@@ -33,6 +33,7 @@ from mcd_agent.segment_admission import (
     active_cycle_follow_up_rows,
     cycle_item_tier,
     pending_important_ids,
+    reconcile_active_claims,
     source_baseline,
     sync_cycle,
 )
@@ -102,6 +103,140 @@ class SegmentAdmissionTests(unittest.TestCase):
             remaining_ids=groups["remaining"],
         )
         self.assertEqual(pending_important_ids(running_state), set())
+
+    def test_prior_terminal_marker_releases_stale_claim_and_allows_next_cycle(self) -> None:
+        """A prior worker must not strand the current 132-item cycle."""
+
+        planned = list(range(1, 133))
+        state, _added, started = sync_cycle(
+            None,
+            planned_ids=planned,
+            never_built=[],
+            running_ids=[],
+            now_ts=1000.0,
+        )
+        self.assertTrue(started)
+        state["done"] = [sid for sid in planned if sid != 61]
+        state["claimed"] = [61]
+        state["running"] = [61]
+        state["active_meta"] = {"61": {"claimed_at": 1000.1, "running_at": 1000.2}}
+        state["status"] = "active"
+
+        reconciled, released = reconcile_active_claims(
+            state,
+            active_evidence={
+                61: {
+                    "status": "terminal",
+                    "cycle_id": "old-cycle",
+                    "started_at": 999.0,
+                }
+            },
+            now_ts=1001.0,
+        )
+        self.assertEqual(released, [61])
+        self.assertEqual(reconciled["claimed"], [])
+        self.assertEqual(reconciled["running"], [])
+        self.assertEqual(set(reconciled["done"]), set(planned) - {61})
+        self.assertEqual(
+            set(reconciled["items"]) - set(reconciled["done"]),
+            {61},
+        )
+
+        claimed, ok = claim_item(
+            reconciled,
+            entity_id=61,
+            eligible_ids=planned,
+            blocked_ids=[],
+            running_ids=[],
+            now_ts=1002.0,
+        )
+        self.assertTrue(ok)
+        running = mark_running(claimed, entity_id=61, now_ts=1002.1)
+        terminal = mark_terminal(running, entity_id=61, success=True, now_ts=1003.0)
+        next_cycle, _added, started_next = sync_cycle(
+            terminal,
+            planned_ids=planned,
+            never_built=[],
+            running_ids=[],
+            now_ts=1004.0,
+        )
+        self.assertTrue(started_next)
+        self.assertNotEqual(next_cycle["cycle_id"], state["cycle_id"])
+        self.assertEqual(next_cycle["claimed"], [])
+        self.assertEqual(next_cycle["running"], [])
+
+    def test_orphan_claim_has_bounded_grace_and_current_generation_live_evidence(self) -> None:
+        state, _added, _started = sync_cycle(
+            None,
+            planned_ids=[7, 9],
+            never_built=[],
+            running_ids=[],
+            now_ts=200.0,
+        )
+        claimed, ok = claim_item(
+            state,
+            entity_id=7,
+            eligible_ids=[7, 9],
+            blocked_ids=[],
+            running_ids=[],
+            now_ts=201.0,
+        )
+        self.assertTrue(ok)
+        held, released = reconcile_active_claims(
+            claimed,
+            active_evidence={},
+            now_ts=220.0,
+            orphan_grace_sec=60,
+        )
+        self.assertEqual(released, [])
+        self.assertEqual(held["claimed"], [7])
+        released_state, released = reconcile_active_claims(
+            held,
+            active_evidence={},
+            now_ts=261.0,
+            orphan_grace_sec=60,
+        )
+        self.assertEqual(released, [7])
+        self.assertEqual(released_state["claimed"], [])
+
+        claimed_again, ok = claim_item(
+            released_state,
+            entity_id=9,
+            eligible_ids=[7, 9],
+            blocked_ids=[],
+            running_ids=[],
+            now_ts=262.0,
+        )
+        self.assertTrue(ok)
+        live, released = reconcile_active_claims(
+            claimed_again,
+            active_evidence={
+                9: {
+                    "active": True,
+                    "cycle_id": claimed_again["cycle_id"],
+                    "started_at": 262.1,
+                    "independent_at": 263.0,
+                }
+            },
+            now_ts=263.0,
+        )
+        self.assertEqual(released, [])
+        self.assertEqual(live["claimed"], [9])
+        self.assertNotIn("orphan_since", live["active_meta"]["9"])
+
+        old, released = reconcile_active_claims(
+            live,
+            active_evidence={
+                9: {
+                    "active": True,
+                    "cycle_id": "prior-cycle",
+                    "started_at": 199.0,
+                }
+            },
+            now_ts=264.0,
+        )
+        self.assertEqual(released, [9])
+        self.assertEqual(old["claimed"], [])
 
     def test_active_cycle_queues_new_ids_in_follow_up_without_reordering_or_reset(self) -> None:
         state, added, started = sync_cycle(

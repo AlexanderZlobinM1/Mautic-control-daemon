@@ -791,6 +791,48 @@ class SegmentLivenessTests(unittest.TestCase):
             self.assertIn(f"{root_b}|segment|202", running)
             store.close()
 
+    def test_daemon_reconciles_prior_terminal_marker_before_pending_projection(self) -> None:
+        root = "/var/www/alex/public_html"
+        store = TaskStore(":memory:")
+        state, _added, _started = sync_cycle(
+            None,
+            planned_ids=[61, 132],
+            never_built=[],
+            running_ids=[],
+            now_ts=100.0,
+        )
+        state["done"] = [132]
+        state["claimed"] = [61]
+        state["running"] = [61]
+        state["status"] = "active"
+        store.put_runtime_sync(cycle_key(root), state)
+        store.put_runtime_sync(
+            daemon._segment_runtime_marker_key(root, 61),
+            {
+                "schema": "mcd-segment-runtime-marker-v1",
+                "root": root,
+                "entity_id": 61,
+                "status": "terminal",
+                "cycle_id": "previous-cycle",
+                "started_at": 99.0,
+                "pid": 0,
+                "command_str": "php mautic segments:update --id=61",
+            },
+        )
+        with patch.object(daemon, "_refresh_scheduler_important_root"):
+            repaired, released = daemon._segment_cycle_reconcile_orphans(
+                store,
+                root=root,
+                running={},
+                now_ts=101.0,
+            )
+        self.assertEqual(released, [61])
+        self.assertEqual(repaired["claimed"], [])
+        self.assertEqual(repaired["running"], [])
+        self.assertEqual(daemon._segment_cycle_pending_order(repaired), [61])
+        self.assertEqual(store.get_runtime_sync(cycle_key(root))["claimed"], [])
+        store.close()
+
     def test_canonical_lifecycle_monitor_is_root_local(self) -> None:
         """A slow A probe cannot delay B terminal cleanup in the same monitor."""
         with tempfile.TemporaryDirectory() as td:
