@@ -1,3 +1,8 @@
+## 1.5.101 - 2026-10-12
+
+- Apply resolved MCC runtime maps when effective local config differs even if
+  the aggregate runtime fingerprint is unchanged.
+
 ## 1.5.100 - 2026-10-12
 
 - Preserve valid per-scope runtime updates when a newer canonical host

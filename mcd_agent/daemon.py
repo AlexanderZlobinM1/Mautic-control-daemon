@@ -13030,12 +13030,14 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                 fp = overrides_fingerprint(overrides)
                 config_profile = str(getattr(config, "profile_name", "") or "").strip().lower()
                 profile_sync_needed = bool(profile_authority and config_profile != profile_authority)
-                if fp != last_runtime_overrides_fp or profile_sync_needed:
+                effective_runtime = local_runtime_overrides(config)
+                runtime_apply_needed = effective_runtime != overrides
+                if fp != last_runtime_overrides_fp or runtime_apply_needed or profile_sync_needed:
                     # Persist only the LWW-resolved values. An absent key is
                     # removed only when the winning MCC metadata is an
                     # explicit tombstone; an old/partial response cannot
                     # erase a local stable value during startup.
-                    if fp != last_runtime_overrides_fp:
+                    if fp != last_runtime_overrides_fp or runtime_apply_needed:
                         _persist_resolved_runtime_to_config(
                             config,
                             local_runtime_overrides(config),
