@@ -1,3 +1,9 @@
+## 1.5.113 - 2026-10-12
+
+- Dispatch the next eligible item from a persisted ordinary cycle whenever a
+  shared worker slot is free, even if another lane launched earlier in the
+  same scheduler tick; prevent pending-tail starvation across long cycles.
+
 ## 1.5.112 - 2026-10-12
 
 - Preserve already-canonical instance lane records in ACK observations instead

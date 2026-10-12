@@ -16019,7 +16019,6 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
             if (
                 cluster_cron_allowed
                 and persisted_pending_cycle_ids
-                and segment_launched_this_tick <= 0
             ):
                 pending_cycle_ring = deque(
                     sid
