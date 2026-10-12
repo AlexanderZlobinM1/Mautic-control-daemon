@@ -8745,10 +8745,11 @@ def _fill_from_ring(
                 _remove_ring_entities(ring, set(chain_ids))
             launched_count += 1
         else:
-            # Count a failed attempt for this round as well. A root that is
-            # temporarily blocked by repeat/DB/lock guards must not leave the
-            # shared host cursor waiting forever while other roots are ready.
-            _mark_scheduler_shared_admission(root, task_type)
+            # A failed/full-cap attempt is not a served turn. Only the common
+            # submit boundary marks a root after it has admitted a worker;
+            # counting a failed attempt here lets a hot root consume the
+            # served-root round while a different ready root waits for the
+            # next genuinely free slot.
             if admission_release is not None and claimed:
                 for chain_sid in chain_ids:
                     try:

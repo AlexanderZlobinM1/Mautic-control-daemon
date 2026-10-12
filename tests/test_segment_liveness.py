@@ -1065,6 +1065,568 @@ class SegmentLivenessTests(unittest.TestCase):
             self.assertEqual(len(check_store.running_rows()), 1)
             check_store.close()
 
+    def test_persisted_refill_fairness_survives_hot_completion_reorder_and_full_cap(self) -> None:
+        """Root-local refill keeps a durable tail out of the hot-root loop.
+
+        This drives the real persisted-cycle claim/submit path while the
+        caller order rotates, a new root is added and removed, and the shared
+        host cap is initially
+        full. The pre-1.5.149 input-order reset would let the first hot root
+        claim every simulated completion; the canonical served-root receipt
+        must give the tail a turn without opening a global barrier.
+        """
+
+        tail_root = "/var/www/maestro/public_html"
+        hot_a = "/var/www/agromanija/public_html"
+        hot_b = "/var/www/berlitz/public_html"
+        added_root = "/var/www/new-root/public_html"
+        roots = [hot_a, hot_b, tail_root]
+        store = TaskStore(":memory:")
+        config = self._config()
+        config.scheduler_host_max_parallel = 1
+        config.scheduler_instance_max_parallel = 1
+        config.segment_mode = "farm"
+        config.segment_regular_parallel_idle = 1
+        config.segment_regular_parallel_throttled = 1
+
+        for root, first_id in ((hot_a, 100), (hot_b, 200), (tail_root, 900)):
+            state, _added, _started = sync_cycle(
+                None,
+                planned_ids=list(range(first_id, first_id + 40)),
+                never_built=[],
+                running_ids=[],
+                now_ts=0.0,
+                remaining_ids=list(range(first_id, first_id + 40)),
+                lazy_mode=False,
+            )
+            store.put_runtime_sync(cycle_key(root), state)
+
+        running: dict[str, daemon.RunningTask | SimpleNamespace] = {}
+        popens: dict[str, object] = {}
+        spawned: list[tuple[str, int]] = []
+        pending_since = {root: 0.0 for root in roots}
+        current_key: str | None = None
+        current_root: str | None = None
+        next_pid = 50000
+
+        class FakeProcess:
+            def __init__(self, pid: int) -> None:
+                self.pid = pid
+
+            def wait(self, timeout: float | None = None) -> int:
+                _ = timeout
+                return 0
+
+            def poll(self) -> None:
+                return None
+
+        def spawn_fixture(**kwargs: object) -> FakeProcess:
+            nonlocal next_pid
+            next_pid += 1
+            args = list(kwargs.get("args") or [])
+            root = str(kwargs.get("root") or "")
+            entity_id = int(args[-1])
+            spawned.append((root, entity_id))
+            return FakeProcess(next_pid)
+
+        def complete_previous() -> None:
+            nonlocal current_key, current_root
+            if not current_key or not current_root:
+                return
+            task = running.pop(current_key)
+            popens.pop(current_key, None)
+            store.finish(int(task.row_id), state="done", rc=0, note="fixture_complete")
+            daemon._segment_cycle_terminal(
+                store,
+                root=current_root,
+                entity_id=int(task.entity_id or 0),
+                success=True,
+                note=None,
+                now_ts=float(len(spawned)),
+            )
+            pending_since.pop(current_root, None)
+            current_key = None
+            current_root = None
+
+        def refill_one(root: str) -> int:
+            state = store.get_runtime_sync(cycle_key(root)) or {}
+            pending = _segment_cycle_pending_order(state)
+            if not pending:
+                return 0
+
+            def claim(entity_id: int) -> bool:
+                eligible = _segment_cycle_pending_order(store.get_runtime_sync(cycle_key(root)) or {})
+                return _segment_cycle_claim(
+                    store,
+                    root=root,
+                    entity_id=int(entity_id),
+                    eligible_ids=eligible,
+                    blocked_ids=set(),
+                    running_ids={
+                        int(getattr(task, "entity_id", 0) or 0)
+                        for task in running.values()
+                        if str(getattr(task, "root", "") or "") == root
+                    },
+                    now_ts=float(len(spawned)),
+                )
+
+            def mark_running(entity_id: int) -> None:
+                daemon._segment_cycle_running(
+                    store,
+                    root=root,
+                    entity_id=int(entity_id),
+                    now_ts=float(len(spawned)),
+                )
+
+            return _fill_from_ring(
+                ring=deque(pending),
+                ring_limit=1,
+                total_limit=1,
+                root=root,
+                task_type="segment",
+                running=running,
+                ring_entities=set(pending),
+                config=config,
+                store=store,
+                popens=popens,
+                build_args=lambda sid: ["php", "segments:update", str(sid)],
+                admission_claim=claim,
+                admission_running=mark_running,
+                admission_release=lambda sid: _segment_cycle_release(
+                    store,
+                    root=root,
+                    entity_id=int(sid),
+                    now_ts=float(len(spawned)),
+                ),
+                bypass_repeat_guard_entities=set(pending),
+                bypass_baseline_admission=True,
+                max_launches=1,
+            )
+
+        with patch.object(daemon, "_spawn_command", side_effect=spawn_fixture), patch.object(
+            daemon, "_task_locked_args", side_effect=lambda _key, args, **_kwargs: args
+        ), patch.object(daemon, "_scheduler_baseline_launch_due", return_value=False), patch.object(
+            daemon, "_SEGMENT_DISPATCH_WAKEUP", None
+        ), patch.object(daemon, "_segment_runtime_marker_write"):
+            for tick in range(60):
+                complete_previous()
+
+                if tick == 10:
+                    added_state, _added, _started = sync_cycle(
+                        None,
+                        planned_ids=[700, 701],
+                        never_built=[],
+                        running_ids=[],
+                        now_ts=float(tick),
+                        remaining_ids=[700, 701],
+                        lazy_mode=False,
+                    )
+                    store.put_runtime_sync(cycle_key(added_root), added_state)
+                    roots.append(added_root)
+                if tick == 20:
+                    roots.remove(added_root)
+
+                # Keep the hot roots at the head of the rotating caller order
+                # and move the tail position on every pass. The distribution
+                # gate must preserve the prior served receipt rather than
+                # treating this as a fresh round.
+                raw_order = [hot_a, hot_b, tail_root] if tick % 2 == 0 else [hot_b, hot_a, tail_root]
+                if added_root in roots:
+                    raw_order.insert(1, added_root)
+                pending_roots = _scheduler_persisted_pending_roots(store, roots)
+                dispatch, _promoted = daemon._fairness_watchdog_dispatch_installs(
+                    [SimpleNamespace(root=root) for root in raw_order],
+                    pending_roots=pending_roots,
+                    pending_since_by_root=pending_since,
+                    now_ts=float(tick),
+                    watchdog_sec=300,
+                )
+                daemon._set_scheduler_distribution_roots(
+                    [inst.root for inst in dispatch],
+                    worker_slots=1,
+                    cursor=0 if tick == 0 else None,
+                )
+
+                # At tick zero the shared cap is occupied, so no root may
+                # launch, but this is a capacity observation, not a
+                # scheduler-wide pause/barrier. The real main-planner-busy
+                # hand-off is covered by the run_loop regression below.
+                if tick == 0:
+                    incumbent_key = f"{hot_a}|segment|9999"
+                    running[incumbent_key] = SimpleNamespace(
+                        root=hot_a,
+                        task_type="segment",
+                        entity_id=9999,
+                        task_key=incumbent_key,
+                    )
+                for inst in dispatch:
+                    root = str(inst.root)
+                    if root not in roots:
+                        continue
+                    if not _segment_cycle_pending_order(store.get_runtime_sync(cycle_key(root)) or {}):
+                        continue
+                    launched = refill_one(root)
+                    if launched:
+                        current_key = next(
+                            key for key, task in running.items()
+                            if str(getattr(task, "root", "") or "") == root
+                        )
+                        current_root = root
+                        break
+
+                if tick == 0:
+                    running.pop(f"{hot_a}|segment|9999", None)
+
+        try:
+            self.assertIn(tail_root, [root for root, _entity in spawned])
+            tail_launches = [index for index, (root, _entity) in enumerate(spawned) if root == tail_root]
+            self.assertTrue(tail_launches)
+            self.assertLessEqual(tail_launches[0], 4)
+            self.assertEqual(len({(root, entity) for root, entity in spawned}), len(spawned))
+            self.assertIn(added_root, {root for root, _entity in spawned})
+            self.assertEqual(
+                daemon._scheduler_persisted_pending_roots(store, [tail_root]),
+                {tail_root},
+            )
+        finally:
+            daemon._set_scheduler_distribution_roots([], worker_slots=1)
+            store.close()
+
+    def test_actual_persisted_refill_worker_serves_cold_root_while_hot_planner_is_busy(self) -> None:
+        """The real refill thread must use the common fair submit boundary.
+
+        The hot root continuously completes short workers while the main
+        planner is held inside that root's dispatch gate. A cold persisted
+        cycle is initially held behind a full shared cap, then must claim the
+        first eligible free slot before the 300-second profile watchdog.
+        """
+
+        class StopMainLoop(BaseException):
+            pass
+
+        with tempfile.TemporaryDirectory() as td:
+            hot_root = "/var/www/hot-root/public_html"
+            cold_root = "/var/www/cold-root/public_html"
+            state_path = Path(td) / "state.db"
+            config_path = Path(td) / "mcd.toml"
+            config_path.write_text(
+                "[profile]\nname = \"custom\"\n"
+                "[daemon]\npoll_interval_sec = 1\ndispatch_interval_sec = 0.05\n"
+                f"[runtime]\nstate_db_path = \"{state_path}\"\n"
+                f"scheduler_pause_flag_path = \"{Path(td) / 'scheduler.pause'}\"\n"
+                "scheduler_host_max_parallel = 1\n"
+                "scheduler_instance_max_parallel = 1\n"
+                "scheduler_fairness_watchdog_sec = 300\n"
+                "segment_mode = \"farm\"\n"
+                "segment_priority_parallel_idle = 0\n"
+                "segment_regular_parallel_idle = 1\n"
+                "segment_priority_parallel_throttled = 0\n"
+                "segment_regular_parallel_throttled = 1\n",
+                encoding="utf-8",
+            )
+            config = load_config(str(config_path), allow_recover_from_mcc=False)
+
+            def seed_cycle(root: str, ids: list[int], running_ids: list[int] | None = None) -> None:
+                state, _added, _started = sync_cycle(
+                    None,
+                    planned_ids=ids,
+                    never_built=[],
+                    running_ids=running_ids or [],
+                    now_ts=100.0,
+                    remaining_ids=ids,
+                    lazy_mode=False,
+                )
+                store.put_runtime_sync(cycle_key(root), state)
+                store.put_runtime_sync(
+                    daemon._segment_dispatch_context_key(root),
+                    {
+                        "schema": "mcd-segment-dispatch-context-v1",
+                        "root": root,
+                        "mautic_major": 6,
+                        "updated_at": time.time(),
+                        "cycle_id": state["cycle_id"],
+                        "cycle_status": "active",
+                        "blocked_ids": [],
+                        "sql_managed_ids": [],
+                        "static_configured_ids": [],
+                        "static_active_ids": [],
+                        "active_import_target_ids": [],
+                        "parents_by_child": {},
+                        "children_by_parent": {},
+                        "scheduler_pause": False,
+                        "backup_pause": False,
+                        "dispatch_pause": False,
+                        "db_pause_until": 0.0,
+                        "cluster_cron_allowed": True,
+                        "cluster_import_allowed": False,
+                        "throttled_active": False,
+                        "priority_pending": False,
+                        "segment_slot_limit": 1,
+                    },
+                )
+
+            store = TaskStore(str(state_path), config)
+            seed_cycle(hot_root, list(range(1000, 1040)), running_ids=[1000])
+            seed_cycle(cold_root, list(range(2000, 2040)))
+            store.close()
+
+            planner_started = threading.Event()
+            cold_launch_seen = threading.Event()
+            stop_refill = threading.Event()
+            spawned: list[tuple[str, int]] = []
+            debug_events: list[str] = []
+            completion_store: TaskStore | None = None
+            instances = [
+                SimpleNamespace(
+                    root=hot_root,
+                    db=object(),
+                    instance_uid="hot-root",
+                    name="hot-root",
+                    mautic_major=6,
+                    mautic_timezone="UTC",
+                ),
+                SimpleNamespace(
+                    root=cold_root,
+                    db=object(),
+                    instance_uid="cold-root",
+                    name="cold-root",
+                    mautic_major=6,
+                    mautic_timezone="UTC",
+                ),
+            ]
+            completion_thread: threading.Thread | None = None
+            real_thread = threading.Thread
+
+            class FixtureInventory:
+                def __init__(self, *_args: object, **_kwargs: object) -> None:
+                    pass
+
+                def count(self) -> int:
+                    return len(instances)
+
+                def list_instances(self) -> list[object]:
+                    return instances
+
+                def rescan(self, *_args: object, **_kwargs: object) -> int:
+                    return len(instances)
+
+            class BlockingTaskStore(TaskStore):
+                def get_runtime_sync(self, key: str) -> dict[str, object] | None:
+                    if (
+                        threading.current_thread().name == "mcd-ordinary-persisted-refill"
+                        and key == cycle_key(cold_root)
+                        and not planner_started.is_set()
+                    ):
+                        planner_started.wait(timeout=3.0)
+                    return super().get_runtime_sync(key)
+
+            class FakeMauticDB:
+                def __init__(self, _cfg: object) -> None:
+                    pass
+
+                def __getattr__(self, _name: str):
+                    return lambda *_args, **_kwargs: []
+
+            class DisabledPusher:
+                def __init__(self, *_args: object, **_kwargs: object) -> None:
+                    pass
+
+                def enabled(self) -> bool:
+                    return False
+
+                def __getattr__(self, _name: str):
+                    return lambda *_args, **_kwargs: None
+
+            class FakeProcess:
+                _next_pid = 61000
+
+                def __init__(self) -> None:
+                    type(self)._next_pid += 1
+                    self.pid = type(self)._next_pid
+
+                def poll(self) -> None:
+                    return None
+
+                def wait(self) -> int:
+                    return 0
+
+            def spawn_fixture(**kwargs: object) -> FakeProcess:
+                args = list(kwargs.get("args") or [])
+                root = str(kwargs.get("root") or "")
+                entity_id = int(args[-1])
+                spawned.append((root, entity_id))
+                debug_events.append(f"spawn:{root}:{entity_id}")
+                if root == cold_root:
+                    cold_launch_seen.set()
+                return FakeProcess()
+
+            def finish_hot_workers(
+                running: dict[str, daemon.RunningTask],
+                popens: dict[str, object],
+                lifecycle_store: TaskStore,
+            ) -> None:
+                while not stop_refill.is_set():
+                    with daemon._SCHEDULER_RUNTIME_LOCK:
+                        hot_tasks = [
+                            (key, task)
+                            for key, task in list(running.items())
+                            if str(getattr(task, "root", "") or "") == hot_root
+                        ]
+                        for key, _task in hot_tasks:
+                            running.pop(key, None)
+                            popens.pop(key, None)
+                    for key, task in hot_tasks:
+                        debug_events.append(f"complete:{key}")
+                        entity_id = int(getattr(task, "entity_id", 0) or 0)
+                        if entity_id > 0:
+                            if int(getattr(task, "row_id", 0) or 0) > 0:
+                                lifecycle_store.finish(
+                                    int(task.row_id),
+                                    state="done",
+                                    rc=0,
+                                    note="hot_fixture_complete",
+                                )
+                            daemon._segment_cycle_terminal(
+                                lifecycle_store,
+                                root=hot_root,
+                                entity_id=entity_id,
+                                success=True,
+                                note=None,
+                                now_ts=time.time(),
+                            )
+                    time.sleep(0.02)
+
+            def sync_external(**kwargs: object) -> dict[str, int]:
+                nonlocal completion_thread, completion_store
+                running = kwargs["running"]
+                popens = kwargs["popens"]
+                if completion_thread is None:
+                    debug_events.append("sync_external:init")
+                    completion_store = TaskStore(str(state_path), config)
+                    initial_key = f"{hot_root}|segment|1000"
+                    running[initial_key] = RunningTask(
+                        row_id=0,
+                        root=hot_root,
+                        task_key=initial_key,
+                        task_type="segment",
+                        entity_id=1000,
+                        command_str="fixture hot segment",
+                        timeout_sec=3600,
+                        attempts=1,
+                        started_at=time.time(),
+                        pid=60999,
+                    )
+                    popens[initial_key] = FakeProcess()
+                    completion_thread = real_thread(
+                        target=finish_hot_workers,
+                        args=(running, popens, completion_store),
+                        name="fixture-hot-completion",
+                        daemon=True,
+                    )
+                    completion_thread.start()
+                return {"observed": 0, "adopted": 0, "updated": 0, "released": 0}
+
+            def blocking_dispatch_gate(
+                dispatch_installs: list[object],
+                *,
+                busy_roots: set[str],
+                lock: threading.RLock,
+            ):
+                current = next(inst for inst in dispatch_installs if str(getattr(inst, "root") or "") == hot_root)
+                with lock:
+                    busy_roots.add(hot_root)
+                planner_started.set()
+                try:
+                    # The main planner is held in the hot root. The refill
+                    # thread must still drain cold_root independently.
+                    if not cold_launch_seen.wait(timeout=4.0):
+                        raise AssertionError(
+                            f"cold persisted root was not served while hot planner was busy; spawned={spawned!r}; events={debug_events!r}"
+                        )
+                    stop_refill.set()
+                    raise StopMainLoop()
+                finally:
+                    with lock:
+                        busy_roots.discard(hot_root)
+                yield current
+
+            class ControlledThread(real_thread):
+                def start(self) -> None:
+                    if self.name != "mcd-ordinary-persisted-refill":
+                        return
+                    super().start()
+
+            patches = [
+                patch.object(daemon, "TaskStore", BlockingTaskStore),
+                patch.object(daemon, "InstanceInventory", FixtureInventory),
+                patch.object(daemon, "MauticDB", FakeMauticDB),
+                patch.object(daemon, "MCCStatePusher", DisabledPusher),
+                patch.object(daemon, "_ensure_mcd_service_kill_mode", return_value=False),
+                patch.object(daemon, "ensure_nginx_4xx_scan_safety", return_value={"status": "ok"}),
+                patch.object(daemon, "ensure_managed_web_firewall_loopback", return_value={"status": "ok"}),
+                patch.object(daemon, "fetch_custom_manifest", return_value=([], "fixture")),
+                patch.object(daemon, "ensure_seeded", return_value=1),
+                patch.object(daemon, "resolve_agent_identity", return_value={"clone_detected": False}),
+                patch.object(daemon, "_load_orphans_from_store", return_value={}),
+                patch.object(daemon, "_bootstrap_remote_runtime_before_local_baseline", return_value="none"),
+                patch.object(daemon, "_initialize_local_runtime_baseline", return_value=({}, "baseline")),
+                patch.object(daemon, "_sync_segment_whitelist_file"),
+                patch.object(daemon, "_apply_instance_runtime_guard"),
+                patch.object(daemon, "_sync_and_publish_form_embed_status", return_value=False),
+                patch.object(daemon, "retire_zabbix_mautic_version_userparameter", return_value={"status": "ok"}),
+                patch.object(daemon, "_monitor_running"),
+                patch.object(daemon, "_reconcile_running_state", return_value={}),
+                patch.object(daemon, "_sync_external_running_tasks", side_effect=sync_external),
+                patch.object(daemon, "_iter_instances_with_root_dispatch_gate", side_effect=blocking_dispatch_gate),
+                patch.object(
+                    daemon,
+                    "render_mautic_command",
+                    side_effect=lambda **kwargs: ["fixture", "segment", str(kwargs.get("id") or 0)],
+                ),
+                patch.object(daemon, "_spawn_command", side_effect=spawn_fixture),
+                patch.object(daemon, "cluster_route_allows", return_value=True),
+                patch.object(daemon, "backup_lock_active", return_value=False),
+                patch.object(daemon.threading, "Thread", ControlledThread),
+            ]
+            try:
+                with ExitStack() as stack:
+                    for item in patches:
+                        stack.enter_context(item)
+                    with self.assertRaises(StopMainLoop):
+                        daemon.run_loop(config, single_cycle=False, _test_stop_event=stop_refill)
+            finally:
+                stop_refill.set()
+                if completion_thread is not None:
+                    completion_thread.join(timeout=2.0)
+                if completion_store is not None:
+                    completion_store.close()
+                refill_threads = [
+                    thread
+                    for thread in threading.enumerate()
+                    if thread.name == "mcd-ordinary-persisted-refill"
+                ]
+                for thread in refill_threads:
+                    thread.join(timeout=2.0)
+
+            self.assertTrue(planner_started.is_set())
+            self.assertTrue(cold_launch_seen.is_set())
+            self.assertIn(cold_root, {root for root, _entity in spawned})
+            self.assertGreaterEqual(
+                len([root for root, _entity in spawned if root == hot_root]),
+                2,
+            )
+            self.assertEqual(
+                len(spawned),
+                len(set(spawned)),
+                "the shared claim/submit boundary must not duplicate a worker",
+            )
+            check_store = TaskStore(str(state_path), config)
+            cold_state = check_store.get_runtime_sync(cycle_key(cold_root))
+            self.assertEqual(cold_state["claimed"], [2000])
+            self.assertEqual(cold_state["running"], [2000])
+            self.assertEqual(_segment_cycle_pending_order(cold_state), list(range(2001, 2040)))
+            check_store.close()
+
     def test_daemon_reconciles_prior_terminal_marker_before_pending_projection(self) -> None:
         root = "/var/www/alex/public_html"
         store = TaskStore(":memory:")

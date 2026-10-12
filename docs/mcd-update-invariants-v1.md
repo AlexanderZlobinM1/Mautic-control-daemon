@@ -58,6 +58,11 @@ The same state must remain root-local and fairly dispatchable: one host,
 instance, or root may not become a global work loop or starve unrelated roots;
 foreign-root metadata is never liveness or update-barrier evidence for the
 local root.
+The fairness watchdog is only a recovery signal; it is not the normal service
+order and must not be required for a ready persisted root to receive the next
+free slot. A profile value such as the historical 300-second default cannot
+justify a hot root receiving repeated turns while another ready root is
+waiting in the canonical served-root round.
 
 Persisted segment-chain reverse indexes are scoped by canonical root, task-key
 owner, closure membership, and cycle generation. A legacy or foreign reverse

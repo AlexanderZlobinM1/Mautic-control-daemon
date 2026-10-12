@@ -4,7 +4,7 @@
 фактическую схему после исправления admission и должен обновляться вместе с
 кодом, тестами и runtime receipt. Документ не является разрешением на
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.149 (follow-up после immutable
+Актуальная редакция этого канона — MCD 1.5.150 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам
@@ -428,7 +428,12 @@ durable round-robin. Если ready roots меньше workers, нескольк
 workers одного root разрешены в пределах shared instance/profile cap. Long-live
 root не задерживает другие roots; root с завершённым cycle строит только свой
 следующий cycle на ближайшем tick. Fairness rotation никогда не создаёт слот
-сверх hard cap. Это проверяется unit-сценарием 40/12, сценарием roots<workers,
+сверх hard cap. Профильный fairness-watchdog является только recovery-сигналом
+(включая исторический 300-секундный default), а не обычным порядком выдачи:
+ready persisted root должен получить следующий свободный slot через
+canonical served-root round даже до watchdog. Неудачный/full-cap проход не
+считает root обслуженным, если не было фактического claim/submit. Это
+проверяется unit-сценарием 40/12, сценарием roots<workers,
 super `4 outside 11`, closure overlap и disposable M6/M7 receipt.
 
 `important` имеет precedence только там, где его root реально может получить

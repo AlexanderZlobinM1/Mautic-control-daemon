@@ -342,6 +342,42 @@ class CampaignRingDispatchTests(unittest.TestCase):
         self.assertTrue(daemon_mod._scheduler_shared_admission_allowed("/var/www/d", "segment"))
         _set_scheduler_distribution_roots([], worker_slots=1)
 
+    def test_failed_submit_does_not_consume_a_served_root_turn(self) -> None:
+        roots = ["/var/www/hot", "/var/www/cold"]
+        _set_scheduler_distribution_roots(roots, worker_slots=1, cursor=0)
+        config = SimpleNamespace(command_timeout_sec=30)
+        ring = deque([101])
+
+        class EmptyStore:
+            @staticmethod
+            def get_runtime_sync(_key: str) -> None:
+                return None
+
+        with patch.object(daemon_mod, "_submit_if_slot", return_value=False):
+            launched = _fill_from_ring(
+                ring=ring,
+                ring_limit=1,
+                total_limit=1,
+                root=roots[0],
+                task_type="segment",
+                running={},
+                ring_entities={101},
+                config=config,
+                store=EmptyStore(),
+                popens={},
+                build_args=lambda sid: ["php", "segments:update", str(sid)],
+                admission_claim=lambda _sid: True,
+                admission_release=lambda _sid: None,
+                bypass_repeat_guard_entities={101},
+                bypass_baseline_admission=True,
+                max_launches=1,
+            )
+
+        self.assertEqual(launched, 0)
+        self.assertTrue(daemon_mod._scheduler_shared_admission_allowed(roots[0], "segment"))
+        self.assertTrue(daemon_mod._scheduler_shared_admission_allowed(roots[1], "segment"))
+        _set_scheduler_distribution_roots([], worker_slots=1)
+
     def test_remaining_root_uses_free_host_slot_when_important_root_is_instance_full(self) -> None:
         important_root = "/var/www/important"
         remaining_root = "/var/www/remaining"

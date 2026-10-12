@@ -1,3 +1,13 @@
+## 1.5.150 - 2026-10-12
+
+- Repair the canonical served-root round and persisted refill admission so a
+  hot root cannot consume repeated turns after a failed/full-cap attempt while
+  another ready root waits. The profile fairness watchdog remains a recovery
+  signal (including its 300-second default), not the normal service order.
+- Add a regression for continuous hot completions, root-order changes,
+  add/remove membership, a busy main planner, and a full-cap skip while the
+  real TaskStore claim/submit path keeps a persisted tail root eligible.
+
 ## 1.5.149 - 2026-10-12
 
 - Preserve the shared-dispatch served-root receipt when the outer instance
