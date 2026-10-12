@@ -687,6 +687,8 @@ def runtime_key_observation(
         if scope_key and key.endswith("_instance_settings") and isinstance(desired, dict):
             if scope_key in desired:
                 desired = desired[scope_key]
+            elif scope_key.split("@", 1)[0] in desired:
+                desired = desired[scope_key.split("@", 1)[0]]
             elif set(desired).issubset({"segments", "slots_override"}):
                 # Instance desired-state rows are already canonical scoped
                 # records. Do not project them through the UID map again.
@@ -703,6 +705,8 @@ def runtime_key_observation(
         if scope_key and key.endswith("_instance_settings") and isinstance(effective_value, dict):
             if scope_key in effective_value:
                 effective_value = effective_value[scope_key]
+            elif scope_key.split("@", 1)[0] in effective_value:
+                effective_value = effective_value[scope_key.split("@", 1)[0]]
             elif set(effective_value).issubset({"segments", "slots_override"}):
                 effective_value = effective_value
             else:

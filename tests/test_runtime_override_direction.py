@@ -2180,6 +2180,32 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
         self.assertEqual(row["desired"], {"segments": []})
         self.assertEqual(row["effective"], {"segments": [23, 86]})
         self.assertEqual(row["status"], "rejected")
+
+    def test_instance_ack_reads_base_uid_projection_for_qualified_scope(self) -> None:
+        cfg = SimpleNamespace(profile_name="custom")
+        with patch(
+            "mcd_agent.runtime_overrides.runtime_effective_map",
+            return_value={"segment_priority_instance_settings": {
+                "electronic": {"segments": [23, 86]},
+            }},
+        ), patch(
+            "mcd_agent.runtime_overrides.runtime_supported_keys",
+            return_value={"segment_priority_instance_settings"},
+        ), patch(
+            "mcd_agent.runtime_overrides.runtime_remote_allowed_keys",
+            return_value={"segment_priority_instance_settings"},
+        ):
+            observed = runtime_overrides.runtime_key_observation(
+                cfg,
+                {"segment_priority_instance_settings": {
+                    "electronic@Farm02": {"segments": [23, 86]},
+                }},
+                revision=187,
+                scope_key="electronic@Farm02",
+            )
+        row = observed["keys"]["segment_priority_instance_settings"]
+        self.assertEqual(row["effective"], {"segments": [23, 86]})
+        self.assertEqual(row["status"], "unchanged")
         self.assertEqual(
             desired_profile_from_runtime_response(
                 {

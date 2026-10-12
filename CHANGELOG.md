@@ -1,3 +1,8 @@
+## 1.5.126 - 2026-10-12
+
+- Resolve qualified instance ACK scopes against base-UID effective projections
+  without emitting an uninformative empty lane.
+
 ## 1.5.125 - 2026-10-12
 
 - Let persisted full-scan cycle items bypass stale per-entity repeat cadence;

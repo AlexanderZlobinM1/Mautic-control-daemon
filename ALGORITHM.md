@@ -4,7 +4,7 @@
 фактическую схему после исправления admission и должен обновляться вместе с
 кодом, тестами и runtime receipt. Документ не является разрешением на
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.125 (follow-up после immutable
+Актуальная редакция этого канона — MCD 1.5.126 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам
@@ -26,6 +26,8 @@ ordinary IDs are present in `cycle.items` before claim validation and survive
 restart without starvation. Persisted full-scan items bypass only stale
 per-entity repeat cadence; capacity, running, dependency, and durable claim
 guards remain enforced.
+Qualified instance ACK scopes resolve base-UID effective projections before
+canonical lane encoding; missing data is not confused with a populated lane.
 restart without starvation.
 
 Для instance-scoped desired state локальный inventory UID является стабильной
