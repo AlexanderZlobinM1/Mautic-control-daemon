@@ -1756,6 +1756,67 @@ class SegmentLivenessTests(unittest.TestCase):
             self.assertTrue(merged["dependency_snapshot_authoritative"])
             store.close()
 
+    def test_planner_no_fresh_read_preserves_same_cycle_dependency_snapshot(self) -> None:
+        """A no-read planner branch cannot publish an empty default over a valid graph."""
+
+        cycle = {"schema": "mcd-segment-cycle-v1", "cycle_id": "cycle-graph", "status": "active"}
+        context = {
+            "schema": "mcd-segment-dispatch-context-v1",
+            "cycle_id": "cycle-graph",
+            "parents_by_child": {"154": [146, 149, 152, 153]},
+            "children_by_parent": {"146": [154], "149": [154], "152": [154], "153": [154]},
+            "dependency_snapshot_authoritative": True,
+            "dependency_snapshot_updated_at": 123.0,
+            "dependency_snapshot_segment_count": 150,
+        }
+        selected = daemon._select_segment_dependency_snapshot(
+            current_context=context,
+            current_cycle=cycle,
+            candidate_parents={},
+            candidate_children={},
+            snapshot_read_ok=False,
+            snapshot_updated_at=0.0,
+            snapshot_segment_count=0,
+        )
+        parents, children, authoritative, updated_at, segment_count, mode = selected
+        self.assertEqual(parents[154], {146, 149, 152, 153})
+        self.assertEqual(children[153], {154})
+        self.assertTrue(authoritative)
+        self.assertEqual(updated_at, 123.0)
+        self.assertEqual(segment_count, 150)
+        self.assertEqual(mode, "preserved_previous")
+
+    def test_successful_empty_dependency_snapshot_is_allowed_for_independent_root(self) -> None:
+        """A genuinely successful empty definition parse remains authoritative."""
+
+        cycle = {"schema": "mcd-segment-cycle-v1", "cycle_id": "cycle-empty", "status": "active"}
+        context = {
+            "schema": "mcd-segment-dispatch-context-v1",
+            "cycle_id": "cycle-empty",
+            "parents_by_child": {"154": [146]},
+            "children_by_parent": {"146": [154]},
+            "dependency_snapshot_authoritative": True,
+            "dependency_snapshot_updated_at": 123.0,
+            "dependency_snapshot_segment_count": 150,
+        }
+        parents, children, authoritative, updated_at, segment_count, mode = (
+            daemon._select_segment_dependency_snapshot(
+                current_context=context,
+                current_cycle=cycle,
+                candidate_parents={},
+                candidate_children={},
+                snapshot_read_ok=True,
+                snapshot_updated_at=456.0,
+                snapshot_segment_count=12,
+            )
+        )
+        self.assertEqual(parents, {})
+        self.assertEqual(children, {})
+        self.assertTrue(authoritative)
+        self.assertEqual(updated_at, 456.0)
+        self.assertEqual(segment_count, 12)
+        self.assertEqual(mode, "live_read")
+
     def test_dependency_refresh_final_merge_after_capability_probe_preserves_newer_policy(self) -> None:
         """M7 help latency cannot overwrite a newer same-cycle planner policy."""
 

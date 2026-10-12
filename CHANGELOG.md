@@ -1,3 +1,12 @@
+## 1.5.154 - 2026-10-13
+
+- Preserve the complete same-cycle dependency snapshot when a planner branch
+  has no successful same-root definition read. A volatile empty map can no
+  longer be persisted together with the previous snapshot's authoritative
+  timestamp/count, while a genuinely successful empty parse remains valid for
+  an independent root. Add provenance mode and regression coverage for both
+  paths.
+
 ## 1.5.153 - 2026-10-13
 
 - Synchronize the packaged `mautic-patch-resolution-v1` contract's exact

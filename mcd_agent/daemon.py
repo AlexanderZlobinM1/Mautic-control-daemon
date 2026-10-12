@@ -2483,6 +2483,124 @@ def _segment_dispatch_context_parts(
     )
 
 
+def _select_segment_dependency_snapshot(
+    *,
+    current_context: Mapping[str, object] | None,
+    current_cycle: Mapping[str, object] | None,
+    candidate_parents: Mapping[int, Iterable[int]] | None,
+    candidate_children: Mapping[int, Iterable[int]] | None,
+    snapshot_read_ok: bool,
+    snapshot_updated_at: float,
+    snapshot_segment_count: int,
+) -> tuple[dict[int, set[int]], dict[int, set[int]], bool, float, int, str]:
+    """Select one complete, root-local dependency snapshot for persistence.
+
+    The planner has a branch where no fresh definition read is available for
+    the current root (for example, an unrelated planning query failed or the
+    root is on an early path).  Its volatile maps are then only defaults and
+    must not overwrite the previous valid graph while copying the previous
+    snapshot's authority metadata.  A genuinely successful read is allowed
+    to return an empty graph for an independent root; only the no-read path
+    reuses a same-cycle persisted snapshot.
+    """
+
+    def _normalize(raw: Mapping[int, Iterable[int]] | None) -> dict[int, set[int]]:
+        normalized: dict[int, set[int]] = {}
+        for raw_key, raw_values in (raw or {}).items():
+            try:
+                key = int(raw_key)
+            except (TypeError, ValueError):
+                continue
+            if key <= 0:
+                continue
+            values: set[int] = set()
+            for raw_value in raw_values or ():
+                try:
+                    value = int(raw_value)
+                except (TypeError, ValueError):
+                    continue
+                if value > 0:
+                    values.add(value)
+            if values:
+                normalized[key] = values
+        return normalized
+
+    parents = _normalize(candidate_parents)
+    children = _normalize(candidate_children)
+    if snapshot_read_ok:
+        return (
+            parents,
+            children,
+            True,
+            float(snapshot_updated_at or 0.0),
+            max(0, int(snapshot_segment_count or 0)),
+            "live_read",
+        )
+
+    context = current_context if isinstance(current_context, Mapping) else {}
+    cycle = current_cycle if isinstance(current_cycle, Mapping) else {}
+    cycle_id = str(cycle.get("cycle_id") or "").strip()
+    context_cycle_id = str(context.get("cycle_id") or "").strip()
+    cycle_status = str(cycle.get("status") or "").strip().lower()
+    if not cycle_id or cycle_id != context_cycle_id or cycle_status != "active":
+        return parents, children, False, 0.0, 0, "read_required"
+
+    def _context_relations(key: str) -> dict[int, set[int]]:
+        raw = context.get(key)
+        if not isinstance(raw, Mapping):
+            return {}
+        return _normalize(
+            {
+                int(raw_key): raw_values
+                for raw_key, raw_values in raw.items()
+                if str(raw_key).strip().lstrip("-").isdigit()
+            }
+        )
+
+    previous_parents = _context_relations("parents_by_child")
+    previous_children = _context_relations("children_by_parent")
+    if not previous_parents and not previous_children:
+        if "dependency_snapshot_authoritative" in context:
+            try:
+                previous_updated_at = float(context.get("dependency_snapshot_updated_at") or 0.0)
+            except (TypeError, ValueError):
+                previous_updated_at = 0.0
+            if previous_updated_at > 0.0:
+                try:
+                    previous_segment_count = max(
+                        0,
+                        int(context.get("dependency_snapshot_segment_count") or 0),
+                    )
+                except (TypeError, ValueError):
+                    previous_segment_count = 0
+                return (
+                    {},
+                    {},
+                    bool(context.get("dependency_snapshot_authoritative")),
+                    previous_updated_at,
+                    previous_segment_count,
+                    "preserved_previous",
+                )
+        return parents, children, False, 0.0, 0, "read_required"
+
+    try:
+        previous_updated_at = float(context.get("dependency_snapshot_updated_at") or 0.0)
+    except (TypeError, ValueError):
+        previous_updated_at = 0.0
+    try:
+        previous_segment_count = max(0, int(context.get("dependency_snapshot_segment_count") or 0))
+    except (TypeError, ValueError):
+        previous_segment_count = 0
+    return (
+        previous_parents,
+        previous_children,
+        bool(context.get("dependency_snapshot_authoritative")),
+        previous_updated_at,
+        previous_segment_count,
+        "preserved_previous",
+    )
+
+
 def _segment_dispatch_context_needs_dependency_refresh(
     context: Mapping[str, object] | None,
     cycle_state: Mapping[str, object] | None,
@@ -2635,6 +2753,7 @@ def _rehydrate_segment_dispatch_context(
                 },
                 "dependency_snapshot_authoritative": True,
                 "dependency_snapshot_source": "mautic_published_segment_filters",
+                "dependency_snapshot_mode": "live_read",
                 "dependency_snapshot_updated_at": refreshed_at,
                 "dependency_snapshot_segment_count": len(
                     {
@@ -19849,30 +19968,31 @@ def run_loop(
                 may consume while the planner is busy elsewhere.
                 """
 
+                previous_context = store.get_runtime_sync(_segment_dispatch_context_key(root)) or {}
+                (
+                    dependency_parents,
+                    dependency_children,
+                    dependency_snapshot_authoritative,
+                    dependency_snapshot_updated_at_effective,
+                    dependency_snapshot_segment_count_effective,
+                    dependency_snapshot_mode,
+                ) = _select_segment_dependency_snapshot(
+                    current_context=previous_context if isinstance(previous_context, Mapping) else {},
+                    current_cycle=segment_cycle_payload,
+                    candidate_parents=segment_parents_by_root.get(root, {}),
+                    candidate_children=segment_dependencies_by_root.get(root, {}),
+                    snapshot_read_ok=bool(dependency_snapshot_read_ok),
+                    snapshot_updated_at=float(dependency_snapshot_updated_at or 0.0),
+                    snapshot_segment_count=int(dependency_snapshot_segment_count or 0),
+                )
                 parents = {
                     str(int(child)): sorted(int(parent) for parent in parent_ids if int(parent) > 0)
-                    for child, parent_ids in segment_parents_by_root.get(root, {}).items()
+                    for child, parent_ids in dependency_parents.items()
                 }
                 children = {
                     str(int(parent)): sorted(int(child) for child in child_ids if int(child) > 0)
-                    for parent, child_ids in segment_dependencies_by_root.get(root, {}).items()
+                    for parent, child_ids in dependency_children.items()
                 }
-                previous_context = store.get_runtime_sync(_segment_dispatch_context_key(root)) or {}
-                previous_snapshot_authoritative = (
-                    bool(previous_context.get("dependency_snapshot_authoritative"))
-                    if isinstance(previous_context, Mapping)
-                    else False
-                )
-                previous_snapshot_updated_at = (
-                    float(previous_context.get("dependency_snapshot_updated_at") or 0.0)
-                    if isinstance(previous_context, Mapping)
-                    else 0.0
-                )
-                previous_snapshot_segment_count = (
-                    int(previous_context.get("dependency_snapshot_segment_count") or 0)
-                    if isinstance(previous_context, Mapping)
-                    else 0
-                )
                 context = {
                     "schema": "mcd-segment-dispatch-context-v1",
                     "root": root,
@@ -19887,16 +20007,11 @@ def run_loop(
                     "active_import_target_ids": sorted(int(value) for value in active_import_target_ids if int(value) > 0),
                     "parents_by_child": parents,
                     "children_by_parent": children,
-                    "dependency_snapshot_authoritative": bool(
-                        dependency_snapshot_read_ok or previous_snapshot_authoritative
-                    ),
+                    "dependency_snapshot_authoritative": bool(dependency_snapshot_authoritative),
                     "dependency_snapshot_source": "mautic_published_segment_filters",
-                    "dependency_snapshot_updated_at": float(
-                        dependency_snapshot_updated_at or previous_snapshot_updated_at
-                    ),
-                    "dependency_snapshot_segment_count": int(
-                        dependency_snapshot_segment_count or previous_snapshot_segment_count
-                    ),
+                    "dependency_snapshot_mode": dependency_snapshot_mode,
+                    "dependency_snapshot_updated_at": float(dependency_snapshot_updated_at_effective),
+                    "dependency_snapshot_segment_count": int(dependency_snapshot_segment_count_effective),
                     "scheduler_pause": bool(scheduler_dispatch_pause),
                     "backup_pause": bool(backup_dispatch_pause),
                     "backup_pause_reason": str(backup_pause_reason or ""),

@@ -80,6 +80,12 @@ graph/capability metadata. A newer pause, throttle, priority, capacity, or lane
 policy is never restored from the stale refresh snapshot; a changed generation
 is discarded and retried with the bounded root-local retry path.
 
+The planner must persist dependency graph data and its read provenance as one
+snapshot. If the current root has no successful published-definition read, its
+volatile empty/default maps must not replace the previous same-cycle graph or
+its authority timestamp/count. A successful read that decodes zero edges is
+valid for an independent root and may persist an empty graph.
+
 Persisted segment-chain reverse indexes are scoped by canonical root, task-key
 owner, closure membership, and cycle generation. A legacy or foreign reverse
 index is metadata only: it cannot keep a different root claimed or defer its
