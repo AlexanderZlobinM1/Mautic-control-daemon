@@ -4,7 +4,7 @@
 фактическую схему после исправления admission и должен обновляться вместе с
 кодом, тестами и runtime receipt. Документ не является разрешением на
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.138 (follow-up после immutable
+Актуальная редакция этого канона — MCD 1.5.139 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам
@@ -192,6 +192,10 @@ config на его profile baseline и только после этого при
    important работа и frozen active cycle не пересобираются при toggle. Новый
    cycle root-а вычисляет только его новое effective значение и не переносит
    policy на другой root.
+   Effective `lazy/full` mode is persisted with the admitted cycle. A UID
+   toggle while that cycle is active does not append fresh rows to its
+   `follow_up`: the dispatcher continues the already-admitted TaskStore
+   cursor, and only the next terminal cycle is admitted under the new mode.
 2. Read-only definitions добавляют опубликованные never-built IDs, которых не
    было в due query. Ordinary snapshot строится строго по категориям:
    `never-built → changed → stale`, где stale threshold берётся из выбранного

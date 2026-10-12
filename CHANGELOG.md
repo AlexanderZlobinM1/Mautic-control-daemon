@@ -1,3 +1,11 @@
+## 1.5.139 - 2026-10-12
+
+- Persist the ordinary cycle's effective lazy/full mode and make a UID toggle
+  a next-cycle policy change: the active TaskStore cursor continues dispatching
+  already-admitted work, while fresh rows from the new mode wait for the next
+  root cycle. Add mixed-mode dispatcher/TaskStore coverage for A→lazy,
+  independent full B, and lazy→full reverse admission.
+
 ## 1.5.138 - 2026-10-12
 
 - Keep Mautic filter-safety heuristics diagnostic-only: a possible date

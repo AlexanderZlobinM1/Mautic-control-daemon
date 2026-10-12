@@ -2862,6 +2862,7 @@ def _segment_cycle_sync(
     source_snapshot: Mapping[object, object] | None = None,
     important_ids: list[int] | tuple[int, ...] | set[int] | None = None,
     remaining_ids: list[int] | tuple[int, ...] | set[int] | None = None,
+    lazy_mode: bool | None = None,
 ) -> tuple[dict[str, object], list[int], bool]:
     """Persist an ordinary cycle without resetting an active cursor."""
 
@@ -2877,6 +2878,7 @@ def _segment_cycle_sync(
             source_snapshot=source_snapshot,
             important_ids=important_ids,
             remaining_ids=remaining_ids,
+            lazy_mode=lazy_mode,
         )
         store.put_runtime_sync(key, state)
     return state, added, started_new
@@ -14168,6 +14170,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                 important_ids=[sid for sid in cycle_planned if sid in important_ids]
                 + [sid for sid in cycle_never_built if sid in important_ids],
                 remaining_ids=[sid for sid in cycle_planned if sid in remaining_ids],
+                lazy_mode=lazy_segment_plan,
             )
             pending = _segment_cycle_pending_order(cycle_state, excluded_ids=static_excluded)
             filter_hint_ids: set[int] = set()
@@ -17356,6 +17359,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                         important_ids=[sid for sid in cycle_planned_ids if sid in important_ids]
                         + [sid for sid in cycle_never_built_ids if sid in important_ids],
                         remaining_ids=[sid for sid in cycle_planned_ids if sid in remaining_ids],
+                        lazy_mode=lazy_segment_plan,
                     )
                     # Every unfinished item in the durable current cycle is
                     # already admitted work. The regular ring is rebuilt from

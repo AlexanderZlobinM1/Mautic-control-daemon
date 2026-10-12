@@ -341,6 +341,14 @@ def _cycle_id(now_ts: float, items: list[int]) -> str:
     return sha1(raw.encode("utf-8")).hexdigest()[:20]
 
 
+def _plan_mode_value(lazy_mode: bool | None) -> str:
+    if lazy_mode is True:
+        return "lazy"
+    if lazy_mode is False:
+        return "full"
+    return ""
+
+
 def _new_cycle(
     items: list[int],
     now_ts: float,
@@ -353,6 +361,7 @@ def _new_cycle(
     observed_generation: int = 0,
     important_ids: Iterable[object] | None = None,
     remaining_ids: Iterable[object] | None = None,
+    lazy_mode: bool | None = None,
 ) -> dict[str, object]:
     cycle_snapshot = _normalize_baseline(cycle_baseline)
     observed = _normalize_baseline(
@@ -375,6 +384,11 @@ def _new_cycle(
     # from the durable tier projection.
     unclassified = [sid for sid in items if sid not in set(important) and sid not in set(remaining)]
     important.extend(unclassified)
+    plan_mode = _plan_mode_value(lazy_mode)
+    if not plan_mode and remaining:
+        # A pre-1.5.139 caller has no explicit mode argument, but a durable
+        # fresh tail is unambiguously a full-mode admission.
+        plan_mode = "full"
     return {
         "schema": SCHEMA,
         "cycle_id": _cycle_id(now_ts, items),
@@ -383,6 +397,7 @@ def _new_cycle(
         "follow_up": [],
         "important_items": normalize_ids(important),
         "remaining_items": normalize_ids(remaining),
+        "plan_mode": plan_mode,
         "importance_classified": True,
         "claimed": [],
         "running": [],
@@ -419,6 +434,9 @@ def normalize_state(raw: Mapping[str, Any] | None) -> dict[str, object]:
         # important until the next planner persists an explicit split.
         important_items = [*items, *follow_up]
         remaining_items = []
+    plan_mode = str(source.get("plan_mode") or "").strip().lower()
+    if plan_mode not in {"lazy", "full"}:
+        plan_mode = "full" if remaining_items else ""
     done = [x for x in normalize_ids(source.get("done")) if x in item_set]
     errors = [x for x in normalize_ids(source.get("errors")) if x in item_set and x not in done]
     claimed = [x for x in normalize_ids(source.get("claimed")) if x in item_set and x not in done and x not in errors]
@@ -445,6 +463,7 @@ def normalize_state(raw: Mapping[str, Any] | None) -> dict[str, object]:
         "follow_up": follow_up,
         "important_items": normalize_ids(important_items),
         "remaining_items": normalize_ids(remaining_items),
+        "plan_mode": plan_mode,
         "importance_classified": bool(importance_classified),
         "claimed": claimed,
         "running": running,
@@ -748,6 +767,7 @@ def sync_cycle(
     source_snapshot: Mapping[object, object] | None = None,
     important_ids: Iterable[object] | None = None,
     remaining_ids: Iterable[object] | None = None,
+    lazy_mode: bool | None = None,
 ) -> tuple[dict[str, object], list[int], bool]:
     """Reconcile planning observations without resetting an active cycle.
 
@@ -755,6 +775,10 @@ def sync_cycle(
     reorder existing work. New IDs discovered after admission enter the
     durable follow-up FIFO; the frozen ``items`` order remains unchanged.
     Claimed, running, and terminal items retain their positions.
+    When ``lazy_mode`` changes while a cycle is active, the policy change is
+    held for that root's next cycle: no fresh rows from the new mode are
+    appended to ``follow_up``. Already-admitted important/remaining work is
+    still dispatchable from the persisted cursor.
     """
 
     excluded = set(normalize_ids(excluded_ids))
@@ -796,6 +820,7 @@ def sync_cycle(
             observed_generation=max(0, int(current.get("observed_generation") or 0)) + 1,
             important_ids=supplied_important if explicit_tiers else None,
             remaining_ids=supplied_remaining if explicit_tiers else None,
+            lazy_mode=lazy_mode,
         )
         added = list(planned)
         _mark_terminal_if_complete(state)
@@ -809,7 +834,22 @@ def sync_cycle(
         _observe_source(state, source_snapshot)
         existing = set(current_items) | set(current_follow_up)
         candidate_order = normalize_ids([*planned, *normalize_ids(never)])
-        additions = [sid for sid in candidate_order if sid not in existing and sid not in running]
+        requested_mode = _plan_mode_value(lazy_mode)
+        current_mode = str(state.get("plan_mode") or "").strip().lower()
+        if current_mode not in {"lazy", "full"}:
+            current_mode = "full" if normalize_ids(state.get("remaining_items")) else ""
+        mode_changed = bool(requested_mode and current_mode and requested_mode != current_mode)
+        # A UID toggle is a next-cycle policy change.  Do not turn fresh
+        # rows from the new mode into follow-up work in the frozen active
+        # cycle: the dispatcher must finish the already-admitted cursor, and
+        # the next root-local cycle is the first one owned by the new mode.
+        additions = [] if mode_changed else [
+            sid for sid in candidate_order if sid not in existing and sid not in running
+        ]
+        if current_mode:
+            state["plan_mode"] = current_mode
+        elif requested_mode:
+            state["plan_mode"] = requested_mode
         # The ordinary snapshot is frozen for the life of the active cycle.
         # New IDs discovered by a later read are durable follow-up FIFO work,
         # so a late segment cannot rewrite the frozen order.

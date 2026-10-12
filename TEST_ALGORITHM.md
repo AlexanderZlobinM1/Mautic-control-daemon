@@ -128,7 +128,13 @@ TaskStore fixture должен сохранять `cycle_id`, `updated_at` и sp
    явную пустую UID-строку с текущей revision и верхнеуровневую пустую
    `segment_lazy_update_instance_settings={}`; при удалении A sparse map B с
    более новой revision сохраняется, а простое отсутствие UID не используется
-   как команда очистки. Очистка всей map — отдельная явная операция.
+   как команда очистки. Очистка всей map — отдельная явная операция. Реальный
+   dispatcher/TaskStore regression `test_mixed_mode_toggle_uses_dispatcher_and_defers_reverse_tail`
+   обязан проверить: active full A с admitted `remaining` после A→lazy
+   действительно доходит до terminal; следующий A lazy-cycle не получает
+   fresh tail; full B продолжает независимый dispatch; lazy→full не добавляет
+   tail в active lazy-cycle, а принимает его только в следующем собственном
+   full-cycle.
 
 10. Проверяется dedicated super lane: четыре enabled super-instance worker-а
    работают outside shared regular `11` capacity (`4 outside 11`), не
@@ -209,7 +215,7 @@ barrier остаются обязательными.
 | roots/instances независимы; нет all-roots barrier/loop одного root | `_iter_instances_with_root_dispatch_gate`, root-local monitor/refill workers | `tests/test_segment_liveness.py` + fresh M6/M7 receipt with every B/C root cycle_count and terminal seeded IDs |
 | explicit caps, sliding fairness и dedicated super lane считают правильный budget | `_scheduler_host_slots_available`, `_scheduler_instance_slots_available`, `_scheduler_round_robin_order` | `tests/test_campaign_ring_dispatch.py` hard-cap/3+ root/40+12/4-outside-11 rows + fresh aggregate slot receipt |
 | important tier получает precedence только при фактической admission-ready capacity; full root не ставит global barrier | `_scheduler_segment_entity_allowed`, `_scheduler_important_root_dispatchable`, `mcd_agent/segment_admission.py` | `test_remaining_root_uses_free_host_slot_when_important_root_is_instance_full` + durable tier receipt |
-| host/instance lazy policy не смешивает roots и не пересобирает active cycle при toggle | `config.py`, `runtime_overrides.py`, оба ordinary planner path в `daemon.py` | mixed UID/root alias tests + M6/M7 receipt с effective policy, frozen cycle и restart/ACK readback |
+| host/instance lazy policy не смешивает roots и не пересобирает active cycle при toggle | `config.py`, `runtime_overrides.py`, `segment_admission.py`, оба ordinary planner path в `daemon.py` | `test_mixed_mode_toggle_uses_dispatcher_and_defers_reverse_tail` через dispatcher/TaskStore + M6/M7 receipt с effective policy, frozen cycle и restart/ACK readback |
 | lazy empty plan остаётся пустым, full mode сохраняет observed IDs | ordinary snapshot/planning paths in `mcd_agent/daemon.py` | lazy/full planner tests + fresh M6/M7 planner receipt |
 | manual N+1 override — per-instance exception без host-wide overflow и с сохранением locks | `_submit_if_slot_uncoordinated`, manual admission path | `tests/test_segment_admission.py` cap-4→5→4→3 и per-instance `11+3→14→...→10→11` receipts |
 | M6 closure занимает один worker/PID, M7 covered roots не параллелятся | `dependency_execution_chains`, `_segment_chain_command_args`, `_segment_chain_runtime_*`, static closure lock | `tests/test_segment_chain_runtime.py` actual TaskStore/PID receipt + fresh M6/M7 sandbox evidence |

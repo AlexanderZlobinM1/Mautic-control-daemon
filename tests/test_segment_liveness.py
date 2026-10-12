@@ -168,6 +168,7 @@ class SegmentLivenessTests(unittest.TestCase):
             now_ts=200.0,
             important_ids=groups_full["important"],
             remaining_ids=groups_full["remaining"],
+            lazy_mode=False,
         )
         self.assertTrue(started)
         toggled, _added, started = sync_cycle(
@@ -178,10 +179,220 @@ class SegmentLivenessTests(unittest.TestCase):
             now_ts=201.0,
             important_ids=groups_lazy["important"],
             remaining_ids=[],
+            lazy_mode=True,
         )
         self.assertFalse(started)
         self.assertEqual(toggled["items"], frozen["items"])
         self.assertEqual(toggled["cycle_id"], frozen["cycle_id"])
+        self.assertEqual(toggled["plan_mode"], "full")
+
+    def test_mixed_mode_toggle_uses_dispatcher_and_defers_reverse_tail(self) -> None:
+        """UID policy changes never strand or inject fresh work into a live cycle."""
+
+        root_a = "/var/www/mixed-a/public_html"
+        root_b = "/var/www/mixed-b/public_html"
+        a_ids = [101, 102, 103]
+        b_ids = [201, 202, 203]
+        store = TaskStore(":memory:")
+        running: dict[str, daemon.RunningTask] = {}
+        dispatch_config = self._config()
+        dispatch_config.scheduler_emergency_reserved_slots = 0
+
+        full_a, _added, started = sync_cycle(
+            None,
+            planned_ids=a_ids,
+            never_built=[101],
+            running_ids=[],
+            now_ts=100.0,
+            important_ids=[101],
+            remaining_ids=[102, 103],
+            lazy_mode=False,
+        )
+        full_b, _added, started_b = sync_cycle(
+            None,
+            planned_ids=b_ids,
+            never_built=[201],
+            running_ids=[],
+            now_ts=100.0,
+            important_ids=[201],
+            remaining_ids=[202, 203],
+            lazy_mode=False,
+        )
+        self.assertTrue(started)
+        self.assertTrue(started_b)
+        store.put_runtime_sync(cycle_key(root_a), full_a)
+        store.put_runtime_sync(cycle_key(root_b), full_b)
+
+        next_pid = iter(range(8101, 8120))
+
+        def state(root: str) -> dict[str, object]:
+            payload = store.get_runtime_sync(cycle_key(root))
+            self.assertIsInstance(payload, dict)
+            return dict(payload)
+
+        def launch_next(root: str) -> daemon.RunningTask:
+            current = state(root)
+            pending = _segment_cycle_pending_order(current)
+            self.assertTrue(pending)
+            entity_id = int(pending[0])
+            eligible = [
+                *[int(value) for value in current.get("items") or []],
+                *[int(value) for value in current.get("follow_up") or []],
+            ]
+            launched = self._launch_persisted_item(
+                store=store,
+                root=root,
+                entity_id=entity_id,
+                eligible_ids=eligible,
+                running=running,
+                pid=0,
+                config=dispatch_config,
+            )
+            self.assertEqual(launched, 1)
+            task = next(
+                task
+                for task in running.values()
+                if task.root == root and int(task.entity_id or 0) == entity_id
+            )
+            return task
+
+        def finish(task: daemon.RunningTask, *, now_ts: float) -> None:
+            store.finish(task.row_id, state="done", rc=0, note=None)
+            _segment_cycle_terminal(
+                store,
+                root=task.root,
+                entity_id=int(task.entity_id or 0),
+                success=True,
+                note=None,
+                now_ts=now_ts,
+            )
+            running.pop(task.task_key, None)
+
+        with patch.object(
+            daemon,
+            "_spawn_command",
+            side_effect=lambda **_kwargs: SimpleNamespace(pid=next(next_pid)),
+        ), patch.object(
+            daemon,
+            "_task_locked_args",
+            side_effect=lambda _key, args, **_kwargs: args,
+        ), patch.object(
+            daemon,
+            "_scheduler_baseline_launch_due",
+            return_value=False,
+        ), patch.object(daemon, "_SEGMENT_DISPATCH_WAKEUP", None), patch.object(
+            daemon, "_SCHEDULER_IMPORTANT_PENDING_ROOTS", frozenset()
+        ), patch.object(daemon, "_SCHEDULER_DISTRIBUTION_READY_ROOTS", ()), patch.object(
+            daemon, "_SCHEDULER_DISTRIBUTION_SERVED_ROOTS", set()
+        ), patch.object(daemon, "_ENTITY_LAUNCH_GUARD", {}):
+            # The important item on each root is actually dispatched through
+            # the same ring/TaskStore path used by the scheduler.
+            finish(launch_next(root_a), now_ts=101.0)
+            finish(launch_next(root_b), now_ts=101.0)
+
+            a_before_toggle = state(root_a)
+            b_before_toggle = state(root_b)
+            self.assertEqual(a_before_toggle["status"], "active")
+            self.assertEqual(a_before_toggle["remaining_items"], [102, 103])
+            self.assertEqual(b_before_toggle["plan_mode"], "full")
+            self.assertEqual(b_before_toggle["remaining_items"], [202, 203])
+
+            # A -> lazy: the admitted full tail stays assigned to the old
+            # cycle and is not erased by the new UID policy.
+            a_lazy, added, started_new = sync_cycle(
+                a_before_toggle,
+                planned_ids=[101],
+                never_built=[],
+                running_ids=[],
+                now_ts=102.0,
+                important_ids=[101],
+                remaining_ids=[],
+                lazy_mode=True,
+            )
+            self.assertFalse(started_new)
+            self.assertEqual(added, [])
+            self.assertEqual(a_lazy["items"], a_before_toggle["items"])
+            self.assertEqual(a_lazy["remaining_items"], [102, 103])
+            self.assertEqual(a_lazy["follow_up"], [])
+            self.assertEqual(a_lazy["plan_mode"], "full")
+            store.put_runtime_sync(cycle_key(root_a), a_lazy)
+
+            # B stays full while A's previously admitted remaining tail is
+            # dispatched. Launch one item on each root concurrently to prove
+            # the per-root mode toggle is not a shared-host barrier.
+            a_second = launch_next(root_a)
+            b_second = launch_next(root_b)
+            self.assertEqual(a_second.entity_id, 102)
+            self.assertEqual(b_second.entity_id, 202)
+            finish(a_second, now_ts=103.0)
+            finish(b_second, now_ts=103.0)
+            finish(launch_next(root_a), now_ts=104.0)
+            finish(launch_next(root_b), now_ts=104.0)
+
+            a_terminal = state(root_a)
+            b_terminal = state(root_b)
+            self.assertEqual(a_terminal["status"], "terminal")
+            self.assertEqual(a_terminal["done"], a_ids)
+            self.assertEqual(b_terminal["status"], "terminal")
+            self.assertEqual(b_terminal["done"], b_ids)
+
+            # The next A cycle uses lazy mode and therefore has no fresh
+            # remaining tail.
+            a_lazy_next, _added, started_new = sync_cycle(
+                a_terminal,
+                planned_ids=[101],
+                never_built=[],
+                running_ids=[],
+                now_ts=105.0,
+                important_ids=[101],
+                remaining_ids=[],
+                lazy_mode=True,
+            )
+            self.assertTrue(started_new)
+            self.assertEqual(a_lazy_next["items"], [101])
+            self.assertEqual(a_lazy_next["remaining_items"], [])
+            self.assertEqual(a_lazy_next["plan_mode"], "lazy")
+
+            # lazy -> full while that lazy cycle is active must not append
+            # fresh rows to its follow-up. They appear only after the active
+            # lazy cycle reaches terminal and a new full cycle is admitted.
+            a_still_lazy, added, started_new = sync_cycle(
+                a_lazy_next,
+                planned_ids=a_ids,
+                never_built=[],
+                running_ids=[],
+                now_ts=106.0,
+                important_ids=[101],
+                remaining_ids=[102, 103],
+                lazy_mode=False,
+            )
+            self.assertFalse(started_new)
+            self.assertEqual(added, [])
+            self.assertEqual(a_still_lazy["items"], [101])
+            self.assertEqual(a_still_lazy["follow_up"], [])
+            self.assertEqual(a_still_lazy["remaining_items"], [])
+            self.assertEqual(a_still_lazy["plan_mode"], "lazy")
+            store.put_runtime_sync(cycle_key(root_a), a_still_lazy)
+
+            finish(launch_next(root_a), now_ts=107.0)
+            a_lazy_terminal = state(root_a)
+            self.assertEqual(a_lazy_terminal["status"], "terminal")
+            a_full_next, _added, started_new = sync_cycle(
+                a_lazy_terminal,
+                planned_ids=a_ids,
+                never_built=[],
+                running_ids=[],
+                now_ts=108.0,
+                important_ids=[101],
+                remaining_ids=[102, 103],
+                lazy_mode=False,
+            )
+            self.assertTrue(started_new)
+            self.assertEqual(a_full_next["items"], a_ids)
+            self.assertEqual(a_full_next["remaining_items"], [102, 103])
+            self.assertEqual(a_full_next["plan_mode"], "full")
+
+        store.close()
 
     def test_main_and_root_local_use_the_same_snapshot_planner(self) -> None:
         self.assertIs(daemon._ordinary_segment_snapshot_order, ordinary_snapshot_order)
@@ -1028,6 +1239,7 @@ class SegmentLivenessTests(unittest.TestCase):
         eligible_ids: list[int],
         running: dict[str, daemon.RunningTask],
         pid: int,
+        config: SimpleNamespace | None = None,
     ) -> int:
         def claim(sid: int) -> bool:
             return _segment_cycle_claim(
@@ -1051,7 +1263,7 @@ class SegmentLivenessTests(unittest.TestCase):
             task_type="segment",
             running=running,
             ring_entities={entity_id},
-            config=self._config(),
+            config=config or self._config(),
             store=store,
             popens={},
             build_args=lambda sid: ["php", "bin/console", "mautic:segments:update", "-i", str(sid)],
@@ -1063,6 +1275,7 @@ class SegmentLivenessTests(unittest.TestCase):
                 entity_id=sid,
                 now_ts=202.0,
             ),
+            bypass_repeat_guard_entities={entity_id},
             bypass_baseline_admission=True,
             max_launches=1,
         )
