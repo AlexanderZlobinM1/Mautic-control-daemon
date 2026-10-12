@@ -1,5 +1,10 @@
 # MCD update invariants
 
+The rule in this document is mandatory and non-waivable. Source, behavioral
+tests, runtime artifact, and target-host evidence must agree with it. A
+missing or conflicting layer is an acceptance failure, not a reason to weaken
+the rule.
+
 This is an implementation and release-evidence reference, not a second
 algorithm. The normative scheduler algorithm is `ALGORITHM.md`. A release is
 not complete until the source, tests, published artifact, and target-host
@@ -20,6 +25,9 @@ receipt all agree with both documents.
   `paused` are never removed by updater recovery.
 - A running application PID must never be killed or waited on merely because
   an MCD update is being installed.
+- This applies to every ordinary application command, not only the examples
+  listed above. A new blocker may be introduced only as an explicit
+  MCD-owned lock/barrier added to this algorithm and its behavioral tests.
 
 ## Scheduler result semantics
 
@@ -45,6 +53,11 @@ duplicate spawn, all durable runtime state:
 - ordinary, static, import, retry, and follow-up queues;
 - claims, running state, terminal receipts, monitor projections, and runtime
   sync snapshots.
+
+The same state must remain root-local and fairly dispatchable: one host,
+instance, or root may not become a global work loop or starve unrelated roots;
+foreign-root metadata is never liveness or update-barrier evidence for the
+local root.
 
 Persisted segment-chain reverse indexes are scoped by canonical root, task-key
 owner, closure membership, and cycle generation. A legacy or foreign reverse

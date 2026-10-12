@@ -1,3 +1,11 @@
+## 1.5.144 - 2026-10-12
+
+- Freeze the ordinary-application/non-blocking update rule as a mandatory,
+  non-waivable acceptance invariant. It covers Mautic/PHP work, explicit
+  MCD-owned barriers, durable queue/claim/running state and restart/update
+  re-adoption, plus root-local fair dispatch; source, behavioral tests,
+  runtime artifact and target receipt must agree.
+
 ## 1.5.143 - 2026-10-12
 
 - Make persisted segment-chain reverse indexes root-, task-key-, owner-, and

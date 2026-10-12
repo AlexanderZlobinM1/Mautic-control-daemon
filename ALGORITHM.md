@@ -4,7 +4,7 @@
 фактическую схему после исправления admission и должен обновляться вместе с
 кодом, тестами и runtime receipt. Документ не является разрешением на
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.143 (follow-up после immutable
+Актуальная редакция этого канона — MCD 1.5.144 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам
@@ -307,7 +307,7 @@ config на его profile baseline и только после этого при
    orphaned `mcd-update-admission` flag снимается только если owner не жив и
    source/update lease свободен; `paused` и прочие manual/maintenance flags
    не трогаются recovery-кодом.
-7. Обязательная граница self-update: живой обычный PHP/Mautic console process
+7. Обязательная и неотменяемая граница self-update: живой обычный PHP/Mautic console process
    (`segments`, `campaigns`, `import` и любой другой application command) не
    является blocker-ом. Он должен пережить restart/reinstall MCD, сохранить
    PID/start identity, а после старта supervisor быть переусыновлён из
@@ -323,6 +323,8 @@ config на его profile baseline и только после этого при
    durable retry/status reason; отсутствие такого lock — дефект реализации,
    а не повод останавливать обычные Mautic PID. Список не ограничен тремя
    примерами, но расширяется только через explicit MCD lock/barrier.
+   Это правило проверяется source, behavioral-тестами, runtime-артефактом и
+   target receipt; любое расхождение блокирует acceptance.
 9. `runtime.mcd_update_defer_during_campaigns` сохраняется только для
    backward-compatible чтения конфигурации и не меняет admission. Это правило
    проверяется одновременно source, tests, systemd unit и runtime receipt.
