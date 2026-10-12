@@ -6,6 +6,7 @@ import tempfile
 import time
 import unittest
 from collections import deque
+from contextlib import ExitStack
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -790,6 +791,242 @@ class SegmentLivenessTests(unittest.TestCase):
             self.assertLess(elapsed, 0.5)
             self.assertIn(f"{root_b}|segment|202", running)
             store.close()
+
+    def test_persisted_refill_overlaps_main_planner_without_duplicate_launch(self) -> None:
+        """An admitted item starts while the main root planner is held busy."""
+
+        class StopMainLoop(BaseException):
+            pass
+
+        with tempfile.TemporaryDirectory() as td:
+            root = "/var/www/refill-concurrency/public_html"
+            state_path = Path(td) / "state.db"
+            config_path = Path(td) / "mcd.toml"
+            config_path.write_text(
+                "[profile]\nname = \"custom\"\n"
+                "[daemon]\npoll_interval_sec = 1\ndispatch_interval_sec = 0.1\n"
+                f"[runtime]\nstate_db_path = \"{state_path}\"\n"
+                f"scheduler_pause_flag_path = \"{Path(td) / 'scheduler.pause'}\"\n"
+                "scheduler_host_max_parallel = 1\n"
+                "scheduler_instance_max_parallel = 1\n"
+                "segment_mode = \"farm\"\n"
+                "segment_priority_parallel_idle = 0\n"
+                "segment_regular_parallel_idle = 1\n"
+                "segment_priority_parallel_throttled = 0\n"
+                "segment_regular_parallel_throttled = 1\n",
+                encoding="utf-8",
+            )
+            config = load_config(str(config_path), allow_recover_from_mcc=False)
+
+            cycle = None
+            cycle, _added, _started = sync_cycle(
+                cycle,
+                planned_ids=[501],
+                never_built=[],
+                running_ids=[],
+                now_ts=time.time(),
+                important_ids=[],
+                remaining_ids=[501],
+                lazy_mode=False,
+            )
+            seed_store = TaskStore(str(state_path), config)
+            seed_store.put_runtime_sync(cycle_key(root), cycle)
+            seed_store.put_runtime_sync(
+                daemon._segment_dispatch_context_key(root),
+                {
+                    "schema": "mcd-segment-dispatch-context-v1",
+                    "root": root,
+                    "mautic_major": 6,
+                    "updated_at": time.time(),
+                    "cycle_id": cycle["cycle_id"],
+                    "cycle_status": "active",
+                    "blocked_ids": [],
+                    "sql_managed_ids": [],
+                    "static_configured_ids": [],
+                    "static_active_ids": [],
+                    "active_import_target_ids": [],
+                    "parents_by_child": {},
+                    "children_by_parent": {},
+                    "scheduler_pause": False,
+                    "backup_pause": False,
+                    "dispatch_pause": False,
+                    "db_pause_until": 0.0,
+                    "cluster_cron_allowed": True,
+                    "cluster_import_allowed": False,
+                    "throttled_active": False,
+                    "priority_pending": False,
+                    "segment_slot_limit": 1,
+                },
+            )
+            seed_store.close()
+
+            planner_started = threading.Event()
+            launch_seen = threading.Event()
+            stop_refill = threading.Event()
+            spawned: list[tuple[str, int | None]] = []
+            instances = [
+                SimpleNamespace(
+                    root=root,
+                    db=object(),
+                    instance_uid="refill-concurrency",
+                    name="refill-concurrency",
+                    mautic_major=6,
+                    mautic_timezone="UTC",
+                )
+            ]
+            real_thread = threading.Thread
+
+            class FixtureInventory:
+                def __init__(self, *_args: object, **_kwargs: object) -> None:
+                    pass
+
+                def count(self) -> int:
+                    return len(instances)
+
+                def list_instances(self) -> list[object]:
+                    return list(instances)
+
+                def rescan(self, *_args: object, **_kwargs: object) -> int:
+                    return len(instances)
+
+            class BlockingTaskStore(TaskStore):
+                def get_runtime_sync(self, key: str) -> dict[str, object] | None:
+                    if (
+                        threading.current_thread().name == "mcd-ordinary-persisted-refill"
+                        and key == cycle_key(root)
+                        and not planner_started.is_set()
+                    ):
+                        planner_started.wait(timeout=2.0)
+                    return super().get_runtime_sync(key)
+
+            class FakeMauticDB:
+                def __init__(self, _cfg: object) -> None:
+                    pass
+
+                def __getattr__(self, _name: str):
+                    return lambda *_args, **_kwargs: []
+
+            class DisabledPusher:
+                def __init__(self, *_args: object, **_kwargs: object) -> None:
+                    pass
+
+                def enabled(self) -> bool:
+                    return False
+
+                def __getattr__(self, _name: str):
+                    return lambda *_args, **_kwargs: None
+
+            class FakeProcess:
+                _next_pid = 44000
+
+                def __init__(self) -> None:
+                    type(self)._next_pid += 1
+                    self.pid = type(self)._next_pid
+
+                def poll(self) -> None:
+                    return None
+
+                def wait(self) -> int:
+                    return 0
+
+            def blocking_dispatch_gate(
+                dispatch_installs: list[object],
+                *,
+                busy_roots: set[str],
+                lock: threading.RLock,
+            ):
+                current = next(iter(dispatch_installs))
+                current_root = str(getattr(current, "root") or "")
+                with lock:
+                    busy_roots.add(current_root)
+                planner_started.set()
+                try:
+                    # The main planner stays inside its root-local section
+                    # until refill has observed and launched the durable item.
+                    launch_seen.wait(timeout=3.0)
+                    yield current
+                    stop_refill.set()
+                    raise StopMainLoop()
+                finally:
+                    with lock:
+                        busy_roots.discard(current_root)
+
+            def spawn_fixture(**kwargs: object) -> FakeProcess:
+                args = list(kwargs.get("args") or [])
+                spawned.append((str(kwargs.get("root") or ""), int(args[-1])))
+                launch_seen.set()
+                return FakeProcess()
+
+            def sync_external(**_kwargs: object) -> dict[str, int]:
+                return {"observed": 0, "adopted": 0, "updated": 0, "released": 0}
+
+            class ControlledThread(real_thread):
+                def start(self) -> None:
+                    # Keep this test focused on the actual persisted refill
+                    # worker; other optional daemon loops are not part of the
+                    # fixture and would outlive the temporary state DB.
+                    if self.name != "mcd-ordinary-persisted-refill":
+                        return
+                    super().start()
+
+            patches = [
+                patch.object(daemon, "TaskStore", BlockingTaskStore),
+                patch.object(daemon, "InstanceInventory", FixtureInventory),
+                patch.object(daemon, "MauticDB", FakeMauticDB),
+                patch.object(daemon, "MCCStatePusher", DisabledPusher),
+                patch.object(daemon, "_ensure_mcd_service_kill_mode", return_value=False),
+                patch.object(daemon, "ensure_nginx_4xx_scan_safety", return_value={"status": "ok"}),
+                patch.object(daemon, "ensure_managed_web_firewall_loopback", return_value={"status": "ok"}),
+                patch.object(daemon, "fetch_custom_manifest", return_value=([], "fixture")),
+                patch.object(daemon, "ensure_seeded", return_value=1),
+                patch.object(daemon, "resolve_agent_identity", return_value={"clone_detected": False}),
+                patch.object(daemon, "_load_orphans_from_store", return_value={}),
+                patch.object(daemon, "_bootstrap_remote_runtime_before_local_baseline", return_value="none"),
+                patch.object(daemon, "_initialize_local_runtime_baseline", return_value=({}, "baseline")),
+                patch.object(daemon, "_sync_segment_whitelist_file"),
+                patch.object(daemon, "_apply_instance_runtime_guard"),
+                patch.object(daemon, "_sync_and_publish_form_embed_status", return_value=False),
+                patch.object(daemon, "retire_zabbix_mautic_version_userparameter", return_value={"status": "ok"}),
+                patch.object(daemon, "_monitor_running"),
+                patch.object(daemon, "_reconcile_running_state", return_value={}),
+                patch.object(daemon, "_sync_external_running_tasks", side_effect=sync_external),
+                patch.object(daemon, "_iter_instances_with_root_dispatch_gate", side_effect=blocking_dispatch_gate),
+                patch.object(
+                    daemon,
+                    "render_mautic_command",
+                    side_effect=lambda **kwargs: ["fixture", "segment", str(kwargs.get("id") or 0)],
+                ),
+                patch.object(daemon, "_spawn_command", side_effect=spawn_fixture),
+                patch.object(daemon, "cluster_route_allows", return_value=True),
+                patch.object(daemon, "backup_lock_active", return_value=False),
+                patch.object(daemon.threading, "Thread", ControlledThread),
+            ]
+            try:
+                with ExitStack() as stack:
+                    for item in patches:
+                        stack.enter_context(item)
+                    with self.assertRaises(StopMainLoop):
+                        daemon.run_loop(config, single_cycle=False, _test_stop_event=stop_refill)
+            finally:
+                stop_refill.set()
+                refill_threads = [
+                    thread
+                    for thread in threading.enumerate()
+                    if thread.name == "mcd-ordinary-persisted-refill"
+                ]
+                for thread in refill_threads:
+                    thread.join(timeout=2.0)
+
+            self.assertTrue(planner_started.is_set())
+            self.assertTrue(launch_seen.is_set())
+            self.assertEqual(spawned, [(root, 501)])
+            check_store = TaskStore(str(state_path), config)
+            state_after = check_store.get_runtime_sync(cycle_key(root))
+            self.assertEqual(state_after["running"], [501])
+            self.assertEqual(state_after["claimed"], [501])
+            self.assertEqual(_segment_cycle_pending_order(state_after), [])
+            self.assertEqual(len(check_store.running_rows()), 1)
+            check_store.close()
 
     def test_daemon_reconciles_prior_terminal_marker_before_pending_projection(self) -> None:
         root = "/var/www/alex/public_html"

@@ -13947,7 +13947,12 @@ def _apply_instance_runtime_guard(installs: list[MauticInstall], *, reason: str)
         )
 
 
-def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
+def run_loop(
+    config: AgentConfig,
+    single_cycle: bool = False,
+    *,
+    _test_stop_event: threading.Event | None = None,
+) -> None:
     global _ACTIVE_PRIORITY_EXECUTOR, _SEGMENT_DISPATCH_WAKEUP
     logging.info("MCD loop started")
     base_config = config
@@ -14360,7 +14365,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
     def _lifecycle_monitor_scheduler() -> None:
         """Continuously tick the canonical root-local lifecycle monitors."""
 
-        while True:
+        while _test_stop_event is None or not _test_stop_event.is_set():
             try:
                 _monitor_authoritative_runtime()
             except Exception as exc:
@@ -15009,7 +15014,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                     return True
             return False
 
-        while True:
+        while _test_stop_event is None or not _test_stop_event.is_set():
             try:
                 with _SCHEDULER_RUNTIME_LOCK:
                     if not cluster_route_allows(config, "cron"):
@@ -15253,7 +15258,10 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                 if now_error - last_error_log >= 30.0:
                     last_error_log = now_error
                     logging.warning("ordinary persisted refill worker failed: %s", exc)
-            ordinary_refill_wakeup.wait(timeout=max(0.2, min(1.0, float(config.dispatch_interval_sec or 1))))
+            if _test_stop_event is not None:
+                _test_stop_event.wait(timeout=max(0.2, min(1.0, float(config.dispatch_interval_sec or 1))))
+            else:
+                ordinary_refill_wakeup.wait(timeout=max(0.2, min(1.0, float(config.dispatch_interval_sec or 1))))
             ordinary_refill_wakeup.clear()
 
     recurring_segment_priority_loop = _RecurringSegmentPriorityLoop(priority_executor)
@@ -16079,7 +16087,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
             daemon=True,
         ).start()
 
-    while True:
+    while _test_stop_event is None or not _test_stop_event.is_set():
         if single_cycle:
             _monitor_authoritative_runtime()
         now = time.time()
