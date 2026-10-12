@@ -10044,6 +10044,20 @@ def _effective_segment_slot_limit(
     )
 
 
+def _effective_segment_regular_slot_limit(
+    config: AgentConfig,
+    throttled_active: bool,
+) -> int:
+    """Return the ordinary worker budget without static priority capacity."""
+    if config.segment_mode == "classic_loop":
+        return 1
+    if throttled_active:
+        if config.segment_throttle_whitelist_only:
+            return 0
+        return max(0, int(config.segment_regular_parallel_throttled or 0))
+    return max(0, int(config.segment_regular_parallel_idle or 0))
+
+
 def _segment_shared_slots_used(
     running: dict[str, RunningTask],
     root: str,
@@ -16154,7 +16168,18 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                         excluded_ids=sql_managed_segment_ids | set(segment_static_ids_for_inst),
                     )
                 )
-                pending_slot_limit = max(1, int(segment_slot_limit or 0))
+                # Persisted ordinary work uses the ordinary regular budget;
+                # static priority/super-priority capacity is a separate lane.
+                # If throttling reduces that budget to zero, retain one
+                # shared slot for already-admitted work as required by the
+                # durable-cycle liveness contract.
+                pending_slot_limit = max(
+                    1,
+                    _effective_segment_regular_slot_limit(
+                        config,
+                        segment_throttled_active,
+                    ),
+                )
                 pending_slot_limit = min(
                     pending_slot_limit,
                     _segment_shared_slots_available(

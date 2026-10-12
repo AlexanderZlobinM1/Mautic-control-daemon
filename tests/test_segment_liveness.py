@@ -17,6 +17,7 @@ from mcd_agent.daemon import (
     _segment_cycle_pending_ids,
     _segment_cycle_running,
     _segment_cycle_terminal,
+    _effective_segment_regular_slot_limit,
     _segment_shared_slots_available,
     _fill_from_ring,
 )
@@ -237,6 +238,190 @@ class SegmentLivenessTests(unittest.TestCase):
         self.assertEqual(running[next(iter(running))].entity_id, 154)
         self.assertEqual(store.get_runtime_sync(cycle_key(root))["running"], [154])
         store.close()
+
+    def test_restart_pending_batch_refills_m6_m7_with_independent_super_lane(self) -> None:
+        pending_ids = [154, 147, 144, 149, 151]
+        for major in (6, 7):
+            for throttled in (False, True):
+                with self.subTest(mautic_major=major, throttled=throttled), tempfile.TemporaryDirectory() as td:
+                    root = f"/var/www/b2bss-m{major}/public_html"
+                    store = TaskStore(str(Path(td) / "state.db"))
+                    state, _added, started = sync_cycle(
+                        None,
+                        planned_ids=pending_ids,
+                        never_built=[],
+                        running_ids=[],
+                        now_ts=100.0,
+                    )
+                    self.assertTrue(started)
+                    cycle_id = state["cycle_id"]
+                    store.put_runtime_sync(cycle_key(root), state)
+                    store.close()
+                    store = TaskStore(str(Path(td) / "state.db"))
+                    recovered = store.get_runtime_sync(cycle_key(root))
+                    self.assertEqual(_segment_cycle_pending_order(recovered), pending_ids)
+
+                    config = self._config()
+                    config.scheduler_host_max_parallel = 0
+                    config.scheduler_instance_max_parallel = 0
+                    config.segment_mode = "farm"
+                    config.segment_priority_parallel_idle = 8
+                    config.segment_regular_parallel_idle = 3
+                    config.segment_priority_parallel_throttled = 2
+                    config.segment_regular_parallel_throttled = 0
+                    config.segment_throttle_whitelist_only = True
+                    config.segment_throttle_whitelist_parallel = 2
+                    pending_limit = max(
+                        1,
+                        _effective_segment_regular_slot_limit(config, throttled),
+                    )
+                    self.assertEqual(pending_limit, 3 if not throttled else 1)
+
+                    class ActiveSuperPriority:
+                        @staticmethod
+                        def active_count(active_root: str | None, task_types: set[str]) -> int:
+                            if active_root == root and task_types == daemon._STATIC_SEGMENT_TASK_TYPES:
+                                return 1
+                            return 0
+
+                    running: dict[str, daemon.RunningTask] = {}
+                    pids = iter(range(9100 + major * 10 + int(throttled) * 5, 9200))
+
+                    def launch_batch(entity_ids: list[int]) -> int:
+                        ring = deque(entity_ids)
+                        return _fill_from_ring(
+                            ring=ring,
+                            ring_limit=pending_limit,
+                            total_limit=pending_limit,
+                            root=root,
+                            task_type="segment",
+                            running=running,
+                            ring_entities=set(entity_ids),
+                            config=config,
+                            store=store,
+                            popens={},
+                            build_args=lambda sid: [
+                                "php",
+                                "bin/console",
+                                "mautic:segments:update",
+                                "-i",
+                                str(sid),
+                            ],
+                            admission_claim=lambda sid: _segment_cycle_claim(
+                                store,
+                                root=root,
+                                entity_id=sid,
+                                eligible_ids=pending_ids,
+                                blocked_ids=set(),
+                                running_ids=set(),
+                                now_ts=200.0,
+                            ),
+                            admission_running=lambda sid: _segment_cycle_running(
+                                store,
+                                root=root,
+                                entity_id=sid,
+                                now_ts=201.0,
+                            ),
+                            admission_release=lambda sid: _segment_cycle_release(
+                                store,
+                                root=root,
+                                entity_id=sid,
+                                now_ts=202.0,
+                            ),
+                            bypass_repeat_guard_entities=set(entity_ids),
+                            bypass_baseline_admission=True,
+                            max_launches=pending_limit,
+                        )
+
+                    with patch.object(daemon, "_ACTIVE_PRIORITY_EXECUTOR", ActiveSuperPriority()), patch.object(
+                        daemon,
+                        "_spawn_command",
+                        side_effect=lambda **_kwargs: SimpleNamespace(pid=next(pids)),
+                    ) as spawn, patch.object(
+                        daemon,
+                        "_task_locked_args",
+                        side_effect=lambda _key, args, **_kwargs: args,
+                    ), patch.object(
+                        daemon,
+                        "_scheduler_baseline_launch_due",
+                        return_value=False,
+                    ), patch.object(daemon, "_SEGMENT_DISPATCH_WAKEUP", None):
+                        self.assertEqual(
+                            _segment_shared_slots_available(
+                                running,
+                                root,
+                                pending_limit,
+                                store=store,
+                                config=config,
+                                now_ts=203.0,
+                            ),
+                            pending_limit,
+                        )
+                        first_batch = pending_ids[:pending_limit]
+                        self.assertEqual(launch_batch(pending_ids), pending_limit)
+                        self.assertEqual(
+                            sorted(task.entity_id for task in running.values()),
+                            sorted(first_batch),
+                        )
+                        self.assertEqual(spawn.call_count, pending_limit)
+                        self.assertEqual(store.running_count(), pending_limit)
+                        running_state = store.get_runtime_sync(cycle_key(root))
+                        self.assertEqual(running_state["cycle_id"], cycle_id)
+                        self.assertEqual(
+                            running_state["running"],
+                            first_batch,
+                        )
+
+                        for task in list(running.values()):
+                            store.finish(task.row_id, state="done", rc=0, note=None)
+                            _segment_cycle_terminal(
+                                store,
+                                root=root,
+                                entity_id=int(task.entity_id),
+                                success=True,
+                                note=None,
+                                now_ts=204.0,
+                            )
+                            running.pop(task.task_key, None)
+
+                        remaining = pending_ids[pending_limit:]
+                        completed = list(first_batch)
+                        while remaining:
+                            batch_size = min(pending_limit, len(remaining))
+                            self.assertEqual(launch_batch(remaining), batch_size)
+                            self.assertEqual(spawn.call_count, len(completed) + batch_size)
+                            self.assertEqual(store.running_count(), batch_size)
+                            refill_state = store.get_runtime_sync(cycle_key(root))
+                            self.assertEqual(refill_state["cycle_id"], cycle_id)
+                            self.assertEqual(refill_state["done"], completed)
+                            self.assertEqual(refill_state["running"], remaining[:batch_size])
+
+                            for task in list(running.values()):
+                                store.finish(task.row_id, state="done", rc=0, note=None)
+                                _segment_cycle_terminal(
+                                    store,
+                                    root=root,
+                                    entity_id=int(task.entity_id),
+                                    success=True,
+                                    note=None,
+                                    now_ts=205.0,
+                                )
+                                running.pop(task.task_key, None)
+                            completed.extend(remaining[:batch_size])
+                            remaining = remaining[batch_size:]
+
+                    terminal = store.get_runtime_sync(cycle_key(root))
+                    self.assertEqual(terminal["cycle_id"], cycle_id)
+                    self.assertEqual(terminal["status"], "terminal")
+                    self.assertEqual(terminal["done"], pending_ids)
+                    rows = store.conn.execute(
+                        "SELECT entity_id, state, pid FROM tasks WHERE root=? ORDER BY id",
+                        (root,),
+                    ).fetchall()
+                    self.assertEqual([int(row["entity_id"]) for row in rows], pending_ids)
+                    self.assertTrue(all(str(row["state"]) == "done" for row in rows))
+                    self.assertTrue(all(int(row["pid"]) > 0 for row in rows))
+                    store.close()
 
     def _launch_persisted_item(
         self,

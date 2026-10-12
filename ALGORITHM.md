@@ -4,7 +4,7 @@
 фактическую схему после исправления admission и должен обновляться вместе с
 кодом, тестами и runtime receipt. Документ не является разрешением на
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.127 (follow-up после immutable
+Актуальная редакция этого канона — MCD 1.5.128 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам
@@ -328,6 +328,10 @@ durable `follow_up`, а `dispatch` запускает уже сохранённ�
 Follow-up FIFO получает следующий свободный ordinary worker раньше frozen
 cursor; campaign/queue pressure блокирует только новую admission. При active
 pressure каждый сохранённый pending cursor и follow-up продолжает dispatch.
+Persisted ordinary work использует только effective regular worker budget;
+static priority/super-priority capacity не расширяет ordinary lane и не
+вычитается из неё. Если throttled whitelist profile даёт regular budget `0`,
+уже admitted cursor сохраняет ровно один shared slot.
 Если обычный ring временно получил нулевой throttled limit, для такого cursor
 сохраняется один shared slot при его фактической доступности.
 

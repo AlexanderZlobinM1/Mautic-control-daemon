@@ -44,6 +44,13 @@ TaskStore fixture должен сохранять `cycle_id`, `updated_at` и sp
    не меняет `cycle.items`: сохраняется в durable `follow_up` FIFO и получает
    следующий свободный ordinary worker раньше следующего frozen-cycle ID.
    После restart порядок follow-up сохраняется, duplicate не создаётся.
+   Exact M6/M7 fixture с durable pending `[154, 147, 144, 149, 151]`, пустыми
+   volatile rings и независимым active super-priority lane обязан после
+   restart запустить реальный batch через `_fill_from_ring`, записать PID и
+   `TaskStore.state=running`, а после terminal callback немедленно refill-ить
+   следующий batch, сохраняя исходный `cycle_id`. Unpressured profile
+   использует regular budget `3`; whitelist-throttled profile с regular
+   budget `0` сохраняет один shared slot.
 4. Несколько roots/instances с `pending>0` и `running=0` получают свободные
    slots по очереди dispatch. Один root не может навсегда удерживать cursor
    active только потому, что другой root первым использовал global baseline.
@@ -54,6 +61,9 @@ TaskStore fixture должен сохранять `cycle_id`, `updated_at` и sp
 ## Guard assertions
 
 Для pending cycle bypass-ится только global new-admission baseline cadence.
+Persisted ordinary pending не получает static priority capacity: его launch
+limit равен effective regular budget, с fallback ровно в один shared slot при
+нулевом throttled regular limit.
 Обязательны и проверяются отдельно: atomic cycle claim, `done/errors/claimed/
 running`, dependency conflict, host/instance capacity, import reservation,
 repeat interval, TaskStore duplicate key и OS execution lock. Pending запуск не

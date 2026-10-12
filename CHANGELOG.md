@@ -1,3 +1,11 @@
+## 1.5.128 - 2026-10-12
+
+- Restore ordinary segment-cycle dispatch from durable pending state after
+  restart or an empty plan refresh, including immediate multi-worker refill
+  without consuming static priority capacity.
+- Keep late ordinary arrivals in durable follow-up FIFO and expose pending
+  cycle IDs in scheduler monitor projections for Operations acceptance.
+
 ## 1.5.127 - 2026-10-12
 
 - Preserve the legacy whitelist projection for alias ACK ordering while
