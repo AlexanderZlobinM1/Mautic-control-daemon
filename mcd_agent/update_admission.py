@@ -33,4 +33,3 @@ def scheduler_admission_lock(config_or_path: object) -> Iterator[None]:
             yield
         finally:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-

@@ -1,3 +1,8 @@
+## 1.5.107 - 2026-10-12
+
+- Republish the self-update admission barrier race fix with normalized source
+  formatting and immutable release metadata.
+
 ## 1.5.106 - 2026-10-12
 
 - Close the self-update admission race: barrier publication and every final
