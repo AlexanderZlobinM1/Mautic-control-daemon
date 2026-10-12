@@ -6335,7 +6335,8 @@ def _monitor_cycle_snapshot(
     running_ids = _monitor_running_entity_ids(running, root=root, task_types=running_task_types)
     done_set = cycle_done.setdefault((str(root), task_type), set())
     base_planned = _unique_positive_ids(list(planned_ids))
-    if not base_planned and not running_ids:
+    queue_source = base_planned if queued_ids is None else _unique_positive_ids(list(queued_ids))
+    if not base_planned and not queue_source and not running_ids:
         done_set.clear()
         return {
             "task_type": task_type,
@@ -6345,14 +6346,18 @@ def _monitor_cycle_snapshot(
             "total": 0,
         }
 
-    planned = _unique_positive_ids(base_planned + list(done_set) + sorted(running_ids))
+    # ``queued_ids`` may contain durable ordinary-cycle work that is no longer
+    # present in a volatile ring after restart or an empty plan refresh.  It is
+    # still part of the monitor plan and must remain visible to Operations.
+    planned = _unique_positive_ids(
+        base_planned + list(queue_source) + list(done_set) + sorted(running_ids)
+    )
     planned_set = set(planned)
     if not planned_set:
         done_set.clear()
     else:
         done_set.intersection_update(planned_set)
 
-    queue_source = planned if queued_ids is None else _unique_positive_ids(list(queued_ids))
     if planned_set and planned_set.issubset(done_set) and not (running_ids & planned_set) and queue_source:
         done_set.clear()
 
@@ -6431,6 +6436,7 @@ def _monitor_visible_queued_ids(
     blocked_entities: set[int] | None = None,
     dynamic_blocked=None,
     running_task_types: set[str] | None = None,
+    bypass_repeat_guard_entities: set[int] | None = None,
 ) -> list[int]:
     out: list[int] = []
     seen: set[int] = set()
@@ -6453,7 +6459,10 @@ def _monitor_visible_queued_ids(
                 continue
         if any(_is_running(running, root, running_task_type, eid) for running_task_type in running_types):
             continue
-        if not _launch_allowed(config, root, task_type, eid, now_ts=now_ts):
+        if (
+            not bypass_repeat_guard_entities
+            or eid not in bypass_repeat_guard_entities
+        ) and not _launch_allowed(config, root, task_type, eid, now_ts=now_ts):
             continue
         out.append(eid)
     return out
@@ -15799,8 +15808,24 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                 campaign_trigger_queued_ids: list[int] = []
                 campaign_rebuild_queued_ids: list[int] = []
                 if cluster_cron_allowed and config.segment_mode != "classic_loop":
+                    durable_pending_order = _segment_cycle_pending_order(
+                        segment_cycle_payload,
+                        excluded_ids=sql_managed_segment_ids | set(segment_static_ids_for_inst),
+                    )
                     segment_queued_ids = _unique_positive_ids(
                         _monitor_visible_queued_ids(
+                            ring=durable_pending_order,
+                            root=root,
+                            task_type="segment",
+                            running=running,
+                            config=config,
+                            now_ts=now,
+                            blocked_entities=segment_blocked_ids,
+                            dynamic_blocked=_segment_chain_running_conflict,
+                            running_task_types={"segment", "segment_sql"},
+                            bypass_repeat_guard_entities=set(durable_pending_order),
+                        )
+                        + _monitor_visible_queued_ids(
                             ring=seg_sql_long_ring,
                             root=root,
                             task_type="segment_sql",

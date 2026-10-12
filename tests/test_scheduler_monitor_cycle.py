@@ -87,6 +87,40 @@ class SchedulerMonitorCycleTests(unittest.TestCase):
             self.assertEqual(cycle["done"], [])
             self.assertEqual(cycle["running"], [])
 
+    def test_durable_pending_cycle_ids_remain_visible_when_volatile_rings_are_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "state.db"
+            store = TaskStore(str(db_path))
+            root = "/var/www/b2bss"
+
+            # A restart or an empty plan refresh may leave the admitted
+            # ordinary cursor only in the durable projection. The monitor
+            # must still expose it so Operations can distinguish pending work
+            # from a genuinely empty scheduler.
+            _publish_scheduler_monitor_cycles(
+                store=store,
+                root=root,
+                cycle_done={(root, "segment"): set()},
+                running={},
+                now_ts=1000.0,
+                seg_sql_ring=deque(),
+                seg_resume_ring=deque(),
+                seg_prio_ring=deque(),
+                seg_reg_ring=deque(),
+                campaign_trigger_prio_ring=deque(),
+                campaign_trigger_reg_ring=deque(),
+                campaign_rebuild_prio_ring=deque(),
+                campaign_rebuild_reg_ring=deque(),
+                segment_queued_ids=[154, 147, 144, 149, 151],
+            )
+
+            payload = self._read_payload(db_path, root)
+            cycle = {cycle["task_type"]: cycle for cycle in payload["cycles"]}["segment"]
+            self.assertEqual(cycle["queued"], [154, 147, 144, 149, 151])
+            self.assertEqual(cycle["done"], [])
+            self.assertEqual(cycle["running"], [])
+            self.assertEqual(cycle["total"], 5)
+
     def test_campaign_cycles_publish_queued_running_and_done_items(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             db_path = Path(td) / "state.db"
