@@ -642,6 +642,14 @@ def runtime_key_observation(
         effective_value = effective.get(key)
         if scope_key and key.endswith("_instance_settings") and isinstance(effective_value, dict):
             effective_value = effective_value.get(scope_key)
+        elif key.endswith("_instance_settings") and isinstance(desired, dict) and isinstance(effective_value, dict):
+            # Host ACKs carry a sparse desired map. Compare only the exact
+            # requested UIDs, including explicit empty tombstones; unrelated
+            # default-filled instance rows are not part of this observation.
+            effective_value = {
+                str(uid): effective_value.get(uid, {})
+                for uid in desired
+            }
         if key in compatibility_unsupported or key not in runtime_supported_keys():
             status, origin, reason = "rejected", "none", "unsupported_key"
         elif key not in runtime_remote_allowed_keys():
@@ -908,7 +916,12 @@ def acknowledge_desired_runtime_states(
             and previous.get("revision") == revision
             and previous.get("content_sha256") == content_sha256
         )
-        if previous_matches and (not chunks or set(range(len(chunks))) <= previous_parts):
+        previous_ack_status = str(previous.get("ack_status", "applied")).strip().lower() if isinstance(previous, dict) else ""
+        if (
+            previous_matches
+            and previous_ack_status in {"applied", "unchanged"}
+            and (not chunks or set(range(len(chunks))) <= previous_parts)
+        ):
             return
         observed = {
             "runtime_fingerprint": runtime_fingerprint,
@@ -959,6 +972,11 @@ def acknowledge_desired_runtime_states(
             "revision": revision,
             "content_sha256": content_sha256,
         }
+        # Empty desired scopes are intentionally unverified and retain the
+        # legacy successful receipt shape; non-empty rejected receipts must
+        # remain retryable on the next poll.
+        if normalized_runtime:
+            entry["ack_status"] = ack_status
         if chunks:
             entry.update(
                 {

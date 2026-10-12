@@ -306,6 +306,65 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             "jobs_max_workers": 6,
         })
 
+    def test_host_ack_projects_sparse_instance_map_without_default_rows(self) -> None:
+        cfg = SimpleNamespace(
+            profile_name="custom",
+            segment_priority_instance_settings={
+                "adonis@Farm02": {"segments": [58, 59]},
+                "unrelated@Farm02": {},
+            },
+        )
+        observed = runtime_key_observation(
+            cfg,
+            {"segment_priority_instance_settings": {"adonis@Farm02": {"segments": [58, 59]}}},
+            revision=196,
+            source="mcc",
+        )
+        row = observed["keys"]["segment_priority_instance_settings"]
+        self.assertEqual(row["status"], "unchanged")
+        self.assertEqual(row["effective"], {"adonis@Farm02": {"segments": [58, 59]}})
+
+    def test_rejected_nonempty_ack_is_retried_after_effective_value_is_fixed(self) -> None:
+        class MemoryStore:
+            def __init__(self):
+                self.values = {}
+
+            def get_runtime_sync(self, key):
+                return self.values.get(key)
+
+            def put_runtime_sync(self, key, value):
+                self.values[key] = dict(value)
+
+        cfg = SimpleNamespace(
+            profile_name="custom",
+            jobs_max_workers=1,
+            mcc_url="https://mcc.example",
+            mcc_token="token",
+        )
+        store = MemoryStore()
+        desired = {"jobs_max_workers": 4}
+        with patch(
+            "mcd_agent.runtime_overrides.acknowledge_runtime_state",
+            return_value={"status": "ok"},
+        ) as acknowledge:
+            acknowledge_desired_runtime_states(
+                cfg, store,
+                desired_state={"scope_key": "Farm02", "revision": 196},
+                host_runtime=desired,
+                instance_states={},
+                runtime_fingerprint="fp",
+            )
+            self.assertEqual(store.values["mcc_runtime_acknowledged"]["host"]["ack_status"], "rejected")
+            cfg.jobs_max_workers = 4
+            acknowledge_desired_runtime_states(
+                cfg, store,
+                desired_state={"scope_key": "Farm02", "revision": 196},
+                host_runtime=desired,
+                instance_states={},
+                runtime_fingerprint="fp",
+            )
+        self.assertEqual(acknowledge.call_count, 2)
+
     def test_empty_instance_ack_is_unverified_and_compact(self) -> None:
         store = SimpleNamespace(values={})
         store.get_runtime_sync = lambda key: store.values.get(key)

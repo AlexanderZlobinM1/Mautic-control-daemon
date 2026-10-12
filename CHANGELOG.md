@@ -1,3 +1,9 @@
+## 1.5.109 - 2026-10-12
+
+- Project host ACK effective instance maps to the exact sparse desired UIDs,
+  and retry ACK publication after rejected/partial status instead of treating
+  a rejected observation as complete.
+
 ## 1.5.108 - 2026-10-12
 
 - Align the patch-resolution contract and release metadata with immutable
