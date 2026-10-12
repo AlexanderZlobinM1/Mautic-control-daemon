@@ -4141,6 +4141,48 @@ def _segment_super_priority_effective_setting(config: AgentConfig, inst: object)
     return _static_segment_ids_from_value(raw, super_priority=True)
 
 
+def _segment_lazy_update_effective_setting(config: AgentConfig, inst: object) -> bool:
+    """Resolve lazy planning per instance with the host value as fallback.
+
+    The host-level ``segment_lazy_update_enabled`` remains the compatible
+    default.  A canonical instance row may override it by immutable UID,
+    root/name/domain alias, or the existing host-qualified ``<uid>@<host>``
+    alias.  Invalid rows deliberately fall back to the host default instead
+    of silently turning a full planner into a lazy one.
+    """
+
+    host_default = bool(getattr(config, "segment_lazy_update_enabled", False))
+    found, raw = _static_segment_setting_value(
+        getattr(config, "segment_lazy_update_instance_settings", {}),
+        inst,
+    )
+    if not found:
+        return host_default
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        return bool(raw)
+    if isinstance(raw, Mapping):
+        if _to_boolish(raw.get("tombstone"), False):
+            return host_default
+        for key in ("segment_lazy_update_enabled", "lazy", "enabled", "value"):
+            if key in raw:
+                value = raw.get(key)
+                if isinstance(value, (bool, int, float, str)):
+                    return _to_boolish(value, host_default)
+    return host_default
+
+
+def _segment_full_scan_admission_enabled(
+    *,
+    lazy_segment_plan: bool,
+    force_segment_full_scan: bool,
+    cluster_cron_allowed: bool,
+) -> bool:
+    """Allow a forced full snapshot to admit fresh work only in full mode."""
+    return bool(force_segment_full_scan and not lazy_segment_plan and cluster_cron_allowed)
+
+
 def _segment_static_lane_parallel_limit(
     config: AgentConfig,
     inst: object,
@@ -13917,8 +13959,9 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                 getattr(inst, "mautic_timezone", None),
                 getattr(inst, "mautic_major", None),
             )
+            lazy_segment_plan = _segment_lazy_update_effective_setting(config, inst)
             try:
-                if bool(getattr(config, "segment_lazy_update_enabled", False)):
+                if lazy_segment_plan:
                     observed_ids = db.fetch_ids(config.sql_segments_due, limit=5000, context=sql_ctx)
                 else:
                     observed_ids = db.fetch_ids(_SQL_SEGMENTS_ALL_PUBLISHED, limit=5000, context=sql_ctx)
@@ -13964,7 +14007,6 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
             previous_baseline = previous_baseline if isinstance(previous_baseline, Mapping) else {}
             retry_ids = [*(_normalize_segment_ids(state.get("errors"))), *(_normalize_segment_ids(state.get("manual_retry_ids")))]
             never_built = _never_built_segment_ids(dep_rows)
-            lazy_segment_plan = bool(getattr(config, "segment_lazy_update_enabled", False))
             plan_groups: dict[str, list[int]] = {}
             standard_ids = _ordinary_segment_snapshot_order(
                 dep_rows,
@@ -14120,6 +14162,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                 "throttled_active": bool(pressure),
                 "priority_pending": priority_pending,
                 "segment_slot_limit": slot_limit,
+                "segment_lazy_update_enabled": bool(lazy_segment_plan),
             }
             store.put_runtime_sync(_segment_dispatch_context_key(root), context)
             pending_after = _segment_cycle_pending_order(cycle_state, excluded_ids=static_excluded)
@@ -16905,6 +16948,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                 force_segment_full_scan = now < import_force_until
                 periodic_full_scan_enabled = bool(getattr(config, "segment_periodic_full_scan_enabled", False))
                 full_scan_interval_sec = max(0, int(getattr(config, "segment_full_scan_interval_sec", 300) or 0))
+                lazy_segment_plan = _segment_lazy_update_effective_setting(config, inst)
                 if (
                     periodic_full_scan_enabled
                     and not force_segment_full_scan
@@ -16914,14 +16958,14 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                     force_segment_full_scan = True
                 if cluster_cron_allowed:
                     try:
-                        if force_segment_full_scan or not bool(getattr(config, "segment_lazy_update_enabled", False)):
+                        if force_segment_full_scan or not lazy_segment_plan:
                             segment_ids = db.fetch_ids(_SQL_SEGMENTS_ALL_PUBLISHED, limit=5000, context=sql_ctx)
                             segment_last_full_scan_ts[root] = now
                             logging.info(
                                 "[%s] segment full-scan planned (reason=%s pending_imports=%s interval=%ss)",
                                 root,
                                 "import_activity" if now < import_force_until else (
-                                    "full_cycle" if not bool(getattr(config, "segment_lazy_update_enabled", False))
+                                    "full_cycle" if not lazy_segment_plan
                                     else "periodic_full_scan"
                                 ),
                                 import_pending_now,
@@ -17066,6 +17110,11 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                             )
                         previous_cycle_retry_ids = list(previous_cycle_payload.get("errors") or [])
                         previous_cycle_retry_ids.extend(list(previous_cycle_payload.get("manual_retry_ids") or []))
+                    full_scan_admission = _segment_full_scan_admission_enabled(
+                        lazy_segment_plan=lazy_segment_plan,
+                        force_segment_full_scan=force_segment_full_scan,
+                        cluster_cron_allowed=cluster_cron_allowed,
+                    )
                     try:
                         dep_rows = db.fetch_published_segment_filters()
                         published_segment_ids = {int(row["id"]) for row in dep_rows}
@@ -17083,7 +17132,6 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                         )
                         for lane_ids in static_plans.values():
                             static_excluded_ids.update(int(sid) for sid in lane_ids if int(sid) > 0)
-                        lazy_segment_plan = bool(getattr(config, "segment_lazy_update_enabled", False))
                         plan_groups: dict[str, list[int]] = {}
                         standard_segment_ids = _ordinary_segment_snapshot_order(
                             dep_rows,
@@ -17096,7 +17144,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                                 or _SEGMENT_STALE_PRIORITY_SEC
                             ),
                             now_ts=float(now),
-                            include_fresh_remaining=bool(force_segment_full_scan or not lazy_segment_plan),
+                            include_fresh_remaining=not lazy_segment_plan,
                             groups=plan_groups,
                         )
                         if observed_segment_ids and not standard_segment_ids and not lazy_segment_plan:
@@ -17197,7 +17245,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                     standard_segment_ids = _reconcile_full_scan_pending(
                         segment_full_scan_pending.setdefault(root, set()),
                         standard_segment_ids,
-                        full_scan=force_segment_full_scan and cluster_cron_allowed,
+                        full_scan=full_scan_admission,
                         published_ids=published_segment_ids,
                     )
                     cycle_planned_ids, cycle_never_built_ids = _segment_cycle_admission_inputs(
@@ -18900,6 +18948,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                     "throttled_active": throttled_active,
                     "priority_pending": priority_pending,
                     "segment_slot_limit": segment_slot_limit,
+                    "segment_lazy_update_enabled": _segment_lazy_update_effective_setting(config, inst),
                 }
                 store.put_runtime_sync(_segment_dispatch_context_key(root), context)
 

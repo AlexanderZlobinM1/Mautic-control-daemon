@@ -20,7 +20,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from mcd_agent import self_update
+from mcd_agent import __version__, self_update
 from mcd_agent.daemon import RunningTask, TaskStore, _reconcile_running_state
 
 
@@ -72,14 +72,19 @@ def _cfg(root: Path) -> SimpleNamespace:
 
 def main() -> int:
     source = Path(__file__).resolve().parents[1]
+    target_version = str(__version__)
+    target_parts = target_version.split(".")
+    if len(target_parts) != 3:
+        raise RuntimeError(f"unexpected agent version: {target_version}")
+    previous_version = ".".join([target_parts[0], target_parts[1], str(max(0, int(target_parts[2]) - 1))])
     with tempfile.TemporaryDirectory(prefix="mcd-runtime-migration-qa-") as tmp:
         root = Path(tmp)
         install = root / "install"
         venv = install / "venv"
         _run([sys.executable, "-m", "venv", str(venv)])
 
-        archive = root / "runtime-1.5.134.tar.gz"
-        _build(source, archive, "runtime-134-source")
+        archive = root / f"runtime-{target_version}.tar.gz"
+        _build(source, archive, f"runtime-{target_version}-source")
         current_src = install / "src"
         _extract(archive, current_src)
         cfg = _cfg(root)
@@ -130,7 +135,7 @@ def main() -> int:
         old_release = self_update.release_session
         old_restart = self_update._restart_service_async
         try:
-            self_update.installed_agent_version = lambda: "1.5.133"
+            self_update.installed_agent_version = lambda: previous_version
             self_update._ensure_update_archive = lambda _cfg, _plan: archive
             self_update.release_session = lambda *_args, **_kwargs: None
             self_update._restart_service_async = lambda: None
@@ -138,8 +143,8 @@ def main() -> int:
                 cfg,
                 {
                     "status": "update",
-                    "target": "1.5.134",
-                    "package_url": "https://qa.invalid/mcd-agent-runtime-1.5.134.tar.gz",
+                    "target": target_version,
+                    "package_url": f"https://qa.invalid/mcd-agent-runtime-{target_version}.tar.gz",
                 },
             )
         finally:
@@ -165,7 +170,7 @@ def main() -> int:
             old_runtime_install(*args, **kwargs)
 
         try:
-            self_update.installed_agent_version = lambda: "1.5.133"
+            self_update.installed_agent_version = lambda: previous_version
             self_update._ensure_update_archive = lambda _cfg, _plan: archive
             self_update.release_session = lambda *_args, **_kwargs: None
             self_update._restart_service_async = lambda: None
@@ -174,8 +179,8 @@ def main() -> int:
                 cfg,
                 {
                     "status": "update",
-                    "target": "1.5.134",
-                    "package_url": "https://qa.invalid/mcd-agent-runtime-1.5.134.tar.gz",
+                    "target": target_version,
+                    "package_url": f"https://qa.invalid/mcd-agent-runtime-{target_version}.tar.gz",
                 },
             )
         finally:
@@ -187,7 +192,7 @@ def main() -> int:
         if rollback_ok or "qa injected runtime install failure" not in rollback_message:
             raise RuntimeError(f"rollback proof did not fail-and-restore: {rollback_message}")
         rollback_receipt = json.loads((install / "var" / "runtime-package-receipt.json").read_text())
-        if rollback_receipt["package_version"] != "1.5.134" or not (install / "src" / "mcd-runtime-manifest.json").is_file():
+        if rollback_receipt["package_version"] != target_version or not (install / "src" / "mcd-runtime-manifest.json").is_file():
             raise RuntimeError("rollback did not restore the previous runtime payload")
 
         reopened = TaskStore(cfg.state_db_path, cfg)

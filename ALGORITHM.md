@@ -166,15 +166,25 @@ config на его profile baseline и только после этого при
 1. По умолчанию (`segment_lazy_update_enabled = false`) планировщик получает
    bounded full snapshot опубликованных сегментов; он удаляет union статических
    `priority`/`super-priority` IDs и строит полный текущий ordinary cycle.
-   Явный lazy-флаг `segment_lazy_update_enabled = true` переключает только
-   новый план на due-only SQL и исключает fresh/current remaining IDs из этого
-   нового admission. Пустой lazy-plan является штатным результатом и не имеет
+   Канонический per-instance map
+   `segment_lazy_update_instance_settings` переопределяет host default по
+   immutable instance UID и его допустимым root/name/domain или
+   `<uid>@<mcc-host>` alias; при отсутствии строки действует host default.
+   Поэтому один host может одновременно иметь `lazy=true`, `false`, `true`
+   для трёх разных roots. Явный lazy-флаг instance `true` переключает только
+   новый план этого root на due-only SQL и исключает fresh/current remaining
+   IDs из этого нового admission. Пустой lazy-plan является штатным результатом и не имеет
    fallback на fresh/current tail. Full mode, напротив, имеет fail-safe fallback:
    если observed published IDs есть, а вторичное snapshot/definition чтение
    вернуло пустой список, observed IDs всё равно материализуются в durable plan,
    чтобы запаздывающее dependency-чтение не стёрло полный цикл. Ни один режим
    не удаляет и не пересобирает уже сохранённые
    `cycle.items`, `follow_up`, claims или running state в TaskStore.
+   В mixed host important work всех roots получает precedence до full-mode
+   `remaining`; lazy root не получает fresh `remaining`, но его уже assigned
+   important работа и frozen active cycle не пересобираются при toggle. Новый
+   cycle root-а вычисляет только его новое effective значение и не переносит
+   policy на другой root.
 2. Read-only definitions добавляют опубликованные never-built IDs, которых не
    было в due query. Ordinary snapshot строится строго по категориям:
    `never-built → changed → stale`, где stale threshold берётся из выбранного
@@ -617,6 +627,7 @@ cycle без ручного `segments:update`, profile/capacity/data changes. Ad
 | normal hard caps, manual per-instance N+1 и dedicated super budget не смешиваются | `mcd_agent/daemon.py:_scheduler_host_slots_available`, `_scheduler_instance_slots_available`, `_submit_if_slot_uncoordinated` | `tests/test_campaign_ring_dispatch.py` hard-cap/3+ root rows; `tests/test_segment_admission.py` cap-4 и `11+3→14→...→10→11` receipts |
 | важный root с заполненной capacity не ставит global remaining barrier | `mcd_agent/daemon.py:_scheduler_segment_entity_allowed`, `_scheduler_important_root_dispatchable` | `test_remaining_root_uses_free_host_slot_when_important_root_is_instance_full` |
 | root-local continuous monitor/refill and shared claim lifecycle | `mcd_agent/daemon.py:_iter_instances_with_root_dispatch_gate`, `_SchedulerRuntimeRegistry`, `_lifecycle_monitor_scheduler`, `_ordinary_persisted_refill_worker` | `tests/test_segment_liveness.py` root-gate/registry/monitor rows; fresh M6/M7 root-local cycle receipt |
+| host/instance lazy effective policy, mixed roots, toggle/restart/UID sync | `mcd_agent/config.py`, `mcd_agent/runtime_overrides.py`, `mcd_agent/daemon.py` ordinary planners/dispatch context | `tests/test_segment_liveness.py`, `tests/test_runtime_override_direction.py` mixed sandbox gate |
 | lazy empty plan versus full-mode observed-ID fallback | `mcd_agent/daemon.py` ordinary snapshot planners | `tests/test_segment_liveness.py` lazy snapshot row; fresh M6/M7 full/lazy planning receipt |
 | profile total-start budget (value `3` means exactly three starts) and bounded orphan expiry | `mcd_agent/config.py`, `mcd_agent/daemon.py` | `tests/test_segment_admission.py` |
 | monitor queued/running/done/error receipt | `mcd_agent/daemon.py` | `tests/test_scheduler_monitor_cycle.py`, `tests/test_signals_scheduler_history.py` |

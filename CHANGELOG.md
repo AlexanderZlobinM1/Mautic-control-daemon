@@ -1,3 +1,13 @@
+## 1.5.135 - 2026-10-12
+
+- Make segment lazy planning an explicit per-instance policy: immutable UID,
+  root/name/domain and qualified-host aliases override the host default, while
+  mixed roots retain independent full/lazy behavior and active cycles remain
+  frozen across a policy toggle or restart.
+- Preserve the instance-scoped lazy setting through runtime desired-state
+  merge, ACK projection, and fresh MCC readback; add mixed-policy and scoped
+  ACK regression coverage.
+
 ## 1.5.134 - 2026-10-12
 
 - Separate the production runtime payload from the MCD source checkout:
@@ -12,6 +22,10 @@
   `KillMode=process`; ordinary Mautic/PHP work remains non-blocking during
   self-update. Record the mandatory invariant contract in
   `docs/mcd-update-invariants-v1.md`.
+- Add the fail-closed legacy-to-runtime bridge component installer and
+  disposable bridge QA receipt for hosts whose old updater requires
+  `pyproject.toml`; the immutable runtime-only archive is never repacked and
+  MCC source, policy, Mautic config/data and ordinary workers remain untouched.
 
 ## 1.5.133 - 2026-10-12
 

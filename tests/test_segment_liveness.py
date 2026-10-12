@@ -25,6 +25,8 @@ from mcd_agent.daemon import (
     _effective_segment_regular_slot_limit,
     _segment_pending_dispatch_limits,
     _segment_shared_slots_available,
+    _segment_lazy_update_effective_setting,
+    _segment_full_scan_admission_enabled,
     _fill_from_ring,
     _iter_instances_with_root_dispatch_gate,
     _SchedulerRuntimeRegistry,
@@ -66,6 +68,109 @@ class SegmentLivenessTests(unittest.TestCase):
             )
             lazy_cfg = load_config(str(config_path), allow_recover_from_mcc=False)
             self.assertTrue(lazy_cfg.segment_lazy_update_enabled)
+
+    def test_mixed_instance_lazy_policy_uses_uid_aliases_and_host_fallback(self) -> None:
+        config = SimpleNamespace(
+            segment_lazy_update_enabled=False,
+            segment_lazy_update_instance_settings={
+                "instance-a": True,
+                "/var/www/b": {"lazy": False},
+                "instance-c@host-a": {"enabled": True},
+            },
+        )
+        installs = [
+            SimpleNamespace(instance_uid="instance-a", root="/var/www/a", name="A"),
+            SimpleNamespace(instance_uid="instance-b", root="/var/www/b", name="B"),
+            SimpleNamespace(instance_uid="instance-c", root="/var/www/c", name="C"),
+            SimpleNamespace(instance_uid="instance-d", root="/var/www/d", name="D"),
+        ]
+        self.assertEqual(
+            [_segment_lazy_update_effective_setting(config, inst) for inst in installs],
+            [True, False, True, False],
+        )
+
+        qualified = SimpleNamespace(instance_uid="instance-c", root="/var/www/c", name="C")
+        qualified_config = SimpleNamespace(
+            segment_lazy_update_enabled=False,
+            segment_lazy_update_instance_settings={"instance-c@host-a": {"enabled": True}},
+        )
+        self.assertTrue(_segment_lazy_update_effective_setting(qualified_config, qualified))
+
+    def test_forced_full_discovery_never_admits_fresh_tail_for_lazy_instance(self) -> None:
+        self.assertFalse(
+            _segment_full_scan_admission_enabled(
+                lazy_segment_plan=True,
+                force_segment_full_scan=True,
+                cluster_cron_allowed=True,
+            )
+        )
+        self.assertTrue(
+            _segment_full_scan_admission_enabled(
+                lazy_segment_plan=False,
+                force_segment_full_scan=True,
+                cluster_cron_allowed=True,
+            )
+        )
+        self.assertFalse(
+            _segment_full_scan_admission_enabled(
+                lazy_segment_plan=False,
+                force_segment_full_scan=True,
+                cluster_cron_allowed=False,
+            )
+        )
+
+    def test_mixed_lazy_gate_keeps_important_before_full_remaining_and_freezes_toggle(self) -> None:
+        rows = [
+            {"id": 101, "last_built_date": None, "date_modified": 190},
+            {"id": 102, "last_built_date": 195, "date_modified": 195},
+        ]
+        groups_lazy: dict[str, list[int]] = {}
+        lazy_ids = ordinary_snapshot_order(
+            rows,
+            [101, 102],
+            stale_after_sec=100,
+            now_ts=200,
+            include_fresh_remaining=False,
+            groups=groups_lazy,
+        )
+        groups_full: dict[str, list[int]] = {}
+        full_ids = ordinary_snapshot_order(
+            rows,
+            [101, 102],
+            stale_after_sec=100,
+            now_ts=200,
+            include_fresh_remaining=True,
+            groups=groups_full,
+        )
+        self.assertEqual(lazy_ids, [101])
+        self.assertEqual(groups_lazy["important"], [101])
+        self.assertEqual(groups_lazy["remaining"], [])
+        self.assertEqual(full_ids, [101, 102])
+        self.assertEqual(groups_full["important"], [101])
+        self.assertEqual(groups_full["remaining"], [102])
+
+        frozen, _added, started = sync_cycle(
+            None,
+            planned_ids=full_ids,
+            never_built=[],
+            running_ids=[],
+            now_ts=200.0,
+            important_ids=groups_full["important"],
+            remaining_ids=groups_full["remaining"],
+        )
+        self.assertTrue(started)
+        toggled, _added, started = sync_cycle(
+            frozen,
+            planned_ids=lazy_ids,
+            never_built=[],
+            running_ids=[],
+            now_ts=201.0,
+            important_ids=groups_lazy["important"],
+            remaining_ids=[],
+        )
+        self.assertFalse(started)
+        self.assertEqual(toggled["items"], frozen["items"])
+        self.assertEqual(toggled["cycle_id"], frozen["cycle_id"])
 
     def test_main_and_root_local_use_the_same_snapshot_planner(self) -> None:
         self.assertIs(daemon._ordinary_segment_snapshot_order, ordinary_snapshot_order)

@@ -12,6 +12,7 @@ MAUTIC_PATCH_PLAN_V2_SCHEMA = "mcd-mautic-patch-plan-v2"
 CONTACT_FIELD_METADATA_OPERATION = "mcd-contact-field-metadata-v1"
 SEGMENT_LANE_SETTINGS_CAPABILITY = "segment_lane_settings"
 SEGMENT_LAZY_UPDATE_CAPABILITY = "segment_lazy_update_enabled"
+SEGMENT_LAZY_UPDATE_INSTANCE_CAPABILITY = "segment_lazy_update_instance_settings"
 KNOWN_RUNTIMES = frozenset({"host", "docker"})
 KNOWN_INSTALL_TYPES = frozenset({"zip", "composer"})
 
@@ -116,6 +117,14 @@ def build_runtime_profile(
     effective = _HOST_DEFAULT_CAPABILITIES if runtime_name == "host" and not declared else declared
     if "database" in effective:
         effective = effective | {CONTACT_FIELD_METADATA_OPERATION}
+    if runtime_name == "host" and install_name in KNOWN_INSTALL_TYPES:
+        # The scheduler supports the UID-scoped map in addition to the
+        # backwards-compatible host boolean. Advertise both explicitly so
+        # MCC cannot mistake host-only support for per-instance support.
+        effective = effective | {
+            SEGMENT_LAZY_UPDATE_CAPABILITY,
+            SEGMENT_LAZY_UPDATE_INSTANCE_CAPABILITY,
+        }
     if (
         runtime_name == "host"
         and install_name in KNOWN_INSTALL_TYPES

@@ -48,6 +48,23 @@ manifest SHA are bound by an external release receipt. This keeps provenance
 detached and avoids a self-referential field while preserving independent
 auditability of the installed package.
 
+## Legacy-to-runtime bridge
+
+The legacy 1.5.x updater is allowed to fail closed when it receives a
+runtime-only archive: a missing `pyproject.toml` is a compatibility signal, not
+permission to repack the immutable runtime artifact or to fall back to a
+checkout package. The one-time transition is performed by the separately
+transported `tools/mcd_runtime_bootstrap.py` component installer. It must use
+the local MCD update lease and scheduler admission barrier, fail closed on an
+active or unreadable backup lock, install and verify the wheel before the
+source switch, keep the previous source as bounded rollback material, and
+leave the supervisor on `/opt/mcd` with `KillMode=process`.
+
+This bridge may change only MCD runtime files, the managed venv package,
+systemd's MCD drop-in, and durable MCD receipts/state. It must not edit MCC
+source, update policy, Mautic profile/config/data, DNS, or ordinary Mautic
+workers. The disposable bridge receipt is required before any live retry.
+
 ## Required evidence
 
 Every candidate handoff must include:
@@ -62,6 +79,10 @@ Every candidate handoff must include:
 5. target-host evidence that ordinary work survived restart, retained its PID
    or start identity where applicable, was adopted from TaskStore, and did not
    duplicate.
+
+For a host still running a pre-runtime-only updater, the handoff additionally
+requires the `mcd-runtime-bridge-qa-v1` disposable receipt and the live bridge
+receipt before the normal targeted self-update sequence can continue.
 
 The user-facing algorithm in [`ALGORITHM.md`](../ALGORITHM.md) is the detailed
 scheduler contract. Changes to this file require matching source/tests and a

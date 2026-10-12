@@ -550,6 +550,12 @@ Important:
     fresh published IDs in stable observed order; `true`
     explicitly opts into due-only lazy planning and excludes fresh/current
     remaining IDs from new admission.
+  - `runtime.segment_lazy_update_instance_settings` is the canonical sparse
+    per-instance override map. Keys resolve by immutable instance UID, then
+    root/name/domain and the compatible `<uid>@<mcc-host>` alias; an absent
+    row falls back to the host-level flag. Mixed roots on one host therefore
+    keep independent lazy/full policy. A policy change never resets a frozen
+    active cycle; only that root's next cycle uses the new effective value.
   - The lazy flag never deletes or rebuilds durable `cycle.items`, `follow_up`,
     claims, running rows, or queue state already held by TaskStore.
   - During an active cycle, newly created or pre-existing never-built segments
@@ -661,6 +667,10 @@ Important:
     priority/super-priority instance settings by immutable UID; validated
     `slots_override` controls that lane's parallel limit, and malformed data
     is rejected rather than silently dropped.
+  - the runtime profile advertises `segment_lazy_update_instance_settings`
+    separately from the legacy host boolean
+    `segment_lazy_update_enabled`; MCC must use the UID-scoped map when the
+    capability is present and treat the host boolean only as fallback.
   - the selected MCC workload profile is kept as canonical provenance across
     every poll/trigger rebase; a stale observed `passive` state cannot erase an
     active farm profile, while an explicit desired profile can change it.

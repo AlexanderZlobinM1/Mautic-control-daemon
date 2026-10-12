@@ -350,6 +350,58 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             },
         )
 
+    def test_instance_lazy_policy_roundtrips_through_desired_merge_and_ack(self) -> None:
+        uid = "instance-c@host-a"
+        merged = merge_instance_desired_states(
+            {"segment_lazy_update_enabled": False},
+            {
+                uid: {
+                    "revision": 7,
+                    "runtime_overrides": {
+                        "segment_lazy_update_instance_settings": {"enabled": True},
+                    },
+                }
+            },
+        )
+        self.assertEqual(
+            merged["segment_lazy_update_instance_settings"][uid],
+            {"enabled": True},
+        )
+        cfg = SimpleNamespace(
+            profile_name="custom",
+            segment_lazy_update_enabled=False,
+            segment_lazy_update_instance_settings={uid: {"enabled": True}},
+        )
+        observed = runtime_key_observation(
+            cfg,
+            {"segment_lazy_update_instance_settings": {"enabled": True}},
+            revision=7,
+            source="mcc",
+            scope_key=uid,
+        )
+        row = observed["keys"]["segment_lazy_update_instance_settings"]
+        self.assertEqual(row["status"], "unchanged")
+        self.assertEqual(row["desired"], {"enabled": True})
+        self.assertEqual(row["effective"], {"enabled": True})
+
+    def test_instance_lazy_policy_materializes_by_root_alias_and_host_default(self) -> None:
+        installs = [
+            SimpleNamespace(instance_uid="uid-a", root="/srv/a", name="A", primary_domain="a.test"),
+            SimpleNamespace(instance_uid="uid-b", root="/srv/b", name="B", primary_domain="b.test"),
+        ]
+        runtime = {
+            "segment_lazy_update_enabled": True,
+            "segment_lazy_update_instance_settings": {"/srv/b": {"enabled": False}},
+        }
+        rows = instance_desired_states(runtime, installs)
+        self.assertEqual(rows["uid-b"]["segment_lazy_update_instance_settings"], {"enabled": False})
+        merged = merge_instance_desired_states({}, rows)
+        self.assertEqual(
+            merged["segment_lazy_update_instance_settings"]["uid-b"],
+            {"enabled": False},
+        )
+        self.assertNotIn("uid-a", merged["segment_lazy_update_instance_settings"])
+
     def test_lazy_scheduler_capability_false_is_observable_not_unsupported(self) -> None:
         observed = runtime_key_observation(
             SimpleNamespace(profile_name="custom"),

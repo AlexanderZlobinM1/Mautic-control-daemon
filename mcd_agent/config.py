@@ -538,6 +538,7 @@ class AgentConfig:
     segment_full_scan_interval_sec: int
     segment_periodic_full_scan_enabled: bool
     segment_lazy_update_enabled: bool
+    segment_lazy_update_instance_settings: dict[str, Any]
     segment_priority_parallel_throttled: int
     segment_regular_parallel_throttled: int
     segment_sql_ring_enabled: bool
@@ -2226,6 +2227,7 @@ _RUNTIME_TO_ATTR: dict[str, str] = {
     "segment_full_scan_interval_sec": "segment_full_scan_interval_sec",
     "segment_periodic_full_scan_enabled": "segment_periodic_full_scan_enabled",
     "segment_lazy_update_enabled": "segment_lazy_update_enabled",
+    "segment_lazy_update_instance_settings": "segment_lazy_update_instance_settings",
     "segment_cycles_per_tick": "segment_cycles_per_tick",
     "segment_priority_parallel_throttled": "segment_priority_parallel_throttled",
     "segment_regular_parallel_throttled": "segment_regular_parallel_throttled",
@@ -3095,6 +3097,11 @@ def _load_config_inner(path: str) -> AgentConfig:
         # lazy flag opts into due-only planning and must not erase durable
         # remaining work already admitted in TaskStore.
         segment_lazy_update_enabled=bool(runtime.get("segment_lazy_update_enabled", False)),
+        segment_lazy_update_instance_settings=(
+            dict(runtime.get("segment_lazy_update_instance_settings", {}))
+            if isinstance(runtime.get("segment_lazy_update_instance_settings", {}), dict)
+            else {}
+        ),
         segment_cycles_per_tick=int(runtime.get("segment_cycles_per_tick", 1)),
         segment_priority_parallel_throttled=int(runtime.get("segment_priority_parallel_throttled", 2)),
         segment_regular_parallel_throttled=int(runtime.get("segment_regular_parallel_throttled", 0)),

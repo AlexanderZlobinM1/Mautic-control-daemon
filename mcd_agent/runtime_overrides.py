@@ -49,6 +49,7 @@ _INSTANCE_RUNTIME_KEYS = {
     "segment_whitelist_instance_settings",
     "segment_priority_instance_settings",
     "segment_super_priority_instance_settings",
+    "segment_lazy_update_instance_settings",
     "segment_special_rings_v1",
     "segment_recurring_priority_v1",
     "campaign_whitelist_instance_settings",
@@ -685,16 +686,7 @@ def runtime_key_observation(
         if key == "segment_whitelist_instance_settings":
             desired = _canonical_legacy_whitelist_value(desired)
         if scope_key and key.endswith("_instance_settings") and isinstance(desired, dict):
-            if scope_key in desired:
-                desired = desired[scope_key]
-            elif scope_key.split("@", 1)[0] in desired:
-                desired = desired[scope_key.split("@", 1)[0]]
-            elif set(desired).issubset({"segments", "slots_override"}):
-                # Instance desired-state rows are already canonical scoped
-                # records. Do not project them through the UID map again.
-                desired = desired
-            else:
-                desired = {}
+            desired = _project_instance_observation_value(desired, scope_key)
         if key == "segment_whitelist_instance_settings":
             # Legacy whitelist is the wire alias of canonical priority; it is
             # not an independent scheduler lane.
@@ -705,14 +697,7 @@ def runtime_key_observation(
         else:
             effective_value = False if key in _RUNTIME_CAPABILITY_KEYS else effective.get(key)
         if scope_key and key.endswith("_instance_settings") and isinstance(effective_value, dict):
-            if scope_key in effective_value:
-                effective_value = effective_value[scope_key]
-            elif scope_key.split("@", 1)[0] in effective_value:
-                effective_value = effective_value[scope_key.split("@", 1)[0]]
-            elif set(effective_value).issubset({"segments", "slots_override"}):
-                effective_value = effective_value
-            else:
-                effective_value = {}
+            effective_value = _project_instance_observation_value(effective_value, scope_key)
         elif key.endswith("_instance_settings") and isinstance(desired, dict) and isinstance(effective_value, dict):
             # Host ACKs carry a sparse desired map. Compare only the exact
             # requested UIDs, including explicit empty tombstones; unrelated
@@ -782,6 +767,26 @@ def _runtime_evidence_value(value: object) -> object:
         "sha256": hashlib.sha256(encoded).hexdigest(),
         "bytes": len(encoded),
     }
+
+
+def _project_instance_observation_value(value: object, scope_key: str) -> object:
+    """Project a host map to one instance without losing a scoped row.
+
+    MCC sends both shapes: a host-level sparse map keyed by UID and an
+    instance-desired-state row whose value is already scoped. The latter can
+    legitimately be a mapping such as ``{"enabled": true}``; treating every
+    mapping as a UID map would turn that row into an empty ACK.
+    """
+    if not isinstance(value, dict):
+        return value
+    if scope_key in value:
+        return value[scope_key]
+    base_key = scope_key.split("@", 1)[0]
+    if base_key in value:
+        return value[base_key]
+    if any(isinstance(item, dict) for item in value.values()):
+        return {}
+    return value
 
 
 def _runtime_observation_chunks(

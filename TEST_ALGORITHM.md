@@ -112,11 +112,24 @@ TaskStore fixture должен сохранять `cycle_id`, `updated_at` и sp
    root; после освобождения capacity precedence восстанавливается. Lazy cycle
    не создаёт remaining.
 
-9. Проверяется dedicated super lane: четыре enabled super-instance worker-а
+9. Проверяется mixed per-instance lazy policy на одном host: sparse
+   `segment_lazy_update_instance_settings` задаёт для разных immutable UID
+   комбинацию `true/false/true`, а отсутствующая строка использует host
+   default. Для lazy roots due/never-built/changed/retry/stale и нужные
+   dependency parents остаются в `important`, но fresh `remaining` не
+   добавляется; full root получает тот же `important` перед своим fresh tail.
+   Receipt обязан показать effective policy и dispatch context отдельно для
+   каждого root, отсутствие cross-root movement и независимое заполнение
+   разрешённых slots. Toggle во время active cycle не меняет frozen
+   `cycle.items`, claims, running или follow-up; только следующий cycle этого
+   root использует новое значение. После restart/reconcile UID-scoped desired
+   row и host fallback восстанавливаются без сброса очереди.
+
+10. Проверяется dedicated super lane: четыре enabled super-instance worker-а
    работают outside shared regular `11` capacity (`4 outside 11`), не
    вычитаются из host/instance regular counters и не дублируют closure/lock.
 
-10. Проверяется retry contract: `runtime.segment_retry_count` — inclusive
+11. Проверяется retry contract: `runtime.segment_retry_count` — inclusive
     total-start cap, несмотря на историческое имя ключа. Значение `3` даёт
     ровно три фактических запуска одного segment item, а не initial плюс три;
     значение `0` даёт один безопасный effective start. Receipt и TaskStore
@@ -179,6 +192,7 @@ barrier остаются обязательными.
 | roots/instances независимы; нет all-roots barrier/loop одного root | `_iter_instances_with_root_dispatch_gate`, root-local monitor/refill workers | `tests/test_segment_liveness.py` + fresh M6/M7 receipt with every B/C root cycle_count and terminal seeded IDs |
 | explicit caps, sliding fairness и dedicated super lane считают правильный budget | `_scheduler_host_slots_available`, `_scheduler_instance_slots_available`, `_scheduler_round_robin_order` | `tests/test_campaign_ring_dispatch.py` hard-cap/3+ root/40+12/4-outside-11 rows + fresh aggregate slot receipt |
 | important tier получает precedence только при фактической admission-ready capacity; full root не ставит global barrier | `_scheduler_segment_entity_allowed`, `_scheduler_important_root_dispatchable`, `mcd_agent/segment_admission.py` | `test_remaining_root_uses_free_host_slot_when_important_root_is_instance_full` + durable tier receipt |
+| host/instance lazy policy не смешивает roots и не пересобирает active cycle при toggle | `config.py`, `runtime_overrides.py`, оба ordinary planner path в `daemon.py` | mixed UID/root alias tests + M6/M7 receipt с effective policy, frozen cycle и restart/ACK readback |
 | lazy empty plan остаётся пустым, full mode сохраняет observed IDs | ordinary snapshot/planning paths in `mcd_agent/daemon.py` | lazy/full planner tests + fresh M6/M7 planner receipt |
 | manual N+1 override — per-instance exception без host-wide overflow и с сохранением locks | `_submit_if_slot_uncoordinated`, manual admission path | `tests/test_segment_admission.py` cap-4→5→4→3 и per-instance `11+3→14→...→10→11` receipts |
 | M6 closure занимает один worker/PID, M7 covered roots не параллелятся | `dependency_execution_chains`, `_segment_chain_command_args`, `_segment_chain_runtime_*`, static closure lock | `tests/test_segment_chain_runtime.py` actual TaskStore/PID receipt + fresh M6/M7 sandbox evidence |

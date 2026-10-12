@@ -5,6 +5,8 @@ from mcd_agent.runtime_matrix import (
     MAUTIC_PATCH_PREFLIGHT_OPERATION,
     MAUTIC_PATCH_PLAN_V2_CAPABILITY,
     MAUTIC_PATCH_PREFLIGHT_V2_OPERATION,
+    SEGMENT_LAZY_UPDATE_CAPABILITY,
+    SEGMENT_LAZY_UPDATE_INSTANCE_CAPABILITY,
     build_runtime_profile,
 )
 
@@ -40,6 +42,8 @@ def test_host_zip_supports_composer_move_but_host_composer_does_not() -> None:
     assert composer.allows("backup")
     assert zipped.allows(CONTACT_FIELD_METADATA_OPERATION)
     assert CONTACT_FIELD_METADATA_OPERATION in zipped.capabilities
+    assert SEGMENT_LAZY_UPDATE_CAPABILITY in zipped.capabilities
+    assert SEGMENT_LAZY_UPDATE_INSTANCE_CAPABILITY in zipped.capabilities
 
 
 def test_contact_field_metadata_is_advertised_for_every_database_runtime() -> None:
