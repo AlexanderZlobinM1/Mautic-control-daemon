@@ -1768,6 +1768,14 @@ def maybe_auto_update(cfg: AgentConfig, *, force: bool = False) -> tuple[str | N
     state["last_check_status"] = status or "unknown"
     state["last_decision"] = decision
 
+    update_barrier = False
+    if status in {"update", "update_available"} and bool(decision.get("target")):
+        pause_flag = Path(str(getattr(cfg, "scheduler_pause_flag_path", "/opt/mcd/var/scheduler.pause") or ""))
+        if not pause_flag.exists():
+            pause_flag.parent.mkdir(parents=True, exist_ok=True)
+            pause_flag.write_text("mcd-update-admission\n", encoding="utf-8")
+            update_barrier = True
+
     if cluster_update_mode:
         handled, cluster_msg, cluster_retry = maybe_cluster_auto_update(cfg, decision, now_s=now_s)
         if handled:
@@ -1842,6 +1850,11 @@ def maybe_auto_update(cfg: AgentConfig, *, force: bool = False) -> tuple[str | N
             _write_state(cfg, state)
             return f"MCD update available: current={current_installed} target={target}", int(state["next_check_ts"]) - now_s
         ok, msg = apply_update(cfg, decision)
+        if ok and update_barrier:
+            try:
+                pause_flag.unlink(missing_ok=True)
+            except OSError:
+                logging.warning("MCD update admission barrier cleanup failed: %s", pause_flag)
         # apply_update() persists result fields (last_status/last_result/...).
         # Re-read to avoid overwriting them with stale pre-apply state.
         state2 = _read_state(cfg)

@@ -1,3 +1,9 @@
+## 1.5.98 - 2026-10-12
+
+- Add an owned scheduler admission barrier when an executable MCD update is
+  available, allowing existing tasks to finish without admitting replacement
+  work before the update applies.
+
 ## 1.5.97 - 2026-10-12
 
 - Advertise the released scheduler capabilities `segment_lane_settings` and
