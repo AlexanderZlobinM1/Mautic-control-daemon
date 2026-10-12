@@ -4,7 +4,7 @@
 фактическую схему после исправления admission и должен обновляться вместе с
 кодом, тестами и runtime receipt. Документ не является разрешением на
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.105 (follow-up после immutable
+Актуальная редакция этого канона — MCD 1.5.106 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями.
@@ -157,9 +157,17 @@ config на его profile baseline и только после этого при
 5. Invalid filters, logical issues, failure cooldown и DB/backup/scheduler
    pause являются блокираторами admission, а не поводом пересортировать или
    потерять persisted cycle.
-6. После полного terminal ordinary cycle следующий snapshot создаёт новый
+6. Self-update сначала публикует persisted `scheduler.pause` под общим
+   межпроцессным `scheduler.pause.lock`. Каждый новый запуск, включая
+   ordinary, priority, super-priority, manual, import и retry, перед
+   фактическим `spawn` получает тот же lock и повторно проверяет barrier.
+   Поэтому после момента публикации barrier новые процессы не появляются;
+   уже запущенные процессы продолжают drain, а update повторяет попытку до
+   безопасного apply. Barrier переживает scheduler tick и restart и снимается
+   только после успешного apply либо штатной terminal-cleanup операции.
+7. После полного terminal ordinary cycle следующий snapshot создаёт новый
    cycle. Пока цикл не terminal, его порядок не пересобирается.
-7. Cycle хранит отдельно `observed_snapshot`/generation и применённый
+8. Cycle хранит отдельно `observed_snapshot`/generation и применённый
    `baseline`/generation. Наблюдения во время active cycle не продвигают
    baseline; он фиксируется только при переходе в terminal. Успешные элементы
    продвигают свои fingerprints, а terminal-error элементы сохраняют старый

@@ -22,6 +22,7 @@ from mcd_agent.hardware_profile import capture_profile_authority, restore_profil
 from mcd_agent.host_identity import resolve_agent_identity
 from mcd_agent.state_backend import mysql_state_connection, mysql_state_enabled, mysql_state_table_names
 from mcd_agent.version_identity import agent_version_payload, installed_agent_version, package_agent_version, source_version
+from mcd_agent.update_admission import scheduler_admission_lock, scheduler_pause_path
 
 try:
     import fcntl
@@ -1769,12 +1770,16 @@ def maybe_auto_update(cfg: AgentConfig, *, force: bool = False) -> tuple[str | N
     state["last_decision"] = decision
 
     update_barrier = False
+    pause_flag = scheduler_pause_path(cfg)
     if status in {"update", "update_available"} and bool(decision.get("target")):
-        pause_flag = Path(str(getattr(cfg, "scheduler_pause_flag_path", "/opt/mcd/var/scheduler.pause") or ""))
-        if not pause_flag.exists():
-            pause_flag.parent.mkdir(parents=True, exist_ok=True)
-            pause_flag.write_text("mcd-update-admission\n", encoding="utf-8")
-            update_barrier = True
+        # Acquire the same admission lock used by the daemon's final submit
+        # boundary before publishing the barrier. Once this returns, no new
+        # task can pass the final check and spawn after the barrier timestamp.
+        with scheduler_admission_lock(cfg):
+            if not pause_flag.exists():
+                pause_flag.parent.mkdir(parents=True, exist_ok=True)
+                pause_flag.write_text("mcd-update-admission\n", encoding="utf-8")
+                update_barrier = True
 
     if cluster_update_mode:
         handled, cluster_msg, cluster_retry = maybe_cluster_auto_update(cfg, decision, now_s=now_s)

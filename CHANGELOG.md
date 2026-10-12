@@ -1,3 +1,10 @@
+## 1.5.106 - 2026-10-12
+
+- Close the self-update admission race: barrier publication and every final
+  new-task spawn now share a persisted inter-process lock, so super/priority,
+  ordinary, manual, import, and retry launches cannot start after the update
+  barrier. Existing workers continue to drain.
+
 ## 1.5.105 - 2026-10-12
 
 - Enforce exact instance UID projection for runtime ACK observations; missing

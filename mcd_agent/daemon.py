@@ -172,6 +172,7 @@ from mcd_agent.static_segment_lanes import (
 )
 from mcd_agent.service_profiles import service_profiles_apply_once
 from mcd_agent.self_update import _ensure_mcd_service_kill_mode, maybe_auto_update
+from mcd_agent.update_admission import scheduler_admission_lock, scheduler_pause_path
 from mcd_agent.segment_filter_safety import format_segment_filter_issues, segment_invalid_filter_issues
 from mcd_agent.segment_recurring_priority import entries_for_instance as recurring_priority_entries_for_instance
 from mcd_agent.segment_recurring_priority import state_key as recurring_priority_state_key
@@ -8998,6 +8999,12 @@ class _PriorityTaskExecutor:
         capacity_lane: str | None = None,
         log_label: str = "priority",
     ) -> bool:
+        # Fast-fail while the persisted update barrier is already active. The
+        # final check in _run() remains mandatory because the barrier may be
+        # published after this admission attempt starts.
+        with scheduler_admission_lock(config):
+            if scheduler_pause_path(config).exists():
+                return False
         key = _task_key(root, task_type, entity_id)
         now = time.time()
         interval = max(1, int(interval_sec or 1))
@@ -9067,7 +9074,10 @@ class _PriorityTaskExecutor:
                         else (getattr(config, "command_timeout_sec", 0) or 0)
                     ),
                 )
-                proc = _spawn_command(root=root, args=locked_args)
+                with scheduler_admission_lock(config):
+                    if scheduler_pause_path(config).exists():
+                        return
+                    proc = _spawn_command(root=root, args=locked_args)
                 if on_start is not None:
                     on_start(int(proc.pid))
                 rc = int(proc.wait(timeout=timeout if timeout > 0 else None) or 0)
@@ -10489,7 +10499,13 @@ def _submit_if_slot_uncoordinated(
         root=root,
         task_type=task_type,
     )
-    proc = _spawn_command(root=root, args=args, stdout_path=stdout_path, stderr_path=stderr_path)
+    # The updater creates the persisted barrier under this same lock. Holding
+    # it through the final pause check and spawn closes the check-to-spawn race
+    # for every lane, including super/priority/manual/import admissions.
+    with scheduler_admission_lock(config):
+        if scheduler_pause_path(config).exists():
+            return False
+        proc = _spawn_command(root=root, args=args, stdout_path=stdout_path, stderr_path=stderr_path)
     if task_type == "segment" and _SEGMENT_DISPATCH_WAKEUP is not None:
         threading.Thread(
             target=_wait_for_segment_process_exit,
@@ -10573,12 +10589,15 @@ def _respawn_task(
     try:
         try:
             args = task.command_str.split(_CMD_SEP)
-            proc = _spawn_command(
-                root=task.root,
-                args=args,
-                stdout_path=task.stdout_path,
-                stderr_path=task.stderr_path,
-            )
+            with scheduler_admission_lock(config):
+                if scheduler_pause_path(config).exists():
+                    return False
+                proc = _spawn_command(
+                    root=task.root,
+                    args=args,
+                    stdout_path=task.stdout_path,
+                    stderr_path=task.stderr_path,
+                )
         except Exception as e:  # pragma: no cover - defensive
             logging.warning("[%s] respawn failed %s: %s", task.root, task.task_type, e)
             return False
