@@ -2567,65 +2567,17 @@ def _rehydrate_segment_dispatch_context(
     dependency_children, dependency_parents = segment_dependency_maps(rows)
     refreshed_at = float(time.time())
     captured_cycle_id = str((cycle_state or {}).get("cycle_id") or "").strip()
-    current_cycle = store.get_runtime_sync(_segment_cycle_key(str(root))) or {}
-    current_cycle_id = str(current_cycle.get("cycle_id") or "").strip() if isinstance(current_cycle, Mapping) else ""
-    if captured_cycle_id and current_cycle_id != captured_cycle_id:
-        raise _SegmentDispatchContextGenerationChanged(
-            f"active cycle changed during dependency refresh: {captured_cycle_id} -> {current_cycle_id}"
-        )
-    current_context = store.get_runtime_sync(_segment_dispatch_context_key(str(root))) or {}
-    if isinstance(current_context, Mapping):
-        current_context_cycle_id = str(current_context.get("cycle_id") or "").strip()
-        if current_context_cycle_id and captured_cycle_id and current_context_cycle_id != captured_cycle_id:
-            raise _SegmentDispatchContextGenerationChanged(
-                f"dispatch context changed during dependency refresh: {captured_cycle_id} -> {current_context_cycle_id}"
-            )
-    # Merge into the latest context, not the snapshot captured before the DB
-    # read.  The planner may have published a newer pause/capacity/lane policy
-    # while this root-local refresh was in flight; only graph/capability
-    # metadata is replaced below.
-    refreshed = dict(current_context) if isinstance(current_context, Mapping) else {}
-    if not refreshed and isinstance(context, Mapping):
-        refreshed.update(context)
-    refreshed.update(
-        {
-            "schema": "mcd-segment-dispatch-context-v1",
-            "root": str(root),
-            "mautic_major": int(mautic_major or 0),
-            "updated_at": refreshed_at,
-            "cycle_id": (current_cycle or cycle_state or {}).get("cycle_id"),
-            "cycle_status": str((current_cycle or cycle_state or {}).get("status") or ""),
-            "parents_by_child": {
-                str(int(child)): sorted(int(parent) for parent in parents if int(parent) > 0)
-                for child, parents in dependency_parents.items()
-            },
-            "children_by_parent": {
-                str(int(parent)): sorted(int(child) for child in children if int(child) > 0)
-                for parent, children in dependency_children.items()
-            },
-            "dependency_snapshot_authoritative": True,
-            "dependency_snapshot_source": "mautic_published_segment_filters",
-            "dependency_snapshot_updated_at": refreshed_at,
-            "dependency_snapshot_segment_count": len(
-                {
-                    int(row.get("id") or 0)
-                    for row in rows
-                    if isinstance(row, Mapping) and int(row.get("id") or 0) > 0
-                }
-            ),
-        }
-    )
-    for key, value in (recovery_policy or {}).items():
-        if key not in refreshed or refreshed.get(key) is None:
-            refreshed[key] = value
 
-    # Mautic 7's native exclude capability is part of the same execution
-    # contract.  Probe it once per root/capability generation, outside the
-    # shared runtime lock, so one slow help command cannot stall other roots.
-    if int(mautic_major or 0) >= 7 and not isinstance(
-        refreshed.get("native_segment_exclude_supported"), bool
-    ):
-        refreshed["native_segment_exclude_supported"] = bool(
+    # All slow Mautic/help I/O happens before the final merge.  In particular,
+    # a Mautic 7 capability probe may invoke a 30-second help command; it must
+    # never leave a stale context snapshot waiting to overwrite a planner
+    # policy or a newly-created cycle.
+    native_exclude_supported: bool | None = None
+    captured_native_supported = (
+        context.get("native_segment_exclude_supported") if isinstance(context, Mapping) else None
+    )
+    if int(mautic_major or 0) >= 7 and not isinstance(captured_native_supported, bool):
+        native_exclude_supported = bool(
             _segment_native_exclude_capability(
                 store,
                 root=str(root),
@@ -2634,8 +2586,73 @@ def _rehydrate_segment_dispatch_context(
             )
         )
 
-    store.put_runtime_sync(_segment_dispatch_context_key(str(root)), refreshed)
-    return refreshed
+    # Serialize the final generation check, latest-context read, metadata-only
+    # merge, and write under the existing TaskStore DB lock.  The lock is
+    # re-entrant for the TaskStore methods, so this closes the read/modify/write
+    # window without adding a second coordination mechanism or blocking other
+    # roots during the slow external reads above.
+    with store._db_lock:
+        current_cycle = store.get_runtime_sync(_segment_cycle_key(str(root))) or {}
+        current_cycle_id = (
+            str(current_cycle.get("cycle_id") or "").strip()
+            if isinstance(current_cycle, Mapping)
+            else ""
+        )
+        if captured_cycle_id and current_cycle_id != captured_cycle_id:
+            raise _SegmentDispatchContextGenerationChanged(
+                f"active cycle changed during dependency refresh: {captured_cycle_id} -> {current_cycle_id}"
+            )
+        current_context = store.get_runtime_sync(_segment_dispatch_context_key(str(root))) or {}
+        if isinstance(current_context, Mapping):
+            current_context_cycle_id = str(current_context.get("cycle_id") or "").strip()
+            if current_context_cycle_id and captured_cycle_id and current_context_cycle_id != captured_cycle_id:
+                raise _SegmentDispatchContextGenerationChanged(
+                    f"dispatch context changed during dependency refresh: {captured_cycle_id} -> {current_context_cycle_id}"
+                )
+        # Merge into the latest context, not the snapshot captured before the
+        # DB/help reads.  Only graph/capability metadata is replaced below;
+        # current policy values are retained exactly, including explicit None
+        # values, which must stay fail-closed rather than resurrecting old
+        # policy from the future's captured snapshot.
+        refreshed = dict(current_context) if isinstance(current_context, Mapping) else {}
+        if not refreshed and isinstance(context, Mapping):
+            refreshed.update(context)
+        refreshed.update(
+            {
+                "schema": "mcd-segment-dispatch-context-v1",
+                "root": str(root),
+                "mautic_major": int(mautic_major or 0),
+                "updated_at": refreshed_at,
+                "cycle_id": (current_cycle or cycle_state or {}).get("cycle_id"),
+                "cycle_status": str((current_cycle or cycle_state or {}).get("status") or ""),
+                "parents_by_child": {
+                    str(int(child)): sorted(int(parent) for parent in parents if int(parent) > 0)
+                    for child, parents in dependency_parents.items()
+                },
+                "children_by_parent": {
+                    str(int(parent)): sorted(int(child) for child in children if int(child) > 0)
+                    for parent, children in dependency_children.items()
+                },
+                "dependency_snapshot_authoritative": True,
+                "dependency_snapshot_source": "mautic_published_segment_filters",
+                "dependency_snapshot_updated_at": refreshed_at,
+                "dependency_snapshot_segment_count": len(
+                    {
+                        int(row.get("id") or 0)
+                        for row in rows
+                        if isinstance(row, Mapping) and int(row.get("id") or 0) > 0
+                    }
+                ),
+            }
+        )
+        if native_exclude_supported is not None:
+            refreshed["native_segment_exclude_supported"] = native_exclude_supported
+        for key, value in (recovery_policy or {}).items():
+            if key not in refreshed:
+                refreshed[key] = value
+
+        store.put_runtime_sync(_segment_dispatch_context_key(str(root)), refreshed)
+        return refreshed
 
 
 def _segment_native_coverage_load(

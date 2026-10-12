@@ -73,6 +73,13 @@ refresh holds only that root; it must never treat the graph as independent and
 must never reset the cycle, cursor, claims, running rows, follow-ups, retries,
 or terminal receipts. Other ready roots continue to use their profile slots.
 
+All slow DB/help/capability reads complete before the refresh's final merge.
+Under the existing `TaskStore` serialization lock, the daemon rereads the
+current cycle/context, compares the captured generation, and merges only
+graph/capability metadata. A newer pause, throttle, priority, capacity, or lane
+policy is never restored from the stale refresh snapshot; a changed generation
+is discarded and retried with the bounded root-local retry path.
+
 Persisted segment-chain reverse indexes are scoped by canonical root, task-key
 owner, closure membership, and cycle generation. A legacy or foreign reverse
 index is metadata only: it cannot keep a different root claimed or defer its

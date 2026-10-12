@@ -1751,6 +1751,186 @@ class SegmentLivenessTests(unittest.TestCase):
             self.assertTrue(merged["dependency_snapshot_authoritative"])
             store.close()
 
+    def test_dependency_refresh_final_merge_after_capability_probe_preserves_newer_policy(self) -> None:
+        """M7 help latency cannot overwrite a newer same-cycle planner policy."""
+
+        with tempfile.TemporaryDirectory() as td:
+            root = "/var/www/capability-merge/public_html"
+            state_path = Path(td) / "state.db"
+            config_path = Path(td) / "mcd.toml"
+            config_path.write_text(
+                "[profile]\nname = \"custom\"\n"
+                f"[runtime]\nstate_db_path = \"{state_path}\"\n"
+                f"scheduler_pause_flag_path = \"{Path(td) / 'scheduler.pause'}\"\n",
+                encoding="utf-8",
+            )
+            config = load_config(str(config_path), allow_recover_from_mcc=False)
+            store = TaskStore(str(state_path), config)
+            cycle = {"schema": "mcd-segment-cycle-v1", "cycle_id": "cycle-old", "status": "active"}
+            context = {
+                "schema": "mcd-segment-dispatch-context-v1",
+                "root": root,
+                "mautic_major": 7,
+                "cycle_id": "cycle-old",
+                "cycle_status": "active",
+                "parents_by_child": {},
+                "children_by_parent": {},
+                "throttled_active": False,
+                "priority_pending": False,
+                "segment_slot_limit": 11,
+                "dispatch_pause": False,
+            }
+            store.put_runtime_sync(cycle_key(root), cycle)
+            store.put_runtime_sync(daemon._segment_dispatch_context_key(root), context)
+            probe_started = threading.Event()
+            probe_release = threading.Event()
+
+            class FastMauticDB:
+                def __init__(self, _cfg: object) -> None:
+                    pass
+
+                def fetch_published_segment_filters(self) -> list[dict[str, object]]:
+                    return [{"id": 1, "filters": "a:0:{}"}]
+
+            def blocked_probe(*_args: object, **_kwargs: object) -> bool:
+                probe_started.set()
+                if not probe_release.wait(timeout=2.0):
+                    raise AssertionError("fixture capability probe did not release")
+                return True
+
+            errors: list[BaseException] = []
+
+            def refresh() -> None:
+                try:
+                    daemon._rehydrate_segment_dispatch_context(
+                        store,
+                        root=root,
+                        db_config=object(),
+                        cycle_state=cycle,
+                        context=context,
+                        config=config,
+                        mautic_major=7,
+                    )
+                except BaseException as exc:
+                    errors.append(exc)
+
+            with patch.object(daemon, "MauticDB", FastMauticDB), patch.object(
+                daemon,
+                "_segment_native_exclude_capability",
+                side_effect=blocked_probe,
+            ):
+                thread = threading.Thread(target=refresh, daemon=True)
+                thread.start()
+                self.assertTrue(probe_started.wait(timeout=1.0))
+                newer_context = dict(context)
+                newer_context["segment_slot_limit"] = 7
+                newer_context["dispatch_pause"] = True
+                store.put_runtime_sync(daemon._segment_dispatch_context_key(root), newer_context)
+                probe_release.set()
+                thread.join(timeout=2.0)
+
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(errors, [])
+            merged = store.get_runtime_sync(daemon._segment_dispatch_context_key(root))
+            self.assertEqual(merged["segment_slot_limit"], 7)
+            self.assertTrue(merged["dispatch_pause"])
+            self.assertTrue(merged["native_segment_exclude_supported"])
+            store.close()
+
+    def test_dependency_refresh_discards_changed_generation_after_capability_probe(self) -> None:
+        """A cycle replacement during M7 help must cause retry, never a stale write."""
+
+        with tempfile.TemporaryDirectory() as td:
+            root = "/var/www/capability-generation/public_html"
+            state_path = Path(td) / "state.db"
+            config_path = Path(td) / "mcd.toml"
+            config_path.write_text(
+                "[profile]\nname = \"custom\"\n"
+                f"[runtime]\nstate_db_path = \"{state_path}\"\n"
+                f"scheduler_pause_flag_path = \"{Path(td) / 'scheduler.pause'}\"\n",
+                encoding="utf-8",
+            )
+            config = load_config(str(config_path), allow_recover_from_mcc=False)
+            store = TaskStore(str(state_path), config)
+            cycle = {"schema": "mcd-segment-cycle-v1", "cycle_id": "cycle-old", "status": "active"}
+            context = {
+                "schema": "mcd-segment-dispatch-context-v1",
+                "root": root,
+                "mautic_major": 7,
+                "cycle_id": "cycle-old",
+                "cycle_status": "active",
+                "parents_by_child": {},
+                "children_by_parent": {},
+                "throttled_active": False,
+                "priority_pending": False,
+                "segment_slot_limit": 11,
+                "dispatch_pause": False,
+            }
+            store.put_runtime_sync(cycle_key(root), cycle)
+            store.put_runtime_sync(daemon._segment_dispatch_context_key(root), context)
+            probe_started = threading.Event()
+            probe_release = threading.Event()
+
+            class FastMauticDB:
+                def __init__(self, _cfg: object) -> None:
+                    pass
+
+                def fetch_published_segment_filters(self) -> list[dict[str, object]]:
+                    return [{"id": 1, "filters": "a:0:{}"}]
+
+            def blocked_probe(*_args: object, **_kwargs: object) -> bool:
+                probe_started.set()
+                if not probe_release.wait(timeout=2.0):
+                    raise AssertionError("fixture capability probe did not release")
+                return True
+
+            errors: list[BaseException] = []
+
+            def refresh() -> None:
+                try:
+                    daemon._rehydrate_segment_dispatch_context(
+                        store,
+                        root=root,
+                        db_config=object(),
+                        cycle_state=cycle,
+                        context=context,
+                        config=config,
+                        mautic_major=7,
+                    )
+                except BaseException as exc:
+                    errors.append(exc)
+
+            with patch.object(daemon, "MauticDB", FastMauticDB), patch.object(
+                daemon,
+                "_segment_native_exclude_capability",
+                side_effect=blocked_probe,
+            ):
+                thread = threading.Thread(target=refresh, daemon=True)
+                thread.start()
+                self.assertTrue(probe_started.wait(timeout=1.0))
+                replacement_cycle = dict(cycle)
+                replacement_cycle["cycle_id"] = "cycle-new"
+                store.put_runtime_sync(cycle_key(root), replacement_cycle)
+                replacement_context = dict(context)
+                replacement_context["cycle_id"] = "cycle-new"
+                replacement_context["segment_slot_limit"] = 5
+                store.put_runtime_sync(daemon._segment_dispatch_context_key(root), replacement_context)
+                probe_release.set()
+                thread.join(timeout=2.0)
+
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(len(errors), 1)
+            self.assertIsInstance(errors[0], daemon._SegmentDispatchContextGenerationChanged)
+            self.assertEqual(
+                store.get_runtime_sync(cycle_key(root))["cycle_id"],
+                "cycle-new",
+            )
+            preserved = store.get_runtime_sync(daemon._segment_dispatch_context_key(root))
+            self.assertEqual(preserved["cycle_id"], "cycle-new")
+            self.assertEqual(preserved["segment_slot_limit"], 5)
+            self.assertNotIn("dependency_snapshot_authoritative", preserved)
+            store.close()
+
     def test_restart_rehydrates_frozen_full_cycle_without_resetting_claims_or_closure(self) -> None:
         """A stale context must recover the live graph before one M7 worker starts."""
 

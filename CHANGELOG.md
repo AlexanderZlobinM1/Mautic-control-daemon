@@ -1,3 +1,13 @@
+## 1.5.152 - 2026-10-13
+
+- Close the delayed Mautic 7 capability-probe race in root-local dependency
+  rehydration: all slow read-only DB/help work completes before a final
+  TaskStore-serialized generation check and metadata-only merge. Newer pause,
+  capacity, throttle, priority, and lane policy cannot be overwritten, and a
+  changed cycle generation is discarded for bounded retry.
+- Add regressions for same-generation policy preservation and changed-cycle
+  discard while the native capability probe is blocked.
+
 ## 1.5.151 - 2026-10-13
 
 - Rehydrate stale active-cycle dependency contexts from same-root published

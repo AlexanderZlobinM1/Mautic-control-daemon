@@ -4,7 +4,7 @@
 фактическую схему после исправления admission и должен обновляться вместе с
 кодом, тестами и runtime receipt. Документ не является разрешением на
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.151 (follow-up после immutable
+Актуальная редакция этого канона — MCD 1.5.152 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам
@@ -251,6 +251,12 @@ config на его profile baseline и только после этого при
    опубликованные definitions того же Mautic-root и capability, сохраняет
    новый context только после успешного read-only чтения и не меняет
    `cycle.items`, cursor, claims, running или terminal receipts.
+   Все медленные DB/help/capability reads завершаются до финального merge:
+   перед записью MCD под существующим `TaskStore` lock ещё раз читает текущие
+   cycle/context, сравнивает generation и мержит только graph/capability
+   metadata. Новая policy (pause, priority, throttle, slot limit и lane
+   state) не восстанавливается из старого snapshot; при смене generation
+   refresh отбрасывается и ставится bounded retry.
    Недоступный/неполный graph удерживает только этот root до retry; другие
    ready roots продолжают dispatch в своих profile slots.
 4. Новый/never-built ID не ждёт нового frozen snapshot. Если он найден
