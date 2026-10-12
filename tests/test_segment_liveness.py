@@ -17,6 +17,7 @@ from mcd_agent.daemon import (
     _segment_cycle_pending_ids,
     _segment_cycle_running,
     _segment_cycle_terminal,
+    _segment_shared_slots_available,
     _fill_from_ring,
 )
 from mcd_agent.segment_admission import cycle_key, mark_terminal, sync_cycle
@@ -151,6 +152,91 @@ class SegmentLivenessTests(unittest.TestCase):
                 bypass_repeat_guard_entities={151}, bypass_baseline_admission=True,
             )
         self.assertEqual(launched, 1)
+
+    def test_super_priority_does_not_consume_regular_slot_for_persisted_pending_item(self) -> None:
+        root = "/var/www/farm02/public_html"
+        store = TaskStore(":memory:")
+        state, _added, _started = sync_cycle(
+            None,
+            planned_ids=[135, 154],
+            never_built=[],
+            running_ids=[],
+            now_ts=100.0,
+        )
+        state = mark_terminal(state, entity_id=135, success=True, now_ts=101.0)
+        store.put_runtime_sync(cycle_key(root), state)
+
+        config = self._config()
+        config.scheduler_host_max_parallel = 0
+        config.scheduler_instance_max_parallel = 0
+        config.segment_mode = "farm"
+        config.segment_priority_parallel_idle = 0
+        config.segment_regular_parallel_idle = 1
+
+        class ActiveSuperPriority:
+            @staticmethod
+            def active_count(active_root: str | None, task_types: set[str]) -> int:
+                if active_root == root and task_types == daemon._STATIC_SEGMENT_TASK_TYPES:
+                    return 1
+                return 0
+
+        running: dict[str, daemon.RunningTask] = {}
+        with patch.object(daemon, "_ACTIVE_PRIORITY_EXECUTOR", ActiveSuperPriority()), patch.object(
+            daemon, "_spawn_command", return_value=SimpleNamespace(pid=9154)
+        ), patch.object(
+            daemon, "_task_locked_args", side_effect=lambda _key, args, **_kwargs: args
+        ), patch.object(
+            daemon, "_scheduler_baseline_launch_due", return_value=False
+        ), patch.object(daemon, "_SEGMENT_DISPATCH_WAKEUP", None):
+            pending_slot_limit = min(
+                1,
+                _segment_shared_slots_available(
+                    running,
+                    root,
+                    1,
+                    store=store,
+                    config=config,
+                    now_ts=102.0,
+                ),
+            )
+            launched = _fill_from_ring(
+                ring=deque([154]),
+                ring_limit=pending_slot_limit,
+                total_limit=pending_slot_limit,
+                root=root,
+                task_type="segment",
+                running=running,
+                ring_entities={154},
+                config=config,
+                store=store,
+                popens={},
+                build_args=lambda sid: ["php", "bin/console", "mautic:segments:update", "-i", str(sid)],
+                admission_claim=lambda sid: _segment_cycle_claim(
+                    store,
+                    root=root,
+                    entity_id=sid,
+                    eligible_ids=[135, 154],
+                    blocked_ids=set(),
+                    running_ids=set(),
+                    now_ts=102.0,
+                ),
+                admission_running=lambda sid: _segment_cycle_running(
+                    store,
+                    root=root,
+                    entity_id=sid,
+                    now_ts=103.0,
+                ),
+                admission_release=lambda sid: None,
+                bypass_repeat_guard_entities={154},
+                bypass_baseline_admission=True,
+                max_launches=pending_slot_limit,
+            )
+
+        self.assertEqual(pending_slot_limit, 1)
+        self.assertEqual(launched, 1)
+        self.assertEqual(running[next(iter(running))].entity_id, 154)
+        self.assertEqual(store.get_runtime_sync(cycle_key(root))["running"], [154])
+        store.close()
 
     def _launch_persisted_item(
         self,

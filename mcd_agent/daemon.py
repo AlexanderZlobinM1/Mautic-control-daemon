@@ -10043,14 +10043,14 @@ def _segment_shared_slots_used(
         _segment_sql_running_state_count(store=store, root=root, config=config, now_ts=now_ts),
         max(0, int(sql_db_running_count or 0)),
     )
-    static_running = 0
-    if _ACTIVE_PRIORITY_EXECUTOR is not None:
-        static_running = _ACTIVE_PRIORITY_EXECUTOR.active_count(root, _STATIC_SEGMENT_TASK_TYPES)
+    # Static priority/super-priority executors are a separate admission lane.
+    # They must not consume the ordinary cycle/import budget: otherwise one
+    # active super-priority item can make a configured regular slot appear
+    # unavailable and strand a durable ordinary cursor.
     return (
         _running_count(running, root, "segment")
         + sql_running_count
         + _running_count(running, root, "import")
-        + static_running
     )
 
 
