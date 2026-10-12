@@ -1,3 +1,9 @@
+## 1.5.97 - 2026-10-12
+
+- Advertise the released scheduler capabilities `segment_lane_settings` and
+  `segment_lazy_update_enabled` in host runtime descriptors so MCC can deliver
+  canonical per-instance priority lanes.
+
 ## 1.5.96 - 2026-10-12
 
 - Preserve IDs returned by the due-segment query when the secondary snapshot

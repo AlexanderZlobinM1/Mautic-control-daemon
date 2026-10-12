@@ -10,6 +10,8 @@ MAUTIC_PATCH_PLAN_V2_CAPABILITY = "mautic-patch-plan-v2"
 MAUTIC_PATCH_PREFLIGHT_V2_OPERATION = "mcd-mautic-patch-preflight-v2"
 MAUTIC_PATCH_PLAN_V2_SCHEMA = "mcd-mautic-patch-plan-v2"
 CONTACT_FIELD_METADATA_OPERATION = "mcd-contact-field-metadata-v1"
+SEGMENT_LANE_SETTINGS_CAPABILITY = "segment_lane_settings"
+SEGMENT_LAZY_UPDATE_CAPABILITY = "segment_lazy_update_enabled"
 KNOWN_RUNTIMES = frozenset({"host", "docker"})
 KNOWN_INSTALL_TYPES = frozenset({"zip", "composer"})
 
@@ -31,6 +33,8 @@ _HOST_DEFAULT_CAPABILITIES = frozenset(
         "migration-target",
         "bulk-operations",
         "host-managed-upgrade",
+        SEGMENT_LANE_SETTINGS_CAPABILITY,
+        SEGMENT_LAZY_UPDATE_CAPABILITY,
     }
 )
 
