@@ -2560,6 +2560,15 @@ def _select_segment_dependency_snapshot(
     previous_parents = _context_relations("parents_by_child")
     previous_children = _context_relations("children_by_parent")
     if not previous_parents and not previous_children:
+        # A pre-provenance daemon could persist an authoritative empty graph
+        # while copying the timestamp/count from a live snapshot.  Such a
+        # context is not evidence that this root is independent: mark it as
+        # unread so the root-local recovery path must perform a live read.
+        # Empty ``live_read`` and same-cycle ``preserved_previous`` snapshots
+        # are explicit provenance and remain valid for an independent root.
+        dependency_snapshot_mode = str(context.get("dependency_snapshot_mode") or "").strip()
+        if dependency_snapshot_mode not in {"live_read", "preserved_previous"}:
+            return parents, children, False, 0.0, 0, "read_required"
         if "dependency_snapshot_authoritative" in context:
             try:
                 previous_updated_at = float(context.get("dependency_snapshot_updated_at") or 0.0)
@@ -2632,6 +2641,23 @@ def _segment_dispatch_context_needs_dependency_refresh(
         return True
     for policy_key in ("throttled_active", "priority_pending", "segment_slot_limit"):
         if policy_key not in context or context.get(policy_key) is None:
+            return True
+
+    # Before dependency provenance was persisted, an authoritative empty
+    # graph could merely be a volatile planner default.  Do not let that
+    # legacy snapshot admit a child as independent; force one root-local live
+    # definition read.  An explicitly proven empty read, or an explicit
+    # same-cycle preservation of a proven empty read, remains valid.
+    if not context.get("parents_by_child") and not context.get("children_by_parent"):
+        dependency_snapshot_mode = str(context.get("dependency_snapshot_mode") or "").strip()
+        dependency_snapshot_verified = context.get("dependency_snapshot_verified")
+        if not isinstance(dependency_snapshot_verified, bool):
+            # 1.5.154 recorded ``live_read`` before the explicit verified
+            # marker existed. That mode is already sufficient evidence;
+            # ``preserved_previous`` is not, because that release could
+            # manufacture it from a legacy empty graph.
+            dependency_snapshot_verified = dependency_snapshot_mode == "live_read"
+        if not dependency_snapshot_verified:
             return True
 
     cycle_id = str((cycle_state or {}).get("cycle_id") or "").strip()
@@ -2754,6 +2780,7 @@ def _rehydrate_segment_dispatch_context(
                 "dependency_snapshot_authoritative": True,
                 "dependency_snapshot_source": "mautic_published_segment_filters",
                 "dependency_snapshot_mode": "live_read",
+                "dependency_snapshot_verified": True,
                 "dependency_snapshot_updated_at": refreshed_at,
                 "dependency_snapshot_segment_count": len(
                     {
@@ -20010,6 +20037,18 @@ def run_loop(
                     "dependency_snapshot_authoritative": bool(dependency_snapshot_authoritative),
                     "dependency_snapshot_source": "mautic_published_segment_filters",
                     "dependency_snapshot_mode": dependency_snapshot_mode,
+                    "dependency_snapshot_verified": bool(
+                        dependency_snapshot_read_ok
+                        or (
+                            dependency_snapshot_mode == "preserved_previous"
+                            and isinstance(previous_context, Mapping)
+                            and (
+                                bool(previous_context.get("dependency_snapshot_verified"))
+                                or str(previous_context.get("dependency_snapshot_mode") or "").strip()
+                                == "live_read"
+                            )
+                        )
+                    ),
                     "dependency_snapshot_updated_at": float(dependency_snapshot_updated_at_effective),
                     "dependency_snapshot_segment_count": int(dependency_snapshot_segment_count_effective),
                     "scheduler_pause": bool(scheduler_dispatch_pause),

@@ -885,6 +885,7 @@ class SegmentLivenessTests(unittest.TestCase):
                     "parents_by_child": {},
                     "children_by_parent": {},
                     "dependency_snapshot_authoritative": True,
+                    "dependency_snapshot_mode": "live_read",
                     "dependency_snapshot_updated_at": time.time(),
                     "scheduler_pause": False,
                     "backup_pause": False,
@@ -1356,6 +1357,7 @@ class SegmentLivenessTests(unittest.TestCase):
                         "parents_by_child": {},
                         "children_by_parent": {},
                         "dependency_snapshot_authoritative": True,
+                        "dependency_snapshot_mode": "live_read",
                         "dependency_snapshot_updated_at": time.time(),
                         "scheduler_pause": False,
                         "backup_pause": False,
@@ -1817,6 +1819,81 @@ class SegmentLivenessTests(unittest.TestCase):
         self.assertEqual(segment_count, 12)
         self.assertEqual(mode, "live_read")
 
+    def test_legacy_empty_dependency_context_requires_live_refresh(self) -> None:
+        """An old empty graph is refreshed before an active cycle can refill."""
+
+        cycle = {"cycle_id": "cycle-legacy-empty", "status": "active"}
+        context = {
+            "schema": "mcd-segment-dispatch-context-v1",
+            "cycle_id": "cycle-legacy-empty",
+            "cycle_status": "active",
+            "parents_by_child": {},
+            "children_by_parent": {},
+            "dependency_snapshot_authoritative": True,
+            "dependency_snapshot_updated_at": 123.0,
+            "dependency_snapshot_segment_count": 150,
+            "throttled_active": False,
+            "priority_pending": False,
+            "segment_slot_limit": 11,
+            "native_segment_exclude_supported": True,
+        }
+        self.assertTrue(
+            daemon._segment_dispatch_context_needs_dependency_refresh(
+                context,
+                cycle,
+                config=self._config(),
+                mautic_major=7,
+                now_ts=200.0,
+            )
+        )
+
+        live_context = dict(context)
+        live_context["dependency_snapshot_mode"] = "live_read"
+        self.assertFalse(
+            daemon._segment_dispatch_context_needs_dependency_refresh(
+                live_context,
+                cycle,
+                config=self._config(),
+                mautic_major=7,
+                now_ts=200.0,
+            )
+        )
+
+        preserved_context = dict(context)
+        preserved_context["dependency_snapshot_mode"] = "preserved_previous"
+        self.assertTrue(
+            daemon._segment_dispatch_context_needs_dependency_refresh(
+                preserved_context,
+                cycle,
+                config=self._config(),
+                mautic_major=7,
+                now_ts=200.0,
+            )
+        )
+
+        verified_preserved_context = dict(preserved_context)
+        verified_preserved_context["dependency_snapshot_verified"] = True
+        self.assertFalse(
+            daemon._segment_dispatch_context_needs_dependency_refresh(
+                verified_preserved_context,
+                cycle,
+                config=self._config(),
+                mautic_major=7,
+                now_ts=200.0,
+            )
+        )
+
+        selected = daemon._select_segment_dependency_snapshot(
+            current_context=context,
+            current_cycle=cycle,
+            candidate_parents={},
+            candidate_children={},
+            snapshot_read_ok=False,
+            snapshot_updated_at=0.0,
+            snapshot_segment_count=0,
+        )
+        self.assertEqual(selected, ({}, {}, False, 0.0, 0, "read_required"))
+
     def test_dependency_refresh_final_merge_after_capability_probe_preserves_newer_policy(self) -> None:
         """M7 help latency cannot overwrite a newer same-cycle planner policy."""
 
@@ -2011,7 +2088,7 @@ class SegmentLivenessTests(unittest.TestCase):
                 f"scheduler_pause_flag_path = \"{Path(td) / 'scheduler.pause'}\"\n"
                 "scheduler_host_max_parallel = 11\n"
                 "scheduler_instance_max_parallel = 11\n"
-                "segment_full_scan_interval_sec = 300\n"
+                "segment_full_scan_interval_sec = 0\n"
                 "segment_mode = \"farm\"\n",
                 encoding="utf-8",
             )
@@ -2055,6 +2132,9 @@ class SegmentLivenessTests(unittest.TestCase):
                 "active_import_target_ids": [],
                 "parents_by_child": {},
                 "children_by_parent": {},
+                "dependency_snapshot_authoritative": True,
+                "dependency_snapshot_updated_at": 102.0,
+                "dependency_snapshot_segment_count": 150,
                 "scheduler_pause": False,
                 "backup_pause": False,
                 "dispatch_pause": False,
@@ -2113,10 +2193,20 @@ class SegmentLivenessTests(unittest.TestCase):
             self.assertEqual(refreshed["parents_by_child"]["154"], [146, 149, 152, 153])
             self.assertEqual(refreshed["children_by_parent"]["153"], [154])
             self.assertTrue(refreshed["dependency_snapshot_authoritative"])
+            self.assertTrue(refreshed["dependency_snapshot_verified"])
             self.assertTrue(refreshed["native_segment_exclude_supported"])
             self.assertEqual(refreshed["segment_slot_limit"], 11)
             self.assertFalse(refreshed["throttled_active"])
             self.assertFalse(refreshed["priority_pending"])
+            self.assertFalse(
+                daemon._segment_dispatch_context_needs_dependency_refresh(
+                    refreshed,
+                    after_cycle,
+                    config=config,
+                    mautic_major=7,
+                    now_ts=200.0,
+                )
+            )
 
             pending = _segment_cycle_pending_order(after_cycle)
             self.assertIn(153, pending)

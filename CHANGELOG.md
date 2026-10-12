@@ -1,3 +1,13 @@
+## 1.5.155 - 2026-10-13
+
+- Add explicit dependency-snapshot verification provenance. A legacy empty
+  graph, including a `preserved_previous` graph written by 1.5.154 without
+  proof of a successful read, triggers one root-local read before refill;
+  successful empty reads remain stable and are not rehydrated on every tick.
+- Preserve the active cycle, claims, running rows, FIFO/follow-up/retry state,
+  and terminal receipts while recovering the graph; add regression coverage for
+  the planner-persist to refill-recovery path.
+
 ## 1.5.154 - 2026-10-13
 
 - Preserve the complete same-cycle dependency snapshot when a planner branch

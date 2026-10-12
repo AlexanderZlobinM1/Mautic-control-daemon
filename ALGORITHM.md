@@ -4,7 +4,7 @@
 фактическую схему после исправления admission и должен обновляться вместе с
 кодом, тестами и runtime receipt. Документ не является разрешением на
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.154 (follow-up после immutable
+Актуальная редакция этого канона — MCD 1.5.155 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам
@@ -261,6 +261,10 @@ config на его profile baseline и только после этого при
    успешного same-root definition read переиспользует graph и timestamp/count
    предыдущего того же cycle, а успешный read с нулём edges может честно
    записать пустой graph для независимого root.
+   `dependency_snapshot_verified` отличает такой подтверждённый empty snapshot
+   от legacy empty graph (включая `preserved_previous`, записанный старой
+   версией): legacy-вариант один раз перечитывается root-local до refill, после
+   успешного read не запускает бесконечный rehydrate.
    Недоступный/неполный graph удерживает только этот root до retry; другие
    ready roots продолжают dispatch в своих profile slots.
 4. Новый/never-built ID не ждёт нового frozen snapshot. Если он найден

@@ -84,7 +84,11 @@ The planner must persist dependency graph data and its read provenance as one
 snapshot. If the current root has no successful published-definition read, its
 volatile empty/default maps must not replace the previous same-cycle graph or
 its authority timestamp/count. A successful read that decodes zero edges is
-valid for an independent root and may persist an empty graph.
+valid for an independent root and may persist an empty graph. The context also
+persists an explicit verification marker: an empty legacy context, including a
+`preserved_previous` value written before that marker existed, gets one
+root-local read before refill. Once a successful empty read is marked verified,
+it is not rehydrated on every refill tick.
 
 Persisted segment-chain reverse indexes are scoped by canonical root, task-key
 owner, closure membership, and cycle generation. A legacy or foreign reverse
