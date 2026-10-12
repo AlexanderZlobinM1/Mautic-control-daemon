@@ -1,3 +1,11 @@
+## 1.5.140 - 2026-10-12
+
+- Make MCD update admission barriers owner-aware: ordinary Mautic/PHP work
+  remains non-blocking, active MCD source/update leases remain fail-closed, and
+  orphaned legacy barriers recover without deleting manual maintenance pauses.
+- Persist barrier owner PID/start identity, clean up owned barriers on every
+  terminal update result, and repair the runtime bridge scheduler-status probe.
+
 ## 1.5.139 - 2026-10-12
 
 - Persist the ordinary cycle's effective lazy/full mode and make a UID toggle
