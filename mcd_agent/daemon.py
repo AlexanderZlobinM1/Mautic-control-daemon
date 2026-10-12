@@ -633,6 +633,45 @@ def _runtime_stamp_wins(left: Mapping[str, Any], right: Mapping[str, Any]) -> bo
     return _runtime_stamp_order(left) > _runtime_stamp_order(right)
 
 
+def _merge_legacy_priority_alias_with_metadata(
+    runtime: Mapping[str, Any], metadata: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Resolve legacy whitelist and priority as one LWW instance field."""
+    out = deepcopy(dict(runtime))
+    legacy = out.get("segment_whitelist_instance_settings")
+    priority = out.get("segment_priority_instance_settings")
+    if not isinstance(legacy, dict) or not isinstance(priority, dict):
+        return out
+    merged = dict(priority)
+    for uid, legacy_value in legacy.items():
+        uid_text = str(uid)
+        modern_value = priority.get(uid_text)
+        if modern_value is None:
+            merged[uid_text] = deepcopy(legacy_value)
+            continue
+        modern_empty = isinstance(modern_value, dict) and modern_value.get("segments") == []
+        legacy_nonempty = isinstance(legacy_value, dict) and bool(
+            legacy_value.get("segments") or legacy_value.get("segment_whitelist")
+        )
+        modern_stamp = _runtime_metadata_get(
+            metadata, "instance", "segment_priority_instance_settings", uid_text
+        ) or {}
+        if modern_empty and legacy_nonempty and not bool(modern_stamp.get("tombstone")):
+            merged[uid_text] = deepcopy(legacy_value)
+        elif not modern_empty and isinstance(modern_value, dict) and isinstance(legacy_value, dict):
+            modern_ids = _to_int_list(modern_value.get("segments", []))
+            legacy_ids = _to_int_list(
+                legacy_value.get("segments", legacy_value.get("segment_whitelist", []))
+            )
+            if legacy_ids:
+                merged[uid_text] = {
+                    **modern_value,
+                    "segments": sorted(set(modern_ids) | set(legacy_ids)),
+                }
+    out["segment_priority_instance_settings"] = merged
+    return out
+
+
 def _resolve_runtime_snapshots(
     local_runtime: Mapping[str, Any],
     remote_runtime: Mapping[str, Any],
@@ -640,6 +679,7 @@ def _resolve_runtime_snapshots(
     remote_metadata: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Resolve host and instance fields with durable last-write-wins metadata."""
+    remote_runtime = _merge_legacy_priority_alias_with_metadata(remote_runtime, remote_metadata)
     local_fields = _runtime_snapshot_fields(local_runtime)
     remote_fields = _runtime_snapshot_fields(remote_runtime)
     local_meta = _runtime_metadata_for_snapshot(local_metadata, local_runtime, source="mcd")

@@ -97,6 +97,32 @@ from mcd_agent.ring_utils import advance_ring_after_launch
 
 
 class CampaignRingDispatchTests(unittest.TestCase):
+    def test_legacy_priority_alias_merge_preserves_nonempty_without_explicit_clear(self) -> None:
+        uid = "electronic@Farm02"
+        runtime = {
+            "segment_priority_instance_settings": {uid: {"segments": []}},
+            "segment_whitelist_instance_settings": {uid: {"segment_whitelist": [23, 86]}},
+        }
+        merged = daemon_mod._merge_legacy_priority_alias_with_metadata(runtime, {})
+        self.assertEqual(merged["segment_priority_instance_settings"][uid]["segment_whitelist"], [23, 86])
+
+        cleared = daemon_mod._merge_legacy_priority_alias_with_metadata(
+            runtime,
+            {"instances": {uid: {"segment_priority_instance_settings": {"tombstone": True}}}},
+        )
+        self.assertEqual(cleared["segment_priority_instance_settings"][uid], {"segments": []})
+
+    def test_legacy_priority_alias_merge_deduplicates_nonempty_rows(self) -> None:
+        uid = "prodajadelova@Farm02"
+        merged = daemon_mod._merge_legacy_priority_alias_with_metadata(
+            {
+                "segment_priority_instance_settings": {uid: {"segments": [23, 44]}},
+                "segment_whitelist_instance_settings": {uid: {"segment_whitelist": [44, 61, 55]}},
+            },
+            {},
+        )
+        self.assertEqual(merged["segment_priority_instance_settings"][uid], {"segments": [23, 44, 55, 61]})
+
     def test_restart_reconciles_and_adopts_live_persisted_worker(self) -> None:
         class Store:
             def sync_sqlite_running_shadow(self) -> dict[str, int]:
