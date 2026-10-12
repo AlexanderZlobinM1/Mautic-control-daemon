@@ -167,8 +167,9 @@ def _active_mautic_processes(timeout_sec: int = 4) -> list[dict[str, Any]]:
         command = parts[2] if has_elapsed else parts[1]
         argv0 = command.split(None, 1)[0] if command else ""
         exe = Path(argv0).name.lower()
-        # Only a running PHP console process blocks self-update. A wrapper
-        # waiting on flock/timeout/sudo is not itself a Mautic process.
+        # Keep only the actual PHP console leaf in telemetry. A wrapper
+        # waiting on flock/timeout/sudo is not itself a Mautic process, and
+        # neither this observation nor the process age is an update blocker.
         if not (exe == "php" or exe.startswith("php")):
             continue
         rows.append({"pid": pid, "elapsed_sec": elapsed_sec, "cmd": command[:500]})
