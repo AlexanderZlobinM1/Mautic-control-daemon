@@ -14013,13 +14013,16 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                     force_segment_full_scan = True
                 if cluster_cron_allowed:
                     try:
-                        if force_segment_full_scan:
+                        if force_segment_full_scan or not bool(getattr(config, "segment_lazy_update_enabled", True)):
                             segment_ids = db.fetch_ids(_SQL_SEGMENTS_ALL_PUBLISHED, limit=5000, context=sql_ctx)
                             segment_last_full_scan_ts[root] = now
                             logging.info(
                                 "[%s] segment full-scan planned (reason=%s pending_imports=%s interval=%ss)",
                                 root,
-                                "import_activity" if now < import_force_until else "periodic_full_scan",
+                                "import_activity" if now < import_force_until else (
+                                    "full_cycle" if not bool(getattr(config, "segment_lazy_update_enabled", True))
+                                    else "periodic_full_scan"
+                                ),
                                 import_pending_now,
                                 full_scan_interval_sec,
                             )

@@ -1,3 +1,10 @@
+## 1.5.115 - 2026-10-12
+
+- Make `segment_lazy_update_enabled` a bidirectional runtime setting: false
+  plans a full published-segment cycle with persisted remaining work, while
+  true retains due-only lazy planning. Treat legacy whitelist as the canonical
+  priority alias in ACK effective observation.
+
 ## 1.5.114 - 2026-10-12
 
 - Observe the advertised read-only `segment_lazy_update_enabled` capability
