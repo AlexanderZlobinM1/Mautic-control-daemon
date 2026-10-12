@@ -1,3 +1,10 @@
+## 1.5.120 - 2026-10-12
+
+- Restrict host runtime ACK chunks to canonical desired keys, preventing MCC
+  HTTP 400 validation failures from expanded local runtime snapshots.
+- Reserve one shared segment slot for admitted ordinary-cycle work while the
+  recurring super-priority loop is continuously due.
+
 ## 1.5.119 - 2026-10-12
 
 - Resolve legacy whitelist and modern priority rows by provenance: preserve

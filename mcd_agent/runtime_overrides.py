@@ -890,6 +890,14 @@ def acknowledge_desired_runtime_states(
         runtime: dict[str, Any],
         accepted_observation_revision: int | None = None,
     ) -> None:
+        # Host ACKs are evidence for the exact canonical desired envelope,
+        # never for an expanded effective/runtime snapshot.  MCC validates
+        # chunk keys against the request that produced the revision; sending
+        # additional supported local keys is therefore a protocol error.
+        if scope == "host" and isinstance(desired_state, dict):
+            canonical_runtime = desired_state.get("runtime_overrides")
+            if isinstance(canonical_runtime, dict):
+                runtime = canonical_runtime
         normalized_runtime, compatibility_unsupported = normalize_runtime_override_payload(
             runtime,
             instance_uid=scope_key if scope == "instance" else None,

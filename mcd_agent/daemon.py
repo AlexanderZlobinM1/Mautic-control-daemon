@@ -10054,6 +10054,12 @@ def _segment_shared_slots_available(
     )
 
 
+def _ordinary_segment_work_pending(store: TaskStore, root: str) -> bool:
+    """Return whether an admitted ordinary cycle is waiting for a worker."""
+
+    return bool(_segment_cycle_pending_ids(store.get_runtime_sync(_segment_cycle_key(root))))
+
+
 def _segment_task_limit_after_import(
     running: dict[str, RunningTask],
     root: str,
@@ -10156,6 +10162,26 @@ def _dispatch_recurring_priority_segments(
         store.delete_runtime_sync(stale_keys)
     if not enabled:
         return 0
+
+    # Recurring super-priority is an independent admission loop, but its
+    # process still consumes the same farm segment capacity.  Preserve one
+    # free shared slot for an already-admitted ordinary cycle; otherwise a
+    # continuously due super ring can starve the durable ordinary tail.
+    segment_capacity_configured = hasattr(config, "segment_priority_parallel_idle") and hasattr(
+        config, "segment_regular_parallel_idle"
+    )
+    segment_slot_limit = _effective_segment_slot_limit(config, False) if segment_capacity_configured else 0
+    if segment_capacity_configured and _ordinary_segment_work_pending(store, root):
+        available = _segment_shared_slots_available(
+            running,
+            root,
+            segment_slot_limit,
+            store=store,
+            config=config,
+            now_ts=time.time(),
+        )
+        if available <= 1:
+            return 0
 
     launched = 0
     for entry in entries:

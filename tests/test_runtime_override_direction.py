@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from mcd_agent import __version__
+import mcd_agent.runtime_overrides as runtime_overrides
 from mcd_agent.runtime_overrides import (
     acknowledge_desired_runtime_states,
     acknowledge_runtime_state,
@@ -2081,6 +2082,50 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             ),
             "farm-hiload",
         )
+
+    def test_host_ack_uses_canonical_desired_keys_not_expanded_runtime(self) -> None:
+        cfg = SimpleNamespace(
+            mcc_url="https://mcc.example",
+            mcc_token="token",
+            profile_name="custom",
+        )
+        store = SimpleNamespace(values={})
+        store.get_runtime_sync = lambda key: store.values.get(key)
+        store.put_runtime_sync = lambda key, value: store.values.__setitem__(key, dict(value))
+        desired = {"jobs_max_workers": 6}
+        with patch(
+            "mcd_agent.runtime_overrides.acknowledge_runtime_state",
+            return_value={"status": "ok"},
+        ) as acknowledge, patch(
+            "mcd_agent.runtime_overrides.runtime_supported_keys",
+            return_value=set(desired),
+        ), patch(
+            "mcd_agent.runtime_overrides.runtime_remote_allowed_keys",
+            return_value=set(desired),
+        ), patch(
+            "mcd_agent.runtime_overrides.runtime_effective_map",
+            return_value={
+                "jobs_max_workers": 6,
+                "import_stall_timeout_sec": 900,
+                "monitored_email_parser_instance_settings": {},
+            },
+        ):
+            failures = runtime_overrides.acknowledge_desired_runtime_states(
+                cfg,
+                store,
+                desired_state={"scope_key": "Farm-02", "revision": 191, "runtime_overrides": desired},
+                host_runtime={
+                    **desired,
+                    "import_stall_timeout_sec": 900,
+                    "monitored_email_parser_instance_settings": {},
+                },
+                instance_states={},
+                runtime_fingerprint="stable",
+            )
+        self.assertEqual(failures, [])
+        observed = acknowledge.call_args.kwargs["observed"]["runtime"]
+        self.assertEqual(set(observed["keys"]), set(desired))
+        self.assertEqual(set(observed["effective_runtime"]), set(desired))
         self.assertEqual(
             desired_profile_from_runtime_response(
                 {

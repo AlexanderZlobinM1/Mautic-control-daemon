@@ -4,10 +4,14 @@
 фактическую схему после исправления admission и должен обновляться вместе с
 кодом, тестами и runtime receipt. Документ не является разрешением на
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.119 (follow-up после immutable
+Актуальная редакция этого канона — MCD 1.5.120 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
-запрошенными per-key наблюдениями.
+запрошенными per-key наблюдениями. Host ACK строится только по ключам
+canonical desired envelope; expanded effective snapshot не добавляет ключи в
+chunk. Recurring super-priority admission учитывает общую farm-capacity и при
+ожидающем persisted ordinary cycle оставляет один свободный shared slot, так
+что постоянный super-ring не может голодать обычный tail.
 
 Для instance-scoped desired state локальный inventory UID является стабильной
 основой, но transport запрашивает также динамически полученный

@@ -35,6 +35,35 @@ class SegmentLivenessTests(unittest.TestCase):
             scheduler_emergency_reserved_slots=1,
         )
 
+    def test_recurring_priority_leaves_slot_for_admitted_ordinary_cycle(self) -> None:
+        root = "/srv/mautic"
+        store = SimpleNamespace(
+            get_runtime_sync=lambda key: {"status": "active", "items": [151], "done": [], "claimed": [], "running": []},
+            list_runtime_sync=lambda prefix: [],
+        )
+        config = SimpleNamespace(
+            segment_mode="farm",
+            segment_priority_parallel_idle=1,
+            segment_regular_parallel_idle=1,
+            segment_priority_parallel_throttled=1,
+            segment_regular_parallel_throttled=1,
+        )
+        entry = SimpleNamespace(segment_id=58, max_interval_sec=60, instance_uid="instance-1")
+        executor = SimpleNamespace()
+        with patch.object(daemon, "_segment_shared_slots_available", return_value=1), patch.object(
+            daemon, "_segment_cycle_key", return_value="segment-cycle:" + root
+        ):
+            launched = daemon._dispatch_recurring_priority_segments(
+                config=config,
+                inst=SimpleNamespace(root=root, instance_uid="instance-1"),
+                store=store,
+                running={},
+                priority_executor=executor,
+                entries=[entry],
+                enabled=True,
+            )
+        self.assertEqual(launched, 0)
+
     def _launch_persisted_item(
         self,
         *,
