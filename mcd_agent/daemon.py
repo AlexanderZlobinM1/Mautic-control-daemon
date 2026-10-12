@@ -13,7 +13,7 @@ import subprocess
 import threading
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from concurrent.futures import Future, ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass, replace
@@ -248,6 +248,38 @@ def _scheduler_runtime_serialized(method: Callable[..., Any]) -> Callable[..., A
             return method(*args, **kwargs)
 
     return _serialized
+
+
+def _iter_instances_with_root_dispatch_gate(
+    installs: Iterable[object],
+    *,
+    busy_roots: set[str],
+    lock: threading.RLock,
+) -> Iterable[object]:
+    """Yield dispatch instances while marking only the current root busy.
+
+    The main dispatcher may spend a long time in one root's Mautic/DB work.
+    Persisted ordinary refill is allowed to continue for every other root, so
+    the hand-off state must be root-scoped rather than a host-wide event. The
+    generator owns cleanup: advancing to the next instance, ``continue``,
+    normal exhaustion, and an exception all release the previous root.
+    """
+
+    current_root = ""
+    try:
+        for inst in installs:
+            if current_root:
+                with lock:
+                    busy_roots.discard(current_root)
+            current_root = str(getattr(inst, "root", "") or "").strip()
+            if current_root:
+                with lock:
+                    busy_roots.add(current_root)
+            yield inst
+    finally:
+        if current_root:
+            with lock:
+                busy_roots.discard(current_root)
 _MCC_RUNTIME_METADATA_KEY = "mcc_runtime_metadata"
 _RUNTIME_METADATA_SCHEMA = "mcd-runtime-sync-metadata-v1"
 
@@ -5578,6 +5610,23 @@ class RunningTask:
     external: bool = False
     stdout_path: str = ""
     stderr_path: str = ""
+
+
+class _SchedulerRuntimeRegistry(dict[str, RunningTask]):
+    """Snapshot iteration for the shared registry's root-local workers.
+
+    The main dispatcher may be inside a slow root-local SQL call while the
+    persisted refill worker admits a different root. Returning snapshots for
+    iteration prevents a cross-root launch from invalidating a concurrent
+    lifecycle/count scan; the actual claim-to-spawn transition remains
+    serialized by ``_SCHEDULER_RUNTIME_LOCK``.
+    """
+
+    def values(self):  # type: ignore[override]
+        return list(super().values())
+
+    def items(self):  # type: ignore[override]
+        return list(super().items())
 
 
 def _load_id_file(path: str | None) -> set[int]:
@@ -11159,6 +11208,7 @@ def _monitor_running(
     segment_terminal_callback: Callable[[RunningTask, bool, str | None], None] | None = None,
     segment_liveness_probe: Callable[[RunningTask], Mapping[str, object] | bool] | None = None,
     import_liveness_probe: Callable[[RunningTask], Mapping[str, object] | bool] | None = None,
+    roots: set[str] | None = None,
 ) -> None:
     now = time.time()
     db_configs = db_configs_by_root or {}
@@ -11320,6 +11370,8 @@ def _monitor_running(
             segment_terminal_callback(task, True, None)
 
     for key, task in list(running.items()):
+        if roots is not None and str(task.root) not in roots:
+            continue
         _plugin_operation_runtime_heartbeat(store, task, now)
         if bool(getattr(task, "external", False)):
             alive = _is_pid_alive(task.pid)
@@ -12098,7 +12150,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
     except Exception as e:
         logging.warning("Custom scripts manifest prefetch failed: %s", e)
 
-    running = _load_orphans_from_store(store)
+    running = _SchedulerRuntimeRegistry(_load_orphans_from_store(store))
     popens: dict[str, subprocess.Popen[bytes]] = {}
     db_configs_by_root: dict[str, object] = {}
     mautic_timezones_by_root: dict[str, str | None] = {}
@@ -12352,10 +12404,14 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
     segment_dispatch_wakeup = threading.Event()
     ordinary_refill_wakeup = threading.Event()
     planner_busy = threading.Event()
-    # The persisted refill worker runs continuously, but yields while the
-    # main thread is in its normal dispatch pass.  The event is checked under
-    # _SCHEDULER_RUNTIME_LOCK so the hand-off cannot overlap a launch/claim.
-    main_dispatch_busy = threading.Event()
+    # The persisted refill worker runs continuously.  Only the root currently
+    # being handled by the main dispatcher is gated; a slow Mautic/DB section
+    # for root A must not stop admitted work for root B.
+    main_dispatch_busy_roots: set[str] = set()
+    lifecycle_monitor_busy_roots: set[str] = set()
+    lifecycle_monitor_futures: dict[str, Future[object]] = {}
+    lifecycle_monitor_executors: dict[str, ThreadPoolExecutor] = {}
+    lifecycle_monitor_wakeup = threading.Event()
     _SEGMENT_DISPATCH_WAKEUP = segment_dispatch_wakeup
 
     def _segment_terminal_callback(task: RunningTask, success: bool, note: str | None) -> None:
@@ -12364,22 +12420,101 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
         _segment_terminal_and_wake(store, segment_dispatch_wakeup, task, success, note)
         ordinary_refill_wakeup.set()
 
-    def _monitor_authoritative_runtime() -> None:
-        """Run the one canonical lifecycle monitor on the main scheduler tick."""
+    def _monitor_one_root(root: str) -> None:
+        """Run the canonical lifecycle monitor for one root-local slice."""
 
-        _monitor_running(
-            config=config,
-            store=store,
-            running=running,
-            popens=popens,
-            db_configs_by_root=db_configs_by_root,
-            mautic_timezones_by_root=mautic_timezones_by_root,
-            campaign_progress_watchdog=campaign_progress_watchdog,
-            import_progress_watchdog=import_progress_watchdog,
-            segment_terminal_callback=_segment_terminal_callback,
-            segment_liveness_probe=_segment_liveness_probe,
-            import_liveness_probe=_import_liveness_probe,
-        )
+        try:
+            _monitor_running(
+                config=config,
+                store=store,
+                running=running,
+                popens=popens,
+                db_configs_by_root=db_configs_by_root,
+                mautic_timezones_by_root=mautic_timezones_by_root,
+                campaign_progress_watchdog=campaign_progress_watchdog,
+                import_progress_watchdog=import_progress_watchdog,
+                segment_terminal_callback=_segment_terminal_callback,
+                segment_liveness_probe=_segment_liveness_probe,
+                import_liveness_probe=_import_liveness_probe,
+                roots={root},
+            )
+        finally:
+            with _SCHEDULER_RUNTIME_LOCK:
+                lifecycle_monitor_busy_roots.discard(root)
+
+    def _monitor_authoritative_runtime() -> None:
+        """Schedule the one canonical lifecycle monitor in root-local slices.
+
+        A process terminal event, TaskStore completion, retry, and ordinary
+        slot release must not wait behind a slow liveness/import probe for a
+        different root. Every slice calls the same ``_monitor_running``
+        implementation; only its execution lane is root-local.
+        """
+
+        if single_cycle:
+            _monitor_running(
+                config=config,
+                store=store,
+                running=running,
+                popens=popens,
+                db_configs_by_root=db_configs_by_root,
+                mautic_timezones_by_root=mautic_timezones_by_root,
+                campaign_progress_watchdog=campaign_progress_watchdog,
+                import_progress_watchdog=import_progress_watchdog,
+                segment_terminal_callback=_segment_terminal_callback,
+                segment_liveness_probe=_segment_liveness_probe,
+                import_liveness_probe=_import_liveness_probe,
+            )
+            return
+
+        roots = {
+            str(getattr(inst, "root", "") or "").strip()
+            for inst in installs
+            if str(getattr(inst, "root", "") or "").strip()
+        }
+        roots.update(str(task.root).strip() for task in running.values() if str(task.root).strip())
+        for root, future in list(lifecycle_monitor_futures.items()):
+            if not future.done():
+                continue
+            lifecycle_monitor_futures.pop(root, None)
+            try:
+                future.result()
+            except Exception as exc:
+                logging.warning("[%s] canonical lifecycle monitor failed: %s", root, exc)
+
+        for root in sorted(roots):
+            if root in lifecycle_monitor_futures:
+                continue
+            with _SCHEDULER_RUNTIME_LOCK:
+                if root in main_dispatch_busy_roots or root in lifecycle_monitor_busy_roots:
+                    continue
+                lifecycle_monitor_busy_roots.add(root)
+            executor = lifecycle_monitor_executors.setdefault(
+                root,
+                ThreadPoolExecutor(
+                    max_workers=1,
+                    thread_name_prefix="mcd-root-lifecycle-" + hashlib.sha1(root.encode("utf-8")).hexdigest()[:8],
+                ),
+            )
+            try:
+                lifecycle_monitor_futures[root] = executor.submit(_monitor_one_root, root)
+            except Exception:
+                with _SCHEDULER_RUNTIME_LOCK:
+                    lifecycle_monitor_busy_roots.discard(root)
+                raise
+
+    def _lifecycle_monitor_scheduler() -> None:
+        """Continuously tick the canonical root-local lifecycle monitors."""
+
+        while True:
+            try:
+                _monitor_authoritative_runtime()
+            except Exception as exc:
+                logging.warning("canonical lifecycle monitor scheduler failed: %s", exc)
+            lifecycle_monitor_wakeup.wait(
+                timeout=max(0.1, min(1.0, float(getattr(config, "dispatch_interval_sec", 1) or 1)))
+            )
+            lifecycle_monitor_wakeup.clear()
 
     def _active_cycle_observation_worker() -> None:
         """Observe late admissions/imports in independent root-local jobs."""
@@ -12521,6 +12656,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
             previous_baseline = previous_baseline if isinstance(previous_baseline, Mapping) else {}
             retry_ids = [*(_normalize_segment_ids(state.get("errors"))), *(_normalize_segment_ids(state.get("manual_retry_ids")))]
             never_built = _never_built_segment_ids(dep_rows)
+            lazy_segment_plan = bool(getattr(config, "segment_lazy_update_enabled", False))
             standard_ids = _ordinary_segment_snapshot_order(
                 dep_rows,
                 observed,
@@ -12532,11 +12668,13 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                     or _SEGMENT_STALE_PRIORITY_SEC
                 ),
                 now_ts=float(now_plan),
-                include_fresh_remaining=not bool(
-                    getattr(config, "segment_lazy_update_enabled", False)
-                ),
+                include_fresh_remaining=not lazy_segment_plan,
             )
-            if observed and not standard_ids:
+            if observed and not standard_ids and not lazy_segment_plan:
+                # In full-scan mode the published snapshot is deliberately
+                # authoritative even if the dependency read lags. In lazy
+                # mode an empty plan is meaningful: do not turn a fresh
+                # current snapshot back into ordinary work.
                 standard_ids = list(observed)
             if int(getattr(inst, "mautic_major", 0) or 0) >= 7:
                 standard_ids, _suppressed = mautic7_terminal_segment_plan(standard_ids, dependency_children)
@@ -12890,13 +13028,14 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
         uses the shared ``running``/``popens`` registry, the complete durable
         dispatch context, the canonical ``_fill_from_ring`` admission path,
         and the same submit/claim/terminal callbacks as the canonical
-        ``_monitor_running`` path.  Lifecycle monitoring itself stays on the
-        main tick: a slow liveness/import probe must never be placed in this
-        shared refill path.  It runs continuously for already-admitted
-        persisted work, yielding only while the main thread owns the normal
-        dispatch pass.  It therefore keeps ordinary queues moving during slow
-        planning without creating a second lifecycle or competing with the
-        main dispatcher.
+        ``_monitor_running`` path.  Lifecycle monitoring runs in separate
+        root-local slices using that same canonical implementation; a slow
+        liveness/import probe must never be placed in this shared refill path.
+        The refill worker runs continuously for already-admitted
+        persisted work, yielding only for the root currently owned by the
+        main dispatcher.  It therefore keeps ordinary queues moving during
+        slow planning without creating a second lifecycle or competing with
+        the main dispatcher.
         """
 
         last_error_log = 0.0
@@ -12996,15 +13135,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
 
         while True:
             try:
-                # The main dispatch pass has priority.  The flag transition
-                # and the check below are serialized with all lifecycle work.
-                if main_dispatch_busy.is_set():
-                    ordinary_refill_wakeup.wait(timeout=0.2)
-                    ordinary_refill_wakeup.clear()
-                    continue
                 with _SCHEDULER_RUNTIME_LOCK:
-                    if main_dispatch_busy.is_set():
-                        continue
                     if not cluster_route_allows(config, "cron"):
                         continue
                     cluster_import_allowed = cluster_route_allows(config, "import")
@@ -13024,6 +13155,8 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                     for inst in list(installs):
                         root = str(getattr(inst, "root", "") or "").strip()
                         if not root or not getattr(inst, "db", None):
+                            continue
+                        if root in main_dispatch_busy_roots or root in lifecycle_monitor_busy_roots:
                             continue
                         state = store.get_runtime_sync(_segment_cycle_key(root)) or {}
                         if not isinstance(state, Mapping):
@@ -13997,6 +14130,11 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
             name="mcd-ordinary-persisted-refill",
             daemon=True,
         ).start()
+        threading.Thread(
+            target=_lifecycle_monitor_scheduler,
+            name="mcd-canonical-lifecycle-scheduler",
+            daemon=True,
+        ).start()
         threading.Thread(target=_priority_scheduler, name="mcd-priority-scheduler", daemon=True).start()
         threading.Thread(
             target=_campaign_rebuild_liveness_scheduler,
@@ -14005,7 +14143,8 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
         ).start()
 
     while True:
-        _monitor_authoritative_runtime()
+        if single_cycle:
+            _monitor_authoritative_runtime()
         now = time.time()
         if now >= next_scheduler_reconcile_at:
             rec = _reconcile_running_state(
@@ -15478,6 +15617,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                         )
                         for lane_ids in static_plans.values():
                             static_excluded_ids.update(int(sid) for sid in lane_ids if int(sid) > 0)
+                        lazy_segment_plan = bool(getattr(config, "segment_lazy_update_enabled", False))
                         standard_segment_ids = _ordinary_segment_snapshot_order(
                             dep_rows,
                             observed_segment_ids,
@@ -15489,17 +15629,15 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                                 or _SEGMENT_STALE_PRIORITY_SEC
                             ),
                             now_ts=float(now),
-                            include_fresh_remaining=bool(
-                                force_segment_full_scan
-                                or not bool(getattr(config, "segment_lazy_update_enabled", False))
-                            ),
+                            include_fresh_remaining=bool(force_segment_full_scan or not lazy_segment_plan),
                         )
-                        if observed_segment_ids and not standard_segment_ids:
+                        if observed_segment_ids and not standard_segment_ids and not lazy_segment_plan:
                             # The due query is already an eligibility decision.
                             # A secondary definition/snapshot read can lag it
                             # (notably for newly created segments) and must not
-                            # erase the plan before it reaches the durable
-                            # cycle and scheduler lanes.
+                            # erase a full-scan plan before it reaches the
+                            # durable cycle and scheduler lanes. In lazy mode
+                            # an empty plan is intentional and must stay empty.
                             standard_segment_ids = list(observed_segment_ids)
                             logging.info(
                                 "[%s] segment due-plan materialized after empty snapshot filter ids=%s",
@@ -16725,10 +16863,6 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                 "oldest_wait_sec": oldest_wait_sec,
             },
         )
-        # Claim ownership before recurring-priority dispatch as well: that
-        # path launches work through the same shared runtime registries.
-        with _SCHEDULER_RUNTIME_LOCK:
-            main_dispatch_busy.set()
         if dispatch_installs:
             dispatch_instance_cursor = (dispatch_instance_cursor + 1) % len(dispatch_installs)
         recurring_segment_priority_loop.update(
@@ -16738,12 +16872,19 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
             running=running,
             enabled=cluster_cron_allowed,
         )
-        for inst in dispatch_installs:
+        for inst in _iter_instances_with_root_dispatch_gate(
+            dispatch_installs,
+            busy_roots=main_dispatch_busy_roots,
+            lock=_SCHEDULER_RUNTIME_LOCK,
+        ):
             if not inst.db:
                 logging.warning("[%s] skip install without db config", inst.root)
                 continue
 
             root = inst.root
+            with _SCHEDULER_RUNTIME_LOCK:
+                if root in lifecycle_monitor_busy_roots:
+                    continue
             segment_priority_for_inst = _segment_priority_effective_setting(config, inst)
             segment_super_priority_for_inst = _segment_super_priority_effective_setting(config, inst)
             segment_static_ids_for_inst = segment_priority_for_inst | segment_super_priority_for_inst
@@ -19146,9 +19287,6 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                     popens=popens,
                 ):
                     jobs_last_run[(root, job.name)] = time.time()
-
-        with _SCHEDULER_RUNTIME_LOCK:
-            main_dispatch_busy.clear()
 
         if pusher.enabled():
             try:

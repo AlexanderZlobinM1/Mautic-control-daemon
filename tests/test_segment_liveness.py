@@ -25,6 +25,8 @@ from mcd_agent.daemon import (
     _segment_pending_dispatch_limits,
     _segment_shared_slots_available,
     _fill_from_ring,
+    _iter_instances_with_root_dispatch_gate,
+    _SchedulerRuntimeRegistry,
 )
 from mcd_agent.segment_admission import (
     cycle_key,
@@ -67,6 +69,49 @@ class SegmentLivenessTests(unittest.TestCase):
         self.assertIs(daemon._ordinary_segment_snapshot_order, ordinary_snapshot_order)
         self.assertIn("ll.last_built_date IS NULL", daemon._SQL_SEGMENTS_LATE_DISCOVERY)
         self.assertNotIn("OR ll.date_modified", daemon._SQL_SEGMENTS_LATE_DISCOVERY)
+
+    def test_lazy_snapshot_does_not_materialize_fresh_tail(self) -> None:
+        rows = [
+            {"id": 101, "last_built_date": 190, "date_modified": 190},
+            {"id": 102, "last_built_date": 195, "date_modified": 195},
+        ]
+        self.assertEqual(
+            ordinary_snapshot_order(
+                rows,
+                [101, 102],
+                stale_after_sec=100,
+                now_ts=200,
+                include_fresh_remaining=False,
+            ),
+            [],
+        )
+
+    def test_root_dispatch_gate_is_independent_and_exception_safe(self) -> None:
+        busy_roots: set[str] = set()
+        lock = threading.RLock()
+        installs = [SimpleNamespace(root="/var/www/root-a"), SimpleNamespace(root="/var/www/root-b")]
+        gated = _iter_instances_with_root_dispatch_gate(
+            installs,
+            busy_roots=busy_roots,
+            lock=lock,
+        )
+
+        first = next(gated)
+        self.assertEqual(first.root, "/var/www/root-a")
+        self.assertEqual(busy_roots, {"/var/www/root-a"})
+
+        second = next(gated)
+        self.assertEqual(second.root, "/var/www/root-b")
+        self.assertEqual(busy_roots, {"/var/www/root-b"})
+
+        gated.close()
+        self.assertEqual(busy_roots, set())
+
+        registry = _SchedulerRuntimeRegistry()
+        registry["a"] = SimpleNamespace(task_key="a")
+        snapshot = registry.values()
+        registry["b"] = SimpleNamespace(task_key="b")
+        self.assertEqual([item.task_key for item in snapshot], ["a"])
 
     def test_recurring_priority_leaves_slot_for_admitted_ordinary_cycle(self) -> None:
         root = "/srv/mautic"
@@ -272,6 +317,91 @@ class SegmentLivenessTests(unittest.TestCase):
             self.assertTrue(launched)
             self.assertLess(elapsed, 0.5)
             self.assertIn(f"{root_b}|segment|202", running)
+            store.close()
+
+    def test_canonical_lifecycle_monitor_is_root_local(self) -> None:
+        """A slow A probe cannot delay B terminal cleanup in the same monitor."""
+        with tempfile.TemporaryDirectory() as td:
+            store = TaskStore(str(Path(td) / "state.db"))
+            root_a = "/var/www/root-a"
+            root_b = "/var/www/root-b"
+            task_a = RunningTask(
+                row_id=0,
+                root=root_a,
+                task_key=f"{root_a}|segment|101",
+                task_type="segment",
+                entity_id=101,
+                command_str="php bin/console mautic:segments:update -i 101",
+                timeout_sec=3600,
+                attempts=1,
+                started_at=time.time(),
+                pid=9101,
+            )
+            task_b = RunningTask(
+                row_id=0,
+                root=root_b,
+                task_key=f"{root_b}|job:ordinary|",
+                task_type="job:ordinary",
+                entity_id=None,
+                command_str="php bin/console mautic:segments:update",
+                timeout_sec=3600,
+                attempts=1,
+                started_at=time.time(),
+                pid=9102,
+            )
+            running = {task_a.task_key: task_a, task_b.task_key: task_b}
+            popens = {task_b.task_key: SimpleNamespace(poll=lambda: 0)}
+            entered = threading.Event()
+            release = threading.Event()
+            config = SimpleNamespace(
+                worker_watchdog_sec=0,
+                segment_kill_grace_sec=1,
+                scheduler_pause_flag_path=str(Path(td) / "scheduler.pause"),
+                scheduler_host_max_parallel=0,
+                scheduler_instance_max_parallel=0,
+                scheduler_elastic_slots_enabled=True,
+                scheduler_emergency_reserved_slots=0,
+                task_retry_max=1,
+                task_retry_delay_sec=0,
+            )
+
+            def slow_segment_probe(_task: RunningTask) -> dict[str, object]:
+                entered.set()
+                release.wait(timeout=2.0)
+                return {"active": True}
+
+            monitor_a = threading.Thread(
+                target=daemon._monitor_running,
+                kwargs={
+                    "config": config,
+                    "store": store,
+                    "running": running,
+                    "popens": popens,
+                    "segment_liveness_probe": slow_segment_probe,
+                    "roots": {root_a},
+                },
+                daemon=True,
+            )
+            with patch.object(daemon, "_is_pid_alive", return_value=True), patch.object(
+                daemon, "_pid_matches_task_command", return_value=False
+            ):
+                monitor_a.start()
+                self.assertTrue(entered.wait(timeout=1.0))
+                started = time.monotonic()
+                daemon._monitor_running(
+                    config=config,
+                    store=store,
+                    running=running,
+                    popens=popens,
+                    roots={root_b},
+                )
+                elapsed = time.monotonic() - started
+                release.set()
+                monitor_a.join(timeout=1.0)
+
+            self.assertLess(elapsed, 0.5)
+            self.assertNotIn(task_b.task_key, running)
+            self.assertIn(task_a.task_key, running)
             store.close()
 
     def test_persisted_full_scan_item_bypasses_stale_repeat_cadence(self) -> None:
