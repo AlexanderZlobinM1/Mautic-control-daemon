@@ -1,3 +1,14 @@
+## 1.5.148 - 2026-10-12
+
+- Include active persisted ordinary-cycle roots in the shared fairness and
+  round-robin projection even while volatile planner rings are empty. This
+  prevents a root with durable pending work from losing every free host slot
+  to unrelated roots between heavyweight plan refreshes, without turning
+  ordinary Mautic work into an update barrier or changing root-local claim and
+  capacity guards.
+- Add a regression covering persisted-cycle participation in the shared
+  fairness set.
+
 ## 1.5.147 - 2026-10-12
 
 - Keep the persisted ordinary refill worker eligible while the main dispatcher

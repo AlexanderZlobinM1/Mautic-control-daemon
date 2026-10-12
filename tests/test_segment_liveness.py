@@ -25,6 +25,7 @@ from mcd_agent.daemon import (
     _segment_cycle_terminal,
     _terminalize_segment_data_errors,
     _active_persisted_segment_cycle_roots,
+    _scheduler_persisted_pending_roots,
     _effective_segment_regular_slot_limit,
     _segment_pending_dispatch_limits,
     _segment_shared_slots_available,
@@ -708,6 +709,42 @@ class SegmentLivenessTests(unittest.TestCase):
         active = mark_terminal(active, entity_id=103, success=True, now_ts=104.0)
         store.put_runtime_sync(cycle_key(root), active)
         self.assertEqual(_active_persisted_segment_cycle_roots(store, [root, other_root]), set())
+        store.close()
+
+    def test_fairness_ignores_claimed_only_and_blocked_persisted_cycles(self) -> None:
+        root = "/var/www/persisted-fairness/public_html"
+        store = TaskStore(":memory:")
+        state, _added, _started = sync_cycle(
+            None,
+            planned_ids=[101, 102],
+            never_built=[],
+            running_ids=[],
+            now_ts=100.0,
+        )
+        state["claimed"] = [101, 102]
+        state["running"] = [101, 102]
+        store.put_runtime_sync(cycle_key(root), state)
+        self.assertEqual(_scheduler_persisted_pending_roots(store, [root]), set())
+
+        state["claimed"] = []
+        state["running"] = []
+        store.put_runtime_sync(cycle_key(root), state)
+        store.put_runtime_sync(
+            daemon._segment_dispatch_context_key(root),
+            {
+                "schema": "mcd-segment-dispatch-context-v1",
+                "root": root,
+                "blocked_ids": [101, 102],
+                "sql_managed_ids": [],
+                "static_configured_ids": [],
+                "scheduler_pause": False,
+                "backup_pause": False,
+                "dispatch_pause": False,
+                "db_pause_until": 0.0,
+                "cluster_cron_allowed": True,
+            },
+        )
+        self.assertEqual(_scheduler_persisted_pending_roots(store, [root]), set())
         store.close()
 
     def test_slow_root_liveness_probe_does_not_hold_shared_dispatch_lock(self) -> None:

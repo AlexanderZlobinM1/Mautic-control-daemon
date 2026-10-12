@@ -78,6 +78,7 @@ from mcd_agent.daemon import (
     _scheduler_host_running_count,
     _scheduler_host_slots_available,
     _scheduler_instance_slots_available,
+    _scheduler_pending_roots,
     _scheduler_round_robin_order,
     _set_scheduler_distribution_roots,
     _set_scheduler_fairness_promoted_roots,
@@ -100,6 +101,24 @@ from mcd_agent.ring_utils import advance_ring_after_launch
 
 
 class CampaignRingDispatchTests(unittest.TestCase):
+    def test_persisted_cycle_roots_stay_in_shared_fairness_set(self) -> None:
+        persisted_root = "/var/www/persisted/public_html"
+        ring_root = "/var/www/ring/public_html"
+        hidden_root = "/var/www/hidden/public_html"
+        installs = [
+            SimpleNamespace(root=persisted_root),
+            SimpleNamespace(root=ring_root),
+            SimpleNamespace(root=hidden_root),
+        ]
+
+        pending = _scheduler_pending_roots(
+            installs,
+            persisted_pending_roots={persisted_root},
+            ring_maps=({}, {ring_root: deque([42])}),
+        )
+
+        self.assertEqual(pending, {persisted_root, ring_root})
+
     def test_legacy_priority_alias_merge_preserves_nonempty_without_explicit_clear(self) -> None:
         uid = "electronic@Farm02"
         runtime = {

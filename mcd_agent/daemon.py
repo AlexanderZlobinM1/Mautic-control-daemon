@@ -3282,6 +3282,53 @@ def _active_persisted_segment_cycle_roots(
     return active_roots
 
 
+def _scheduler_persisted_pending_roots(
+    store: "TaskStore",
+    roots: list[str] | tuple[str, ...] | set[str],
+    *,
+    now_ts: float | None = None,
+) -> set[str]:
+    """Return roots with genuinely eligible durable ordinary work.
+
+    Fair dispatch must see unclaimed pending work, including follow-up,
+    important, and remaining items. A root with only claimed/running work,
+    a fully blocked cycle, or an explicit root-local pause is not a global
+    fairness barrier for unrelated roots.
+    """
+
+    now = float(now_ts if now_ts is not None else time.time())
+    pending_roots: set[str] = set()
+    for raw_root in roots:
+        root = str(raw_root or "").strip()
+        if not root:
+            continue
+        state = store.get_runtime_sync(_segment_cycle_key(root))
+        pending_ids = _segment_cycle_pending_ids(state)
+        if not pending_ids:
+            continue
+        context = store.get_runtime_sync(_segment_dispatch_context_key(root))
+        if isinstance(context, Mapping):
+            if any(
+                bool(context.get(field))
+                for field in ("scheduler_pause", "backup_pause", "dispatch_pause")
+            ):
+                continue
+            try:
+                if float(context.get("db_pause_until") or 0.0) > now:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            if not bool(context.get("cluster_cron_allowed", True)):
+                continue
+            excluded = set(_normalize_segment_ids(context.get("blocked_ids")))
+            excluded.update(_normalize_segment_ids(context.get("sql_managed_ids")))
+            excluded.update(_normalize_segment_ids(context.get("static_configured_ids")))
+            pending_ids.difference_update(excluded)
+        if pending_ids:
+            pending_roots.add(root)
+    return pending_roots
+
+
 def _segment_cycle_admission_inputs(
     state: Mapping[str, object] | None,
     planned_ids: list[int] | tuple[int, ...] | set[int],
@@ -5788,6 +5835,40 @@ def _scheduler_round_robin_order(
     start = int(cursor or 0) % len(roots)
     rotated = roots[start:] + roots[:start]
     return [rotated[index % len(rotated)] for index in range(max(1, int(worker_slots or 1)))]
+
+
+def _scheduler_pending_roots(
+    installs: Iterable[object],
+    *,
+    priority_pending_roots: Iterable[object] = (),
+    persisted_pending_roots: Iterable[object] = (),
+    ring_maps: Iterable[Mapping[str, object]] = (),
+) -> set[str]:
+    """Return every root that must participate in shared fair dispatch.
+
+    Volatile rings are not the complete scheduler queue: an admitted ordinary
+    cycle lives in ``TaskStore.runtime_sync`` and is consumed by the persisted
+    refill worker while the main planner is busy. Keep those roots in the
+    same host-wide fairness set so a persisted cycle cannot become invisible
+    between plan refreshes and lose every free slot to unrelated roots.
+    """
+
+    roots = {
+        str(root).strip()
+        for root in priority_pending_roots
+        if str(root or "").strip()
+    }
+    roots.update(
+        str(root).strip()
+        for root in persisted_pending_roots
+        if str(root or "").strip()
+    )
+    ring_sources = tuple(ring_maps)
+    for inst in installs:
+        root = str(getattr(inst, "root", "") or "").strip()
+        if root and any(bool(ring_map.get(root)) for ring_map in ring_sources):
+            roots.add(root)
+    return roots
 
 
 def _set_scheduler_distribution_roots(
@@ -18739,18 +18820,26 @@ def run_loop(
                 or bool(campaign_rebuild_reg_rings.get(root))
             )
         }
-        pending_roots = set(priority_pending_roots)
-        pending_roots.update(
-            root
-            for root in {str(getattr(inst, "root", "") or "").strip() for inst in installs}
-            if root
-            and (
-                bool(segment_sql_long_rings.get(root))
-                or bool(segment_sql_rings.get(root))
-                or bool(segment_resume_rings.get(root))
-                or bool(segment_prio_rings.get(root))
-                or bool(segment_reg_rings.get(root))
-            )
+        # Persisted ordinary cycles are an executable queue even while their
+        # volatile planner rings are intentionally empty. Refresh this
+        # read-only projection on every dispatch tick so the refill worker's
+        # roots remain visible to the same host-wide round-robin/fairness gate
+        # between heavyweight plan refreshes.
+        persisted_pending_dispatch_roots = _scheduler_persisted_pending_roots(
+            store,
+            [str(getattr(inst, "root", "") or "") for inst in installs],
+        )
+        pending_roots = _scheduler_pending_roots(
+            installs,
+            priority_pending_roots=priority_pending_roots,
+            persisted_pending_roots=persisted_pending_dispatch_roots,
+            ring_maps=(
+                segment_sql_long_rings,
+                segment_sql_rings,
+                segment_resume_rings,
+                segment_prio_rings,
+                segment_reg_rings,
+            ),
         )
         _set_scheduler_priority_pending_roots(priority_pending_roots)
         pending_import_roots = {
