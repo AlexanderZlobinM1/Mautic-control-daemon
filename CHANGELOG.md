@@ -1,3 +1,8 @@
+## 1.5.102 - 2026-10-12
+
+- Apply accepted canonical segment lane maps while unrelated local runtime
+  reconciliation remains pending, without overwriting that local delta.
+
 ## 1.5.101 - 2026-10-12
 
 - Apply resolved MCC runtime maps when effective local config differs even if

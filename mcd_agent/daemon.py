@@ -13192,6 +13192,38 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                 last_runtime_overrides_error = ""
                 next_runtime_overrides_poll_at = now + poll_interval
             elif status == "deferred_local_delta":
+                # An unrelated local runtime delta (for example a message
+                # queue migration retry) must not strand an already accepted
+                # canonical segment-lane snapshot. Apply only the accepted
+                # lane scopes here; the pending local delta remains queued and
+                # continues through its own rebase/ACK path.
+                accepted_runtime = _accepted_local_runtime_snapshot(store)
+                lane_keys = {
+                    "segment_priority_instance_settings",
+                    "segment_super_priority_instance_settings",
+                }
+                accepted_lanes = {
+                    key: deepcopy(value)
+                    for key, value in accepted_runtime.items()
+                    if key in lane_keys
+                }
+                if accepted_lanes:
+                    effective_runtime = local_runtime_overrides(config)
+                    lane_runtime = dict(effective_runtime)
+                    lane_runtime.update(accepted_lanes)
+                    if lane_runtime != effective_runtime:
+                        applied = apply_remote_overrides(config, lane_runtime)
+                        next_cfg = applied.get("config")
+                        if isinstance(next_cfg, AgentConfig):
+                            config = next_cfg
+                            pusher.cfg = config
+                            _persist_resolved_runtime_to_config(
+                                config,
+                                effective_runtime,
+                                lane_runtime,
+                                store.get_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY) or {},
+                            )
+                            logging.info("runtime-overrides accepted segment lanes applied during local-delta retry")
                 startup_runtime_sync_pending = True
                 runtime_overrides_sync_requested = True
                 next_runtime_overrides_poll_at = 0.0
