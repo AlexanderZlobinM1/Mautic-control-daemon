@@ -1,3 +1,8 @@
+## 1.5.110 - 2026-10-12
+
+- Preserve canonical instance desired rows in durable accepted snapshots and
+  republish instance ACKs during unrelated deferred local-delta retries.
+
 ## 1.5.109 - 2026-10-12
 
 - Project host ACK effective instance maps to the exact sparse desired UIDs,

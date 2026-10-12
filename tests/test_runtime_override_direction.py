@@ -961,7 +961,13 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
         self.assertTrue(daemon._store_desired_runtime_push_result(store, result))
         self.assertEqual(
             store.values["mcc_runtime_desired_state"],
-            {"revision": 13, "instance_revisions": {"generic.sales-snap.com@MauticFarm-02": 9}},
+            {
+                "revision": 13,
+                "instance_revisions": {"generic.sales-snap.com@MauticFarm-02": 9},
+                "instance_desired_states": {
+                    "generic.sales-snap.com@MauticFarm-02": {"revision": 9},
+                },
+            },
         )
 
     def test_local_restart_preserves_remote_special_ring_when_baseline_has_no_instance_key(self) -> None:
