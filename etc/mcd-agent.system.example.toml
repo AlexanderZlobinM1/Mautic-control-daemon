@@ -100,8 +100,8 @@ scheduler_pause_flag_path = "/opt/mcd/var/scheduler.pause"
 weights_recalc_interval_sec = 86400
 # Retry count for failed command run.
 task_retry_max = 1
-# Retries after the initial attempt for an automatic segment command.
-# The approved host-profile default is 2 (at most 3 starts for one segment item).
+# Inclusive total starts for one automatic segment command. This historical
+# key name is retained; a value of 3 means exactly three starts, with no +1.
 segment_retry_count = 2
 # Delay before retry, sec.
 task_retry_delay_sec = 2

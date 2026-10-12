@@ -572,9 +572,11 @@ Important:
 - Import and retry invariants:
   - Imports are singleton per instance/root, while different instances may
     import in parallel within host/profile capacity.
-  - `runtime.segment_retry_count` is the number of retries after the initial
-    launch; total starts are exactly `segment_retry_count + 1` (approved
-    default: three starts).
+  - `runtime.segment_retry_count` is a historical key whose value is the
+    inclusive total-start cap for an automatic segment item, not the number
+    of retries after launch: `1` means one start and `3` means exactly three
+    starts. Existing profile values are not rewritten and no implicit `+1` is
+    applied; `0` is safely admitted as one effective start.
 - Self-update safety:
   - Ordinary Mautic/PHP console workers (`segments`, `campaigns`, `import`, and
     other application commands) are not self-update blockers. They survive the
@@ -594,9 +596,9 @@ Important:
     - `>1` = bounded retries (attempt cap),
     - `0` or negative = unlimited immediate retries (with `task_retry_delay_sec` pause).
   - `runtime.segment_retry_count` is the host-profile policy for automatic
-    segment commands and counts retries after the initial attempt: `0` means
-    one start, `2` (the approved default) means at most three starts. A non-zero Mautic
-    exit is recorded as the segment's terminal outcome after the bound; it is
+    segment commands and caps total starts: `1` means one start and `3` means
+    at most three starts. A non-zero Mautic exit is recorded as the segment's
+    terminal outcome after the bound; it is
     not a daemon failure, and the dispatcher continues with the next eligible
     item while the failed item remains due for the next cycle.
   - global default: `runtime.command_timeout_sec = 0` and `runtime.worker_watchdog_sec = 0` (long-running tasks are not killed by timeout).

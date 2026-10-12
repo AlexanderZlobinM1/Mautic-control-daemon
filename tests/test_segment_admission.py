@@ -1254,7 +1254,7 @@ class SegmentAdmissionTests(unittest.TestCase):
                 _monitor_running(
                     config=SimpleNamespace(
                         task_retry_max=1,
-                        segment_retry_count=2,
+                        segment_retry_count=3,
                         task_retry_delay_sec=0,
                     ),
                     store=store,
@@ -1337,7 +1337,7 @@ class SegmentAdmissionTests(unittest.TestCase):
 
                 config = SimpleNamespace(
                     task_retry_max=1,
-                    segment_retry_count=2,
+                    segment_retry_count=3,
                     task_retry_delay_sec=0,
                 )
                 with patch("mcd_agent.daemon._spawn_command", side_effect=spawn):

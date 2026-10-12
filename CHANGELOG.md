@@ -1,3 +1,11 @@
+## 1.5.133 - 2026-10-12
+
+- Make the historical `runtime.segment_retry_count` key an explicit inclusive
+  total-start cap: a profile value of `3` means exactly three starts, not an
+  initial start plus three retries. Existing profile numbers are preserved;
+  the scheduler no longer applies a silent `+1`, and `0` is safely bounded to
+  one effective start. Add canonical algorithm, test, and receipt coverage.
+
 ## 1.5.132 - 2026-10-12
 
 - Prevent a slow full inventory/DB/filter plan from suspending dispatch for a

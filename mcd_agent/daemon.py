@@ -12289,8 +12289,11 @@ def _effective_task_retry_max(config: AgentConfig, task: RunningTask) -> int:
     if task.manual_request_id is None and task.task_type == "campaign_trigger" and retry_max == 1:
         retry_max = _CAMPAIGN_TRIGGER_AUTOMATIC_RETRY_CAP
     if task.manual_request_id is None and task.task_type == "segment" and task.entity_id is not None:
-        segment_retry_count = max(0, int(getattr(config, "segment_retry_count", 2) or 0))
-        retry_max = segment_retry_count + 1
+        # ``segment_retry_count`` is a historical key name, but its current
+        # contract is an inclusive total-start cap. Do not add an implicit
+        # initial attempt: a profile value of 3 means starts 1..3 exactly.
+        segment_start_limit = max(1, int(getattr(config, "segment_retry_count", 2) or 0))
+        retry_max = segment_start_limit
     return retry_max
 
 

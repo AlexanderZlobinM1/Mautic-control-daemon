@@ -116,6 +116,13 @@ TaskStore fixture должен сохранять `cycle_id`, `updated_at` и sp
    работают outside shared regular `11` capacity (`4 outside 11`), не
    вычитаются из host/instance regular counters и не дублируют closure/lock.
 
+10. Проверяется retry contract: `runtime.segment_retry_count` — inclusive
+    total-start cap, несмотря на историческое имя ключа. Значение `3` даёт
+    ровно три фактических запуска одного segment item, а не initial плюс три;
+    значение `0` даёт один безопасный effective start. Receipt и TaskStore
+    history обязаны показать attempts `1..3` и terminal callback после третьего
+    неуспешного запуска, после чего следующий item получает admission.
+
 ## Guard assertions
 
 Для pending cycle bypass-ится только global new-admission baseline cadence.

@@ -876,8 +876,10 @@ class AgentConfig:
     segment_priority_instance_settings: dict[str, Any] = field(default_factory=dict)
     segment_super_priority_instance_settings: dict[str, Any] = field(default_factory=dict)
     segment_stale_after_sec: int = 24 * 60 * 60
-    # Number of retries after the initial attempt for an automatic segment
-    # command. Values below zero are normalized to zero at load time.
+    # Historical wire/config name retained for compatibility. The value is
+    # the maximum total starts for one automatic segment item, not an
+    # additional-retry count. Values below zero are normalized to zero at
+    # load time and become one safe effective start at admission.
     segment_retry_count: int = 2
 
 

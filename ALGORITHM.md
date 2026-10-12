@@ -4,7 +4,7 @@
 фактическую схему после исправления admission и должен обновляться вместе с
 кодом, тестами и runtime receipt. Документ не является разрешением на
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.132 (follow-up после immutable
+Актуальная редакция этого канона — MCD 1.5.133 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам
@@ -399,19 +399,19 @@ adopted/static/native priority workers и SQL workers, а wrapper/повторн
 priority launch не могут вместе пересечь explicit cap; независимые lane
 budgets при этом не сливаются.
 
-### Import lifecycle and segment ownership
+### Жизненный цикл import и владение сегментами
 
-Владение import определяется признаками lifecycle, а не только числовым
-status. Для Mautic 4–7 непустой `date_ended` — terminal evidence, который
-перекрывает устаревший `queued` или `running` status. Failed, paused, cancelled
-и completed imports остаются видимыми в lane `done`, но их target segments не
-попадают в `active_import_target_ids` и не блокируют ordinary segment или
-import follow-up. SQL-подсчёт pending imports также требует
+Владение импортом определяется признаками жизненного цикла, а не только
+числовым status. Для Mautic 4–7 непустой `date_ended` — terminal evidence,
+который перекрывает устаревший `queued` или `running` status. Failed, paused,
+cancelled и completed imports остаются видимыми в lane `done`, но их target
+segments не попадают в `active_import_target_ids` и не блокируют ordinary
+segment или import follow-up. SQL-подсчёт pending imports также требует
 `date_ended IS NULL`.
 
-Только import со статусом `queued` или `running` без terminal date может
+Только импорт со статусом `queued` или `running` без terminal date может
 зарезервировать явно указанные в `defaults.list` segment targets. Это сохраняет
-FIFO среди eligible imports и позволяет исторической строке, например с
+FIFO среди eligible imports и позволяет исторической строке, например со
 status `1`, освободить свой singleton после появления `date_ended`. Retry и
 recovery остаются в существующем import recovery path и используют независимые
 признаки живого процесса.
@@ -556,10 +556,13 @@ TaskStore duplicate, OS execution и self-update critical locks; он тольк
 ## 5. Retry и terminal/error
 
 `done` записывается только после успешного process exit. Для automatic segment
-`runtime.segment_retry_count` — внешняя host-profile policy и означает число
-повторов после initial attempt: approved default `2` даёт максимум три
-фактических запуска одного item, без хардкода хоста или segment ID. До
-исчерпания bound item остаётся claimed для respawn.
+`runtime.segment_retry_count` — историческое имя внешней host-profile policy,
+но значение является inclusive cap общего числа запусков одного item, а не
+числом дополнительных повторов: `1` означает один запуск, `3` — ровно три
+запуска (`attempts` 1..3). Значение `0` или отрицательное безопасно даёт один
+эффективный запуск. Числовые значения существующих профилей не переписываются;
+в текущем контракте к ним не применяется скрытое `+1`. До исчерпания bound
+item остаётся claimed для respawn.
 
 Код Mautic с `rc != 0` сам по себе не является ошибкой MCD. Если MCD честно
 запустил process, выполнил bounded retries, записал terminal outcome текущего
@@ -605,7 +608,7 @@ cycle без ручного `segments:update`, profile/capacity/data changes. Ad
 | важный root с заполненной capacity не ставит global remaining barrier | `mcd_agent/daemon.py:_scheduler_segment_entity_allowed`, `_scheduler_important_root_dispatchable` | `test_remaining_root_uses_free_host_slot_when_important_root_is_instance_full` |
 | root-local continuous monitor/refill and shared claim lifecycle | `mcd_agent/daemon.py:_iter_instances_with_root_dispatch_gate`, `_SchedulerRuntimeRegistry`, `_lifecycle_monitor_scheduler`, `_ordinary_persisted_refill_worker` | `tests/test_segment_liveness.py` root-gate/registry/monitor rows; fresh M6/M7 root-local cycle receipt |
 | lazy empty plan versus full-mode observed-ID fallback | `mcd_agent/daemon.py` ordinary snapshot planners | `tests/test_segment_liveness.py` lazy snapshot row; fresh M6/M7 full/lazy planning receipt |
-| profile retry budget, three starts and bounded orphan expiry | `mcd_agent/config.py`, `mcd_agent/daemon.py` | `tests/test_segment_admission.py` |
+| profile total-start budget (value `3` means exactly three starts) and bounded orphan expiry | `mcd_agent/config.py`, `mcd_agent/daemon.py` | `tests/test_segment_admission.py` |
 | monitor queued/running/done/error receipt | `mcd_agent/daemon.py` | `tests/test_scheduler_monitor_cycle.py`, `tests/test_signals_scheduler_history.py` |
 | heavy-plan deferral and durable pending guard | `mcd_agent/daemon.py` | `tests/test_segment_liveness.py`, live M6/M7 acceptance receipt |
 | self-update preserves ordinary application work and all durable queues | `mcd_agent/self_update.py`, `daemon.py`, systemd unit | `tests/test_self_update_version_reporting.py` |
