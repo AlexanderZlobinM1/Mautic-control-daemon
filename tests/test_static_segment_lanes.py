@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
+from mcd_agent import daemon
 from mcd_agent.daemon import (
     _manual_static_lane_for_ids,
     _segment_static_closure_conflict,
@@ -356,6 +358,81 @@ class StaticSegmentLaneTests(unittest.TestCase):
             orphan_grace_sec=1,
         )
         self.assertEqual(reconciled["lanes"][PRIORITY]["running"], [59])
+
+    def test_foreign_chain_marker_does_not_block_static_root(self) -> None:
+        root = "/var/www/current"
+        foreign_root = "/var/www/grubinshowroom/public_html"
+        chain_key = daemon._segment_chain_runtime_key(root, 59)
+
+        class Store:
+            @staticmethod
+            def get_runtime_sync(key: str) -> dict[str, object] | None:
+                if key == chain_key:
+                    return {
+                        "schema": "mcd-segment-execution-chain-v1",
+                        "root": foreign_root,
+                        "owner_id": 59,
+                        "entity_ids": [59],
+                        "status": "running",
+                        "task_key": f"{foreign_root}|segment_priority|59",
+                        "pid": 123,
+                        "pid_start_time": 456,
+                    }
+                return None
+
+            @staticmethod
+            def running_rows() -> list[dict[str, object]]:
+                return []
+
+        state = self._claimed_running_state(PRIORITY)
+        evidence = _static_lane_runtime_evidence(
+            store=Store(),
+            root=root,
+            static_state=state,
+            running={},
+            priority_executor=None,
+            now_ts=110.0,
+        )
+        self.assertNotIn("taskstore_active", evidence[(PRIORITY, 59)])
+
+    def test_live_chain_owner_still_protects_non_owner_static_member(self) -> None:
+        root = "/var/www/current"
+        chain_key = daemon._segment_chain_runtime_key(root, 59)
+
+        class Store:
+            @staticmethod
+            def get_runtime_sync(key: str) -> dict[str, object] | None:
+                if key == chain_key:
+                    return {
+                        "schema": "mcd-segment-execution-chain-v1",
+                        "root": root,
+                        "owner_id": 59,
+                        "entity_ids": [59],
+                        "status": "running",
+                        "task_key": f"{root}|segment_priority|59",
+                        "pid": 123,
+                        "pid_start_time": 456,
+                        "command_str": "php bin/console mautic:segments:update -i 59",
+                    }
+                return None
+
+            @staticmethod
+            def running_rows() -> list[dict[str, object]]:
+                return []
+
+        state = self._claimed_running_state(PRIORITY)
+        with patch.object(daemon, "_is_pid_alive", return_value=True), patch.object(
+            daemon, "_pid_start_time", return_value=456
+        ), patch.object(daemon, "_pid_matches_task_command", return_value=True):
+            evidence = _static_lane_runtime_evidence(
+                store=Store(),
+                root=root,
+                static_state=state,
+                running={},
+                priority_executor=None,
+                now_ts=110.0,
+            )
+        self.assertTrue(evidence[(PRIORITY, 59)]["taskstore_active"])
 
 
 if __name__ == "__main__":

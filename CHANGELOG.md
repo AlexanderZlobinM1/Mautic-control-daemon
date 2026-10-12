@@ -1,3 +1,12 @@
+## 1.5.143 - 2026-10-12
+
+- Make persisted segment-chain reverse indexes root-, task-key-, owner-, and
+  cycle-scoped. Foreign or stale legacy payloads are ignored as liveness and
+  cannot block another root; a live owner with matching PID start identity
+  still protects every member of its genuine closure. Bound terminal chain
+  reconciliation to the current cycle's members and add cross-root,
+  generation, recycled-marker, and live-owner regressions.
+
 ## 1.5.142 - 2026-10-12
 
 - Derive ordinary orphan grace from the existing profile-managed

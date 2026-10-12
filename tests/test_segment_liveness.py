@@ -907,6 +907,59 @@ class SegmentLivenessTests(unittest.TestCase):
         self.assertEqual(daemon._segment_cycle_pending_order(repaired), [])
         store.close()
 
+    def test_foreign_chain_reverse_index_is_not_loaded_or_reused(self) -> None:
+        root = "/var/www/alex/current"
+        foreign_root = "/var/www/grubinshowroom/public_html"
+        store = TaskStore(":memory:")
+        store.put_runtime_sync(
+            daemon._segment_chain_runtime_key(root, 61),
+            {
+                "schema": "mcd-segment-execution-chain-v1",
+                "root": foreign_root,
+                "owner_id": 61,
+                "entity_ids": [61, 62],
+                "status": "running",
+                "task_key": f"{foreign_root}|segment_priority|61",
+                "pid": 123,
+                "pid_start_time": 456,
+            },
+        )
+        self.assertEqual(daemon._segment_chain_runtime_load(store, root, 61), {})
+        self.assertEqual(daemon._segment_chain_entity_ids(store, root, 61), [61])
+        store.close()
+
+    def test_chain_reverse_index_is_scoped_to_current_cycle_generation_and_members(self) -> None:
+        root = "/var/www/alex/generation"
+        store = TaskStore(":memory:")
+        state, _added, _started = sync_cycle(
+            None,
+            planned_ids=[61, 62],
+            never_built=[],
+            running_ids=[],
+            now_ts=100.0,
+        )
+        store.put_runtime_sync(cycle_key(root), state)
+        store.put_runtime_sync(
+            daemon._segment_chain_runtime_key(root, 61),
+            {
+                "schema": "mcd-segment-execution-chain-v1",
+                "root": root,
+                "owner_id": 61,
+                "entity_ids": [61, 62, 999],
+                "status": "running",
+                "cycle_id": state["cycle_id"],
+                "task_key": f"{root}|segment|61",
+                "pid": 123,
+                "pid_start_time": 456,
+            },
+        )
+        self.assertEqual(daemon._segment_chain_entity_ids(store, root, 61), [61, 62])
+        stale = dict(store.get_runtime_sync(daemon._segment_chain_runtime_key(root, 61)))
+        stale["cycle_id"] = "older-cycle"
+        store.put_runtime_sync(daemon._segment_chain_runtime_key(root, 61), stale)
+        self.assertEqual(daemon._segment_chain_entity_ids(store, root, 61), [61])
+        store.close()
+
     def test_recycled_marker_pid_enters_grace_then_releases_without_duplicate(self) -> None:
         root = "/var/www/alex/recycled"
         store = TaskStore(":memory:")

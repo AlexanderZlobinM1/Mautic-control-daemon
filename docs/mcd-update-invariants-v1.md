@@ -46,6 +46,13 @@ duplicate spawn, all durable runtime state:
 - claims, running state, terminal receipts, monitor projections, and runtime
   sync snapshots.
 
+Persisted segment-chain reverse indexes are scoped by canonical root, task-key
+owner, closure membership, and cycle generation. A legacy or foreign reverse
+index is metadata only: it cannot keep a different root claimed or defer its
+ordinary work. A live owner with matching PID start identity remains the sole
+source of liveness for its genuine closure, so overlapping IDs in separate
+roots stay isolated without sacrificing restart adoption.
+
 The supervisor unit uses the installed venv package and `KillMode=process`.
 After restart, the daemon adopts surviving application workers from TaskStore;
 source-tree paths are not used as worker identity.

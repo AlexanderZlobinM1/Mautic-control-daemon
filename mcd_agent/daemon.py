@@ -2356,6 +2356,65 @@ def _segment_chain_runtime_key(root: str, owner_id: int) -> str:
     return f"{_SEGMENT_CHAIN_RUNTIME_PREFIX}{digest}:{int(owner_id)}"
 
 
+def _segment_chain_runtime_payload_valid(
+    root: str,
+    payload: Mapping[str, object],
+    *,
+    member_id: int | None = None,
+) -> bool:
+    """Reject legacy reverse-index hints that do not belong to this root.
+
+    The storage key is root-scoped, but old payloads were persisted before
+    that scope was consistently enforced.  A stale value under a valid key
+    is only metadata; it must never make a foreign process look like a live
+    owner of this root's closure.
+    """
+
+    if payload.get("schema") != _SEGMENT_CHAIN_RUNTIME_SCHEMA:
+        return False
+    canonical_root = str(root or "").strip()
+    if not canonical_root or str(payload.get("root") or "").strip() != canonical_root:
+        return False
+    try:
+        owner_id = int(payload.get("owner_id") or 0)
+    except (TypeError, ValueError):
+        return False
+    if owner_id <= 0:
+        return False
+    entity_ids: list[int] = []
+    raw_ids = payload.get("entity_ids")
+    for raw_id in raw_ids if isinstance(raw_ids, (list, tuple, set)) else []:
+        try:
+            entity_id = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        if entity_id > 0 and entity_id not in entity_ids:
+            entity_ids.append(entity_id)
+    if owner_id not in entity_ids:
+        return False
+    if member_id is not None:
+        try:
+            requested_id = int(member_id)
+        except (TypeError, ValueError):
+            return False
+        if requested_id <= 0 or requested_id not in entity_ids:
+            return False
+    task_key = str(payload.get("task_key") or "").strip()
+    if task_key:
+        task_parts = task_key.rsplit("|", 2)
+        if len(task_parts) != 3 or task_parts[0] != canonical_root:
+            return False
+        if not task_parts[1].startswith("segment"):
+            return False
+        try:
+            task_owner_id = int(task_parts[2])
+        except (TypeError, ValueError):
+            return False
+        if task_owner_id != owner_id:
+            return False
+    return True
+
+
 def _segment_native_coverage_key(root: str) -> str:
     digest = hashlib.sha1(str(root or "").encode("utf-8")).hexdigest()[:24]
     return f"{_SEGMENT_NATIVE_COVERAGE_PREFIX}{digest}"
@@ -2616,7 +2675,10 @@ def _segment_chain_runtime_load(
     if sid <= 0:
         return {}
     raw = store.get_runtime_sync(_segment_chain_runtime_key(root, sid))
-    return dict(raw) if isinstance(raw, Mapping) else {}
+    if not isinstance(raw, Mapping):
+        return {}
+    payload = dict(raw)
+    return payload if _segment_chain_runtime_payload_valid(root, payload, member_id=sid) else {}
 
 
 def _segment_chain_entity_ids(
@@ -2635,6 +2697,18 @@ def _segment_chain_entity_ids(
     payload = _segment_chain_runtime_load(store, root, owner)
     if payload.get("schema") != _SEGMENT_CHAIN_RUNTIME_SCHEMA:
         return [owner]
+    try:
+        cycle_state = store.get_runtime_sync(_segment_cycle_key(str(root)))
+    except Exception:
+        cycle_state = None
+    current_cycle_id = (
+        str(cycle_state.get("cycle_id") or "").strip()
+        if isinstance(cycle_state, Mapping)
+        else ""
+    )
+    payload_cycle_id = str(payload.get("cycle_id") or "").strip()
+    if payload_cycle_id and current_cycle_id and payload_cycle_id != current_cycle_id:
+        return [owner]
     raw_ids = payload.get("entity_ids")
     ids: list[int] = []
     for raw_id in raw_ids if isinstance(raw_ids, (list, tuple, set)) else []:
@@ -2644,7 +2718,20 @@ def _segment_chain_entity_ids(
             continue
         if sid > 0 and sid not in ids:
             ids.append(sid)
-    return ids or [owner]
+    if not ids or owner not in ids:
+        return [owner]
+    if isinstance(cycle_state, Mapping):
+        cycle_ids = set(
+            _normalize_segment_ids(
+                [*(cycle_state.get("items") or []), *(cycle_state.get("follow_up") or [])]
+            )
+        )
+        if cycle_ids and owner in cycle_ids:
+            scoped_ids = [sid for sid in ids if sid in cycle_ids]
+            if owner not in scoped_ids:
+                return [owner]
+            ids = scoped_ids
+    return ids
 
 
 def _segment_chain_runtime_write(
@@ -2672,6 +2759,18 @@ def _segment_chain_runtime_write(
             normalized.append(sid)
     if not normalized:
         normalized = [int(owner_id)]
+    if task is not None:
+        task_root = str(task.root or "").strip()
+        task_key_root = str(task.task_key or "").rsplit("|", 2)[0]
+        if task_root != str(root or "").strip() or task_key_root != str(root or "").strip():
+            logging.warning(
+                "[%s] refusing foreign segment chain marker owner=%s task_root=%s task_key_root=%s",
+                root,
+                owner_id,
+                task_root,
+                task_key_root,
+            )
+            return
     payload = _segment_chain_runtime_load(store, root, int(owner_id))
     payload.update(
         {
@@ -3737,10 +3836,13 @@ def _static_lane_runtime_evidence(
                 chain_payload.get("schema") == _SEGMENT_CHAIN_RUNTIME_SCHEMA
                 and str(chain_payload.get("status") or "").strip().lower()
                 in {"admitting", "running"}
+                and _segment_cycle_marker_process_live(chain_payload)
             ):
                 # One chain has one executor owner. Reverse-index evidence
                 # prevents non-owner members from being released by static
                 # orphan reconciliation while that owner is still alive.
+                # A persisted marker without current PID/start identity is
+                # only stale metadata and must not block this root.
                 evidence["taskstore_active"] = True
             if marker:
                 for field in ("last_independent_at", "started_at"):
