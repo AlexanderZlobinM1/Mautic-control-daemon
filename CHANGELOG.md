@@ -1,3 +1,8 @@
+## 1.5.108 - 2026-10-12
+
+- Align the patch-resolution contract and release metadata with immutable
+  MCD 1.5.108.
+
 ## 1.5.107 - 2026-10-12
 
 - Republish the self-update admission barrier race fix with normalized source
