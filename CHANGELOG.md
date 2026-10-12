@@ -1,3 +1,8 @@
+## 1.5.124 - 2026-10-12
+
+- Preserve stable priority ID order across legacy alias and modern projection
+  merges; deduplicate without treating execution order as a set.
+
 ## 1.5.123 - 2026-10-12
 
 - Admit persisted full-scan pending IDs into the durable cycle before regular

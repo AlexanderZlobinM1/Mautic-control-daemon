@@ -4,7 +4,7 @@
 фактическую схему после исправления admission и должен обновляться вместе с
 кодом, тестами и runtime receipt. Документ не является разрешением на
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.123 (follow-up после immutable
+Актуальная редакция этого канона — MCD 1.5.124 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам
@@ -19,6 +19,8 @@ chunk. Recurring super-priority admission учитывает общую farm-cap
 ACK evidence для modern priority и legacy whitelist использует один
 canonical `segments` codec; статус не подменяется при несовпадении desired и
 effective.
+Priority and super-priority IDs are deduplicated stably; execution order is
+semantic and is never normalized by sorting or set comparison.
 `pending_full_scan` reconciles before `segment_cycle_sync`, поэтому persisted
 ordinary IDs are present in `cycle.items` before claim validation and survive
 restart without starvation.

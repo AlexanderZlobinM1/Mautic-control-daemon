@@ -666,7 +666,9 @@ def _merge_legacy_priority_alias_with_metadata(
             if legacy_ids:
                 merged[uid_text] = {
                     **modern_value,
-                    "segments": sorted(set(modern_ids) | set(legacy_ids)),
+                    # Preserve execution order from the legacy alias while
+                    # appending only modern IDs that are not already present.
+                    "segments": list(dict.fromkeys([*legacy_ids, *modern_ids])),
                 }
     out["segment_priority_instance_settings"] = merged
     return out

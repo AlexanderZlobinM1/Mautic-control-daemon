@@ -121,7 +121,7 @@ class CampaignRingDispatchTests(unittest.TestCase):
             },
             {},
         )
-        self.assertEqual(merged["segment_priority_instance_settings"][uid], {"segments": [23, 44, 55, 61]})
+        self.assertEqual(merged["segment_priority_instance_settings"][uid], {"segments": [44, 61, 55, 23]})
 
     def test_restart_reconciles_and_adopts_live_persisted_worker(self) -> None:
         class Store:
