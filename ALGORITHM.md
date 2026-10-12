@@ -4,7 +4,7 @@
 фактическую схему после исправления admission и должен обновляться вместе с
 кодом, тестами и runtime receipt. Документ не является разрешением на
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.130 (follow-up после immutable
+Актуальная редакция этого канона — MCD 1.5.131 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам
@@ -220,8 +220,11 @@ config на его profile baseline и только после этого при
    (`segments`, `campaigns`, `import` и любой другой application command) не
    является blocker-ом. Он должен пережить restart/reinstall MCD, сохранить
    PID/start identity, а после старта supervisor быть переусыновлён из
-   durable TaskStore без duplicate spawn. Нельзя превращать список process
-   names или длительность Mautic-задачи в update gate.
+   durable TaskStore без duplicate spawn. Все durable очереди и оперативное
+   состояние (`TaskStore`, `runtime_sync`, ordinary/static/import queues,
+   claims, running/follow-up, retry и monitor projections) должны сохраниться
+   без сброса и быть подхвачены после обновления. Нельзя превращать список
+   process names или длительность Mautic-задачи в update gate.
 8. Blocker-ами являются только MCD-owned critical operations: active backup
    lock, source/update lease для deployment/self-update и MCD-owned migration,
    а также любой новый critical operation только после явного добавления его
@@ -472,6 +475,7 @@ cycle без ручного `segments:update`, profile/capacity/data changes. Ad
 | host/instance slots и rotation | `mcd_agent/daemon.py` | `tests/test_campaign_ring_dispatch.py` |
 | profile retry budget, three starts and bounded orphan expiry | `mcd_agent/config.py`, `mcd_agent/daemon.py` | `tests/test_segment_admission.py` |
 | monitor queued/running/done/error receipt | `mcd_agent/daemon.py` | `tests/test_scheduler_monitor_cycle.py`, `tests/test_signals_scheduler_history.py` |
+| self-update preserves ordinary application work and all durable queues | `mcd_agent/self_update.py`, `daemon.py`, systemd unit | `tests/test_self_update_version_reporting.py` |
 | authority-safe desired runtime projection | `mcd_agent/config.py`, `mcd_agent/runtime_overrides.py` | `tests/test_runtime_override_direction.py`, `tests/test_runtime_stable_keys.py`, `tests/test_runtime_migration_adapter.py` |
 | natural b2bss/Adonis evidence | runtime TaskStore/MCC receipts | rollout acceptance (после package/install) |
 

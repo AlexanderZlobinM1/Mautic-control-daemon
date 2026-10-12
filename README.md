@@ -528,7 +528,9 @@ Important:
   - Ordinary Mautic/PHP console workers (`segments`, `campaigns`, `import`, and
     other application commands) are not self-update blockers. They survive the
     MCD supervisor restart (`KillMode=process`) and are re-adopted from
-    TaskStore after startup; no process-name heuristic may defer an update.
+    TaskStore after startup; all TaskStore/runtime_sync queue state, claims,
+    running/follow-up/retry state and monitor projections are preserved across
+    update/reinstall; no process-name heuristic may defer an update.
   - Only MCD-owned critical operation barriers may defer self-update: active
     backup locks, the source/update lease used by deployment and migration
     operations, and an explicitly declared MCD critical-operation lock.

@@ -10121,6 +10121,53 @@ def _segment_task_limit_after_import(
     return max(0, max(0, int(segment_slot_limit or 0)) - _running_count(running, root, "import"))
 
 
+def _segment_pending_dispatch_limits(
+    config: AgentConfig,
+    throttled_active: bool,
+    running: dict[str, RunningTask],
+    root: str,
+    *,
+    segment_slot_limit: int,
+    priority_pending: bool,
+    store: TaskStore | None = None,
+    now_ts: float | None = None,
+    sql_db_running_count: int | None = None,
+) -> tuple[int, int]:
+    """Return the absolute pending cap and the currently free launch budget.
+
+    ``total_limit`` passed to ``_fill_from_ring`` is an absolute per-root
+    segment cap (after subtracting a singleton import worker).  The second
+    value is only the number of new launches available in this scheduler tick.
+    These values must not be collapsed: doing so underfills a persisted cycle
+    whenever it already has one or more ordinary workers running.
+
+    When no priority work is ready, ordinary pending work may borrow unused
+    priority capacity.  The profile total remains subject to the explicit
+    scheduler host/instance caps enforced by ``_submit_if_slot``.
+    """
+
+    regular_budget = max(
+        1,
+        _effective_segment_regular_slot_limit(config, throttled_active),
+    )
+    if not throttled_active and not priority_pending:
+        regular_budget = max(regular_budget, max(0, int(segment_slot_limit or 0)))
+    total_limit = _segment_task_limit_after_import(running, root, regular_budget)
+    launch_budget = min(
+        max(0, total_limit),
+        _segment_shared_slots_available(
+            running,
+            root,
+            regular_budget,
+            store=store,
+            config=config,
+            now_ts=now_ts,
+            sql_db_running_count=sql_db_running_count,
+        ),
+    )
+    return total_limit, launch_budget
+
+
 def _import_followup_slot_limit(
     running: dict[str, RunningTask],
     root: str,
@@ -16168,35 +16215,33 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                         excluded_ids=sql_managed_segment_ids | set(segment_static_ids_for_inst),
                     )
                 )
-                # Persisted ordinary work uses the ordinary regular budget;
-                # static priority/super-priority capacity is a separate lane.
-                # If throttling reduces that budget to zero, retain one
-                # shared slot for already-admitted work as required by the
-                # durable-cycle liveness contract.
-                pending_slot_limit = max(
-                    1,
-                    _effective_segment_regular_slot_limit(
-                        config,
-                        segment_throttled_active,
+                # Persisted ordinary work uses the regular budget while
+                # priority work is ready, but may borrow unused priority
+                # capacity when that ring is empty.  Keep the absolute cap
+                # separate from the free launch budget: otherwise a cycle
+                # with one running worker and a 3-worker regular budget is
+                # incorrectly capped at 2 total workers.
+                pending_total_limit, pending_launch_budget = _segment_pending_dispatch_limits(
+                    config,
+                    segment_throttled_active,
+                    running,
+                    root,
+                    segment_slot_limit=segment_slot_limit,
+                    priority_pending=_ring_has_launchable(
+                        seg_prio_ring,
+                        running=running,
+                        root=root,
+                        task_type="segment",
                     ),
+                    store=store,
+                    now_ts=now,
+                    sql_db_running_count=segment_sql_db_running_count,
                 )
-                pending_slot_limit = min(
-                    pending_slot_limit,
-                    _segment_shared_slots_available(
-                        running,
-                        root,
-                        pending_slot_limit,
-                        store=store,
-                        config=config,
-                        now_ts=now,
-                        sql_db_running_count=segment_sql_db_running_count,
-                    ),
-                )
-                if pending_cycle_ring and pending_slot_limit > 0:
+                if pending_cycle_ring and pending_launch_budget > 0:
                     segment_launched_this_tick += _fill_from_ring(
                         ring=pending_cycle_ring,
-                        ring_limit=pending_slot_limit,
-                        total_limit=pending_slot_limit,
+                        ring_limit=pending_total_limit,
+                        total_limit=pending_total_limit,
                         root=root,
                         task_type="segment",
                         running=running,
@@ -16218,7 +16263,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                         remove_on_launch=True,
                         bypass_repeat_guard_entities=persisted_pending_cycle_ids,
                         bypass_baseline_admission=True,
-                        max_launches=pending_slot_limit,
+                        max_launches=pending_launch_budget,
                     )
 
             if (

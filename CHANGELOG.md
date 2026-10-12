@@ -1,3 +1,15 @@
+## 1.5.131 - 2026-10-12
+
+- Keep the absolute ordinary-cycle regular-worker limit separate from the
+  currently free shared launch budget; persisted refills now reach the
+  configured capacity when workers are already running instead of underfilling
+  by treating free slots as the total cap.
+- Allow pending ordinary work to use unused priority capacity while preserving
+  explicit host/instance safety caps and priority precedence.
+- Record the mandatory self-update invariant: ordinary Mautic/PHP operations
+  never block MCD updates, and TaskStore/runtime_sync queues and operational
+  state survive update/reinstall and are re-adopted without duplicate spawn.
+
 ## 1.5.130 - 2026-10-12
 
 - Make the default ordinary planner a full published-segment cycle; the

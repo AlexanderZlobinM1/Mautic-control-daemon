@@ -19,6 +19,7 @@ from mcd_agent.daemon import (
     _segment_cycle_running,
     _segment_cycle_terminal,
     _effective_segment_regular_slot_limit,
+    _segment_pending_dispatch_limits,
     _segment_shared_slots_available,
     _fill_from_ring,
 )
@@ -437,6 +438,138 @@ class SegmentLivenessTests(unittest.TestCase):
                     self.assertTrue(all(str(row["state"]) == "done" for row in rows))
                     self.assertTrue(all(int(row["pid"]) > 0 for row in rows))
                     store.close()
+
+    def test_pending_refill_keeps_absolute_limit_when_workers_are_already_running(self) -> None:
+        """Free capacity must limit launches, not shrink the total cap."""
+        root = "/var/www/refill/public_html"
+        store = TaskStore(":memory:")
+        config = self._config()
+        config.scheduler_host_max_parallel = 0
+        config.scheduler_instance_max_parallel = 0
+        config.segment_mode = "farm"
+        config.segment_regular_parallel_idle = 3
+        config.segment_regular_parallel_throttled = 0
+        config.segment_throttle_whitelist_only = False
+
+        existing = SimpleNamespace(
+            root=root,
+            task_type="segment",
+            entity_id=101,
+            task_key=f"{root}|segment|101",
+        )
+        running: dict[str, daemon.RunningTask] = {existing.task_key: existing}
+        total_limit, launch_budget = _segment_pending_dispatch_limits(
+            config,
+            False,
+            running,
+            root,
+            segment_slot_limit=3,
+            priority_pending=True,
+            store=store,
+            now_ts=200.0,
+        )
+        self.assertEqual((total_limit, launch_budget), (3, 2))
+
+        pids = iter((9102, 9103))
+        with patch.object(
+            daemon,
+            "_spawn_command",
+            side_effect=lambda **_kwargs: SimpleNamespace(pid=next(pids)),
+        ), patch.object(
+            daemon,
+            "_task_locked_args",
+            side_effect=lambda _key, args, **_kwargs: args,
+        ), patch.object(daemon, "_scheduler_baseline_launch_due", return_value=False), patch.object(
+            daemon, "_SEGMENT_DISPATCH_WAKEUP", None
+        ):
+            launched = _fill_from_ring(
+                ring=deque([102, 103, 104]),
+                ring_limit=total_limit,
+                total_limit=total_limit,
+                root=root,
+                task_type="segment",
+                running=running,
+                ring_entities={102, 103, 104},
+                config=config,
+                store=store,
+                popens={},
+                build_args=lambda sid: ["php", "bin/console", "mautic:segments:update", "-i", str(sid)],
+                bypass_repeat_guard_entities={102, 103, 104},
+                bypass_baseline_admission=True,
+                max_launches=launch_budget,
+            )
+
+        self.assertEqual(launched, 2)
+        self.assertEqual(
+            sorted(int(task.entity_id) for task in running.values()),
+            [101, 102, 103],
+        )
+        self.assertEqual(store.running_count(), 2)
+        store.close()
+
+    def test_pending_cycle_borrows_unused_priority_capacity_within_instance_cap(self) -> None:
+        root = "/var/www/full-budget/public_html"
+        store = TaskStore(":memory:")
+        config = self._config()
+        config.scheduler_host_max_parallel = 12
+        config.scheduler_instance_max_parallel = 6
+        config.scheduler_emergency_reserved_slots = 0
+        config.segment_mode = "farm"
+        config.segment_priority_parallel_idle = 8
+        config.segment_regular_parallel_idle = 3
+        config.segment_priority_parallel_throttled = 2
+        config.segment_regular_parallel_throttled = 0
+        config.segment_throttle_whitelist_only = False
+
+        running: dict[str, daemon.RunningTask] = {}
+        total_limit, launch_budget = _segment_pending_dispatch_limits(
+            config,
+            False,
+            running,
+            root,
+            segment_slot_limit=11,
+            priority_pending=False,
+            store=store,
+            now_ts=200.0,
+        )
+        self.assertEqual(total_limit, 11)
+        self.assertEqual(launch_budget, 11)
+
+        pids = iter(range(9200, 9220))
+        pending_ids = list(range(201, 221))
+        with patch.object(
+            daemon,
+            "_spawn_command",
+            side_effect=lambda **_kwargs: SimpleNamespace(pid=next(pids)),
+        ), patch.object(
+            daemon,
+            "_task_locked_args",
+            side_effect=lambda _key, args, **_kwargs: args,
+        ), patch.object(daemon, "_SEGMENT_DISPATCH_WAKEUP", None):
+            launched = _fill_from_ring(
+                ring=deque(pending_ids),
+                ring_limit=total_limit,
+                total_limit=total_limit,
+                root=root,
+                task_type="segment",
+                running=running,
+                ring_entities=set(pending_ids),
+                config=config,
+                store=store,
+                popens={},
+                build_args=lambda sid: ["php", "bin", "mautic:segments:update", "-i", str(sid)],
+                bypass_repeat_guard_entities=set(pending_ids),
+                bypass_baseline_admission=True,
+                max_launches=launch_budget,
+            )
+
+        # The profile has 8+3=11 segment capacity, but this instance is
+        # explicitly capped at 6; the pending lane must use all eligible
+        # capacity without bypassing that safety cap.
+        self.assertEqual(launched, 6)
+        self.assertEqual(len(running), 6)
+        self.assertEqual(store.running_count(), 6)
+        store.close()
 
     def _launch_persisted_item(
         self,
