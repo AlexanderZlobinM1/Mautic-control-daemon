@@ -2126,6 +2126,33 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
         observed = acknowledge.call_args.kwargs["observed"]["runtime"]
         self.assertEqual(set(observed["keys"]), set(desired))
         self.assertEqual(set(observed["effective_runtime"]), set(desired))
+
+    def test_instance_materialization_preserves_legacy_for_bare_modern_empty(self) -> None:
+        runtime = {
+            "segment_whitelist_instance_settings": {
+                "electronic@Farm02": {"segment_whitelist": [23, 86]},
+            },
+        }
+        merged = runtime_overrides.merge_instance_desired_states(
+            runtime,
+            {"electronic@Farm02": {"runtime_overrides": {
+                "segment_priority_instance_settings": {"segments": []},
+            }}},
+        )
+        self.assertEqual(
+            merged["segment_priority_instance_settings"]["electronic@Farm02"],
+            {"segment_whitelist": [23, 86]},
+        )
+        cleared = runtime_overrides.merge_instance_desired_states(
+            runtime,
+            {"electronic@Farm02": {"runtime_overrides": {
+                "segment_priority_instance_settings": {"segments": [], "tombstone": True},
+            }}},
+        )
+        self.assertEqual(
+            cleared["segment_priority_instance_settings"]["electronic@Farm02"],
+            {"segments": [], "tombstone": True},
+        )
         self.assertEqual(
             desired_profile_from_runtime_response(
                 {

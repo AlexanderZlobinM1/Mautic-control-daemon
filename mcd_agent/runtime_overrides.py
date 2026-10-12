@@ -434,6 +434,13 @@ def merge_instance_desired_states(runtime: dict[str, Any], states: object) -> di
         uid = str(raw_uid or "").strip()
         if not uid or not isinstance(raw_state, dict):
             continue
+        legacy_fallback = None
+        legacy_map = merged.get("segment_whitelist_instance_settings")
+        if isinstance(legacy_map, dict):
+            for current_uid, current_value in legacy_map.items():
+                if str(current_uid).split("@", 1)[0] == uid.split("@", 1)[0]:
+                    legacy_fallback = current_value
+                    break
         # MCC returns one authoritative desired-state row per known instance,
         # including rows with no runtime overrides. Clear that instance's
         # previous values first so an unset MCC override cannot live forever.
@@ -482,6 +489,14 @@ def merge_instance_desired_states(runtime: dict[str, Any], states: object) -> di
                 continue
             if key not in _INSTANCE_RUNTIME_KEYS:
                 continue
+            if (
+                key == "segment_priority_instance_settings"
+                and isinstance(value, dict)
+                and value.get("segments") == []
+                and legacy_fallback is not None
+                and not bool(value.get("tombstone"))
+            ):
+                value = legacy_fallback
             _set_instance_lane(merged, key, uid, value)
     return merged
 
