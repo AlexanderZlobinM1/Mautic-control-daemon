@@ -5,6 +5,24 @@ cycles. Тесты не используют production host, не запуск�
 не меняют profile/config/data. Реальный MCC gate является отдельным
 read-only/package/install шагом после unit matrix.
 
+## Mandatory self-update lifecycle gate
+
+1. Живой обычный PHP/Mautic console worker не блокирует self-update. Тест
+   обязан подтвердить, что `segments`, `campaigns`, `import` и произвольный
+   `bin/console` process переживают supervisor restart/reinstall с той же
+   PID/start identity, а после старта MCD TaskStore re-adopts его без duplicate
+   spawn. Проверяется реальный `KillMode=process` и process/cgroup поведение,
+   не только mock self-update gate.
+2. Active backup lock, MCD source/update lease и MCD-owned migration/deployment
+   critical lock блокируют update fail-closed и возвращают явный retry/status
+   reason. Обычные task locks, campaign pressure и process-name observations
+   не могут стать update blockers.
+3. Acceptance receipt обязан раздельно показать сохранность TaskStore,
+   `runtime_sync`, ordinary/static/import очередей, claims/running/follow-up,
+   PID adoption/terminal receipt и каждый MCD-owned critical barrier. Любое
+   расхождение source ↔ tests ↔ systemd ↔ receipt блокирует push/install
+   acceptance.
+
 ## State fixture
 
 Для каждого major (`6`, `7`) создаётся persisted `mcd-segment-cycle-v1`:

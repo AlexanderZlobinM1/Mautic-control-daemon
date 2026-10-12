@@ -827,6 +827,8 @@ class AgentConfig:
     mcd_update_policy: str
     mcd_update_allow_test_build: bool
     mcd_update_wait_retry_sec: int
+    # Legacy compatibility only. Ordinary Mautic/PHP tasks never gate MCD
+    # self-update; MCD-owned critical operation locks are the authority.
     mcd_update_defer_during_campaigns: bool
     mcd_update_cleanup_enabled: bool
     mcd_update_cleanup_interval_sec: int

@@ -36,6 +36,7 @@ from mcd_agent.nginx_templates import render_nginx_template
 from mcd_agent.runtime_adapters import run_runtime_adapter, runtime_adapter_path
 from mcd_agent.runtime_descriptor import descriptor_for_root
 from mcd_agent.runtime_matrix import build_runtime_profile
+from mcd_agent.source_operation import stable_source_operation
 
 
 _MIN_TARGET_HEADROOM_BYTES = 5 * 1024 * 1024 * 1024
@@ -514,6 +515,7 @@ def _target_db_exists(db_name: str) -> bool:
     return bool(str(out or "").strip())
 
 
+@stable_source_operation
 def stream_source_files(config: AgentConfig, *, selector: str | None, output: Any) -> int:
     inv = InstanceInventory(config.state_db_path)
     ensure_seeded(inv, config)
@@ -687,6 +689,7 @@ def receive_target_letsencrypt(*, input_stream: Any) -> dict[str, Any]:
     return {"schema": "mcd-instance-migration-target-letsencrypt-v1", "ok": True, "extracted": extracted}
 
 
+@stable_source_operation
 def stream_source_db(config: AgentConfig, *, selector: str | None, output: Any) -> int:
     inv = InstanceInventory(config.state_db_path)
     ensure_seeded(inv, config)
@@ -803,6 +806,7 @@ def import_target_db_stream(*, target_db_name: str, target_db_user: str, target_
     return {"schema": "mcd-instance-migration-target-db-v1", "ok": True, "target_db_name": target_db.name, "target_db_user": target_db.user}
 
 
+@stable_source_operation
 def finalize_target_relay(
     config: AgentConfig,
     *,
@@ -1034,6 +1038,7 @@ def _target_healthcheck(root: Path) -> list[str]:
     return lines[-8:]
 
 
+@stable_source_operation
 def run_target_pull_migration(
     config: AgentConfig,
     *,

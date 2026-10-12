@@ -513,8 +513,15 @@ Important:
     canonicalized before cron migration; a cron enables the operation only
     when no older state exists.
 - Self-update safety:
-  - `runtime.mcd_update_defer_during_campaigns = true` prevents MCD self-update while campaign trigger/rebuild/update console jobs are running.
-  - daemon auto-update keeps a short cooldown after campaign console activity to avoid restarting between batch passes.
+  - Ordinary Mautic/PHP console workers (`segments`, `campaigns`, `import`, and
+    other application commands) are not self-update blockers. They survive the
+    MCD supervisor restart (`KillMode=process`) and are re-adopted from
+    TaskStore after startup; no process-name heuristic may defer an update.
+  - Only MCD-owned critical operation barriers may defer self-update: active
+    backup locks, the source/update lease used by deployment and migration
+    operations, and an explicitly declared MCD critical-operation lock.
+  - `runtime.mcd_update_defer_during_campaigns` is retained as a legacy config
+    key for compatibility but is no longer a blocker or a cooldown policy.
 - Retry and watchdog:
   - `runtime.task_retry_max`, `runtime.task_retry_delay_sec` control retries for concrete command execution.
   - `runtime.task_retry_max` semantics:
@@ -588,9 +595,9 @@ Important:
   - daemon also watches local mutable runtime section fingerprint and pushes to MCC immediately when it changes.
   - any mutating command that already does immediate state push updates observed runtime view in MCC without separate polling.
   - `runtime.tasks_compact_*` controls quiet-window compaction cadence (`DELETE` + optional `VACUUM`).
-  - systemd service uses `KillMode=control-group` and `TimeoutStopSec=15` so a
-    restart cannot leave child Mautic commands orphaned while preserving the
-    normal per-task process-group timeout behavior.
+  - systemd service uses `KillMode=process` and `TimeoutStopSec=15` so a
+    supervisor restart preserves ordinary Mautic workers for TaskStore
+    re-adoption; MCD-owned critical operations remain lock-protected.
 - Plugin interactive sync:
 - MCD reads `manifest.json` from MCC plugin repo
   - shows status table (`OK`, `UPDATE`, `MISSING`, `BROKEN`) plus local-only rows (`-`)

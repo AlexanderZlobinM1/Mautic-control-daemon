@@ -4,7 +4,7 @@
 фактическую схему после исправления admission и должен обновляться вместе с
 кодом, тестами и runtime receipt. Документ не является разрешением на
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.128 (follow-up после immutable
+Актуальная редакция этого канона — MCD 1.5.129 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам
@@ -207,9 +207,25 @@ config на его profile baseline и только после этого при
    уже запущенные процессы продолжают drain, а update повторяет попытку до
    безопасного apply. Barrier переживает scheduler tick и restart и снимается
    только после успешного apply либо штатной terminal-cleanup операции.
-7. После полного terminal ordinary cycle следующий snapshot создаёт новый
+7. Обязательная граница self-update: живой обычный PHP/Mautic console process
+   (`segments`, `campaigns`, `import` и любой другой application command) не
+   является blocker-ом. Он должен пережить restart/reinstall MCD, сохранить
+   PID/start identity, а после старта supervisor быть переусыновлён из
+   durable TaskStore без duplicate spawn. Нельзя превращать список process
+   names или длительность Mautic-задачи в update gate.
+8. Blocker-ами являются только MCD-owned critical operations: active backup
+   lock, source/update lease для deployment/self-update и MCD-owned migration,
+   а также любой новый critical operation только после явного добавления его
+   lock/barrier в этот контракт. Внутренние locks должны fail-closed и иметь
+   durable retry/status reason; отсутствие такого lock — дефект реализации,
+   а не повод останавливать обычные Mautic PID. Список не ограничен тремя
+   примерами, но расширяется только через explicit MCD lock/barrier.
+9. `runtime.mcd_update_defer_during_campaigns` сохраняется только для
+   backward-compatible чтения конфигурации и не меняет admission. Это правило
+   проверяется одновременно source, tests, systemd unit и runtime receipt.
+10. После полного terminal ordinary cycle следующий snapshot создаёт новый
    cycle. Пока цикл не terminal, его порядок не пересобирается.
-8. Cycle хранит отдельно `observed_snapshot`/generation и применённый
+11. Cycle хранит отдельно `observed_snapshot`/generation и применённый
    `baseline`/generation. Наблюдения во время active cycle не продвигают
    baseline; он фиксируется только при переходе в terminal. Успешные элементы
    продвигают свои fingerprints, а terminal-error элементы сохраняют старый

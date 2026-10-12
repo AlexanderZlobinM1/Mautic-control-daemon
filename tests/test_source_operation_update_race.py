@@ -1,4 +1,5 @@
 import json
+import inspect
 import multiprocessing
 from pathlib import Path
 from types import SimpleNamespace
@@ -77,6 +78,20 @@ def test_failed_operation_releases_lease_without_stale_busy_state(tmp_path, monk
         operation(config=_cfg(tmp_path))
     monkeypatch.setattr(self_update, "_apply_update_locked", lambda *a: (True, "updated"))
     assert self_update.apply_update(_cfg(tmp_path), _plan())[0]
+
+
+def test_mcd_instance_migration_entrypoints_use_explicit_source_barrier():
+    from mcd_agent import instance_migrate
+
+    for name in (
+        "stream_source_files",
+        "stream_source_db",
+        "finalize_target_relay",
+        "run_target_pull_migration",
+    ):
+        function = getattr(instance_migrate, name)
+        assert hasattr(function, "__wrapped__"), name
+        assert inspect.unwrap(function) is not function
 
 
 @pytest.mark.parametrize("mode", ["zip", "composer"])

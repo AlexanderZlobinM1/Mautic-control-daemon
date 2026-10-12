@@ -7,12 +7,14 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+from mcd_agent.daemon import RunningTask, TaskStore, _reconcile_running_state
 import mcd_agent.self_update as self_update
 
 
 def _cfg(tmp: str) -> SimpleNamespace:
     return SimpleNamespace(
         state_db_path=str(Path(tmp) / "state.db"),
+        mcc_host_name="",
         mcd_update_policy="approved",
         mcd_update_channel="approved",
         mcd_auto_update_enabled=True,
@@ -35,21 +37,22 @@ class SelfUpdateVersionReportingTests(unittest.TestCase):
         self.assertEqual(rows[0]["pid"], 321)
         self.assertIn("mautic:segments:update", rows[0]["cmd"])
 
-    def test_apply_update_defers_for_any_active_mautic_console_process(self) -> None:
+    def test_shipped_systemd_unit_preserves_mautic_workers_for_re_adoption(self) -> None:
+        unit = Path(self_update.__file__).parents[1] / "systemd" / "mcd-agent.service"
+        content = unit.read_text(encoding="utf-8")
+        self.assertIn("KillMode=process", content)
+        self.assertNotIn("KillMode=control-group", content)
+
+    def test_apply_update_allows_active_mautic_console_process(self) -> None:
         with TemporaryDirectory() as tmp:
             cfg = _cfg(tmp)
-            releases: list[dict[str, str]] = []
-            old_active = self_update._active_mautic_processes
-            old_installed = self_update.installed_agent_version
-            old_release = self_update.release_session
-            try:
-                self_update._active_mautic_processes = lambda: [
+            with patch.object(
+                self_update,
+                "_active_mautic_processes",
+                return_value=[
                     {"pid": 321, "elapsed_sec": 42, "cmd": "php bin/console mautic:segments:update -i 108"}
-                ]
-                self_update.installed_agent_version = lambda: "1.2.44"
-                self_update.release_session = lambda _cfg, session_id, **kw: releases.append(
-                    {"session_id": session_id, **{key: str(value) for key, value in kw.items()}}
-                )
+                ],
+            ), patch.object(self_update, "_apply_update_locked", return_value=(True, "updated")) as apply:
                 ok, msg = self_update.apply_update(
                     cfg,
                     {
@@ -59,31 +62,21 @@ class SelfUpdateVersionReportingTests(unittest.TestCase):
                         "session_id": "session-1",
                     },
                 )
-            finally:
-                self_update._active_mautic_processes = old_active
-                self_update.installed_agent_version = old_installed
-                self_update.release_session = old_release
 
-            state = json.loads((Path(tmp) / "mcd-self-update.json").read_text(encoding="utf-8"))
+        self.assertTrue(ok)
+        self.assertEqual(msg, "updated")
+        apply.assert_called_once()
 
-        self.assertFalse(ok)
-        self.assertIn("active Mautic console process", msg)
-        self.assertEqual(state["last_status"], "deferred_active_mautic_task")
-        self.assertEqual(state["active_mautic_processes"][0]["pid"], 321)
-        self.assertEqual(releases[0]["result_status"], "deferred")
-
-    def test_restart_only_repair_is_deferred_for_active_mautic_process(self) -> None:
+    def test_restart_only_repair_is_not_deferred_for_active_mautic_process(self) -> None:
         with TemporaryDirectory() as tmp:
             cfg = _cfg(tmp)
-            old_active = self_update._active_mautic_processes
-            old_installed = self_update.installed_agent_version
-            old_sync = self_update._agent_package_sync_needed
-            try:
-                self_update._active_mautic_processes = lambda: [
+            with patch.object(
+                self_update,
+                "_active_mautic_processes",
+                return_value=[
                     {"pid": 321, "elapsed_sec": 42, "cmd": "php bin/console mautic:segments:update -i 108"}
-                ]
-                self_update.installed_agent_version = lambda: "9.9.9"
-                self_update._agent_package_sync_needed = lambda *_args, **_kw: False
+                ],
+            ), patch.object(self_update, "_apply_update_locked", return_value=(True, "restart scheduled")) as apply:
                 ok, msg = self_update.apply_update(
                     cfg,
                     {
@@ -92,20 +85,105 @@ class SelfUpdateVersionReportingTests(unittest.TestCase):
                         "package_url": "https://mcc.invalid/mcd-agent-9.9.8.tar.gz",
                     },
                 )
-            finally:
-                self_update._active_mautic_processes = old_active
-                self_update.installed_agent_version = old_installed
-                self_update._agent_package_sync_needed = old_sync
 
-        self.assertFalse(ok)
-        self.assertIn("active Mautic console process", msg)
+        self.assertTrue(ok)
+        self.assertEqual(msg, "restart scheduled")
+        apply.assert_called_once()
+
+    def test_cluster_update_blockers_ignore_active_mautic_processes(self) -> None:
+        cfg = SimpleNamespace(backup_enabled=False)
+        with patch.object(
+            self_update,
+            "_active_mautic_processes",
+            return_value=[{"pid": 321, "elapsed_sec": 42, "cmd": "php bin/console mautic:segments:update -i 108"}],
+        ):
+            self.assertEqual(self_update._cluster_local_update_blockers(cfg), [])
+
+    def test_update_preserves_taskstore_queues_and_re_adopts_running_worker(self) -> None:
+        with TemporaryDirectory() as tmp:
+            cfg = _cfg(tmp)
+            store = TaskStore(str(Path(tmp) / "state.db"), cfg)
+            cycle = {
+                "cycle_id": "cycle-7",
+                "items": [108, 109],
+                "follow_up": [144],
+                "claimed": [108],
+                "running": [108],
+                "done": [],
+                "errors": [],
+                "status": "active",
+            }
+            queue_state = {
+                "segment_cycle:/var/www/mautic": cycle,
+                "ordinary_queue:/var/www/mautic": {
+                    **cycle,
+                    "queue": "ordinary",
+                },
+                "static_queue:/var/www/mautic": {
+                    **cycle,
+                    "queue": "static",
+                },
+                "import_queue:/var/www/mautic": {
+                    **cycle,
+                    "queue": "import",
+                },
+            }
+            for key, payload in queue_state.items():
+                store.put_runtime_sync(key, payload)
+            task = RunningTask(
+                row_id=0,
+                root="/var/www/mautic",
+                task_key="/var/www/mautic|segment|108",
+                task_type="segment",
+                entity_id=108,
+                command_str="php /var/www/mautic/bin/console mautic:segments:update -i 108",
+                timeout_sec=3600,
+                attempts=1,
+                started_at=1234.0,
+                pid=4321,
+                manual_request_id=None,
+            )
+            task.row_id = store.add_running(task)
+            store.close()
+
+            with patch.object(
+                self_update,
+                "_active_mautic_processes",
+                return_value=[
+                    {"pid": 4321, "elapsed_sec": 42, "cmd": task.command_str}
+                ],
+            ), patch.object(self_update, "_apply_update_locked", return_value=(True, "updated")):
+                ok, msg = self_update.apply_update(
+                    cfg,
+                    {
+                        "status": "update",
+                        "target": "1.2.45",
+                        "package_url": "https://mcc.invalid/mcd-agent-1.2.45.tar.gz",
+                    },
+                )
+
+            reopened = TaskStore(str(Path(tmp) / "state.db"), cfg)
+            self.assertTrue(ok)
+            self.assertEqual(msg, "updated")
+            for key, payload in queue_state.items():
+                self.assertEqual(reopened.get_runtime_sync(key), payload)
+            self.assertEqual(reopened.running_rows()[0]["pid"], 4321)
+            running: dict[str, object] = {}
+            with patch("mcd_agent.daemon._is_pid_alive", return_value=True), patch(
+                "mcd_agent.daemon._pid_matches_task_command", return_value=True
+            ):
+                stats = _reconcile_running_state(store=reopened, running=running, popens={})
+            reopened.close()
+
+        self.assertEqual(stats["adopted"], 1)
+        self.assertIn("/var/www/mautic|segment|108", running)
 
     def test_daemon_startup_runs_service_unit_migration(self) -> None:
         daemon_source = Path(self_update.__file__).with_name("daemon.py").read_text(encoding="utf-8")
 
         self.assertIn("if _ensure_mcd_service_kill_mode():", daemon_source)
 
-    def test_existing_service_unit_is_migrated_to_control_group(self) -> None:
+    def test_existing_service_unit_is_migrated_to_process_mode(self) -> None:
         with TemporaryDirectory() as tmp:
             unit = Path(tmp) / "mcd.service"
             unit.write_text(

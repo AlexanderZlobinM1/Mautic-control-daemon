@@ -192,7 +192,8 @@ mcd_update_policy = "approved"
 mcd_update_allow_test_build = false
 # Retry delay after MCC says "wait for free update slot".
 mcd_update_wait_retry_sec = 60
-# Do not self-update while campaign trigger/rebuild/update console jobs are running.
+# Legacy compatibility key. Ordinary Mautic/PHP console jobs do not block
+# self-update; MCD-owned backup/source/deployment/migration locks do.
 mcd_update_defer_during_campaigns = true
 # Enable self-update artifacts cleanup (`/opt/mcd/var/updates`, preupdate tar backups).
 mcd_update_cleanup_enabled = true

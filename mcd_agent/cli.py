@@ -100,6 +100,7 @@ from mcd_agent.instance_migrate import (
     stream_source_files,
     stream_source_letsencrypt,
 )
+from mcd_agent.source_operation import source_operation_lease
 from mcd_agent.inventory import InstanceInventory, ensure_seeded
 from mcd_agent.install_type import detect_install_type
 from mcd_agent.hardware_profile import (
@@ -4256,7 +4257,8 @@ def main() -> int:
         if args.op == "source-stream-db":
             return stream_source_db(cfg, selector=args.root, output=sys.stdout.buffer)
         if args.op == "source-stream-letsencrypt":
-            return stream_source_letsencrypt(domains_json=str(args.domains_json or "[]"), output=sys.stdout.buffer)
+            with source_operation_lease(cfg):
+                return stream_source_letsencrypt(domains_json=str(args.domains_json or "[]"), output=sys.stdout.buffer)
         if args.op == "target-preflight":
             missing = [
                 name
@@ -4268,31 +4270,34 @@ def main() -> int:
             ]
             if missing:
                 raise RuntimeError("missing required target-preflight arguments: " + ", ".join(missing))
-            payload = preflight_target_relay(
-                target_root=str(args.target_root or "").strip(),
-                target_db_name=str(args.target_db_name or "").strip(),
-                wipe_target_root=bool(args.wipe_target),
-                wipe_target_db=bool(args.wipe_target_db),
-                runtime_adapter=str(args.runtime_adapter or "").strip() or None,
-                runtime=str(args.runtime or "").strip() or None,
-                install_type=str(args.install_type or "").strip() or None,
-                image_ref=str(args.image_ref or "").strip() or None,
-                domains_json=str(args.domains_json or "[]"),
-            )
+            with source_operation_lease(cfg):
+                payload = preflight_target_relay(
+                    target_root=str(args.target_root or "").strip(),
+                    target_db_name=str(args.target_db_name or "").strip(),
+                    wipe_target_root=bool(args.wipe_target),
+                    wipe_target_db=bool(args.wipe_target_db),
+                    runtime_adapter=str(args.runtime_adapter or "").strip() or None,
+                    runtime=str(args.runtime or "").strip() or None,
+                    install_type=str(args.install_type or "").strip() or None,
+                    image_ref=str(args.image_ref or "").strip() or None,
+                    domains_json=str(args.domains_json or "[]"),
+                )
             print(json.dumps(payload, ensure_ascii=True, indent=2))
             return 0 if bool(payload.get("ok", False)) else 1
         if args.op == "target-receive-files":
             if not str(args.target_root or "").strip():
                 raise RuntimeError("missing required target-receive-files argument: target-root")
-            payload = receive_target_files(
-                target_root=str(args.target_root or "").strip(),
-                input_stream=sys.stdin.buffer,
-                wipe_target=bool(args.wipe_target),
-            )
+            with source_operation_lease(cfg):
+                payload = receive_target_files(
+                    target_root=str(args.target_root or "").strip(),
+                    input_stream=sys.stdin.buffer,
+                    wipe_target=bool(args.wipe_target),
+                )
             print(json.dumps(payload, ensure_ascii=True, indent=2))
             return 0 if bool(payload.get("ok", False)) else 1
         if args.op == "target-receive-letsencrypt":
-            payload = receive_target_letsencrypt(input_stream=sys.stdin.buffer)
+            with source_operation_lease(cfg):
+                payload = receive_target_letsencrypt(input_stream=sys.stdin.buffer)
             print(json.dumps(payload, ensure_ascii=True, indent=2))
             return 0 if bool(payload.get("ok", False)) else 1
         if args.op == "target-import-db":
@@ -4308,12 +4313,13 @@ def main() -> int:
             ]
             if missing:
                 raise RuntimeError("missing required target-import-db arguments: " + ", ".join(missing))
-            payload = import_target_db_stream(
-                target_db_name=str(args.target_db_name or "").strip(),
-                target_db_user=str(args.target_db_user or "").strip(),
-                target_db_password=target_db_password,
-                input_stream=sys.stdin.buffer,
-            )
+            with source_operation_lease(cfg):
+                payload = import_target_db_stream(
+                    target_db_name=str(args.target_db_name or "").strip(),
+                    target_db_user=str(args.target_db_user or "").strip(),
+                    target_db_password=target_db_password,
+                    input_stream=sys.stdin.buffer,
+                )
             print(json.dumps(payload, ensure_ascii=True, indent=2))
             return 0 if bool(payload.get("ok", False)) else 1
         if args.op == "target-finalize":

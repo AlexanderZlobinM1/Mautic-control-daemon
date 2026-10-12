@@ -117,7 +117,13 @@ def _update_policy(cfg: AgentConfig) -> str:
 
 
 def _active_mautic_processes(timeout_sec: int = 4) -> list[dict[str, Any]]:
-    """Return running Mautic console processes that must survive an update."""
+    """Observe running Mautic consoles for status/adoption telemetry only.
+
+    Ordinary Mautic/PHP work is deliberately not a self-update blocker. The
+    supervisor is restarted with ``KillMode=process`` and re-adopts durable
+    TaskStore work after startup. Update admission is lock/barrier based on
+    MCD-owned critical operations instead of process-name heuristics.
+    """
     stdout = ""
     has_elapsed = True
     for ps_args, elapsed_supported in (
@@ -176,24 +182,6 @@ def _active_campaign_processes(timeout_sec: int = 4) -> list[dict[str, Any]]:
         for process in _active_mautic_processes(timeout_sec)
         if any(command in str(process.get("cmd", "")) for command in _CAMPAIGN_CONSOLE_COMMANDS)
     ]
-
-
-def _active_campaign_update_defer_message(rows: list[dict[str, Any]]) -> str:
-    sample = ", ".join(
-        f"pid={int(row.get('pid') or 0)} age={int(row.get('elapsed_sec') or 0)}s"
-        for row in rows[:3]
-    )
-    suffix = f" ({sample})" if sample else ""
-    return f"MCD update deferred: active campaign trigger/rebuild process is running{suffix}"
-
-
-def _active_mautic_update_defer_message(rows: list[dict[str, Any]]) -> str:
-    sample = ", ".join(
-        f"pid={int(row.get('pid') or 0)} age={int(row.get('elapsed_sec') or 0)}s"
-        for row in rows[:3]
-    )
-    suffix = f" ({sample})" if sample else ""
-    return f"MCD update deferred: active Mautic console process is running{suffix}"
 
 
 def check_with_mcc(cfg: AgentConfig, *, auto_update_enabled: bool) -> dict[str, Any]:
@@ -926,15 +914,10 @@ def _cluster_local_update_blockers(cfg: AgentConfig) -> list[dict[str, Any]]:
                 blockers.append({"kind": "backup_lock", "message": "backup lock is active"})
         except Exception as e:
             blockers.append({"kind": "backup_lock_probe_failed", "message": str(e)[:300]})
-    active = _active_mautic_processes()
-    if active:
-        blockers.append(
-            {
-                "kind": "active_mautic_tasks",
-                "message": _active_mautic_update_defer_message(active),
-                "processes": active[:10],
-            }
-        )
+    # Mautic/PHP workers are external work and intentionally do not block the
+    # MCD rollout. The source/update lock acquired by apply_update() is the
+    # barrier for MCD-owned deployment/migration operations; backup has its
+    # own lock above. Keep this list limited to those explicit MCD gates.
     return blockers
 
 
@@ -972,41 +955,6 @@ def _defer_update_for_backup_lock(
             "last_target": target,
             "last_attempt_ts": now_s,
             "last_session_id": session_id,
-        }
-    )
-    _write_state(cfg, state)
-    if session_id:
-        release_session(
-            cfg,
-            session_id,
-            result_status="deferred",
-            result_message=msg,
-            new_version=installed_agent_version(),
-        )
-    return msg
-
-
-def _defer_update_for_active_mautic_processes(
-    cfg: AgentConfig,
-    state: dict[str, Any],
-    *,
-    target: str,
-    session_id: str,
-    now_s: int,
-) -> str | None:
-    """Fail closed while any Mautic console task is running."""
-    active = _active_mautic_processes()
-    if not active:
-        return None
-    msg = _active_mautic_update_defer_message(active)
-    state.update(
-        {
-            "last_status": "deferred_active_mautic_task",
-            "last_result": msg,
-            "last_target": target,
-            "last_attempt_ts": now_s,
-            "last_session_id": session_id,
-            "active_mautic_processes": active[:10],
         }
     )
     _write_state(cfg, state)
@@ -1496,15 +1444,11 @@ def _apply_update_locked(cfg: AgentConfig, plan: dict[str, Any], lock_f) -> tupl
     )
     if backup_defer is not None:
         return False, backup_defer
-    active_defer = _defer_update_for_active_mautic_processes(
-        cfg,
-        state,
-        target=target,
-        session_id=session_id,
-        now_s=now_s,
-    )
-    if active_defer is not None:
-        return False, active_defer
+    # Do not inspect or gate on live Mautic/PHP console PIDs here. Their
+    # supervisor-owned process identity survives the restart and TaskStore
+    # re-adopts the work. Only MCD-owned locks/barriers may defer this path:
+    # backup_lock_active above and the exclusive source/update lease acquired
+    # by apply_update().
     install_dir = Path(str(getattr(cfg, "mcd_install_dir", "/opt/mcd") or "/opt/mcd"))
     profile_authority = capture_profile_authority(
         str(getattr(cfg, "config_file_path", "") or ""),
@@ -1746,16 +1690,8 @@ def maybe_auto_update(cfg: AgentConfig, *, force: bool = False) -> tuple[str | N
     active_mautic = _active_mautic_processes()
     if active_mautic:
         state["active_mautic_processes"] = active_mautic[:10]
-        if not cluster_update_mode:
-            retry_sec = max(60, int(cfg.mcd_update_wait_retry_sec or 60))
-            state["last_check_ts"] = now_s
-            state["last_check_status"] = "deferred_active_mautic_task"
-            state["last_result"] = _active_mautic_update_defer_message(active_mautic)
-            state["next_check_ts"] = now_s + retry_sec
-            _write_state(cfg, state)
-            return str(state["last_result"]), retry_sec
     else:
-        _clear_active_campaign_process_state(state)
+        state.pop("active_mautic_processes", None)
 
     # Cluster mode has its own Galera-backed rollout coordinator, so MCC is
     # queried as a release catalog and must not reserve a per-host update slot.

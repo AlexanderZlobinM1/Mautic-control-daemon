@@ -47,7 +47,7 @@ def test_runtime_adapter_finalizer_receives_database_and_layout(tmp_path: Path, 
 
     monkeypatch.setattr(instance_migrate, "run_runtime_adapter", fake_run)
     result = instance_migrate.finalize_target_relay(
-        type("Config", (), {})(),
+        type("Config", (), {"state_db_path": str(tmp_path / "state.db")})(),
         target_root=str(tmp_path / "instances/newlook"),
         target_db_name="baza_newlook",
         target_db_user="korisnik_newlook",

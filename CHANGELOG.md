@@ -1,3 +1,14 @@
+## 1.5.129 - 2026-10-12
+
+- Make self-update admission lock/barrier based: ordinary Mautic/PHP console
+  workers no longer block deployment and survive the MCD supervisor restart.
+- Preserve TaskStore/runtime queue state and re-adopt running workers after
+  update without duplicate spawn; retain backup, source-operation and other
+  explicit MCD-owned critical locks as fail-closed blockers.
+- Change the shipped systemd unit to `KillMode=process` and add mandatory
+  lifecycle acceptance coverage for worker survival, state preservation and
+  critical-operation barriers.
+
 ## 1.5.128 - 2026-10-12
 
 - Restore ordinary segment-cycle dispatch from durable pending state after
