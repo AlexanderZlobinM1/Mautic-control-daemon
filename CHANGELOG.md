@@ -1,3 +1,12 @@
+## 1.5.149 - 2026-10-12
+
+- Preserve the shared-dispatch served-root receipt when the outer instance
+  list rotates or a ready-root set changes. A durable pending ordinary cycle
+  can no longer be returned to the head of a new input order on every tick and
+  starve unrelated roots until the fairness watchdog; add regressions for
+  rotated input and add/remove membership while retaining the MCD-owned
+  blocker and durable queue invariants.
+
 ## 1.5.148 - 2026-10-12
 
 - Include active persisted ordinary-cycle roots in the shared fairness and

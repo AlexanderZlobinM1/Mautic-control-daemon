@@ -5882,17 +5882,42 @@ def _set_scheduler_distribution_roots(
     with _SCHEDULER_DISTRIBUTION_LOCK:
         if cursor is not None:
             _SCHEDULER_DISTRIBUTION_CURSOR = max(0, int(cursor))
-        roots = tuple(
-            _scheduler_round_robin_order(
-                raw_roots,
-                len(raw_roots),
-                cursor=_SCHEDULER_DISTRIBUTION_CURSOR,
-            )
-        )
-        if roots != _SCHEDULER_DISTRIBUTION_READY_ROOTS:
-            _SCHEDULER_DISTRIBUTION_READY_ROOTS = roots
+        previous = _SCHEDULER_DISTRIBUTION_READY_ROOTS
+        if not raw_roots:
+            _SCHEDULER_DISTRIBUTION_READY_ROOTS = ()
             _SCHEDULER_DISTRIBUTION_SERVED_ROOTS.clear()
-        if roots:
+            return
+
+        if previous:
+            previous_set = set(previous)
+            incoming_set = set(raw_roots)
+            # ``dispatch_instance_cursor`` and priority/import interleaving can
+            # rotate the caller's input order every tick.  That is not a new
+            # fairness round: resetting served roots here lets the first
+            # instance in the rotated list claim again while a durable pending
+            # root waits behind it.  Keep the existing round order stable and
+            # append only genuinely new roots.  A root that leaves is removed
+            # from the served set; roots that remain keep their turn receipt.
+            roots = tuple(
+                [root for root in previous if root in incoming_set]
+                + [root for root in raw_roots if root not in previous_set]
+            )
+            _SCHEDULER_DISTRIBUTION_SERVED_ROOTS.intersection_update(incoming_set)
+        else:
+            roots = tuple(
+                _scheduler_round_robin_order(
+                    raw_roots,
+                    len(raw_roots),
+                    cursor=_SCHEDULER_DISTRIBUTION_CURSOR,
+                )
+            )
+            _SCHEDULER_DISTRIBUTION_SERVED_ROOTS.clear()
+
+        _SCHEDULER_DISTRIBUTION_READY_ROOTS = roots
+        # The cursor is a persisted restart hint, not a per-tick input-order
+        # cursor.  Advance it only when a new root set is initially selected;
+        # otherwise the served-root receipt is the round-robin state.
+        if not previous and roots:
             _SCHEDULER_DISTRIBUTION_CURSOR = (
                 _SCHEDULER_DISTRIBUTION_CURSOR + max(1, int(worker_slots or 1))
             ) % len(roots)

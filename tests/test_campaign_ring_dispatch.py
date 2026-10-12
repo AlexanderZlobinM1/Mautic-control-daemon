@@ -314,6 +314,34 @@ class CampaignRingDispatchTests(unittest.TestCase):
         self.assertTrue(daemon_mod._scheduler_shared_admission_allowed(roots[1], "segment"))
         _set_scheduler_distribution_roots([], worker_slots=1)
 
+    def test_distribution_gate_keeps_served_roots_when_input_order_rotates(self) -> None:
+        roots = ["/var/www/a", "/var/www/b", "/var/www/c"]
+        _set_scheduler_distribution_roots(roots, worker_slots=3, cursor=0)
+        daemon_mod._mark_scheduler_shared_admission(roots[0], "segment")
+
+        # The outer dispatch loop rotates its instance list between ticks. A
+        # caller-order change is not a new fairness round and must not make
+        # root A eligible for a second claim before B/C receive their turn.
+        _set_scheduler_distribution_roots([roots[1], roots[2], roots[0]], worker_slots=3)
+
+        self.assertEqual(daemon_mod._SCHEDULER_DISTRIBUTION_READY_ROOTS, tuple(roots))
+        self.assertFalse(daemon_mod._scheduler_shared_admission_allowed(roots[0], "segment"))
+        self.assertTrue(daemon_mod._scheduler_shared_admission_allowed(roots[1], "segment"))
+        _set_scheduler_distribution_roots([], worker_slots=1)
+
+    def test_distribution_gate_keeps_served_roots_when_ready_set_changes(self) -> None:
+        roots = ["/var/www/a", "/var/www/b", "/var/www/c"]
+        _set_scheduler_distribution_roots(roots, worker_slots=3, cursor=0)
+        daemon_mod._mark_scheduler_shared_admission(roots[0], "segment")
+        daemon_mod._mark_scheduler_shared_admission(roots[1], "segment")
+
+        _set_scheduler_distribution_roots([roots[1], roots[2], "/var/www/d"], worker_slots=3)
+
+        self.assertFalse(daemon_mod._scheduler_shared_admission_allowed(roots[1], "segment"))
+        self.assertTrue(daemon_mod._scheduler_shared_admission_allowed(roots[2], "segment"))
+        self.assertTrue(daemon_mod._scheduler_shared_admission_allowed("/var/www/d", "segment"))
+        _set_scheduler_distribution_roots([], worker_slots=1)
+
     def test_remaining_root_uses_free_host_slot_when_important_root_is_instance_full(self) -> None:
         important_root = "/var/www/important"
         remaining_root = "/var/www/remaining"
