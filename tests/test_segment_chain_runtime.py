@@ -52,6 +52,7 @@ class SegmentChainRuntimeTests(unittest.TestCase):
         candidate_ids: list[int],
         parents: dict[str, list[int]],
         children: dict[str, list[int]],
+        native_exclude_probe_id: int = 21,
     ) -> dict[str, object]:
         with tempfile.TemporaryDirectory(prefix="mcd-chain-") as temp_dir:
             root = str(Path(temp_dir) / "root")
@@ -152,8 +153,9 @@ class SegmentChainRuntimeTests(unittest.TestCase):
 
             def build_args(sid: int) -> list[str]:
                 if major >= 7:
+                    probe_id = int(native_exclude_probe_id)
                     script = (
-                        f'if [ "$0" != "--exclude=21" ] && [ "$1" != "21" ]; then printf \'%s\\n\' 21 >> {output_path}; fi; '
+                        f'if [ "$0" != "--exclude={probe_id}" ] && [ "$1" != "{probe_id}" ]; then printf \'%s\\n\' {probe_id} >> {output_path}; fi; '
                         f"printf '%s\\n' {int(sid)} >> {output_path}; sleep 0.05; "
                         f"true # mautic:segments:update -i {int(sid)}"
                     )
@@ -286,6 +288,24 @@ class SegmentChainRuntimeTests(unittest.TestCase):
         self.assertEqual(receipt["execution_order"], [21, 57, 61])
         self.assertEqual(receipt["native_covered_ids"], [21, 57, 61])
         self.assertIn("--exclude=21", receipt["task_commands"][0])
+
+    def test_m7_native_fixture_19_20_21_22_rebuilds_shared_parent_once(self) -> None:
+        """Canonical native fixture: 19 -> (20, 21) -> 22."""
+
+        receipt = self._run_fixture(
+            major=7,
+            candidate_ids=[19, 20, 21, 22],
+            parents={"20": [19], "21": [19], "22": [21]},
+            children={"19": [20, 21], "20": [], "21": [22], "22": []},
+            native_exclude_probe_id=19,
+        )
+        self.assertEqual(receipt["launched_workers"], 1)
+        self.assertEqual(receipt["task_pids"], [receipt["task_pid"]])
+        self.assertEqual(receipt["claimed"], [19, 20, 21, 22])
+        self.assertEqual(receipt["done"], [19, 20, 21, 22])
+        self.assertEqual(receipt["execution_order"].count(19), 1)
+        self.assertEqual(receipt["native_covered_ids"], [19, 20, 21, 22])
+        self.assertIn("--exclude=19", receipt["task_command"])
 
     def test_m7_native_exclude_capability_probe_is_read_only_and_array_aware(self) -> None:
         class Store:

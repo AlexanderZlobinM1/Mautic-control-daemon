@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 import tempfile
 import time
@@ -309,6 +310,8 @@ class SegmentLivenessTests(unittest.TestCase):
                 remaining_ids=[],
                 lazy_mode=True,
             )
+            full_to_lazy_added = list(added)
+            full_to_lazy_started = bool(started_new)
             self.assertFalse(started_new)
             self.assertEqual(added, [])
             self.assertEqual(a_lazy["items"], a_before_toggle["items"])
@@ -366,6 +369,8 @@ class SegmentLivenessTests(unittest.TestCase):
                 remaining_ids=[102, 103],
                 lazy_mode=False,
             )
+            lazy_to_full_added = list(added)
+            lazy_to_full_started = bool(started_new)
             self.assertFalse(started_new)
             self.assertEqual(added, [])
             self.assertEqual(a_still_lazy["items"], [101])
@@ -391,6 +396,74 @@ class SegmentLivenessTests(unittest.TestCase):
             self.assertEqual(a_full_next["items"], a_ids)
             self.assertEqual(a_full_next["remaining_items"], [102, 103])
             self.assertEqual(a_full_next["plan_mode"], "full")
+
+            receipt = {
+                "schema": "mcd-mixed-mode-dispatch-receipt-v1",
+                "dispatcher": "_launch_persisted_item",
+                "durable_store": "TaskStore",
+                "roots": {
+                    "A": {
+                        "initial_cycle_id": full_a["cycle_id"],
+                        "initial_plan_mode": full_a["plan_mode"],
+                        "full_to_lazy": {
+                            "cycle_id": a_lazy["cycle_id"],
+                            "started_new": full_to_lazy_started,
+                            "added": full_to_lazy_added,
+                            "active_plan_mode": a_lazy["plan_mode"],
+                            "remaining_items_preserved": a_lazy["remaining_items"],
+                        },
+                        "old_full_cycle_terminal": {
+                            "cycle_id": a_terminal["cycle_id"],
+                            "status": a_terminal["status"],
+                            "done": a_terminal["done"],
+                        },
+                        "next_lazy_cycle": {
+                            "cycle_id": a_lazy_next["cycle_id"],
+                            "started_new": True,
+                            "plan_mode": a_lazy_next["plan_mode"],
+                            "items": a_lazy_next["items"],
+                            "remaining_items": a_lazy_next["remaining_items"],
+                        },
+                        "lazy_to_full_while_active": {
+                            "cycle_id": a_still_lazy["cycle_id"],
+                            "started_new": lazy_to_full_started,
+                            "added": lazy_to_full_added,
+                            "plan_mode": a_still_lazy["plan_mode"],
+                            "follow_up": a_still_lazy["follow_up"],
+                            "remaining_items": a_still_lazy["remaining_items"],
+                        },
+                        "next_full_cycle": {
+                            "cycle_id": a_full_next["cycle_id"],
+                            "started_new": True,
+                            "plan_mode": a_full_next["plan_mode"],
+                            "items": a_full_next["items"],
+                            "remaining_items": a_full_next["remaining_items"],
+                        },
+                    },
+                    "B": {
+                        "initial_cycle_id": full_b["cycle_id"],
+                        "plan_mode": b_before_toggle["plan_mode"],
+                        "terminal": {
+                            "cycle_id": b_terminal["cycle_id"],
+                            "status": b_terminal["status"],
+                            "done": b_terminal["done"],
+                        },
+                    },
+                },
+                "concurrent_dispatch": {
+                    "roots": [root_a, root_b],
+                    "entities": [int(a_second.entity_id), int(b_second.entity_id)],
+                    "pids": [int(a_second.pid), int(b_second.pid)],
+                    "same_host_global_barrier": False,
+                },
+                "assertions": {
+                    "old_full_cycle_terminal_before_next_lazy": True,
+                    "active_lazy_toggle_does_not_append_full_tail": True,
+                    "new_full_cycle_admits_deferred_tail": True,
+                    "queue_claims_and_cycle_ids_are_durable": True,
+                },
+            }
+            print("MIXED_MODE_RECEIPT " + json.dumps(receipt, sort_keys=True))
 
         store.close()
 

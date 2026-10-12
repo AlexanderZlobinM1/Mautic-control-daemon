@@ -86,7 +86,13 @@ TaskStore fixture должен сохранять `cycle_id`, `updated_at` и sp
    read-only help capability `--exclude`, exact parent rebuild count, durable
    covered IDs и отсутствие второго PID для одной closure; `--exclude`
    передаётся повторяемым option, не CSV. Failed/timeout root не считается
-   covered.
+   covered. Канонический native fixture для этого gate фиксирован: `19 ->
+   (20, 21) -> 22`. Его receipt обязан быть получен через реальный
+   `_fill_from_ring` + `TaskStore`, показать один worker/PID,
+   `claimed/done=[19,20,21,22]`, ровно один запуск общего parent `19`,
+   `--exclude=19` во второй native-команде и durable `native_covered_ids`
+   для всей closure. Равенство списков без dispatcher receipt и отдельные
+   native CLI-запуски acceptance не заменяют.
 
 6. Для host с тремя и более готовыми roots проверяется aggregate capacity:
    shared/host/instance counters считаются по фактически running tasks,
