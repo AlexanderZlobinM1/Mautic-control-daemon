@@ -1,3 +1,11 @@
+## 1.5.137 - 2026-10-12
+
+- Report the actual effective `segment_lazy_update_enabled` host setting in
+  runtime ACK evidence. A live host set to `true` is no longer falsely ACKed
+  as a rejected read-only capability, while the default/unsupported fixture
+  remains `false` and the setting stays governed by the existing runtime
+  contract.
+
 ## 1.5.136 - 2026-10-12
 
 - Preserve the UID row when the last local per-instance override is removed:

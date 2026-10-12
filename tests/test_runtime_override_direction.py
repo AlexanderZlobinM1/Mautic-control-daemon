@@ -414,6 +414,18 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
         self.assertEqual(row["effective"], False)
         self.assertEqual(row["reason"], "already_effective")
 
+    def test_lazy_scheduler_capability_reports_actual_true_effective_state(self) -> None:
+        observed = runtime_key_observation(
+            SimpleNamespace(profile_name="custom", segment_lazy_update_enabled=True),
+            {"segment_lazy_update_enabled": True},
+            revision=197,
+            source="mcc",
+        )
+        row = observed["keys"]["segment_lazy_update_enabled"]
+        self.assertEqual(row["status"], "unchanged")
+        self.assertEqual(row["effective"], True)
+        self.assertEqual(row["reason"], "already_effective")
+
     def test_rejected_nonempty_ack_is_retried_after_effective_value_is_fixed(self) -> None:
         class MemoryStore:
             def __init__(self):

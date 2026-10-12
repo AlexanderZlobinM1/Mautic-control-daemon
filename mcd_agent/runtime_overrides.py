@@ -695,7 +695,19 @@ def runtime_key_observation(
                 effective_value = effective.get("segment_priority_instance_settings")
             effective_value = _canonical_legacy_whitelist_value(effective_value)
         else:
-            effective_value = False if key in _RUNTIME_CAPABILITY_KEYS else effective.get(key)
+            # ``segment_lazy_update_enabled`` is advertised as a capability
+            # for compatibility, but it is also the host's actual
+            # bidirectional lazy/full planning setting.  Report the loaded
+            # effective value instead of hard-coding ``False``; otherwise an
+            # applied host=true desired state is ACKed as rejected and MCC
+            # keeps retrying an already-effective setting.  A lightweight
+            # fixture without the AgentConfig attribute still reads as the
+            # supported default ``False``.
+            effective_value = (
+                bool(effective.get(key, False))
+                if key in _RUNTIME_CAPABILITY_KEYS
+                else effective.get(key)
+            )
         if scope_key and key.endswith("_instance_settings") and isinstance(effective_value, dict):
             effective_value = _project_instance_observation_value(effective_value, scope_key)
         elif key.endswith("_instance_settings") and isinstance(desired, dict) and isinstance(effective_value, dict):
