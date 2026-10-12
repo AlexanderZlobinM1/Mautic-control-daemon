@@ -2138,6 +2138,20 @@ def runtime_effective_map(cfg: AgentConfig) -> dict[str, Any]:
     for key, attr in _RUNTIME_TO_ATTR.items():
         if hasattr(cfg, attr):
             out[key] = getattr(cfg, attr)
+    legacy = out.get("segment_whitelist_instance_settings")
+    priority = out.get("segment_priority_instance_settings")
+    if isinstance(legacy, dict) and isinstance(priority, dict):
+        merged = dict(priority)
+        for uid, raw in legacy.items():
+            if str(uid) in merged:
+                # Explicit modern priority rows, including empty tombstones,
+                # have precedence over the legacy alias.
+                continue
+            if isinstance(raw, dict) and "segment_whitelist" in raw:
+                raw = {"segments": _normalize_int_list(raw.get("segment_whitelist"))}
+            merged[str(uid)] = raw
+        out["segment_priority_instance_settings"] = merged
+        out["segment_whitelist_instance_settings"] = merged
     return out
 
 

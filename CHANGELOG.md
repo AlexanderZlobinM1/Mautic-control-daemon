@@ -1,3 +1,15 @@
+## 1.5.118 - 2026-10-12
+
+- Materialize host legacy whitelist desired rows into canonical priority
+  instance settings during remote apply, preserving IDs and modern explicit
+  tombstone precedence.
+
+## 1.5.117 - 2026-10-12
+
+- Materialize legacy whitelist IDs into the canonical effective priority map
+  for runtime readback, while explicit modern priority tombstones retain
+  precedence over the legacy alias.
+
 ## 1.5.116 - 2026-10-12
 
 - Canonicalize legacy `segment_whitelist` instance records to the priority

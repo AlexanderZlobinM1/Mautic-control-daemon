@@ -629,6 +629,17 @@ def consume_poll_trigger(cfg: AgentConfig) -> bool:
 
 def apply_remote_overrides(base_cfg: AgentConfig, overrides: dict[str, Any]) -> dict[str, Any]:
     normalized, compatibility_unsupported = normalize_runtime_override_payload(overrides)
+    legacy = normalized.get("segment_whitelist_instance_settings")
+    priority = normalized.get("segment_priority_instance_settings")
+    if isinstance(legacy, dict):
+        legacy = _canonical_legacy_whitelist_value(legacy)
+        merged = dict(legacy)
+        if isinstance(priority, dict):
+            # Modern priority rows, including explicit empty tombstones, win
+            # for the same UID; otherwise legacy IDs become canonical lanes.
+            merged.update(priority)
+        normalized["segment_priority_instance_settings"] = merged
+        normalized.pop("segment_whitelist_instance_settings", None)
     cfg2, applied, unsupported, blocked = apply_runtime_overrides(
         base_cfg,
         normalized,
