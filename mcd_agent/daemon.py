@@ -14336,6 +14336,17 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                     standard_segment_ids = [
                         sid for sid in standard_segment_ids if sid not in static_excluded_ids
                     ]
+                    # Full-scan admissions must enter the durable ordinary
+                    # cycle before claim/dispatch is built.  Keeping this
+                    # reconciliation after cycle sync leaves the ID visible
+                    # in the regular ring but absent from cycle.items, so the
+                    # claim guard rejects it forever after restart.
+                    standard_segment_ids = _reconcile_full_scan_pending(
+                        segment_full_scan_pending.setdefault(root, set()),
+                        standard_segment_ids,
+                        full_scan=force_segment_full_scan and cluster_cron_allowed,
+                        published_ids=published_segment_ids,
+                    )
                     cycle_planned_ids, cycle_never_built_ids = _segment_cycle_admission_inputs(
                         previous_cycle_payload,
                         standard_segment_ids,
@@ -14399,12 +14410,6 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                     ]
                     if cycle_pending_ids:
                         standard_segment_ids = cycle_pending_ids
-                    standard_segment_ids = _reconcile_full_scan_pending(
-                        segment_full_scan_pending.setdefault(root, set()),
-                        standard_segment_ids,
-                        full_scan=force_segment_full_scan and cluster_cron_allowed,
-                        published_ids=published_segment_ids,
-                    )
                     segment_definition_rows: list[dict[str, object]] = []
                     invalid_filter_ids: set[int] = set()
                     if standard_segment_ids:

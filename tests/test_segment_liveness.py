@@ -64,6 +64,23 @@ class SegmentLivenessTests(unittest.TestCase):
             )
         self.assertEqual(launched, 0)
 
+    def test_full_scan_pending_is_admitted_before_claim_guard(self) -> None:
+        pending = {151}
+        planned = daemon._reconcile_full_scan_pending(
+            pending,
+            [151],
+            full_scan=False,
+            published_ids={151},
+        )
+        state = {"status": "active", "items": [], "done": [], "errors": [], "claimed": [], "running": []}
+        cycle_planned, _ = _segment_cycle_admission_inputs(
+            state,
+            planned,
+            [],
+            pressure=False,
+        )
+        self.assertEqual(cycle_planned, [151])
+
     def _launch_persisted_item(
         self,
         *,

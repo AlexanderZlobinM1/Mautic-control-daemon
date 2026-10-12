@@ -715,6 +715,15 @@ def runtime_key_observation(
                 str(uid): effective_value.get(uid, {})
                 for uid in desired
             }
+        if key in {
+            "segment_whitelist_instance_settings",
+            "segment_priority_instance_settings",
+        }:
+            # Both wire aliases describe the same priority lane.  ACK evidence
+            # uses the canonical segments codec while retaining the original
+            # desired value and its provenance/status.
+            desired = _canonical_legacy_whitelist_value(desired)
+            effective_value = _canonical_legacy_whitelist_value(effective_value)
         if key in _RUNTIME_CAPABILITY_KEYS:
             if effective_value == desired:
                 status, origin, reason = "unchanged", "capability", "already_effective"

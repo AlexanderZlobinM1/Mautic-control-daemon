@@ -2153,6 +2153,33 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             cleared["segment_priority_instance_settings"]["electronic@Farm02"],
             {"segments": [], "tombstone": True},
         )
+
+    def test_modern_priority_ack_uses_segments_codec_for_legacy_effective_value(self) -> None:
+        cfg = SimpleNamespace(profile_name="custom")
+        with patch(
+            "mcd_agent.runtime_overrides.runtime_effective_map",
+            return_value={"segment_priority_instance_settings": {
+                "electronic@Farm02": {"segment_whitelist": [23, 86]},
+            }},
+        ), patch(
+            "mcd_agent.runtime_overrides.runtime_supported_keys",
+            return_value={"segment_priority_instance_settings"},
+        ), patch(
+            "mcd_agent.runtime_overrides.runtime_remote_allowed_keys",
+            return_value={"segment_priority_instance_settings"},
+        ):
+            observed = runtime_overrides.runtime_key_observation(
+                cfg,
+                {"segment_priority_instance_settings": {
+                    "electronic@Farm02": {"segments": []},
+                }},
+                revision=191,
+                scope_key="electronic@Farm02",
+            )
+        row = observed["keys"]["segment_priority_instance_settings"]
+        self.assertEqual(row["desired"], {"segments": []})
+        self.assertEqual(row["effective"], {"segments": [23, 86]})
+        self.assertEqual(row["status"], "rejected")
         self.assertEqual(
             desired_profile_from_runtime_response(
                 {
