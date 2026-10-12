@@ -9,9 +9,9 @@
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам
 canonical desired envelope; expanded effective snapshot не добавляет ключи в
-chunk. Recurring super-priority admission учитывает общую farm-capacity и при
-ожидающем persisted ordinary cycle оставляет один свободный shared slot, так
-что постоянный super-ring не может голодать обычный tail.
+chunk. Recurring super-priority admission сохраняет резерв для уже admitted
+ordinary cycle, а active static/super-priority work не вычитается из ordinary
+shared capacity: постоянный super-ring не может голодать обычный tail.
 
 При materialization instance rows bare modern empty `segments: []` не очищает
 непустой legacy whitelist: IDs переносятся в canonical priority lane. Очистка
@@ -124,11 +124,15 @@ profile/config и manual `segments:update` для admission не меняютс�
 `super-priority → priority → ordinary`. Любой опубликованный segment/closure
 принадлежит только одной линии; статические линии полностью исключены из
 ordinary snapshot. Обе статические линии имеют собственные persisted queues,
-но используют общие host-profile slots, instance locks и execution locks.
+собственный lane accounting и execution locks; dependency overlap и явно
+заданный host safety cap остаются отдельными защитами и не уменьшают
+configured ordinary worker budget.
 
 `super-priority` проверяется чаще `priority`; частота не меняет precedence и
-не убивает running job. Если worker свободен, независимая работа другой линии
-может продолжаться; общая capacity и dependency lock обязательны.
+не убивает running job. Если ordinary worker свободен, независимая работа
+super-priority может продолжаться параллельно; active super-priority не
+уменьшает ordinary capacity, а dependency overlap и execution lock остаются
+обязательными.
 
 ### Канонический runtime envelope
 
@@ -172,18 +176,21 @@ config на его profile baseline и только после этого при
    одну topological последовательность на worker: родители перед детьми. На
    Mautic 7 MCD оставляет только native terminal/root plan; внутренние
    dependencies не запускаются отдельными MCD элементами.
-4. Новый never-built не ждёт следующего snapshot. В active ordinary cycle он
-   атомарно добавляется после уже стоящих pending never-built и перед pending
-   changed/stale. Уже claimed/running и terminal элементы не двигаются,
-   существующий cursor не сбрасывается, duplicate не создаётся. Прочие новые
-   observed IDs добавляются в хвост pending очереди.
-   После `segment_cycle_sync` regular ring является строгой ordered-проекцией
-   только durable `cycle.items` без `done/errors/claimed/running` и static
-   IDs. Наблюдённый, но удержанный campaign/admission pressure кандидат не
-   попадает в ring и claim path до атомарной записи в `cycle.items`; он остаётся
-   кандидатом следующего планирования, а не orphan ring entry. После restart
-   dispatch строит pending projection напрямую из `runtime_sync`, поэтому
-   отсутствие volatile planner cache не может скрыть уже admitted work.
+4. Новый/never-built ID не ждёт нового frozen snapshot. Если он найден
+   уже после admission active ordinary cycle, `cycle.items` и его cursor не
+   меняются: ID атомарно добавляется в durable FIFO `follow_up`. Follow-up
+   конкурирует за следующий свободный ordinary worker и выбирается раньше
+   следующего pending ID frozen cycle; он не создаёт duplicate и не меняет
+   порядок исходного `cycle.items`. Уже claimed/running и terminal элементы не
+   двигаются. Follow-up state переживает restart, а terminal success/error,
+   retry и dead-letter остаются привязаны к его текущему generation.
+   После `segment_cycle_sync` dispatch строит projection из durable
+   `follow_up` FIFO, затем pending `cycle.items`, исключая
+   `done/errors/claimed/running`, static и SQL-managed IDs. Наблюдённый, но
+   удержанный campaign/admission pressure кандидат не попадает в follow-up и
+   claim path до атомарной записи; он остаётся кандидатом следующего
+   планирования, а не orphan ring entry. После restart порядок обеих очередей
+   сохраняется.
 5. Invalid filters, logical issues, failure cooldown и DB/backup/scheduler
    pause являются блокираторами admission, а не поводом пересортировать или
    потерять persisted cycle.
@@ -316,12 +323,13 @@ claim. Поэтому restart с живым executor/process принимает 
 pending ring после bounded grace.
 
 Для ordinary cycle есть два разных решения, которые нельзя смешивать:
-`admission` добавляет новые IDs в persisted cycle, а `dispatch` запускает уже
-сохранённые pending IDs. Campaign/queue pressure блокирует только первое:
-при active pressure новый snapshot не расширяет active cycle, но каждый
-сохранённый pending cursor продолжает dispatch. Если обычный ring временно
-получил нулевой throttled limit, для такого cursor сохраняется один shared
-slot при его фактической доступности.
+`admission` фиксирует frozen `cycle.items` и отдельно добавляет поздние IDs в
+durable `follow_up`, а `dispatch` запускает уже сохранённые pending IDs.
+Follow-up FIFO получает следующий свободный ordinary worker раньше frozen
+cursor; campaign/queue pressure блокирует только новую admission. При active
+pressure каждый сохранённый pending cursor и follow-up продолжает dispatch.
+Если обычный ring временно получил нулевой throttled limit, для такого cursor
+сохраняется один shared slot при его фактической доступности.
 
 Глобальный пятисекундный baseline cadence относится к новым baseline
 admissions, но не к unfinished item текущего durable cycle: и newly planned,

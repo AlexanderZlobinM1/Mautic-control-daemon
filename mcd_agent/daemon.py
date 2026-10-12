@@ -2230,6 +2230,7 @@ def _segment_cycle_sync(
     planned_ids: list[int] | tuple[int, ...] | set[int],
     never_built_ids: list[int] | tuple[int, ...] | set[int],
     running_ids: list[int] | tuple[int, ...] | set[int],
+    excluded_ids: list[int] | tuple[int, ...] | set[int] | None = None,
     now_ts: float,
     source_snapshot: Mapping[object, object] | None = None,
 ) -> tuple[dict[str, object], list[int], bool]:
@@ -2242,6 +2243,7 @@ def _segment_cycle_sync(
             planned_ids=planned_ids,
             never_built=never_built_ids,
             running_ids=running_ids,
+            excluded_ids=excluded_ids,
             now_ts=now_ts,
             source_snapshot=source_snapshot,
         )
@@ -2261,7 +2263,9 @@ def _segment_cycle_pending_ids(state: Mapping[str, object] | None) -> set[int]:
         return set()
     if str(state.get("status") or "active").strip().lower() != "active":
         return set()
-    items = set(_normalize_segment_ids(state.get("items")))
+    items = set(_normalize_segment_ids(state.get("items"))) | set(
+        _normalize_segment_ids(state.get("follow_up"))
+    )
     finished = set(_normalize_segment_ids(state.get("done"))) | set(
         _normalize_segment_ids(state.get("errors"))
     )
@@ -2276,12 +2280,14 @@ def _segment_cycle_pending_order(
     *,
     excluded_ids: list[int] | tuple[int, ...] | set[int] | None = None,
 ) -> list[int]:
-    """Project an active durable cycle into its ordered pending dispatch list.
+    """Project durable ordinary work into the ordered pending dispatch list.
 
-    Regular rings are a projection of ``cycle.items`` only.  An ID discovered
-    by a plan refresh is not eligible for claim until ``sync_cycle`` has
-    persisted it, and an item already claimed/running is left to its existing
-    worker.  This single projection is also used after restart so volatile
+    The frozen ``cycle.items`` cursor is never reordered.  IDs discovered
+    after its admission live in a separate durable follow-up FIFO and receive
+    the next free ordinary worker before the frozen cursor advances.  An ID
+    discovered by a plan refresh is not eligible for claim until ``sync_cycle``
+    has persisted it, and an item already claimed/running is left to its
+    existing worker.  This projection is also used after restart so volatile
     planner caches cannot strand durable work.
     """
 
@@ -2289,11 +2295,11 @@ def _segment_cycle_pending_order(
         return []
     pending = _segment_cycle_pending_ids(state)
     excluded = set(_normalize_segment_ids(excluded_ids))
-    return [
-        sid
-        for sid in _normalize_segment_ids(state.get("items"))
-        if sid in pending and sid not in excluded
+    ordered = [
+        *_normalize_segment_ids(state.get("follow_up")),
+        *_normalize_segment_ids(state.get("items")),
     ]
+    return [sid for sid in ordered if sid in pending and sid not in excluded]
 
 
 def _segment_cycle_admission_inputs(
@@ -14401,6 +14407,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                             for segment_id in standard_segment_ids
                             if priority_executor.is_active(root, "segment", int(segment_id))
                         ],
+                        excluded_ids=static_excluded_ids,
                         now_ts=float(now),
                         source_snapshot=source_snapshot,
                     )
@@ -15594,7 +15601,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
             persisted_pending_cycle_ids = set(
                 _segment_cycle_pending_order(
                     segment_cycle_payload,
-                    excluded_ids=sql_managed_segment_ids,
+                    excluded_ids=sql_managed_segment_ids | set(segment_static_ids_for_inst),
                 )
             )
             static_lane_payload = store.get_runtime_sync(_static_lane_state_key(root)) or {}
@@ -15609,11 +15616,14 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                         for value in [*(lane_payload.get("claimed") or []), *(lane_payload.get("running") or [])]
                         if str(value).strip().isdigit() and int(value) > 0
                     )
-            segment_cycle_ids = {
-                int(value)
-                for value in list(segment_cycle_payload.get("items") or [])
-                if str(value).strip().isdigit() and int(value) > 0
-            }
+            segment_cycle_ids = set(
+                _normalize_segment_ids(
+                    [
+                        *(segment_cycle_payload.get("items") or []),
+                        *(segment_cycle_payload.get("follow_up") or []),
+                    ]
+                )
+            )
             if not segment_cycle_ids:
                 segment_cycle_ids = set(seg_prio_ring) | set(seg_reg_ring)
 
@@ -16114,9 +16124,10 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                 and persisted_pending_cycle_ids
             ):
                 pending_cycle_ring = deque(
-                    sid
-                    for sid in _normalize_segment_ids(segment_cycle_payload.get("items"))
-                    if sid in persisted_pending_cycle_ids
+                    _segment_cycle_pending_order(
+                        segment_cycle_payload,
+                        excluded_ids=sql_managed_segment_ids | set(segment_static_ids_for_inst),
+                    )
                 )
                 pending_slot_limit = max(1, int(segment_slot_limit or 0))
                 pending_slot_limit = min(

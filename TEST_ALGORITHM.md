@@ -40,6 +40,10 @@ TaskStore fixture должен сохранять `cycle_id`, `updated_at` и sp
    же `cycle_id` без ring reset. Уже сохранённый pending ID всё равно
    claim-ится и стартует. После снятия pressure новый ID может быть добавлен
    по обычному FIFO/never-built правилу.
+   Если новый never-built ID обнаружен уже после admission active cycle, он
+   не меняет `cycle.items`: сохраняется в durable `follow_up` FIFO и получает
+   следующий свободный ordinary worker раньше следующего frozen-cycle ID.
+   После restart порядок follow-up сохраняется, duplicate не создаётся.
 4. Несколько roots/instances с `pending>0` и `running=0` получают свободные
    slots по очереди dispatch. Один root не может навсегда удерживать cursor
    active только потому, что другой root первым использовал global baseline.

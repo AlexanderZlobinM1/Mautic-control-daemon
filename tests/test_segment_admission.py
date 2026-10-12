@@ -60,7 +60,7 @@ class SegmentAdmissionTests(unittest.TestCase):
             [151, 152],
         )
 
-    def test_active_cycle_appends_without_reordering_or_reset(self) -> None:
+    def test_active_cycle_queues_new_ids_in_follow_up_without_reordering_or_reset(self) -> None:
         state, added, started = sync_cycle(
             None,
             planned_ids=[10, 20],
@@ -80,8 +80,21 @@ class SegmentAdmissionTests(unittest.TestCase):
         )
         self.assertFalse(started)
         self.assertEqual(added, [30])
-        self.assertEqual(state["items"], [10, 20, 30])
+        self.assertEqual(state["items"], [10, 20])
+        self.assertEqual(state["follow_up"], [30])
         self.assertEqual(state["running"], [10])
+
+        state, added, started = sync_cycle(
+            state,
+            planned_ids=[20, 30, 58],
+            never_built=[58],
+            running_ids=[],
+            excluded_ids=[58],
+            now_ts=102.0,
+        )
+        self.assertFalse(started)
+        self.assertEqual(added, [])
+        self.assertEqual(state["follow_up"], [30])
 
     def test_persisted_cycle_survives_several_minute_ticks_before_reset(self) -> None:
         store = self.RuntimeStore()
@@ -179,7 +192,7 @@ class SegmentAdmissionTests(unittest.TestCase):
         self.assertEqual(restarted["items"], planned)
         self.assertEqual(len(restarted["items"]), len(set(restarted["items"])))
 
-    def test_mid_cycle_never_built_is_inserted_before_pending_changed_work(self) -> None:
+    def test_mid_cycle_never_built_enters_follow_up_without_reordering_frozen_work(self) -> None:
         state, _added, _started = sync_cycle(
             None,
             planned_ids=[1, 2, 3],
@@ -196,7 +209,8 @@ class SegmentAdmissionTests(unittest.TestCase):
         )
         self.assertFalse(started)
         self.assertEqual(added, [4])
-        self.assertEqual(state["items"], [1, 2, 4, 3])
+        self.assertEqual(state["items"], [1, 2, 3])
+        self.assertEqual(state["follow_up"], [4])
         self.assertEqual(state["running"], [1])
 
     def test_ordinary_snapshot_uses_categories_fifo_and_excludes_static_lanes(self) -> None:

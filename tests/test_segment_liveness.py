@@ -428,7 +428,144 @@ class SegmentLivenessTests(unittest.TestCase):
                 )
                 self.assertFalse(started_new)
                 self.assertEqual(added, [13])
-                self.assertEqual(released["items"], [11, 13, 12])
+                self.assertEqual(released["items"], [11, 12])
+                self.assertEqual(released["follow_up"], [13])
+
+    def test_new_never_built_arrival_uses_follow_up_fifo_after_restart(self) -> None:
+        root = "/var/www/b2bss/public_html"
+        cycle_admitted_at = 7 * 3600 + 8 * 60 + 17
+        new_segment_at = 11 * 3600 + 51 * 60 + 35
+        source_before = {
+            "3": {"modified_ts": 100.0, "built_ts": 90.0},
+            "144": {"modified_ts": 101.0, "built_ts": 91.0},
+        }
+        source_after = {
+            **source_before,
+            "154": {"modified_ts": float(new_segment_at), "built_ts": None},
+        }
+        state, _added, started = sync_cycle(
+            None,
+            planned_ids=[3, 144],
+            never_built=[],
+            running_ids=[],
+            now_ts=float(cycle_admitted_at),
+            source_snapshot=source_before,
+        )
+        self.assertTrue(started)
+        cycle_id = state["cycle_id"]
+
+        state, added, started = sync_cycle(
+            state,
+            planned_ids=[3, 144, 154],
+            never_built=[154],
+            running_ids=[],
+            now_ts=float(new_segment_at),
+            source_snapshot=source_after,
+        )
+        self.assertFalse(started)
+        self.assertEqual(added, [154])
+        self.assertEqual(state["cycle_id"], cycle_id)
+        self.assertEqual(state["items"], [3, 144])
+        self.assertEqual(state["follow_up"], [154])
+        self.assertEqual(_segment_cycle_pending_order(state), [154, 3, 144])
+
+        with tempfile.TemporaryDirectory() as td:
+            store = TaskStore(str(Path(td) / "state.db"))
+            store.put_runtime_sync(cycle_key(root), state)
+            store.close()
+            store = TaskStore(str(Path(td) / "state.db"))
+            recovered = store.get_runtime_sync(cycle_key(root))
+            self.assertEqual(_segment_cycle_pending_order(recovered), [154, 3, 144])
+
+            running: dict[str, daemon.RunningTask] = {}
+            pending_order = _segment_cycle_pending_order(recovered)
+            with patch.object(daemon, "_spawn_command", return_value=SimpleNamespace(pid=9154)) as spawn, patch.object(
+                daemon, "_task_locked_args", side_effect=lambda _key, args, **_kwargs: args
+            ), patch.object(daemon, "_scheduler_baseline_launch_due", return_value=False), patch.object(
+                daemon, "_SEGMENT_DISPATCH_WAKEUP", None
+            ):
+                launched = _fill_from_ring(
+                    ring=deque(pending_order),
+                    ring_limit=1,
+                    total_limit=1,
+                    root=root,
+                    task_type="segment",
+                    running=running,
+                    ring_entities=set(pending_order),
+                    config=self._config(),
+                    store=store,
+                    popens={},
+                    build_args=lambda sid: ["php", "bin/console", "mautic:segments:update", "-i", str(sid)],
+                    admission_claim=lambda sid: _segment_cycle_claim(
+                        store,
+                        root=root,
+                        entity_id=sid,
+                        eligible_ids=pending_order,
+                        blocked_ids=set(),
+                        running_ids=set(),
+                        now_ts=float(new_segment_at),
+                    ),
+                    admission_running=lambda sid: _segment_cycle_running(
+                        store,
+                        root=root,
+                        entity_id=sid,
+                        now_ts=float(new_segment_at + 1),
+                    ),
+                    admission_release=lambda sid: None,
+                    bypass_repeat_guard_entities=set(pending_order),
+                    bypass_baseline_admission=True,
+                    max_launches=1,
+                )
+
+            self.assertEqual(launched, 1)
+            spawn.assert_called_once()
+            self.assertEqual(running[next(iter(running))].entity_id, 154)
+            running_state = store.get_runtime_sync(cycle_key(root))
+            self.assertEqual(running_state["items"], [3, 144])
+            self.assertEqual(running_state["follow_up"], [154])
+            self.assertEqual(running_state["running"], [154])
+
+            _segment_cycle_terminal(
+                store,
+                root=root,
+                entity_id=154,
+                success=False,
+                note="fixture_failure",
+                now_ts=float(new_segment_at + 2),
+            )
+            failed = store.get_runtime_sync(cycle_key(root))
+            self.assertEqual(failed["follow_up"], [154])
+            self.assertEqual(failed["errors"], [154])
+            self.assertEqual(_segment_cycle_pending_order(failed), [3, 144])
+            _segment_cycle_terminal(
+                store,
+                root=root,
+                entity_id=3,
+                success=True,
+                note=None,
+                now_ts=float(new_segment_at + 3),
+            )
+            _segment_cycle_terminal(
+                store,
+                root=root,
+                entity_id=144,
+                success=True,
+                note=None,
+                now_ts=float(new_segment_at + 4),
+            )
+            terminal = store.get_runtime_sync(cycle_key(root))
+            self.assertEqual(terminal["status"], "terminal")
+            retried, _added, started_new = sync_cycle(
+                terminal,
+                planned_ids=[3, 144, 154],
+                never_built=[154],
+                running_ids=[],
+                now_ts=float(new_segment_at + 5),
+            )
+            self.assertTrue(started_new)
+            self.assertEqual(retried["items"], [3, 144, 154])
+            self.assertEqual(retried["follow_up"], [])
+            store.close()
 
     def test_host_wide_free_slots_distribute_persisted_pending_cycles(self) -> None:
         with tempfile.TemporaryDirectory() as td:

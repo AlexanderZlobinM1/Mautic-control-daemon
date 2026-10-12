@@ -305,6 +305,7 @@ def _new_cycle(
         "cycle_id": _cycle_id(now_ts, items),
         "status": "active" if items else "terminal",
         "items": list(items),
+        "follow_up": [],
         "claimed": [],
         "running": [],
         "done": [],
@@ -326,7 +327,8 @@ def _new_cycle(
 def normalize_state(raw: Mapping[str, Any] | None) -> dict[str, object]:
     source = dict(raw or {})
     items = normalize_ids(source.get("items"))
-    item_set = set(items)
+    follow_up = [sid for sid in normalize_ids(source.get("follow_up")) if sid not in set(items)]
+    item_set = set(items) | set(follow_up)
     done = [x for x in normalize_ids(source.get("done")) if x in item_set]
     errors = [x for x in normalize_ids(source.get("errors")) if x in item_set and x not in done]
     claimed = [x for x in normalize_ids(source.get("claimed")) if x in item_set and x not in done and x not in errors]
@@ -350,6 +352,7 @@ def normalize_state(raw: Mapping[str, Any] | None) -> dict[str, object]:
         "cycle_id": str(source.get("cycle_id") or ""),
         "status": status,
         "items": items,
+        "follow_up": follow_up,
         "claimed": claimed,
         "running": running,
         "done": done,
@@ -374,7 +377,7 @@ def normalize_state(raw: Mapping[str, Any] | None) -> dict[str, object]:
 
 
 def _mark_terminal_if_complete(state: dict[str, object]) -> None:
-    items = set(normalize_ids(state.get("items")))
+    items = set(normalize_ids(state.get("items"))) | set(normalize_ids(state.get("follow_up")))
     finished = set(normalize_ids(state.get("done"))) | set(normalize_ids(state.get("errors")))
     active = set(normalize_ids(state.get("claimed"))) | set(normalize_ids(state.get("running")))
     if items and items <= finished and not active:
@@ -423,7 +426,8 @@ def _commit_terminal_baseline(state: dict[str, object]) -> None:
         )
     }
     done = set(normalize_ids(state.get("done")))
-    if not state.get("items") and not errors:
+    all_items = set(normalize_ids(state.get("items"))) | set(normalize_ids(state.get("follow_up")))
+    if not all_items and not errors:
         # An empty terminal cycle still establishes that the full read-only
         # snapshot was observed, preventing fresh rows from being rediscovered
         # on every scheduler tick.
@@ -438,7 +442,7 @@ def _commit_terminal_baseline(state: dict[str, object]) -> None:
     state["baseline"] = _normalize_baseline(applied)
     state["applied_state"] = _normalize_baseline(applied)
     state["baseline_ready"] = True
-    if not errors and (not state.get("items") or done):
+    if not errors and (not all_items or done):
         state["baseline_generation"] = max(
             0, int(state.get("baseline_generation") or 0)
         ) + 1
@@ -485,7 +489,7 @@ def manual_claim(
     if isinstance(previous, Mapping) and str(previous.get("status") or "").startswith("claimed"):
         return state, False, "manual_already_claimed"
 
-    items = set(normalize_ids(state.get("items")))
+    items = set(normalize_ids(state.get("items"))) | set(normalize_ids(state.get("follow_up")))
     finished = set(normalize_ids(state.get("done"))) | set(normalize_ids(state.get("errors")))
     active = set(normalize_ids(state.get("claimed"))) | set(normalize_ids(state.get("running")))
     if set(ids) & finished:
@@ -560,7 +564,7 @@ def manual_terminal(
     entry = dict(raw_entry)
     ids = normalize_ids(entry.get("entity_ids"))
     claimed_ids = set(normalize_ids(entry.get("claimed_ids")))
-    item_ids = set(normalize_ids(state.get("items")))
+    item_ids = set(normalize_ids(state.get("items"))) | set(normalize_ids(state.get("follow_up")))
     previous_status = str(state.get("status") or "active")
     observed = _normalize_baseline(
         observed_snapshot if observed_snapshot is not None else entry.get("observed_snapshot")
@@ -620,28 +624,31 @@ def sync_cycle(
     planned_ids: Iterable[object] | None,
     never_built: Iterable[object] | None,
     running_ids: Iterable[object] | None,
+    excluded_ids: Iterable[object] | None = None,
     now_ts: float,
     source_snapshot: Mapping[object, object] | None = None,
 ) -> tuple[dict[str, object], list[int], bool]:
     """Reconcile planning observations without resetting an active cycle.
 
     Returns ``(state, added_ids, started_new_cycle)``. Active cycles never
-    reorder existing work. New ordinary IDs append in first-seen order; new
-    never-built IDs are inserted after existing pending never-built items and
-    before pending changed/stale items. Claimed, running, and terminal items
-    retain their positions.
+    reorder existing work. New IDs discovered after admission enter the
+    durable follow-up FIFO; the frozen ``items`` order remains unchanged.
+    Claimed, running, and terminal items retain their positions.
     """
 
-    planned = normalize_ids(planned_ids)
-    never = set(normalize_ids(never_built))
+    excluded = set(normalize_ids(excluded_ids))
+    planned = [sid for sid in normalize_ids(planned_ids) if sid not in excluded]
+    never = {sid for sid in normalize_ids(never_built) if sid not in excluded}
     running = set(normalize_ids(running_ids))
     current = normalize_state(raw)
     current_items = normalize_ids(current.get("items"))
+    current_follow_up = normalize_ids(current.get("follow_up"))
     current_status = str(current.get("status") or "active")
     finished = set(normalize_ids(current.get("done"))) | set(normalize_ids(current.get("errors")))
     active_claims = set(normalize_ids(current.get("claimed"))) | set(normalize_ids(current.get("running")))
-    cycle_complete = bool(current_items) and set(current_items) <= finished and not active_claims
-    started_new = not current_items or current_status == "terminal" or cycle_complete
+    all_current_items = set(current_items) | set(current_follow_up)
+    cycle_complete = bool(all_current_items) and all_current_items <= finished and not active_claims
+    started_new = not all_current_items or current_status == "terminal" or cycle_complete
     if started_new:
         current_observed = _normalize_baseline(current.get("observed_snapshot"))
         cycle_snapshot = (
@@ -669,46 +676,17 @@ def sync_cycle(
         if not state.get("cycle_baseline") and source_snapshot is not None:
             state["cycle_baseline"] = _normalize_baseline(source_snapshot)
         _observe_source(state, source_snapshot)
-        existing = set(current_items)
+        existing = set(current_items) | set(current_follow_up)
         candidate_order = normalize_ids([*planned, *normalize_ids(never)])
-        additions = [sid for sid in candidate_order if sid not in existing]
-        new_never = [sid for sid in additions if sid in never]
-        ordinary_additions = [sid for sid in additions if sid not in never]
-        if new_never:
-            claimed_now = set(normalize_ids(current.get("claimed")))
-            running_now = set(normalize_ids(current.get("running")))
-            pending_non_never_index = next(
-                (
-                    index
-                    for index, sid in enumerate(current_items)
-                    if sid not in never
-                    and sid not in set(normalize_ids(current.get("done")))
-                    and sid not in set(normalize_ids(current.get("errors")))
-                    and sid not in claimed_now
-                    and sid not in running_now
-                    and sid not in running
-                ),
-                None,
-            )
-            insertion_index = (
-                len(current_items)
-                if pending_non_never_index is None
-                else pending_non_never_index
-            )
-            # The insertion point is immediately before the first pending
-            # changed/stale item; a valid ordinary snapshot already has all
-            # pending never-built items before that point.
-            state["items"] = [
-                *current_items[:insertion_index],
-                *new_never,
-                *current_items[insertion_index:],
-                *ordinary_additions,
-            ]
-        else:
-            state["items"] = [*current_items, *ordinary_additions]
+        additions = [sid for sid in candidate_order if sid not in existing and sid not in running]
+        # The ordinary snapshot is frozen for the life of the active cycle.
+        # New IDs discovered by a later read are durable follow-up FIFO work,
+        # so a late segment cannot rewrite the frozen order.
+        state["items"] = list(current_items)
+        state["follow_up"] = normalize_ids([*current_follow_up, *additions])
         added = additions
 
-    state_items = set(normalize_ids(state.get("items")))
+    state_items = set(normalize_ids(state.get("items"))) | set(normalize_ids(state.get("follow_up")))
     state["running"] = [sid for sid in normalize_ids(running) if sid in state_items]
     running_set = set(normalize_ids(state.get("running")))
     state["claimed"] = [
@@ -738,7 +716,7 @@ def claim_item(
     sid = int(entity_id)
     if str(state.get("status") or "active") != "active":
         return state, False
-    items = set(normalize_ids(state.get("items")))
+    items = set(normalize_ids(state.get("items"))) | set(normalize_ids(state.get("follow_up")))
     blocked = set(normalize_ids(blocked_ids))
     running = set(normalize_ids([*normalize_ids(state.get("running")), *normalize_ids(running_ids)]))
     eligible = set(normalize_ids(eligible_ids)) if eligible_ids is not None else items
@@ -754,7 +732,7 @@ def claim_item(
 def mark_running(raw: Mapping[str, Any] | None, *, entity_id: int, now_ts: float) -> dict[str, object]:
     state = normalize_state(raw)
     sid = int(entity_id)
-    if sid in set(normalize_ids(state.get("items"))):
+    if sid in set(normalize_ids(state.get("items"))) | set(normalize_ids(state.get("follow_up"))):
         state["claimed"] = normalize_ids([*state.get("claimed", []), sid])
         state["running"] = normalize_ids([*state.get("running", []), sid])
         state["updated_at"] = float(now_ts)
