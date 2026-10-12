@@ -31,6 +31,8 @@ from mcd_agent.segment_admission import (
     normalize_state,
     ordinary_snapshot_order,
     active_cycle_follow_up_rows,
+    cycle_item_tier,
+    pending_important_ids,
     source_baseline,
     sync_cycle,
 )
@@ -60,6 +62,46 @@ class SegmentAdmissionTests(unittest.TestCase):
             ),
             [151, 152],
         )
+
+    def test_full_cycle_persists_important_and_remaining_tiers(self) -> None:
+        groups: dict[str, list[int]] = {}
+        planned = ordinary_snapshot_order(
+            [
+                {"id": 1, "last_built_date": None, "date_modified": None},
+                {"id": 2, "last_built_date": 100, "date_modified": 100},
+                {"id": 3, "last_built_date": 100, "date_modified": 100},
+            ],
+            [1, 2, 3],
+            now_ts=200,
+            stale_after_sec=1000,
+            include_fresh_remaining=True,
+            groups=groups,
+        )
+        state, _added, started = sync_cycle(
+            None,
+            planned_ids=planned,
+            never_built=[1],
+            running_ids=[],
+            now_ts=201,
+            important_ids=groups["important"],
+            remaining_ids=groups["remaining"],
+        )
+        self.assertTrue(started)
+        self.assertEqual(state["important_items"], [1])
+        self.assertEqual(state["remaining_items"], [2, 3])
+        self.assertEqual(pending_important_ids(state), {1})
+        self.assertEqual(cycle_item_tier(state, 2), "remaining")
+
+        running_state, _added, _started = sync_cycle(
+            state,
+            planned_ids=planned,
+            never_built=[1],
+            running_ids=[1],
+            now_ts=202,
+            important_ids=groups["important"],
+            remaining_ids=groups["remaining"],
+        )
+        self.assertEqual(pending_important_ids(running_state), set())
 
     def test_active_cycle_queues_new_ids_in_follow_up_without_reordering_or_reset(self) -> None:
         state, added, started = sync_cycle(
@@ -530,6 +572,216 @@ class SegmentAdmissionTests(unittest.TestCase):
             )
         self.assertTrue(launched)
         self.assertIn("/var/www/site|segment|151", running)
+
+    def test_manual_override_adds_slot_but_normal_dispatch_waits_for_capacity(self) -> None:
+        class LaunchStore:
+            def __init__(self) -> None:
+                self.tasks: list[RunningTask] = []
+
+            def has_running_task_key(self, _key: str) -> bool:
+                return False
+
+            def add_running(self, task: RunningTask) -> int:
+                self.tasks.append(task)
+                return len(self.tasks)
+
+        def task(entity_id: int, manual_request_id: int | None = None) -> RunningTask:
+            return RunningTask(
+                row_id=entity_id,
+                root="/var/www/site",
+                task_key=f"/var/www/site|segment|{entity_id}",
+                task_type="segment",
+                entity_id=entity_id,
+                command_str="php mautic segments:update",
+                timeout_sec=60,
+                attempts=1,
+                started_at=100.0,
+                pid=entity_id,
+                manual_request_id=manual_request_id,
+            )
+
+        config = SimpleNamespace(
+            scheduler_host_max_parallel=4,
+            scheduler_instance_max_parallel=4,
+            scheduler_elastic_slots_enabled=True,
+            scheduler_emergency_reserved_slots=0,
+            segment_mode="id_weighted",
+            segment_priority_parallel_idle=4,
+            segment_regular_parallel_idle=0,
+        )
+        root = "/var/www/site"
+        running = {f"normal-{idx}": task(idx) for idx in range(1, 5)}
+        store = LaunchStore()
+        proc_counter = iter([500, 501])
+        proc = lambda: SimpleNamespace(pid=next(proc_counter), wait=lambda: 0)
+
+        with patch(
+            "mcd_agent.daemon._scheduler_shared_admission_allowed",
+            side_effect=[False, True, True],
+        ), patch(
+            "mcd_agent.daemon._spawn_command", side_effect=lambda **_kwargs: proc()
+        ), patch(
+            "mcd_agent.daemon._task_locked_args", side_effect=lambda _key, args, **_kwargs: args
+        ), patch("mcd_agent.daemon._SEGMENT_DISPATCH_WAKEUP", None):
+            manual_launched = _submit_if_slot_uncoordinated(
+                config=config,
+                store=store,
+                running=running,
+                root=root,
+                task_type="segment",
+                entity_id=151,
+                args=["php", "segments:update"],
+                timeout_sec=60,
+                max_parallel_for_type=1,
+                popens={},
+                ignore_limit=True,
+                manual_request_id=17,
+            )
+            self.assertTrue(manual_launched)
+            self.assertEqual(len(running), 5)
+
+            del running["normal-1"]
+            ordinary_waits = _submit_if_slot_uncoordinated(
+                config=config,
+                store=store,
+                running=running,
+                root=root,
+                task_type="segment",
+                entity_id=152,
+                args=["php", "segments:update"],
+                timeout_sec=60,
+                max_parallel_for_type=4,
+                popens={},
+                bypass_baseline_admission=True,
+            )
+            self.assertFalse(ordinary_waits)
+            self.assertEqual(len(running), 4)
+
+            del running["normal-2"]
+            ordinary_launched = _submit_if_slot_uncoordinated(
+                config=config,
+                store=store,
+                running=running,
+                root=root,
+                task_type="segment",
+                entity_id=152,
+                args=["php", "segments:update"],
+                timeout_sec=60,
+                max_parallel_for_type=4,
+                popens={},
+                bypass_baseline_admission=True,
+            )
+            self.assertTrue(ordinary_launched)
+            self.assertEqual(len(running), 4)
+
+    def test_manual_override_is_per_instance_without_host_overflow_cap(self) -> None:
+        class LaunchStore:
+            def __init__(self) -> None:
+                self.tasks: list[RunningTask] = []
+
+            def has_running_task_key(self, _key: str) -> bool:
+                return False
+
+            def add_running(self, task: RunningTask) -> int:
+                self.tasks.append(task)
+                return len(self.tasks)
+
+        def task(root: str, entity_id: int, manual_request_id: int | None = None) -> RunningTask:
+            return RunningTask(
+                row_id=entity_id,
+                root=root,
+                task_key=f"{root}|segment|{entity_id}",
+                task_type="segment",
+                entity_id=entity_id,
+                command_str="php mautic segments:update",
+                timeout_sec=60,
+                attempts=1,
+                started_at=100.0,
+                pid=entity_id,
+                manual_request_id=manual_request_id,
+            )
+
+        config = SimpleNamespace(
+            scheduler_host_max_parallel=11,
+            scheduler_instance_max_parallel=4,
+            scheduler_elastic_slots_enabled=True,
+            scheduler_emergency_reserved_slots=0,
+            segment_mode="id_weighted",
+            segment_priority_parallel_idle=11,
+            segment_regular_parallel_idle=0,
+        )
+        roots = ["/var/www/a", "/var/www/b", "/var/www/c"]
+        running = {
+            f"normal-{idx}": task(roots[idx % len(roots)], idx + 1)
+            for idx in range(11)
+        }
+        store = LaunchStore()
+        proc_counter = iter(range(700, 704))
+
+        with patch(
+            "mcd_agent.daemon._scheduler_shared_admission_allowed",
+            side_effect=lambda _root, _task_type: len(running) <= 10,
+        ), patch(
+            "mcd_agent.daemon._spawn_command",
+            side_effect=lambda **_kwargs: SimpleNamespace(pid=next(proc_counter), wait=lambda: 0),
+        ), patch(
+            "mcd_agent.daemon._task_locked_args", side_effect=lambda _key, args, **_kwargs: args
+        ), patch("mcd_agent.daemon._SEGMENT_DISPATCH_WAKEUP", None):
+            for offset, root in enumerate(roots, start=1):
+                self.assertTrue(
+                    _submit_if_slot_uncoordinated(
+                        config=config,
+                        store=store,
+                        running=running,
+                        root=root,
+                        task_type="segment",
+                        entity_id=100 + offset,
+                        args=["php", "segments:update"],
+                        timeout_sec=60,
+                        max_parallel_for_type=1,
+                        popens={},
+                        ignore_limit=True,
+                        manual_request_id=offset,
+                    )
+                )
+            self.assertEqual(len(running), 14)
+
+            for idx in range(3):
+                del running[f"normal-{idx}"]
+                self.assertFalse(
+                    _submit_if_slot_uncoordinated(
+                        config=config,
+                        store=store,
+                        running=running,
+                        root=roots[0],
+                        task_type="segment",
+                        entity_id=200 + idx,
+                        args=["php", "segments:update"],
+                        timeout_sec=60,
+                        max_parallel_for_type=11,
+                        popens={},
+                        bypass_baseline_admission=True,
+                    )
+                )
+            self.assertEqual(len(running), 11)
+
+            del running["normal-3"]
+            self.assertTrue(
+                _submit_if_slot_uncoordinated(
+                    config=config,
+                    store=store,
+                    running=running,
+                    root=roots[0],
+                    task_type="segment",
+                    entity_id=203,
+                    args=["php", "segments:update"],
+                    timeout_sec=60,
+                    max_parallel_for_type=11,
+                    popens={},
+                    bypass_baseline_admission=True,
+                )
+            )
+            self.assertEqual(len(running), 11)
 
     def test_manual_success_records_applied_snapshot_outside_current_cycle(self) -> None:
         previous_rows = [{"id": 151, "last_built_date": 100, "date_modified": 100}]

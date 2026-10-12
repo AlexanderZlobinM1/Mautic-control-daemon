@@ -75,8 +75,11 @@ from mcd_agent.daemon import (
     _rotated_dispatch_installs,
     _root_has_live_campaign_process,
     _run_sql_segment_ring,
+    _scheduler_host_running_count,
     _scheduler_host_slots_available,
     _scheduler_instance_slots_available,
+    _scheduler_round_robin_order,
+    _set_scheduler_distribution_roots,
     _set_scheduler_fairness_promoted_roots,
     _set_scheduler_priority_pending_roots,
     _take_scheduler_fairness_claimed_roots,
@@ -173,6 +176,8 @@ class CampaignRingDispatchTests(unittest.TestCase):
             daemon_mod._CAMPAIGN_DISPATCHING_ROOTS.clear()
         _set_scheduler_priority_pending_roots(set())
         _set_scheduler_fairness_promoted_roots(set())
+        daemon_mod._set_scheduler_important_pending_roots(set())
+        _set_scheduler_distribution_roots([], worker_slots=1)
         _take_scheduler_fairness_claimed_roots()
         with daemon_mod._SCHEDULER_FAIRNESS_LOCK:
             daemon_mod._SCHEDULER_BASELINE_LAST_LAUNCH_BY_LANE.clear()
@@ -204,7 +209,179 @@ class CampaignRingDispatchTests(unittest.TestCase):
             segment_regular_parallel_idle=1,
         )
 
-        self.assertEqual(_scheduler_host_slots_available(cfg, running, "segment"), 1)
+        self.assertEqual(_scheduler_host_slots_available(cfg, running, "segment"), 0)
+
+    def test_shared_round_robin_first_pass_is_one_worker_per_ready_root(self) -> None:
+        roots = [f"/var/www/root-{index}" for index in range(40)]
+        first_pass = _scheduler_round_robin_order(roots, 12)
+        self.assertEqual(len(first_pass), 12)
+        self.assertEqual(len(set(first_pass)), 12)
+
+        fewer_roots = _scheduler_round_robin_order(roots[:3], 12)
+        self.assertEqual(len(fewer_roots), 12)
+        self.assertEqual(set(fewer_roots), set(roots[:3]))
+
+        _set_scheduler_distribution_roots(roots, worker_slots=12)
+        admitted: list[str] = []
+        for _slot in range(12):
+            for root in roots:
+                if daemon_mod._scheduler_shared_admission_allowed(root, "segment"):
+                    daemon_mod._mark_scheduler_shared_admission(root, "segment")
+                    admitted.append(root)
+                    break
+        self.assertEqual(len(admitted), 12)
+        self.assertEqual(len(set(admitted)), 12)
+        _set_scheduler_distribution_roots([], worker_slots=1)
+
+    def test_super_priority_is_outside_shared_host_and_instance_caps(self) -> None:
+        root = "/var/www/super"
+        cfg = SimpleNamespace(
+            scheduler_host_max_parallel=1,
+            scheduler_instance_max_parallel=1,
+            scheduler_elastic_slots_enabled=True,
+            scheduler_emergency_reserved_slots=0,
+            segment_mode="id_weighted",
+            segment_priority_parallel_idle=1,
+            segment_regular_parallel_idle=1,
+        )
+        running = {
+            "ordinary": SimpleNamespace(root="/var/www/ordinary", task_type="segment", entity_id=1),
+            "super": SimpleNamespace(root=root, task_type="segment_super_priority", entity_id=58),
+        }
+        self.assertEqual(_scheduler_host_slots_available(cfg, running, "segment"), 0)
+        self.assertIsNone(_scheduler_host_slots_available(cfg, running, "segment_super_priority", root=root))
+        self.assertIsNone(
+            _scheduler_instance_slots_available(
+                cfg,
+                running,
+                root=root,
+                task_type="segment_super_priority",
+            )
+        )
+
+    def test_super_lane_owner_overrides_generic_adopted_wrapper(self) -> None:
+        root = "/var/www/super"
+        super_key = _task_key(root, "segment_super_priority", 58)
+        executor = _PriorityTaskExecutor()
+        with executor._guard:
+            executor._active[super_key] = (root, "segment_super_priority", "segment_super_priority")
+        wrapper = {
+            "observed-wrapper": SimpleNamespace(
+                root=root,
+                task_type="segment",
+                entity_id=58,
+            )
+        }
+        self.assertEqual(
+            daemon_mod._scheduler_actual_work_count(wrapper, priority_executor=executor),
+            0,
+        )
+
+        ordinary = {
+            "ordinary": SimpleNamespace(root=root, task_type="segment", entity_id=59),
+            "wrapper": SimpleNamespace(root=root, task_type="segment", entity_id=59),
+        }
+        self.assertEqual(
+            daemon_mod._scheduler_actual_work_count(ordinary),
+            1,
+        )
+
+    def test_distribution_gate_serves_unassigned_roots_before_second_slot(self) -> None:
+        roots = ["/var/www/a", "/var/www/b", "/var/www/c"]
+        _set_scheduler_distribution_roots(roots, worker_slots=12)
+        self.assertTrue(daemon_mod._scheduler_shared_admission_allowed(roots[0], "segment"))
+        daemon_mod._mark_scheduler_shared_admission(roots[0], "segment")
+        self.assertFalse(daemon_mod._scheduler_shared_admission_allowed(roots[0], "segment"))
+        self.assertTrue(daemon_mod._scheduler_shared_admission_allowed(roots[1], "segment"))
+        _set_scheduler_distribution_roots([], worker_slots=1)
+
+    def test_remaining_root_uses_free_host_slot_when_important_root_is_instance_full(self) -> None:
+        important_root = "/var/www/important"
+        remaining_root = "/var/www/remaining"
+        cycle_key = daemon_mod._segment_cycle_key(remaining_root)
+
+        class Store:
+            def get_runtime_sync(self, key: str) -> dict[str, object] | None:
+                if key == cycle_key:
+                    return {
+                        "schema": "mcd-segment-cycle-v1",
+                        "status": "active",
+                        "items": [200],
+                        "important_items": [],
+                        "remaining_items": [200],
+                        "claimed": [],
+                        "running": [],
+                        "done": [],
+                        "errors": [],
+                    }
+                return None
+
+            def put_runtime_sync(self, _key: str, _payload: dict[str, object]) -> None:
+                return None
+
+        cfg = SimpleNamespace(
+            command_timeout_sec=30,
+            scheduler_host_max_parallel=2,
+            scheduler_instance_max_parallel=1,
+            scheduler_elastic_slots_enabled=True,
+            scheduler_emergency_reserved_slots=0,
+        )
+        running = {
+            "important-worker": SimpleNamespace(
+                root=important_root,
+                task_type="segment",
+                entity_id=101,
+            )
+        }
+        daemon_mod._set_scheduler_important_pending_roots({important_root})
+        first_ring = deque([200])
+        with patch.object(daemon_mod, "_submit_if_slot", return_value=True) as submit:
+            launched = _fill_from_ring(
+                ring=first_ring,
+                ring_limit=1,
+                total_limit=1,
+                root=remaining_root,
+                task_type="segment",
+                running=running,
+                ring_entities={200},
+                config=cfg,
+                store=Store(),
+                popens={},
+                build_args=lambda sid: ["php", "bin/console", "mautic:segments:update", "-i", str(sid)],
+                admission_claim=lambda _sid: True,
+                remove_on_launch=True,
+                bypass_baseline_admission=True,
+                max_launches=1,
+            )
+
+        self.assertEqual(launched, 1)
+        submit.assert_called_once()
+
+        # Once the important root is actually free, the same remaining item
+        # must wait behind it again; the capacity filter is not a tier bypass.
+        running.clear()
+        second_ring = deque([200])
+        with patch.object(daemon_mod, "_submit_if_slot", return_value=True) as submit:
+            launched = _fill_from_ring(
+                ring=second_ring,
+                ring_limit=1,
+                total_limit=1,
+                root=remaining_root,
+                task_type="segment",
+                running=running,
+                ring_entities={200},
+                config=cfg,
+                store=Store(),
+                popens={},
+                build_args=lambda sid: ["php", "bin/console", "mautic:segments:update", "-i", str(sid)],
+                admission_claim=lambda _sid: True,
+                remove_on_launch=True,
+                bypass_baseline_admission=True,
+                max_launches=1,
+            )
+
+        self.assertEqual(launched, 0)
+        submit.assert_not_called()
 
     def test_selected_profile_fanout_is_not_clamped_without_explicit_host_cap(self) -> None:
         root = "/var/www/site"
@@ -232,7 +409,7 @@ class CampaignRingDispatchTests(unittest.TestCase):
             profile_name="hiload",
             scheduler_host_max_parallel=2,
             scheduler_elastic_slots_enabled=True,
-            scheduler_emergency_reserved_slots=1,
+            scheduler_emergency_reserved_slots=0,
             segment_mode="id_weighted",
             segment_priority_parallel_idle=6,
             segment_regular_parallel_idle=2,
@@ -243,7 +420,7 @@ class CampaignRingDispatchTests(unittest.TestCase):
 
         self.assertEqual(_scheduler_host_slots_available(cfg, running, "segment", root=root), 1)
 
-    def test_elastic_host_budget_keeps_one_emergency_slot_for_priority_work(self) -> None:
+    def test_elastic_host_budget_counts_baselines_inside_hard_host_cap(self) -> None:
         cfg = SimpleNamespace(
             scheduler_host_max_parallel=6,
             scheduler_elastic_slots_enabled=True,
@@ -267,10 +444,10 @@ class CampaignRingDispatchTests(unittest.TestCase):
             for campaign_id in range(6)
         }
 
-        self.assertEqual(_scheduler_host_slots_available(cfg, five_segments, "segment"), 5)
-        self.assertEqual(_scheduler_host_slots_available(cfg, five_segments, "campaign_rebuild"), 6)
-        self.assertEqual(_scheduler_host_slots_available(cfg, five_segments, "import"), 6)
-        self.assertEqual(_scheduler_host_slots_available(cfg, six_campaigns, "campaign_rebuild"), 1)
+        self.assertEqual(_scheduler_host_slots_available(cfg, five_segments, "segment"), 0)
+        self.assertEqual(_scheduler_host_slots_available(cfg, five_segments, "campaign_rebuild"), 1)
+        self.assertEqual(_scheduler_host_slots_available(cfg, five_segments, "import"), 1)
+        self.assertEqual(_scheduler_host_slots_available(cfg, six_campaigns, "campaign_rebuild"), 0)
         self.assertEqual(_scheduler_host_slots_available(cfg, six_campaigns, "segment"), 0)
 
     def test_farm_instance_limit_reserves_root_slot_when_priority_work_is_pending(self) -> None:
@@ -299,10 +476,7 @@ class CampaignRingDispatchTests(unittest.TestCase):
             scheduler_elastic_slots_enabled=True,
             scheduler_emergency_reserved_slots=0,
         )
-        running = {
-            "starving-baseline": SimpleNamespace(root=starving_root, task_type="segment"),
-            "ordinary-baseline": SimpleNamespace(root=ordinary_root, task_type="segment"),
-        }
+        running = {}
         _set_scheduler_fairness_promoted_roots({starving_root})
 
         self.assertEqual(
@@ -322,23 +496,20 @@ class CampaignRingDispatchTests(unittest.TestCase):
             scheduler_elastic_slots_enabled=True,
             scheduler_emergency_reserved_slots=0,
         )
-        running = {
-            "first-baseline": SimpleNamespace(root=first_root, task_type="segment"),
-            "second-baseline": SimpleNamespace(root=second_root, task_type="segment"),
-        }
+        running = {}
         _set_scheduler_fairness_promoted_roots([first_root, second_root])
 
         self.assertEqual(_scheduler_host_slots_available(cfg, running, "segment", root=first_root), 1)
         self.assertEqual(_scheduler_host_slots_available(cfg, running, "segment", root=second_root), 0)
         daemon_mod._mark_scheduler_fairness_claim(first_root, "segment")
-        running["first-extra"] = SimpleNamespace(root=first_root, task_type="segment")
+        running["first-baseline"] = SimpleNamespace(root=first_root, task_type="segment")
 
         self.assertEqual(_take_scheduler_fairness_claimed_roots(), {first_root})
-        running.pop("first-extra")
+        running.pop("first-baseline")
         _set_scheduler_fairness_promoted_roots([second_root])
         self.assertEqual(_scheduler_host_slots_available(cfg, running, "segment", root=second_root), 1)
 
-    def test_many_promoted_roots_reserve_only_one_shared_slot(self) -> None:
+    def test_many_promoted_roots_cannot_bypass_hard_host_cap(self) -> None:
         cfg = SimpleNamespace(
             scheduler_host_max_parallel=3,
             scheduler_elastic_slots_enabled=True,
@@ -354,10 +525,115 @@ class CampaignRingDispatchTests(unittest.TestCase):
         roots = [f"/promoted-{idx}" for idx in range(20)]
         _set_scheduler_fairness_promoted_roots(roots)
 
-        self.assertEqual(_scheduler_host_slots_available(cfg, running, "segment", root=roots[0]), 1)
+        self.assertEqual(_scheduler_host_slots_available(cfg, running, "segment", root=roots[0]), 0)
         self.assertEqual(_scheduler_host_slots_available(cfg, running, "segment", root="/ordinary"), 0)
 
-    def test_each_root_has_segment_and_campaign_baseline_outside_shared_pool(self) -> None:
+    def test_three_ready_roots_share_aggregate_host_and_instance_capacity(self) -> None:
+        cfg = SimpleNamespace(
+            scheduler_host_max_parallel=3,
+            scheduler_instance_max_parallel=1,
+            scheduler_elastic_slots_enabled=True,
+            scheduler_emergency_reserved_slots=0,
+        )
+        roots = [f"/ready-{idx}" for idx in range(3)]
+        running = {}
+        _set_scheduler_fairness_promoted_roots(set())
+
+        for idx, root in enumerate(roots):
+            self.assertEqual(
+                _scheduler_host_slots_available(cfg, running, "segment", root=root),
+                3 - idx,
+            )
+            self.assertEqual(
+                _scheduler_instance_slots_available(cfg, running, root=root, task_type="segment"),
+                1,
+            )
+            running[f"segment-{idx}"] = SimpleNamespace(root=root, task_type="segment")
+
+        self.assertEqual(len(running), cfg.scheduler_host_max_parallel)
+        self.assertEqual(_scheduler_host_slots_available(cfg, running, "segment", root="/ready-3"), 0)
+        self.assertEqual(
+            _scheduler_instance_slots_available(cfg, running, root=roots[0], task_type="segment"),
+            0,
+        )
+
+    def test_explicit_host_cap_counts_normal_static_campaign_import_once(self) -> None:
+        cfg = SimpleNamespace(
+            scheduler_host_max_parallel=4,
+            scheduler_instance_max_parallel=1,
+            scheduler_elastic_slots_enabled=True,
+            scheduler_emergency_reserved_slots=0,
+        )
+        normal_root = "/normal"
+        static_root = "/static"
+        campaign_root = "/campaign"
+        import_root = "/import"
+        static_key = _task_key(static_root, "segment_priority", 101)
+        campaign_key = _task_key(campaign_root, "campaign_trigger", 202)
+        running = {
+            _task_key(normal_root, "segment", 1): SimpleNamespace(
+                root=normal_root,
+                task_type="segment",
+                entity_id=1,
+            ),
+            _task_key(import_root, "import", None): SimpleNamespace(
+                root=import_root,
+                task_type="import",
+                entity_id=None,
+            ),
+            # This adopted/static wrapper has the same logical segment as the
+            # active priority executor item and must not be counted twice.
+            static_key: SimpleNamespace(
+                root=static_root,
+                task_type="segment",
+                entity_id=101,
+            ),
+        }
+        executor = _PriorityTaskExecutor()
+        with executor._guard:
+            executor._active[static_key] = (static_root, "segment_priority", "segment_priority")
+            executor._active[campaign_key] = (campaign_root, "campaign_trigger", "campaign_trigger")
+
+        previous_executor = daemon_mod._ACTIVE_PRIORITY_EXECUTOR
+        daemon_mod._ACTIVE_PRIORITY_EXECUTOR = executor
+        try:
+            self.assertEqual(daemon_mod._scheduler_actual_work_count(running), 4)
+            self.assertEqual(_scheduler_host_running_count(running, "segment"), 3)
+            self.assertEqual(_scheduler_host_running_count(running, "campaign_trigger"), 1)
+            self.assertEqual(
+                _scheduler_host_slots_available(cfg, running, "campaign_rebuild", root="/ready"),
+                0,
+            )
+            self.assertEqual(
+                _scheduler_instance_slots_available(cfg, running, root=static_root, task_type="segment_priority"),
+                0,
+            )
+            self.assertEqual(
+                _scheduler_instance_slots_available(cfg, running, root=import_root, task_type="import"),
+                0,
+            )
+            self.assertEqual(
+                _scheduler_instance_slots_available(cfg, running, root="/ready", task_type="segment"),
+                1,
+            )
+            with patch.object(daemon_mod, "_spawn_command") as spawn:
+                self.assertFalse(
+                    executor.launch(
+                        cfg,
+                        root="/ready",
+                        task_type="segment_priority",
+                        entity_id=303,
+                        running=running,
+                        args=["php", "bin/console"],
+                        interval_sec=1,
+                        max_parallel=1,
+                    )
+                )
+                spawn.assert_not_called()
+        finally:
+            daemon_mod._ACTIVE_PRIORITY_EXECUTOR = previous_executor
+
+    def test_explicit_host_cap_blocks_root_baselines_when_host_is_full(self) -> None:
         root = "/var/www/prodajadelova/public_html"
         cfg = SimpleNamespace(
             scheduler_host_max_parallel=1,
@@ -369,11 +645,24 @@ class CampaignRingDispatchTests(unittest.TestCase):
             "shared": SimpleNamespace(root="/other", task_type="import"),
         }
 
-        self.assertEqual(_scheduler_host_slots_available(cfg, running, "segment", root=root), 1)
-        self.assertEqual(_scheduler_host_slots_available(cfg, running, "campaign_trigger", root=root), 1)
+        self.assertEqual(_scheduler_host_slots_available(cfg, running, "segment", root=root), 0)
+        self.assertEqual(_scheduler_host_slots_available(cfg, running, "campaign_trigger", root=root), 0)
         self.assertEqual(_scheduler_instance_slots_available(cfg, running, root=root, task_type="segment"), 1)
         self.assertEqual(_scheduler_instance_slots_available(cfg, running, root=root, task_type="campaign_rebuild"), 1)
-        self.assertEqual(_scheduler_host_slots_available(cfg, running, "import", root=root), 1)
+        self.assertEqual(_scheduler_host_slots_available(cfg, running, "import", root=root), 0)
+
+    def test_explicit_instance_cap_counts_baseline_tasks(self) -> None:
+        root = "/var/www/prodajadelova/public_html"
+        cfg = SimpleNamespace(scheduler_instance_max_parallel=1)
+        running = {
+            "segment-baseline": SimpleNamespace(root=root, task_type="segment"),
+        }
+
+        self.assertEqual(_scheduler_instance_slots_available(cfg, running, root=root, task_type="segment"), 0)
+        self.assertEqual(
+            _scheduler_instance_slots_available(cfg, running, root=root, task_type="campaign_trigger"),
+            0,
+        )
 
     def test_additional_lightweight_work_uses_shared_pool(self) -> None:
         root = "/var/www/prodajadelova/public_html"
@@ -2580,6 +2869,125 @@ class CampaignRingDispatchTests(unittest.TestCase):
         self.assertEqual(launched, 3)
         self.assertEqual([call.kwargs["entity_id"] for call in submit.call_args_list], [11, 22, 33])
         self.assertEqual(list(ring), [44, 11, 22, 33])
+
+    def test_fill_from_ring_runs_m6_dependency_closure_in_one_worker_slot(self) -> None:
+        root = "/var/www/site"
+        ring = deque([21, 22, 11, 57, 106, 61, 300])
+        context = {
+            "schema": "mcd-segment-dispatch-context-v1",
+            "mautic_major": 6,
+            "parents_by_child": {"11": [21, 22], "57": [11], "106": [11], "61": [57, 106]},
+            "children_by_parent": {"21": [11], "22": [11], "11": [57, 106], "57": [61], "106": [61]},
+        }
+
+        class Store:
+            def __init__(self) -> None:
+                self.writes: list[tuple[str, dict[str, object]]] = []
+
+            def get_runtime_sync(self, key: str) -> dict[str, object] | None:
+                if key == daemon_mod._segment_dispatch_context_key(root):
+                    return context
+                return None
+
+            def put_runtime_sync(self, key: str, payload: dict[str, object]) -> None:
+                self.writes.append((key, payload))
+
+        store = Store()
+        claimed: list[int] = []
+        running_ids: list[int] = []
+        cfg = SimpleNamespace(command_timeout_sec=3600, segment_full_scan_interval_sec=0)
+
+        with patch.object(daemon_mod, "_submit_if_slot", return_value=True) as submit:
+            launched = _fill_from_ring(
+                ring=ring,
+                ring_limit=3,
+                total_limit=3,
+                root=root,
+                task_type="segment",
+                running={},
+                ring_entities={21, 22, 11, 57, 106, 61, 300},
+                config=cfg,
+                store=store,
+                popens={},
+                build_args=lambda sid: ["php", "bin/console", "mautic:segments:update", "-i", str(sid)],
+                admission_claim=lambda sid: claimed.append(int(sid)) or True,
+                admission_running=lambda sid: running_ids.append(int(sid)),
+                remove_on_launch=True,
+                max_launches=1,
+            )
+
+        self.assertEqual(launched, 1)
+        submit.assert_called_once()
+        self.assertEqual(submit.call_args.kwargs["entity_id"], 21)
+        self.assertEqual(claimed, [21, 22, 11, 57, 106, 61])
+        self.assertEqual(running_ids, claimed)
+        self.assertEqual(submit.call_args.kwargs["args"][:2], ["/bin/sh", "-c"])
+        self.assertIn("-i 21", submit.call_args.kwargs["args"][2])
+        self.assertIn("-i 61", submit.call_args.kwargs["args"][2])
+        self.assertEqual(list(ring), [300])
+
+    def test_fill_from_ring_does_not_pull_remaining_descendant_into_important_chain(self) -> None:
+        root = "/var/www/site"
+        ring = deque([21, 22, 11, 57, 106, 61])
+        context = {
+            "schema": "mcd-segment-dispatch-context-v1",
+            "mautic_major": 6,
+            "parents_by_child": {"11": [21, 22], "57": [11], "106": [11], "61": [57, 106]},
+            "children_by_parent": {"21": [11], "22": [11], "11": [57, 106], "57": [61], "106": [61]},
+        }
+        cycle = {
+            "schema": "mcd-segment-cycle-v1",
+            "status": "active",
+            "items": [21, 22, 11, 57, 106, 61],
+            "follow_up": [],
+            "important_items": [21, 22, 11, 57, 106],
+            "remaining_items": [61],
+            "claimed": [],
+            "running": [],
+            "done": [],
+            "errors": [],
+        }
+
+        class Store:
+            def __init__(self) -> None:
+                self.payloads = {
+                    daemon_mod._segment_dispatch_context_key(root): context,
+                    daemon_mod._segment_cycle_key(root): cycle,
+                }
+
+            def get_runtime_sync(self, key: str) -> dict[str, object] | None:
+                return self.payloads.get(key)
+
+            def put_runtime_sync(self, key: str, payload: dict[str, object]) -> None:
+                self.payloads[key] = payload
+
+        store = Store()
+        claimed: list[int] = []
+        cfg = SimpleNamespace(command_timeout_sec=3600, segment_full_scan_interval_sec=0)
+
+        with patch.object(daemon_mod, "_submit_if_slot", return_value=True) as submit:
+            launched = _fill_from_ring(
+                ring=ring,
+                ring_limit=1,
+                total_limit=1,
+                root=root,
+                task_type="segment",
+                running={},
+                ring_entities=set(ring),
+                config=cfg,
+                store=store,
+                popens={},
+                build_args=lambda sid: ["php", "bin/console", "mautic:segments:update", "-i", str(sid)],
+                admission_claim=lambda sid: claimed.append(int(sid)) or True,
+                remove_on_launch=True,
+                bypass_baseline_admission=True,
+                max_launches=1,
+            )
+
+        self.assertEqual(launched, 1)
+        self.assertEqual(claimed, [21, 22, 11, 57, 106])
+        self.assertNotIn("-i 61", submit.call_args.kwargs["args"][2])
+        self.assertEqual(list(ring), [61])
 
     def test_fill_from_ring_skips_blocked_dependency_chain_and_launches_independent_segment(self) -> None:
         root = "/var/www/site"

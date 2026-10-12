@@ -357,11 +357,16 @@ def _extract_archive_to_dir(archive_path: Path, dst_dir: Path) -> None:
     with tempfile.TemporaryDirectory(prefix="mcd-self-update-") as td:
         td_path = Path(td)
         with tarfile.open(archive_path, "r:*") as tf:
+            base = td_path.resolve()
+            for member in tf.getmembers():
+                target = (td_path / member.name).resolve()
+                if target != base and base not in target.parents:
+                    raise RuntimeError(f"update archive path escapes staging root: {member.name}")
             tf.extractall(td_path)
         entries = [x for x in td_path.iterdir() if not x.name.startswith(".")]
         root = entries[0] if len(entries) == 1 and entries[0].is_dir() else td_path
-        if not (root / "mcd_agent").exists():
-            raise RuntimeError("update archive does not contain mcd_agent package")
+        if not any(root.iterdir()):
+            raise RuntimeError("update archive is empty")
         if dst_dir.exists():
             shutil.rmtree(dst_dir)
         shutil.copytree(

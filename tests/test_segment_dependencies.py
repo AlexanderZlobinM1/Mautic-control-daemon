@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 from mcd_agent.segment_dependencies import (
     dependent_segment_closure,
+    dependency_execution_chains,
     dependency_expanded_segment_plan,
     dependency_segment_closure,
     extract_leadlist_filter_segment_ids,
@@ -178,6 +179,63 @@ class SegmentDependencyTests(unittest.TestCase):
         planned = dependency_expanded_segment_plan([61], parents)
 
         self.assertEqual(planned, [21, 22, 11, 57, 106, 61])
+
+    def test_m6_shared_parent_diamond_is_one_topological_worker_chain(self) -> None:
+        parents = {11: {21, 22}, 57: {11}, 106: {11}, 61: {57, 106}}
+        children = {21: {11}, 22: {11}, 11: {57, 106}, 57: {61}, 106: {61}}
+
+        chains = dependency_execution_chains(
+            [21, 22, 11, 57, 106, 61],
+            parents,
+            children,
+            mautic_major=6,
+        )
+
+        self.assertEqual(chains, [[21, 22, 11, 57, 106, 61]])
+
+    def test_m6_independent_closures_keep_independent_workers(self) -> None:
+        chains = dependency_execution_chains(
+            [21, 22, 30],
+            {22: {21}},
+            {21: {22}},
+            mautic_major=6,
+        )
+
+        self.assertEqual(chains, [[21, 22], [30]])
+
+    def test_m7_overlapping_native_roots_share_one_durable_closure(self) -> None:
+        chains = dependency_execution_chains(
+            [57, 61, 21],
+            {57: {21}, 61: {21}},
+            {21: {57, 61}},
+            mautic_major=7,
+        )
+
+        self.assertEqual(chains, [[57, 61, 21]])
+
+    def test_m7_independent_native_closures_keep_independent_workers(self) -> None:
+        chains = dependency_execution_chains(
+            [57, 61, 21, 300],
+            {57: {21}, 61: {21}},
+            {21: {57, 61}},
+            mautic_major=7,
+        )
+
+        self.assertEqual(chains, [[57, 61, 21], [300]])
+
+    def test_m6_tier_projection_keeps_fresh_descendant_out_of_important_chain(self) -> None:
+        parents = {11: {21, 22}, 57: {11}, 106: {11}, 61: {57, 106}}
+        children = {21: {11}, 22: {11}, 11: {57, 106}, 57: {61}, 106: {61}}
+
+        chains = dependency_execution_chains(
+            [21, 22, 11, 57, 106, 61],
+            parents,
+            children,
+            mautic_major=6,
+            eligible_ids={21, 22, 11, 57, 106},
+        )
+
+        self.assertEqual(chains, [[21, 22, 11, 57, 106]])
 
     def test_related_ids_connect_shared_dependency_chains(self) -> None:
         children = {21: {11}, 22: {11}, 11: {57, 106}, 57: {61}, 106: {61}}

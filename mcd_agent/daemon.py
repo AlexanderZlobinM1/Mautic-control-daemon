@@ -151,9 +151,11 @@ from mcd_agent.segment_admission import (
     manual_release as _segment_cycle_manual_release_state,
     manual_terminal as _segment_cycle_manual_terminal_state,
     active_cycle_follow_up_rows as _active_cycle_follow_up_rows,
+    cycle_item_tier as _segment_cycle_item_tier,
     never_built_ids as _never_built_segment_ids,
     ordinary_snapshot_order as _ordinary_segment_snapshot_order,
     normalize_ids as _normalize_segment_ids,
+    pending_important_ids as _segment_cycle_pending_important_ids,
     release_claim as _segment_cycle_release_claim,
     source_baseline as _ordinary_segment_source_baseline,
     sync_cycle as _segment_cycle_sync_state,
@@ -181,6 +183,8 @@ from mcd_agent.segment_recurring_priority import state_key as recurring_priority
 from mcd_agent.segment_recurring_priority import state_payload as recurring_priority_state_payload
 from mcd_agent.segment_sql_auto import DetectedSQLSegmentRule, detect_auto_sql_segment_rules
 from mcd_agent.segment_dependencies import (
+    dependency_segment_closure,
+    dependency_execution_chains,
     dependency_expanded_segment_plan,
     segment_dependency_blocked_ids,
     segment_dependency_maps,
@@ -2288,6 +2292,526 @@ def _segment_runtime_marker_orphan_active(
     return float(now_ts) - lost_at <= max(1, int(grace_sec or 1))
 
 
+_SEGMENT_CHAIN_RUNTIME_SCHEMA = "mcd-segment-execution-chain-v1"
+_SEGMENT_CHAIN_RUNTIME_PREFIX = "segment_chain:"
+_SEGMENT_NATIVE_COVERAGE_SCHEMA = "mcd-segment-native-coverage-v1"
+_SEGMENT_NATIVE_COVERAGE_PREFIX = "segment_native_coverage:"
+_SEGMENT_NATIVE_CAPABILITY_SCHEMA = "mcd-segment-native-capability-v1"
+_SEGMENT_NATIVE_CAPABILITY_PREFIX = "segment_native_capability:"
+
+
+def _segment_chain_runtime_key(root: str, owner_id: int) -> str:
+    digest = hashlib.sha1(str(root or "").encode("utf-8")).hexdigest()[:24]
+    return f"{_SEGMENT_CHAIN_RUNTIME_PREFIX}{digest}:{int(owner_id)}"
+
+
+def _segment_native_coverage_key(root: str) -> str:
+    digest = hashlib.sha1(str(root or "").encode("utf-8")).hexdigest()[:24]
+    return f"{_SEGMENT_NATIVE_COVERAGE_PREFIX}{digest}"
+
+
+def _segment_dispatch_context_parts(
+    store: "TaskStore",
+    root: str,
+) -> tuple[Mapping[str, object], int, dict[int, set[int]], dict[int, set[int]]]:
+    raw_context = store.get_runtime_sync(_segment_dispatch_context_key(root))
+    context = raw_context if isinstance(raw_context, Mapping) else {}
+
+    def _relation_map(raw: object) -> dict[int, set[int]]:
+        if not isinstance(raw, Mapping):
+            return {}
+        result: dict[int, set[int]] = {}
+        for raw_key, raw_values in raw.items():
+            try:
+                key = int(raw_key)
+            except (TypeError, ValueError):
+                continue
+            if key <= 0:
+                continue
+            values: set[int] = set()
+            for raw_value in raw_values if isinstance(raw_values, (list, tuple, set)) else []:
+                try:
+                    value = int(raw_value)
+                except (TypeError, ValueError):
+                    continue
+                if value > 0:
+                    values.add(value)
+            result[key] = values
+
+        return result
+
+    try:
+        major = int(context.get("mautic_major") or 6)
+    except (TypeError, ValueError):
+        major = 6
+    return (
+        context,
+        major,
+        _relation_map(context.get("parents_by_child")),
+        _relation_map(context.get("children_by_parent")),
+    )
+
+
+def _segment_native_coverage_load(
+    store: "TaskStore",
+    root: str,
+) -> dict[str, object]:
+    if not hasattr(store, "get_runtime_sync"):
+        return {}
+    try:
+        raw = store.get_runtime_sync(_segment_native_coverage_key(root))
+    except Exception:
+        return {}
+    return dict(raw) if isinstance(raw, Mapping) else {}
+
+
+def _segment_native_covered_ids(
+    store: "TaskStore",
+    root: str,
+) -> set[int]:
+    payload = _segment_native_coverage_load(store, root)
+    if payload.get("schema") != _SEGMENT_NATIVE_COVERAGE_SCHEMA:
+        return set()
+    try:
+        cycle = store.get_runtime_sync(_segment_cycle_key(str(root)))
+    except Exception:
+        cycle = None
+    cycle_id = str(cycle.get("cycle_id") or "") if isinstance(cycle, Mapping) else ""
+    if not cycle_id or str(payload.get("cycle_id") or "") != cycle_id:
+        return set()
+    return {
+        int(raw_id)
+        for raw_id in payload.get("covered_ids") or []
+        if str(raw_id).strip().lstrip("-").isdigit() and int(raw_id) > 0
+    }
+
+
+def _segment_native_coverage_record(
+    store: "TaskStore",
+    *,
+    root: str,
+    entity_id: int,
+    success: bool,
+    now_ts: float,
+) -> None:
+    """Persist successful M7 native traversal coverage for current cycle.
+
+    Mautic 7's ``-i`` command traverses the requested root's parents.  The
+    durable coverage receipt lets a later overlapping root pass only those
+    already-successful parents via repeated ``--exclude=<id>`` options; a
+    failed or timed-out root never contributes coverage.
+    """
+
+    if not success or not hasattr(store, "put_runtime_sync"):
+        return
+    try:
+        context, major, parents_by_child, _children_by_parent = _segment_dispatch_context_parts(store, root)
+    except Exception:
+        return
+    if major < 7:
+        return
+    try:
+        cycle = store.get_runtime_sync(_segment_cycle_key(str(root)))
+    except Exception:
+        cycle = None
+    if not isinstance(cycle, Mapping):
+        return
+    cycle_id = str(cycle.get("cycle_id") or "")
+    if not cycle_id:
+        return
+    covered = dependency_segment_closure({int(entity_id)}, parents_by_child) | {int(entity_id)}
+    with _SEGMENT_CYCLE_LOCK:
+        payload = _segment_native_coverage_load(store, root)
+        if (
+            payload.get("schema") != _SEGMENT_NATIVE_COVERAGE_SCHEMA
+            or str(payload.get("cycle_id") or "") != cycle_id
+        ):
+            payload = {
+                "schema": _SEGMENT_NATIVE_COVERAGE_SCHEMA,
+                "root": str(root),
+                "cycle_id": cycle_id,
+                "covered_ids": [],
+                "receipts": {},
+            }
+        covered_ids = {
+            int(raw_id)
+            for raw_id in payload.get("covered_ids") or []
+            if str(raw_id).strip().lstrip("-").isdigit() and int(raw_id) > 0
+        }
+        covered_ids.update(covered)
+        receipts = dict(payload.get("receipts") or {}) if isinstance(payload.get("receipts"), Mapping) else {}
+        receipts[str(int(entity_id))] = {
+            "covered_ids": sorted(covered),
+            "success": True,
+            "updated_at": float(now_ts),
+        }
+        payload.update(
+            {
+                "covered_ids": sorted(covered_ids),
+                "receipts": receipts,
+                "updated_at": float(now_ts),
+                "last_root_id": int(entity_id),
+            }
+        )
+        store.put_runtime_sync(_segment_native_coverage_key(root), payload)
+
+
+def _append_segment_native_excludes(args: list[str], exclude_ids: Iterable[int]) -> list[str]:
+    normalized: list[int] = []
+    for raw_id in exclude_ids:
+        try:
+            sid = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        if sid > 0 and sid not in normalized:
+            normalized.append(sid)
+    if not normalized:
+        return list(args)
+    out = list(args)
+    insert_at = next(
+        (index for index, value in enumerate(out) if value == "--no-interaction"),
+        len(out),
+    )
+    for sid in normalized:
+        out[insert_at:insert_at] = [f"--exclude={sid}"]
+        insert_at += 1
+    return out
+
+
+def _segment_native_exclude_capability(
+    store: "TaskStore",
+    *,
+    root: str,
+    config: "AgentConfig",
+    mautic_major: int,
+) -> bool:
+    """Read-only probe for Mautic 7's repeatable native ``--exclude`` option."""
+
+    if int(mautic_major or 0) < 7:
+        return False
+    key = f"{_SEGMENT_NATIVE_CAPABILITY_PREFIX}{hashlib.sha1(str(root).encode('utf-8')).hexdigest()[:24]}"
+    try:
+        cached = store.get_runtime_sync(key)
+    except Exception:
+        cached = None
+    if (
+        isinstance(cached, Mapping)
+        and cached.get("schema") == _SEGMENT_NATIVE_CAPABILITY_SCHEMA
+        and int(cached.get("mautic_major") or 0) == int(mautic_major)
+        and isinstance(cached.get("supported"), bool)
+    ):
+        return bool(cached.get("supported"))
+
+    command: list[str] = []
+    supported = False
+    status = "probe_failed"
+    output = ""
+    try:
+        command = render_mautic_command(
+            php_bin=str(getattr(config, "php_bin", "php") or "php"),
+            run_as_user=str(getattr(config, "mautic_run_as_user", "") or "") or None,
+            root=str(root),
+            template="help mautic:segments:update --format=json",
+        )
+        probe = subprocess.run(
+            command,
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        output = f"{probe.stdout or ''}\n{probe.stderr or ''}"
+        compact = re.sub(r"\s+", "", output)
+        supported = (
+            probe.returncode == 0
+            and '"name":"--exclude"' in compact
+            and '"is_multiple":true' in compact
+        )
+        status = "supported" if supported else "unsupported"
+    except Exception as exc:
+        status = "probe_failed"
+        output = str(exc)
+    payload = {
+        "schema": _SEGMENT_NATIVE_CAPABILITY_SCHEMA,
+        "root": str(root),
+        "mautic_major": int(mautic_major),
+        "command": shlex.join(command) if command else "",
+        "read_only": True,
+        "supported": bool(supported),
+        "status": status,
+        "output_sha256": hashlib.sha256(output.encode("utf-8", "replace")).hexdigest(),
+        "checked_at": float(time.time()),
+    }
+    if hasattr(store, "put_runtime_sync"):
+        try:
+            store.put_runtime_sync(key, payload)
+        except Exception:
+            pass
+    return bool(supported)
+
+
+def _segment_chain_runtime_load(
+    store: "TaskStore",
+    root: str,
+    owner_id: int | None,
+) -> dict[str, object]:
+    if owner_id is None or not hasattr(store, "get_runtime_sync"):
+        return {}
+    try:
+        sid = int(owner_id)
+    except (TypeError, ValueError):
+        return {}
+    if sid <= 0:
+        return {}
+    raw = store.get_runtime_sync(_segment_chain_runtime_key(root, sid))
+    return dict(raw) if isinstance(raw, Mapping) else {}
+
+
+def _segment_chain_entity_ids(
+    store: "TaskStore",
+    root: str,
+    owner_id: int | None,
+) -> list[int]:
+    """Return the durable IDs owned by one currently running chain worker."""
+
+    try:
+        owner = int(owner_id) if owner_id is not None else 0
+    except (TypeError, ValueError):
+        owner = 0
+    if owner <= 0:
+        return []
+    payload = _segment_chain_runtime_load(store, root, owner)
+    if payload.get("schema") != _SEGMENT_CHAIN_RUNTIME_SCHEMA:
+        return [owner]
+    raw_ids = payload.get("entity_ids")
+    ids: list[int] = []
+    for raw_id in raw_ids if isinstance(raw_ids, (list, tuple, set)) else []:
+        try:
+            sid = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        if sid > 0 and sid not in ids:
+            ids.append(sid)
+    return ids or [owner]
+
+
+def _segment_chain_runtime_write(
+    store: "TaskStore",
+    *,
+    root: str,
+    owner_id: int,
+    entity_ids: Iterable[int],
+    status: str,
+    now_ts: float,
+    task: "RunningTask" | None = None,
+    command_str: str = "",
+) -> None:
+    """Persist the chain owner/IDs so restart adoption retains whole closure."""
+
+    if not hasattr(store, "put_runtime_sync"):
+        return
+    normalized = []
+    for raw_id in entity_ids:
+        try:
+            sid = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        if sid > 0 and sid not in normalized:
+            normalized.append(sid)
+    if not normalized:
+        normalized = [int(owner_id)]
+    payload = _segment_chain_runtime_load(store, root, int(owner_id))
+    payload.update(
+        {
+            "schema": _SEGMENT_CHAIN_RUNTIME_SCHEMA,
+            "root": str(root),
+            "owner_id": int(owner_id),
+            "entity_ids": normalized,
+            "status": str(status or "running"),
+            "updated_at": float(now_ts),
+        }
+    )
+    if task is not None:
+        payload.update(
+            {
+                "task_key": str(task.task_key),
+                "task_type": str(task.task_type),
+                "pid": int(task.pid),
+                "started_at": float(task.started_at),
+                "command_str": str(task.command_str),
+            }
+        )
+    elif command_str:
+        payload["command_str"] = str(command_str)
+    # Keep a small reverse index under every member as well as under the
+    # owner.  Restart/liveness reconciliation can then find the one worker
+    # from any claimed closure member without adding a second TaskStore row.
+    for chain_id in normalized:
+        store.put_runtime_sync(_segment_chain_runtime_key(root, int(chain_id)), payload)
+
+
+def _segment_chain_from_dispatch_context(
+    store: "TaskStore",
+    root: str,
+    candidate_ids: Iterable[int],
+    entity_id: int,
+) -> list[int]:
+    """Resolve one pending ring item to its chain owner and sequence.
+
+    A full-cycle ring can contain an important parent beside a fresh
+    ``remaining`` descendant.  M6 dependency connectivity alone must not
+    collapse those two tiers into one worker: the descendant is not needed to
+    execute the parent and would otherwise bypass the durable important gate.
+    Project the connected graph onto the owner's tier, while retaining any
+    pending ancestors that are required to execute that owner.  The planner
+    normally promotes those ancestors durably; retaining them here is the
+    fail-closed path for a partially upgraded cycle state.
+    """
+
+    candidates = []
+    for raw_id in candidate_ids:
+        try:
+            sid = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        if sid > 0 and sid not in candidates:
+            candidates.append(sid)
+    if int(entity_id) not in candidates or not hasattr(store, "get_runtime_sync"):
+        return [int(entity_id)]
+    context, major, parents_by_child, children_by_parent = _segment_dispatch_context_parts(store, root)
+    eligible_ids: set[int] | None = None
+    if major < 7:
+        try:
+            cycle_state = store.get_runtime_sync(_segment_cycle_key(str(root)))
+        except Exception:
+            cycle_state = None
+        owner_tier = _segment_cycle_item_tier(cycle_state, int(entity_id))
+        if owner_tier in {"important", "remaining"}:
+            eligible_ids = {
+                int(sid)
+                for sid in candidates
+                if _segment_cycle_item_tier(cycle_state, int(sid)) == owner_tier
+            }
+            # A required pending ancestor is part of the owner's executable
+            # closure even if an older persisted state failed to classify it
+            # with the same tier.  Descendants are deliberately not added.
+            eligible_ids.update(
+                int(sid)
+                for sid in dependency_segment_closure({int(entity_id)}, parents_by_child)
+                if int(sid) in candidates
+            )
+            eligible_ids.add(int(entity_id))
+    chains = dependency_execution_chains(
+        candidates,
+        parents_by_child,
+        children_by_parent,
+        mautic_major=major,
+        eligible_ids=eligible_ids,
+    )
+    for chain in chains:
+        if int(entity_id) in chain:
+            return chain
+    return [int(entity_id)]
+
+
+def _segment_chain_command_args(
+    build_args: Callable[[int], list[str]],
+    entity_ids: list[int],
+    *,
+    exclude_ids: Iterable[int] | None = None,
+    command_entity_ids: Iterable[int] | None = None,
+    exclude_ids_by_entity: Mapping[int, Iterable[int]] | None = None,
+) -> list[str]:
+    """Build one shell worker for a durable closure.
+
+    ``entity_ids`` is the complete durable ownership set.  Native Mautic 7
+    closures may contain several leaf roots but do not need an explicit
+    command for every covered parent, so ``command_entity_ids`` can project
+    the one worker onto the native roots while all closure IDs remain claimed
+    and terminalized together.
+    """
+
+    command_ids = [int(sid) for sid in (command_entity_ids or entity_ids) if int(sid) > 0]
+    commands: list[list[str]] = []
+    for sid in command_ids:
+        command = list(build_args(int(sid)))
+        per_entity_excludes = (
+            exclude_ids_by_entity.get(int(sid), ())
+            if isinstance(exclude_ids_by_entity, Mapping)
+            else ()
+        )
+        if per_entity_excludes:
+            command = _append_segment_native_excludes(command, per_entity_excludes)
+        elif len(command_ids) <= 1:
+            command = _append_segment_native_excludes(command, exclude_ids or ())
+        commands.append(command)
+    if len(commands) <= 1:
+        return commands[0] if commands else []
+    script = "set -e\n" + "\n".join(shlex.join(command) for command in commands)
+    return ["/bin/sh", "-c", script]
+
+
+def _segment_native_chain_command_plan(
+    entity_ids: Iterable[int],
+    parents_by_child: Mapping[int, Iterable[int]],
+    children_by_parent: Mapping[int, Iterable[int]],
+    *,
+    already_covered_ids: Iterable[int] | None = None,
+) -> tuple[list[int], dict[int, list[int]]]:
+    """Project one Mautic 7 closure onto native roots and exclusions.
+
+    A connected fork such as ``57 <- 21 -> 61`` owns one scheduler worker,
+    but native traversal needs two sequential leaf-root commands.  The first
+    command covers the shared parent; the second receives a repeatable
+    ``--exclude=21`` so the parent is not rebuilt again.  Durable claims still
+    include every member of the closure.
+    """
+
+    ordered: list[int] = []
+    for raw_id in entity_ids:
+        try:
+            sid = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        if sid > 0 and sid not in ordered:
+            ordered.append(sid)
+    if not ordered:
+        return [], {}
+    component = set(ordered)
+    children = children_by_parent or {}
+    roots = [
+        sid
+        for sid in ordered
+        if not (
+            {
+                int(child)
+                for child in (children.get(sid, ()) or ())
+                if str(child).strip().lstrip("-").isdigit() and int(child) > 0
+            }
+            & component
+        )
+    ]
+    if not roots:
+        roots = [ordered[0]]
+    covered: set[int] = set()
+    for raw_id in already_covered_ids or ():
+        try:
+            sid = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        if sid > 0:
+            covered.add(sid)
+    command_roots = [sid for sid in roots if sid not in covered]
+    excludes: dict[int, list[int]] = {}
+    for sid in command_roots:
+        ancestors = dependency_segment_closure({int(sid)}, dict(parents_by_child or {}))
+        excludes[int(sid)] = sorted(covered & ancestors)
+        covered.update(ancestors)
+        covered.add(int(sid))
+    return command_roots, excludes
+
+
 def _segment_cycle_sync(
     store: "TaskStore",
     *,
@@ -2298,6 +2822,8 @@ def _segment_cycle_sync(
     excluded_ids: list[int] | tuple[int, ...] | set[int] | None = None,
     now_ts: float,
     source_snapshot: Mapping[object, object] | None = None,
+    important_ids: list[int] | tuple[int, ...] | set[int] | None = None,
+    remaining_ids: list[int] | tuple[int, ...] | set[int] | None = None,
 ) -> tuple[dict[str, object], list[int], bool]:
     """Persist an ordinary cycle without resetting an active cursor."""
 
@@ -2311,6 +2837,8 @@ def _segment_cycle_sync(
             excluded_ids=excluded_ids,
             now_ts=now_ts,
             source_snapshot=source_snapshot,
+            important_ids=important_ids,
+            remaining_ids=remaining_ids,
         )
         store.put_runtime_sync(key, state)
     return state, added, started_new
@@ -2360,10 +2888,18 @@ def _segment_cycle_pending_order(
         return []
     pending = _segment_cycle_pending_ids(state)
     excluded = set(_normalize_segment_ids(excluded_ids))
-    ordered = [
+    important = set(_normalize_segment_ids(state.get("important_items")))
+    remaining = set(_normalize_segment_ids(state.get("remaining_items")))
+    # A legacy state has no explicit tier fields; normalize_state in the
+    # admission module projects it as important, so this remains safe across
+    # upgrade/restart.
+    ordered_all = [
         *_normalize_segment_ids(state.get("follow_up")),
         *_normalize_segment_ids(state.get("items")),
     ]
+    ordered = [sid for sid in ordered_all if sid in important]
+    ordered.extend(sid for sid in ordered_all if sid in remaining and sid not in important)
+    ordered.extend(sid for sid in ordered_all if sid not in important and sid not in remaining)
     return [sid for sid in ordered if sid in pending and sid not in excluded]
 
 
@@ -2443,6 +2979,7 @@ def _segment_cycle_claim(
         )
         if claimed:
             store.put_runtime_sync(key, state)
+            _refresh_scheduler_important_root(store, root)
         return claimed
 
 
@@ -2455,6 +2992,7 @@ def _segment_cycle_release(store: "TaskStore", *, root: str, entity_id: int, now
             now_ts=now_ts,
         )
         store.put_runtime_sync(key, state)
+    _refresh_scheduler_important_root(store, root)
 
 
 def _segment_cycle_running(store: "TaskStore", *, root: str, entity_id: int, now_ts: float) -> None:
@@ -2466,6 +3004,7 @@ def _segment_cycle_running(store: "TaskStore", *, root: str, entity_id: int, now
             now_ts=now_ts,
         )
         store.put_runtime_sync(key, state)
+    _refresh_scheduler_important_root(store, root)
 
 
 def _segment_cycle_terminal(
@@ -2487,6 +3026,7 @@ def _segment_cycle_terminal(
             now_ts=now_ts,
         )
         store.put_runtime_sync(key, state)
+    _refresh_scheduler_important_root(store, root)
 
 
 def _manual_static_lane_for_ids(
@@ -2757,14 +3297,62 @@ def _segment_terminal_and_wake(
             now_ts=time.time(),
         )
     else:
-        _segment_cycle_terminal(
-            store,
-            root=task.root,
-            entity_id=int(task.entity_id),
-            success=bool(success),
-            note=note,
-            now_ts=time.time(),
-        )
+        chain_ids = _segment_chain_entity_ids(store, task.root, int(task.entity_id))
+        terminal_at = time.time()
+        for chain_id in chain_ids:
+            marker_task = replace(
+                task,
+                entity_id=int(chain_id),
+                task_key=_task_key(task.root, task.task_type, int(chain_id)),
+            )
+            _segment_runtime_marker_write(
+                store,
+                marker_task,
+                status="terminal",
+                now_ts=terminal_at,
+                note=note,
+            )
+            _segment_cycle_terminal(
+                store,
+                root=task.root,
+                entity_id=int(chain_id),
+                success=bool(success),
+                note=note,
+                now_ts=terminal_at,
+            )
+            _mark_segment_finished(task.root, int(chain_id), now_ts=terminal_at)
+        if success and task.task_type == "segment":
+            native_roots = [int(task.entity_id)]
+            try:
+                _dispatch_context, dispatch_major, parents_by_child, children_by_parent = (
+                    _segment_dispatch_context_parts(store, task.root)
+                )
+                if int(dispatch_major or 0) >= 7:
+                    native_roots, _native_excludes = _segment_native_chain_command_plan(
+                        chain_ids,
+                        parents_by_child,
+                        children_by_parent,
+                    )
+            except Exception:
+                native_roots = [int(task.entity_id)]
+            for native_root in native_roots:
+                _segment_native_coverage_record(
+                    store,
+                    root=task.root,
+                    entity_id=int(native_root),
+                    success=True,
+                    now_ts=terminal_at,
+                )
+        if len(chain_ids) > 1:
+            _segment_chain_runtime_write(
+                store,
+                root=task.root,
+                owner_id=int(task.entity_id),
+                entity_ids=chain_ids,
+                status="terminal",
+                now_ts=terminal_at,
+                task=task,
+            )
     wakeup.set()
 
 
@@ -2860,6 +3448,16 @@ def _static_lane_runtime_evidence(
             if candidate is None:
                 candidate = running_candidates.get((int(sid), "segment"))
             marker = _segment_runtime_marker_load(store, root, int(sid))
+            chain_payload = _segment_chain_runtime_load(store, root, int(sid))
+            if (
+                chain_payload.get("schema") == _SEGMENT_CHAIN_RUNTIME_SCHEMA
+                and str(chain_payload.get("status") or "").strip().lower()
+                in {"admitting", "running"}
+            ):
+                # One chain has one executor owner. Reverse-index evidence
+                # prevents non-owner members from being released by static
+                # orphan reconciliation while that owner is still alive.
+                evidence["taskstore_active"] = True
             if marker:
                 for field in ("last_independent_at", "started_at"):
                     try:
@@ -3557,7 +4155,13 @@ def _segment_static_lane_parallel_limit(
     effective without introducing host- or instance-specific scheduler code.
     """
 
-    default = max(1, int(getattr(config, "segment_priority_parallel_idle", 1) or 1))
+    # Every enabled super instance owns one dedicated worker by default. An
+    # explicit lane override may increase only that instance's super ring.
+    default = (
+        1
+        if super_priority
+        else max(1, int(getattr(config, "segment_priority_parallel_idle", 1) or 1))
+    )
     settings_key = (
         "segment_super_priority_instance_settings"
         if super_priority
@@ -4591,25 +5195,255 @@ def _segment_sql_worker_total_count() -> int:
 
 _SCHEDULER_SEGMENT_TASK_TYPES = frozenset({"segment", "segment_sql", "import", *_STATIC_SEGMENT_TASK_TYPES})
 _SCHEDULER_CAMPAIGN_TASK_TYPES = frozenset({"campaign_update", "campaign_trigger", "campaign_rebuild"})
-_SCHEDULER_BASELINE_SEGMENT_TASK_TYPES = _SCHEDULER_SEGMENT_TASK_TYPES
+_SCHEDULER_SUPER_PRIORITY_TASK_TYPES = frozenset({"segment_super_priority"})
+_SCHEDULER_PRIORITY_SEGMENT_TASK_TYPES = frozenset(
+    {"segment", "segment_priority", "segment_super_priority", "segment_recurring_priority"}
+)
+_SCHEDULER_PRIORITY_CAMPAIGN_TASK_TYPES = frozenset(
+    {"campaign_update", "campaign_rebuild", "campaign_trigger", "campaign_native_fallback"}
+)
+_SCHEDULER_PRIORITY_WORK_TASK_TYPES = (
+    _SCHEDULER_PRIORITY_SEGMENT_TASK_TYPES | _SCHEDULER_PRIORITY_CAMPAIGN_TASK_TYPES
+)
+_SCHEDULER_WORK_TASK_TYPES = _SCHEDULER_SEGMENT_TASK_TYPES | _SCHEDULER_CAMPAIGN_TASK_TYPES
+_SCHEDULER_SHARED_WORK_TASK_TYPES = frozenset(
+    (_SCHEDULER_WORK_TASK_TYPES | _SCHEDULER_PRIORITY_WORK_TASK_TYPES)
+    - _SCHEDULER_SUPER_PRIORITY_TASK_TYPES
+)
+_SCHEDULER_BASELINE_SEGMENT_TASK_TYPES = frozenset(
+    _SCHEDULER_SEGMENT_TASK_TYPES - _SCHEDULER_SUPER_PRIORITY_TASK_TYPES
+)
 _SCHEDULER_BASELINE_CAMPAIGN_TASK_TYPES = _SCHEDULER_CAMPAIGN_TASK_TYPES
 _SCHEDULER_BACKGROUND_TASK_TYPES = frozenset({"segment", "segment_sql"})
-_SCHEDULER_WORK_TASK_TYPES = _SCHEDULER_SEGMENT_TASK_TYPES | _SCHEDULER_CAMPAIGN_TASK_TYPES
 _SCHEDULER_RESERVED_SAFETY_TASK_TYPES = frozenset({"job:plugin_operation_safety"})
 _SCHEDULER_PRIORITY_PENDING_ROOTS: frozenset[str] = frozenset()
+_SCHEDULER_IMPORTANT_PENDING_ROOTS: frozenset[str] = frozenset()
 _SCHEDULER_FAIRNESS_PROMOTED_ROOTS: frozenset[str] = frozenset()
 _SCHEDULER_FAIRNESS_RESERVED_ROOT = ""
 _SCHEDULER_FAIRNESS_CLAIMED_ROOTS: set[str] = set()
 _SCHEDULER_FAIRNESS_LOCK = threading.Lock()
 _SCHEDULER_BASELINE_ADMISSION_INTERVAL_SEC = 5.0
 _SCHEDULER_BASELINE_LAST_LAUNCH_BY_LANE: dict[str, float] = {}
+_SCHEDULER_DISTRIBUTION_LOCK = threading.RLock()
+_SCHEDULER_DISTRIBUTION_READY_ROOTS: tuple[str, ...] = ()
+_SCHEDULER_DISTRIBUTION_SERVED_ROOTS: set[str] = set()
+_SCHEDULER_DISTRIBUTION_CURSOR = 0
+
+
+def _scheduler_round_robin_order(
+    ready_roots: Iterable[object],
+    worker_slots: int,
+    *,
+    cursor: int = 0,
+) -> list[str]:
+    """Return the sliding root order used by shared regular admission.
+
+    The first pass contains each root at most once. When fewer roots than
+    workers are ready, subsequent passes may repeat roots, which is the
+    intended independent-worker behavior under the per-root/profile guards.
+    """
+
+    roots = list(dict.fromkeys(str(root).strip() for root in ready_roots if str(root).strip()))
+    if not roots:
+        return []
+    start = int(cursor or 0) % len(roots)
+    rotated = roots[start:] + roots[:start]
+    return [rotated[index % len(rotated)] for index in range(max(1, int(worker_slots or 1)))]
+
+
+def _set_scheduler_distribution_roots(
+    ready_roots: Iterable[object],
+    *,
+    worker_slots: int,
+    cursor: int | None = None,
+) -> None:
+    global _SCHEDULER_DISTRIBUTION_READY_ROOTS, _SCHEDULER_DISTRIBUTION_CURSOR
+    raw_roots = tuple(dict.fromkeys(str(root).strip() for root in ready_roots if str(root).strip()))
+    with _SCHEDULER_DISTRIBUTION_LOCK:
+        if cursor is not None:
+            _SCHEDULER_DISTRIBUTION_CURSOR = max(0, int(cursor))
+        roots = tuple(
+            _scheduler_round_robin_order(
+                raw_roots,
+                len(raw_roots),
+                cursor=_SCHEDULER_DISTRIBUTION_CURSOR,
+            )
+        )
+        if roots != _SCHEDULER_DISTRIBUTION_READY_ROOTS:
+            _SCHEDULER_DISTRIBUTION_READY_ROOTS = roots
+            _SCHEDULER_DISTRIBUTION_SERVED_ROOTS.clear()
+        if roots:
+            _SCHEDULER_DISTRIBUTION_CURSOR = (
+                _SCHEDULER_DISTRIBUTION_CURSOR + max(1, int(worker_slots or 1))
+            ) % len(roots)
+
+
+def _scheduler_shared_admission_allowed(root: str, task_type: str) -> bool:
+    normalized = str(task_type or "").strip().lower()
+    if normalized in _SCHEDULER_SUPER_PRIORITY_TASK_TYPES:
+        return True
+    with _SCHEDULER_DISTRIBUTION_LOCK:
+        ready = set(_SCHEDULER_DISTRIBUTION_READY_ROOTS)
+        if not ready or str(root) not in ready:
+            return True
+        unserved = ready - _SCHEDULER_DISTRIBUTION_SERVED_ROOTS
+        if unserved and str(root) in _SCHEDULER_DISTRIBUTION_SERVED_ROOTS:
+            return False
+        if not unserved:
+            _SCHEDULER_DISTRIBUTION_SERVED_ROOTS.clear()
+        return True
+
+
+def _scheduler_shared_admission_ready(root: str, task_type: str) -> bool:
+    """Read the RR gate without mutating its served-root cursor."""
+
+    normalized = str(task_type or "").strip().lower()
+    if normalized in _SCHEDULER_SUPER_PRIORITY_TASK_TYPES:
+        return True
+    with _SCHEDULER_DISTRIBUTION_LOCK:
+        ready = set(_SCHEDULER_DISTRIBUTION_READY_ROOTS)
+        if not ready or str(root) not in ready:
+            return True
+        unserved = ready - _SCHEDULER_DISTRIBUTION_SERVED_ROOTS
+        return not (unserved and str(root) in _SCHEDULER_DISTRIBUTION_SERVED_ROOTS)
+
+
+def _mark_scheduler_shared_admission(root: str, task_type: str) -> None:
+    normalized = str(task_type or "").strip().lower()
+    if normalized in _SCHEDULER_SUPER_PRIORITY_TASK_TYPES:
+        return
+    with _SCHEDULER_DISTRIBUTION_LOCK:
+        if str(root) in _SCHEDULER_DISTRIBUTION_READY_ROOTS:
+            _SCHEDULER_DISTRIBUTION_SERVED_ROOTS.add(str(root))
+
+
+def _set_scheduler_important_pending_roots(roots: Iterable[object]) -> None:
+    global _SCHEDULER_IMPORTANT_PENDING_ROOTS
+    with _SCHEDULER_DISTRIBUTION_LOCK:
+        _SCHEDULER_IMPORTANT_PENDING_ROOTS = frozenset(
+            str(root).strip() for root in roots if str(root).strip()
+        )
+
+
+def _scheduler_ready_important_ids(store: object, root: str) -> set[int]:
+    try:
+        payload = store.get_runtime_sync(_segment_cycle_key(str(root)))
+        pending = set(_segment_cycle_pending_important_ids(payload))
+        context = store.get_runtime_sync(_segment_dispatch_context_key(str(root)))
+    except Exception:
+        return set()
+    if isinstance(context, Mapping):
+        # The dispatch context is the full authoritative execution snapshot;
+        # the pending guard is intentionally display/diagnostic telemetry and
+        # may truncate or lag blocked IDs.
+        pending.difference_update(_normalize_segment_ids(context.get("blocked_ids")))
+        if context.get("scheduler_pause") or context.get("backup_pause") or context.get("dispatch_pause"):
+            return set()
+        try:
+            if float(context.get("db_pause_until") or 0.0) > time.time():
+                return set()
+        except (TypeError, ValueError):
+            return set()
+    return pending
+
+
+def _refresh_scheduler_important_root(
+    store: object,
+    root: str,
+    *,
+    blocked_ids: Iterable[object] | None = None,
+) -> bool:
+    """Refresh one root's ready-important marker after claim/terminal changes."""
+
+    pending_ids = _scheduler_ready_important_ids(store, root)
+    if blocked_ids is not None:
+        pending_ids.difference_update(_normalize_segment_ids(blocked_ids))
+    pending = bool(pending_ids)
+    global _SCHEDULER_IMPORTANT_PENDING_ROOTS
+    current = set(_SCHEDULER_IMPORTANT_PENDING_ROOTS)
+    if pending:
+        current.add(str(root))
+    else:
+        current.discard(str(root))
+    _set_scheduler_important_pending_roots(current)
+    return pending
+
+
+def _scheduler_important_root_dispatchable(
+    config: AgentConfig,
+    running: dict[str, "RunningTask"],
+    root: str,
+    *,
+    priority_executor: object | None = None,
+) -> bool:
+    """Return whether an important root can take a real segment admission now.
+
+    A pending important item on a full instance is not a global remaining-tier
+    barrier: another root may use a free host worker.  The RR check is read
+    without advancing fairness so this helper is safe to call while deciding
+    whether a different root's remaining item may proceed.
+    """
+
+    if not _scheduler_shared_admission_ready(root, "segment"):
+        return False
+    host_slots = _scheduler_host_slots_available(
+        config,
+        running,
+        "segment",
+        root=root,
+        priority_executor=priority_executor,
+    )
+    if host_slots is not None and host_slots <= 0:
+        return False
+    instance_slots = _scheduler_instance_slots_available(
+        config,
+        running,
+        root=root,
+        task_type="segment",
+        priority_executor=priority_executor,
+    )
+    return instance_slots is None or instance_slots > 0
+
+
+def _scheduler_segment_entity_allowed(
+    store: object,
+    root: str,
+    entity_id: object,
+    *,
+    config: AgentConfig | None = None,
+    running: dict[str, "RunningTask"] | None = None,
+    priority_executor: object | None = None,
+) -> bool:
+    """Gate fresh remaining work behind currently dispatchable important work."""
+
+    try:
+        payload = store.get_runtime_sync(_segment_cycle_key(str(root)))
+        tier = _segment_cycle_item_tier(payload, entity_id)
+    except Exception:
+        return True
+    _refresh_scheduler_important_root(store, root)
+    if tier != "remaining":
+        return True
+    important_roots = set(_SCHEDULER_IMPORTANT_PENDING_ROOTS)
+    if config is not None and running is not None:
+        important_roots = {
+            pending_root
+            for pending_root in important_roots
+            if _scheduler_important_root_dispatchable(
+                config,
+                running,
+                pending_root,
+                priority_executor=priority_executor,
+            )
+        }
+    return not important_roots
 
 
 def _scheduler_task_lane(task_type: str | None) -> str | None:
     normalized = str(task_type or "").strip().lower()
-    if normalized in _SCHEDULER_SEGMENT_TASK_TYPES:
+    if normalized in _SCHEDULER_SEGMENT_TASK_TYPES or normalized in _SCHEDULER_PRIORITY_SEGMENT_TASK_TYPES:
         return "segment"
-    if normalized in _SCHEDULER_CAMPAIGN_TASK_TYPES:
+    if normalized in _SCHEDULER_CAMPAIGN_TASK_TYPES or normalized in _SCHEDULER_PRIORITY_CAMPAIGN_TASK_TYPES:
         return "campaign"
     return None
 
@@ -4650,36 +5484,198 @@ def _scheduler_host_lane_limit(config: AgentConfig, task_type: str | None) -> in
     return min(host_limit, configured if configured > 0 else host_limit)
 
 
+def _scheduler_capacity_key(root: str, task_type: str, entity_id: object) -> str:
+    """Return one logical worker identity for host/instance accounting.
+
+    Static wrappers, ordinary/adopted rows and native campaign variants can
+    describe the same underlying Mautic work with different task type labels.
+    Capacity must count that logical worker once, while keeping imports and
+    full-segment workers distinct.
+    """
+
+    normalized = str(task_type or "").strip().lower()
+    if normalized in {
+        "segment",
+        "segment_sql",
+        "segment_priority",
+        "segment_super_priority",
+        "segment_recurring_priority",
+    }:
+        kind = "segment"
+    elif normalized in {"campaign_update", "campaign_rebuild", "campaign_trigger"}:
+        kind = "campaign"
+    elif normalized == "campaign_native_fallback":
+        kind = "campaign_native_fallback"
+    elif normalized == "import":
+        kind = "import"
+    else:
+        kind = normalized
+    entity = "-" if entity_id is None else str(entity_id)
+    return f"{root}|{kind}|{entity}"
+
+
+def _scheduler_priority_active_items(
+    priority_executor: object | None = None,
+) -> list[tuple[str, str, str]]:
+    executor = priority_executor if priority_executor is not None else _ACTIVE_PRIORITY_EXECUTOR
+    if executor is None:
+        return []
+    active_items = getattr(executor, "active_items", None)
+    if not callable(active_items):
+        return []
+    try:
+        return [
+            (str(key), str(root), str(task_type))
+            for key, root, task_type, _lane in active_items(_SCHEDULER_SHARED_WORK_TASK_TYPES)
+        ]
+    except Exception:
+        return []
+
+
+def _scheduler_actual_work_items(
+    running: dict[str, "RunningTask"],
+    *,
+    priority_executor: object | None = None,
+) -> dict[str, tuple[str, str]]:
+    """Build a deduplicated logical-worker view for capacity decisions."""
+
+    items: dict[str, tuple[str, str]] = {}
+    known_types = _SCHEDULER_SHARED_WORK_TASK_TYPES
+    dedicated_super_keys: set[str] = set()
+    for key, task in list(running.items()):
+        task_type = str(getattr(task, "task_type", "") or "").strip().lower()
+        if task_type in _SCHEDULER_SUPER_PRIORITY_TASK_TYPES:
+            root = str(getattr(task, "root", "") or "").strip()
+            if root:
+                dedicated_super_keys.add(
+                    _scheduler_capacity_key(root, task_type, getattr(task, "entity_id", key))
+                )
+    executor = priority_executor if priority_executor is not None else _ACTIVE_PRIORITY_EXECUTOR
+    active_items = getattr(executor, "active_items", None) if executor is not None else None
+    if callable(active_items):
+        try:
+            for key, root, task_type, _lane in active_items(_SCHEDULER_SUPER_PRIORITY_TASK_TYPES):
+                dedicated_super_keys.add(
+                    _scheduler_capacity_key(
+                        str(root),
+                        str(task_type),
+                        str(key).rsplit("|", 1)[-1],
+                    )
+                )
+        except Exception:
+            pass
+    for key, task in list(running.items()):
+        task_type = str(getattr(task, "task_type", "") or "").strip().lower()
+        if task_type not in known_types:
+            continue
+        root = str(getattr(task, "root", "") or "").strip()
+        if not root:
+            continue
+        entity_id = getattr(task, "entity_id", key)
+        capacity_key = _scheduler_capacity_key(root, task_type, entity_id)
+        if capacity_key in dedicated_super_keys:
+            # A generic adopted wrapper can observe the same PID/entity as a
+            # dedicated super lane. The authoritative lane owner wins, and
+            # the super worker remains outside shared regular accounting.
+            continue
+        items.setdefault(capacity_key, (root, task_type))
+
+    with _SEGMENT_SQL_WORKERS_LOCK:
+        sql_workers = list(_SEGMENT_SQL_WORKERS)
+    for root, segment_id in sql_workers:
+        root_value = str(root or "").strip()
+        if not root_value:
+            continue
+        capacity_key = _scheduler_capacity_key(root_value, "segment_sql", segment_id)
+        items.setdefault(capacity_key, (root_value, "segment_sql"))
+
+    for key, root, task_type in _scheduler_priority_active_items(priority_executor):
+        entity_token = str(key).rsplit("|", 1)[-1]
+        entity_id: object = None if entity_token == "-" else entity_token
+        capacity_key = _scheduler_capacity_key(root, task_type, entity_id)
+        if capacity_key in dedicated_super_keys:
+            continue
+        items.setdefault(capacity_key, (root, task_type))
+    return items
+
+
+def _scheduler_super_priority_active_count(
+    running: dict[str, "RunningTask"],
+    *,
+    root: str | None = None,
+    priority_executor: object | None = None,
+) -> int:
+    """Count dedicated super workers without touching shared regular capacity."""
+
+    count = sum(
+        1
+        for task in running.values()
+        if str(getattr(task, "task_type", "") or "").strip().lower()
+        in _SCHEDULER_SUPER_PRIORITY_TASK_TYPES
+        and (root is None or str(getattr(task, "root", "") or "") == str(root))
+    )
+    executor = priority_executor if priority_executor is not None else _ACTIVE_PRIORITY_EXECUTOR
+    active_items = getattr(executor, "active_items", None) if executor is not None else None
+    if callable(active_items):
+        try:
+            count += sum(
+                1
+                for _key, active_root, task_type, _lane in active_items(
+                    _SCHEDULER_SUPER_PRIORITY_TASK_TYPES
+                )
+                if root is None or str(active_root) == str(root)
+            )
+        except Exception:
+            pass
+    return count
+
+
+def _scheduler_actual_work_count(
+    running: dict[str, "RunningTask"],
+    *,
+    root: str | None = None,
+    lane: str | None = None,
+    priority_executor: object | None = None,
+) -> int:
+    return sum(
+        1
+        for item_root, task_type in _scheduler_actual_work_items(
+            running,
+            priority_executor=priority_executor,
+        ).values()
+        if (root is None or item_root == root)
+        and (lane is None or _scheduler_task_lane(task_type) == lane)
+    )
+
+
 def _scheduler_host_running_count(
     running: dict[str, "RunningTask"],
     task_type: str | None = None,
+    *,
+    priority_executor: object | None = None,
 ) -> int:
-    lane = _scheduler_task_lane(task_type)
-    if lane == "segment":
-        static_count = 0
-        if _ACTIVE_PRIORITY_EXECUTOR is not None:
-            static_count = _ACTIVE_PRIORITY_EXECUTOR.active_count(None, _STATIC_SEGMENT_TASK_TYPES)
-        return sum(1 for task in running.values() if task.task_type in _SCHEDULER_SEGMENT_TASK_TYPES) + (
-            _segment_sql_worker_total_count()
-        ) + static_count
-    if lane == "campaign":
-        return sum(1 for task in running.values() if task.task_type in _SCHEDULER_CAMPAIGN_TASK_TYPES)
-    return len(running) + _segment_sql_worker_total_count()
+    return _scheduler_actual_work_count(
+        running,
+        lane=_scheduler_task_lane(task_type),
+        priority_executor=priority_executor,
+    )
 
 
 def _scheduler_root_lane_running_count(
     running: dict[str, "RunningTask"],
     root: str,
     lane: str,
+    *,
+    priority_executor: object | None = None,
 ) -> int:
-    count = sum(
+    return sum(
         1
-        for task in running.values()
-        if task.root == root and _scheduler_baseline_lane(task.task_type) == lane
+        for item_root, task_type in _scheduler_actual_work_items(
+            running,
+            priority_executor=priority_executor,
+        ).values()
+        if item_root == root and _scheduler_baseline_lane(task_type) == lane
     )
-    if lane == "segment":
-        count += _segment_sql_worker_count(root)
-    return count
 
 
 def _scheduler_baseline_running_count(
@@ -4704,17 +5700,34 @@ def _scheduler_host_slots_available(
     task_type: str | None = None,
     *,
     root: str = "",
+    priority_executor: object | None = None,
 ) -> int | None:
     normalized = str(task_type or "").strip().lower()
     if normalized in _SCHEDULER_RESERVED_SAFETY_TASK_TYPES or normalized.startswith("job:plugin_operation"):
         return None
+    if normalized in _SCHEDULER_SUPER_PRIORITY_TASK_TYPES:
+        # Super-priority owns a dedicated per-instance ring. Its lane limit is
+        # enforced by the executor/static dispatcher, not by shared regular
+        # host capacity.
+        return None
     lane = _scheduler_task_lane(normalized)
     baseline_lane = _scheduler_baseline_lane(normalized)
-    if baseline_lane is not None and root and _scheduler_root_lane_running_count(running, root, baseline_lane) <= 0:
-        # Every instance owns one lightweight segment lane and one lightweight
-        # campaign lane. Shared host capacity applies only above that baseline.
-        return 1
     host_limit = max(0, int(getattr(config, "scheduler_host_max_parallel", 0) or 0))
+    if (
+        host_limit <= 0
+        and baseline_lane is not None
+        and root
+        and _scheduler_root_lane_running_count(
+            running,
+            root,
+            baseline_lane,
+            priority_executor=priority_executor,
+        ) <= 0
+    ):
+        # Without an explicit host safety cap every instance still owns one
+        # lightweight baseline lane.  An explicit host cap is different: all
+        # real work, including baseline work, must fit inside that hard cap.
+        return 1
     if lane == "segment" and host_limit <= 0:
         # The selected profile's per-instance segment lanes are authoritative
         # unless an operator explicitly configures a host-wide safety cap.
@@ -4723,16 +5736,21 @@ def _scheduler_host_slots_available(
     if (
         bool(getattr(config, "scheduler_elastic_slots_enabled", True))
         and host_limit > 0
-        and normalized in _SCHEDULER_WORK_TASK_TYPES
+        and normalized in _SCHEDULER_SHARED_WORK_TASK_TYPES
     ):
         effective_limit = host_limit
         if normalized in _SCHEDULER_BACKGROUND_TASK_TYPES and host_limit > 1:
             reserve = max(0, int(getattr(config, "scheduler_emergency_reserved_slots", 1) or 0))
             effective_limit = max(1, host_limit - min(host_limit - 1, reserve))
-        running_total = sum(
-            1 for task in running.values() if str(task.task_type or "").strip().lower() in _SCHEDULER_WORK_TASK_TYPES
-        ) + _segment_sql_worker_total_count()
-        shared_running_total = max(0, running_total - _scheduler_baseline_running_count(running))
+        running_total = _scheduler_actual_work_count(
+            running,
+            priority_executor=priority_executor,
+        )
+        # Baselines are only outside the shared pool when the operator has not
+        # configured a host-wide safety cap.  With an explicit cap, counting
+        # only "additional" work would let one baseline per root bypass the
+        # cap and fan out past the host limit.
+        shared_running_total = running_total
         with _SCHEDULER_FAIRNESS_LOCK:
             reserved_root = _SCHEDULER_FAIRNESS_RESERVED_ROOT
             reservation_claimed = reserved_root in _SCHEDULER_FAIRNESS_CLAIMED_ROOTS
@@ -4742,10 +5760,21 @@ def _scheduler_host_slots_available(
     limit = _scheduler_host_lane_limit(config, task_type)
     if limit <= 0:
         return None
-    shared_lane_running = max(
-        0,
-        _scheduler_host_running_count(running, task_type) - _scheduler_baseline_running_count(running, lane),
-    )
+    if host_limit > 0:
+        shared_lane_running = _scheduler_host_running_count(
+            running,
+            task_type,
+            priority_executor=priority_executor,
+        )
+    else:
+        shared_lane_running = max(
+            0,
+            _scheduler_host_running_count(
+                running,
+                task_type,
+                priority_executor=priority_executor,
+            ) - _scheduler_baseline_running_count(running, lane),
+        )
     return max(0, limit - shared_lane_running)
 
 
@@ -4799,23 +5828,38 @@ def _scheduler_instance_slots_available(
     *,
     root: str,
     task_type: str,
+    priority_executor: object | None = None,
 ) -> int | None:
     normalized = str(task_type or "").strip().lower()
-    if normalized not in _SCHEDULER_WORK_TASK_TYPES:
+    if normalized in _SCHEDULER_SUPER_PRIORITY_TASK_TYPES:
+        return None
+    if normalized not in _SCHEDULER_SHARED_WORK_TASK_TYPES:
         return None
     lane = _scheduler_baseline_lane(normalized)
-    if lane is not None and _scheduler_root_lane_running_count(running, root, lane) <= 0:
-        return 1
     limit = max(0, int(getattr(config, "scheduler_instance_max_parallel", 0) or 0))
+    if (
+        limit <= 0
+        and lane is not None
+        and _scheduler_root_lane_running_count(
+            running,
+            root,
+            lane,
+            priority_executor=priority_executor,
+        ) <= 0
+    ):
+        # The implicit per-root baseline remains available only when the
+        # operator did not set an explicit instance cap.  Explicit caps must
+        # count baseline tasks as real occupancy, just like host caps do.
+        return 1
     if limit <= 0:
         return None
     if normalized in _SCHEDULER_BACKGROUND_TASK_TYPES and root in _SCHEDULER_PRIORITY_PENDING_ROOTS:
         limit = max(0, limit - 1)
-    running_total = sum(
-        1
-        for task in running.values()
-        if task.root == root and str(task.task_type or "").strip().lower() in _SCHEDULER_WORK_TASK_TYPES
-    ) + _segment_sql_worker_count(root)
+    running_total = _scheduler_actual_work_count(
+        running,
+        root=root,
+        priority_executor=priority_executor,
+    )
     return max(0, limit - running_total)
 
 
@@ -6787,13 +7831,135 @@ def _fill_from_ring(
         # later instance roots.
         scans = min(scans, _CAMPAIGN_TRIGGER_STALE_SCAN_CAP)
     while (
+        ring
+        and
         launched_count < max(1, int(max_launches or 1))
         and _running_count_for_entities(running, root, task_type, ring_entities) < ring_limit
         and scans > 0
     ):
         eid = ring[0]
         scans -= 1
-        if blocked_entities and eid in blocked_entities:
+        chain_ids = [int(eid)]
+        if task_type == "segment":
+            chain_ids = _segment_chain_from_dispatch_context(
+                store,
+                root,
+                list(ring),
+                int(eid),
+            )
+            # The topological owner is the only ring entry allowed to start
+            # a multi-ID worker. A child remains visible in the durable FIFO,
+            # but must not create a second process for the same closure.
+            if chain_ids and int(chain_ids[0]) != int(eid):
+                ring.rotate(-1)
+                continue
+        native_exclude_ids: list[int] = []
+        native_command_entity_ids: list[int] | None = None
+        native_exclude_ids_by_entity: dict[int, list[int]] = {}
+        covered_ids: set[int] = set()
+        if task_type == "segment":
+            try:
+                dispatch_context, dispatch_major, parents_by_child, children_by_parent = (
+                    _segment_dispatch_context_parts(store, root)
+                )
+            except Exception:
+                dispatch_context, dispatch_major, parents_by_child, children_by_parent = {}, 0, {}, {}
+            if int(dispatch_major or 0) >= 7:
+                covered_ids = _segment_native_covered_ids(store, root)
+                try:
+                    cycle_payload = store.get_runtime_sync(_segment_cycle_key(str(root)))
+                except Exception:
+                    cycle_payload = None
+                cycle_items = (
+                    set(_normalize_segment_ids(cycle_payload.get("items")))
+                    | set(_normalize_segment_ids(cycle_payload.get("follow_up")))
+                    if isinstance(cycle_payload, Mapping)
+                    else set()
+                )
+                if int(eid) in covered_ids and int(eid) in cycle_items:
+                    _segment_cycle_terminal(
+                        store,
+                        root=root,
+                        entity_id=int(eid),
+                        success=True,
+                        note="native_covered_by_successful_root",
+                        now_ts=time.time(),
+                    )
+                    _mark_segment_finished(root, int(eid), now_ts=time.time())
+                    remove_covered = (
+                        bool(remove_on_launch(eid))
+                        if callable(remove_on_launch)
+                        else bool(remove_on_launch)
+                    )
+                    _advance_ring_after_launch(ring, eid, remove_on_launch=remove_covered)
+                    if remove_covered:
+                        _remove_ring_entities(ring, {int(eid)})
+                    logging.info(
+                        "[%s] mautic7 segment root=%s skipped native_covered_by_prior_root",
+                        root,
+                        eid,
+                    )
+                    continue
+                native_command_entity_ids, native_exclude_ids_by_entity = _segment_native_chain_command_plan(
+                    chain_ids,
+                    parents_by_child,
+                    children_by_parent,
+                    already_covered_ids=covered_ids,
+                )
+                native_exclude_ids = sorted(
+                    {
+                        int(value)
+                        for values in native_exclude_ids_by_entity.values()
+                        for value in values
+                    }
+                )
+                if native_exclude_ids:
+                    native_exclude_supported = dispatch_context.get("native_segment_exclude_supported")
+                    if native_exclude_supported is None:
+                        native_exclude_supported = _segment_native_exclude_capability(
+                            store,
+                            root=root,
+                            config=config,
+                            mautic_major=int(dispatch_major),
+                        )
+                        if hasattr(store, "put_runtime_sync"):
+                            try:
+                                refreshed_context = dict(dispatch_context)
+                                refreshed_context["native_segment_exclude_supported"] = bool(
+                                    native_exclude_supported
+                                )
+                                refreshed_context["native_segment_capability_checked_at"] = float(time.time())
+                                store.put_runtime_sync(
+                                    _segment_dispatch_context_key(root),
+                                    refreshed_context,
+                                )
+                            except Exception:
+                                pass
+                else:
+                    native_exclude_supported = True
+                if native_exclude_ids and native_exclude_supported is False:
+                    # Never silently repeat a successfully rebuilt parent when
+                    # the runtime capability was explicitly disproven.  A
+                    # fresh read-only help probe/descriptor refresh must set
+                    # this field before the root can be retried.
+                    ring.rotate(-1)
+                    logging.warning(
+                        "[%s] mautic7 root=%s waits for native --exclude capability ids=%s",
+                        root,
+                        eid,
+                        ",".join(str(value) for value in native_exclude_ids),
+                    )
+                    continue
+        if task_type == "segment" and not _scheduler_segment_entity_allowed(
+            store,
+            root,
+            eid,
+            config=config,
+            running=running,
+        ):
+            ring.rotate(-1)
+            continue
+        if blocked_entities and any(int(sid) in blocked_entities for sid in chain_ids):
             ring.rotate(-1)
             continue
         if dynamic_blocked is not None and dynamic_blocked(eid):
@@ -6809,24 +7975,65 @@ def _fill_from_ring(
                 remove_skipped = bool(remove_on_skip(eid)) if callable(remove_on_skip) else bool(remove_on_skip)
                 _advance_ring_after_launch(ring, eid, remove_on_launch=remove_skipped)
                 continue
-        if _is_running(running, root, task_type, eid):
+        if any(_is_running(running, root, task_type, int(sid)) for sid in chain_ids):
             ring.rotate(-1)
             continue
-        bypass_repeat_guard = bool(bypass_repeat_guard_entities and eid in bypass_repeat_guard_entities)
+        bypass_repeat_guard = bool(
+            bypass_repeat_guard_entities
+            and any(int(sid) in bypass_repeat_guard_entities for sid in chain_ids)
+        )
         if not bypass_repeat_guard and not _launch_allowed(config, root, task_type, eid):
             ring.rotate(-1)
             continue
+        claimed_ids: list[int] = []
         claimed = False
         if admission_claim is not None:
-            try:
-                claimed = bool(admission_claim(eid))
-            except Exception as e:
-                logging.warning("[%s] %s entity=%s admission claim failed: %s", root, task_type, eid, e)
-                claimed = False
+            for chain_sid in chain_ids:
+                try:
+                    chain_claimed = bool(admission_claim(int(chain_sid)))
+                except Exception as e:
+                    logging.warning(
+                        "[%s] %s entity=%s admission claim failed: %s",
+                        root,
+                        task_type,
+                        chain_sid,
+                        e,
+                    )
+                    chain_claimed = False
+                if not chain_claimed:
+                    break
+                claimed_ids.append(int(chain_sid))
+            claimed = len(claimed_ids) == len(chain_ids)
             if not claimed:
+                if admission_release is not None:
+                    for chain_sid in claimed_ids:
+                        try:
+                            admission_release(int(chain_sid))
+                        except Exception:
+                            pass
                 ring.rotate(-1)
                 continue
-        args = build_args(eid)
+        args = (
+            _segment_chain_command_args(
+                build_args,
+                chain_ids,
+                exclude_ids=native_exclude_ids,
+                command_entity_ids=native_command_entity_ids,
+                exclude_ids_by_entity=native_exclude_ids_by_entity,
+            )
+            if task_type == "segment"
+            else build_args(eid)
+        )
+        if task_type == "segment" and len(chain_ids) > 1:
+            _segment_chain_runtime_write(
+                store,
+                root=root,
+                owner_id=int(eid),
+                entity_ids=chain_ids,
+                status="admitting",
+                now_ts=time.time(),
+                command_str=shlex.join(args),
+            )
         launched = _submit_if_slot(
             config=config,
             store=store,
@@ -6843,10 +8050,35 @@ def _fill_from_ring(
         )
         if launched:
             if admission_running is not None and claimed:
-                try:
-                    admission_running(eid)
-                except Exception:
-                    pass
+                for chain_sid in chain_ids:
+                    try:
+                        admission_running(int(chain_sid))
+                    except Exception:
+                        pass
+            if task_type == "segment" and len(chain_ids) > 1:
+                chain_task = running.get(_task_key(root, task_type, int(eid)))
+                _segment_chain_runtime_write(
+                    store,
+                    root=root,
+                    owner_id=int(eid),
+                    entity_ids=chain_ids,
+                    status="running",
+                    now_ts=time.time(),
+                    task=chain_task,
+                )
+                if chain_task is not None:
+                    for chain_sid in chain_ids:
+                        marker_task = replace(
+                            chain_task,
+                            entity_id=int(chain_sid),
+                            task_key=_task_key(root, task_type, int(chain_sid)),
+                        )
+                        _segment_runtime_marker_write(
+                            store,
+                            marker_task,
+                            status="running",
+                            now_ts=time.time(),
+                        )
             if task_type == "segment":
                 queued_at = (queued_at_by_entity or {}).pop(eid, None)
                 if queued_at is not None:
@@ -6857,19 +8089,36 @@ def _fill_from_ring(
                         max(0.0, time.time() - float(queued_at)),
                     )
             if on_launch is not None:
-                try:
-                    on_launch(eid)
-                except Exception:
-                    pass
+                for chain_sid in chain_ids:
+                    try:
+                        on_launch(int(chain_sid))
+                    except Exception:
+                        pass
             remove_launched = bool(remove_on_launch(eid)) if callable(remove_on_launch) else bool(remove_on_launch)
             _advance_ring_after_launch(ring, eid, remove_on_launch=remove_launched)
+            if remove_launched and len(chain_ids) > 1:
+                _remove_ring_entities(ring, set(chain_ids))
             launched_count += 1
         else:
+            # Count a failed attempt for this round as well. A root that is
+            # temporarily blocked by repeat/DB/lock guards must not leave the
+            # shared host cursor waiting forever while other roots are ready.
+            _mark_scheduler_shared_admission(root, task_type)
             if admission_release is not None and claimed:
-                try:
-                    admission_release(eid)
-                except Exception:
-                    pass
+                for chain_sid in chain_ids:
+                    try:
+                        admission_release(int(chain_sid))
+                    except Exception:
+                        pass
+            if task_type == "segment" and len(chain_ids) > 1:
+                _segment_chain_runtime_write(
+                    store,
+                    root=root,
+                    owner_id=int(eid),
+                    entity_ids=chain_ids,
+                    status="released",
+                    now_ts=time.time(),
+                )
             break
     return launched_count
 
@@ -9278,7 +10527,7 @@ class _PriorityTaskExecutor:
         self._active: dict[str, tuple[str, str, str]] = {}
         self._last_started: dict[str, float] = {}
         self._last_finished: dict[str, float] = {}
-        self._guard = threading.Lock()
+        self._guard = threading.RLock()
 
     def is_active(self, root: str, task_type: str, entity_id: int) -> bool:
         key = _task_key(root, task_type, entity_id)
@@ -9308,6 +10557,17 @@ class _PriorityTaskExecutor:
                 and (task_types is None or active_type in task_types)
             )
 
+    def active_items(
+        self,
+        task_types: set[str] | None = None,
+    ) -> list[tuple[str, str, str, str]]:
+        with self._guard:
+            return [
+                (key, active_root, active_type, capacity_lane)
+                for key, (active_root, active_type, capacity_lane) in self._active.items()
+                if task_types is None or active_type in task_types
+            ]
+
     def last_finished(self, root: str, task_type: str, entity_id: int) -> float:
         key = _task_key(root, task_type, entity_id)
         with self._guard:
@@ -9336,6 +10596,7 @@ class _PriorityTaskExecutor:
         capacity_lane: str | None = None,
         log_label: str = "priority",
         execution_lock_key: str | None = None,
+        running: dict[str, RunningTask] | None = None,
     ) -> bool:
         # Fast-fail while the persisted update barrier is already active. The
         # final check in _run() remains mandatory because the barrier may be
@@ -9352,7 +10613,12 @@ class _PriorityTaskExecutor:
             return False
         admitted = False
         try:
-            with self._guard:
+            # Ordinary submit and priority launch share this lock.  The
+            # reservation is inserted before the worker thread is spawned, so
+            # neither lane can pass a host/instance cap concurrently with the
+            # other.  Configured lane budgets remain independent; these gates
+            # apply only to the explicit host/instance ceilings.
+            with _SCHEDULER_RUNTIME_LOCK, self._guard:
                 previous = float(self._last_started.get(key, 0.0) or 0.0)
                 active_for_lane = sum(
                     1
@@ -9369,6 +10635,23 @@ class _PriorityTaskExecutor:
                     for active_root, active_type, _active_lane in self._active.values()
                     if active_root == root and active_type in _CAMPAIGN_EXACT_TASK_TYPES
                 )
+                host_slots = None
+                instance_slots = None
+                if running is not None:
+                    host_slots = _scheduler_host_slots_available(
+                        config,
+                        running,
+                        task_type,
+                        root=root,
+                        priority_executor=self,
+                    )
+                    instance_slots = _scheduler_instance_slots_available(
+                        config,
+                        running,
+                        root=root,
+                        task_type=task_type,
+                        priority_executor=self,
+                    )
                 admitted = (
                     key not in self._active
                     and _launch_allowed(
@@ -9381,15 +10664,19 @@ class _PriorityTaskExecutor:
                     )
                     and not (previous > 0 and now - previous < interval)
                     and active_for_lane < max(1, int(max_parallel or 1))
+                    and _scheduler_shared_admission_allowed(root, task_type)
                     and (
                         campaign_capacity is None
                         or active_campaign_total < campaign_capacity
                     )
+                    and (host_slots is None or host_slots > 0)
+                    and (instance_slots is None or instance_slots > 0)
                 )
                 if admitted:
                     self._active[key] = (root, task_type, lane)
                     self._last_started[key] = now
                     _ENTITY_LAUNCH_GUARD[_entity_launch_guard_key(root, task_type, entity_id)] = now
+                    _mark_scheduler_shared_admission(root, task_type)
         finally:
             _campaign_dispatch_end(root, task_type)
         if not admitted:
@@ -9632,6 +10919,7 @@ def _dispatch_due_campaign_triggers(
             root=root,
             task_type="campaign_trigger",
             entity_id=campaign_id,
+            running=running,
             args=render_mautic_command(
                 php_bin=config.php_bin,
                 run_as_user=config.mautic_run_as_user,
@@ -9679,6 +10967,7 @@ def _dispatch_due_campaign_rebuilds(
             root=root,
             task_type="campaign_rebuild",
             entity_id=campaign_id,
+            running=running,
             args=render_mautic_command(
                 php_bin=config.php_bin,
                 run_as_user=config.mautic_run_as_user,
@@ -10641,6 +11930,7 @@ def _dispatch_recurring_priority_segments(
             root=root,
             task_type="segment_recurring_priority",
             entity_id=segment_id,
+            running=running,
             args=render_mautic_command(
                 php_bin=config.php_bin,
                 run_as_user=config.mautic_run_as_user,
@@ -10876,6 +12166,7 @@ def _submit_if_slot_uncoordinated(
     stderr_path: str = "",
 ) -> bool:
     key = _task_key(root, task_type, entity_id)
+    manual_override = bool(manual_request_id is not None and ignore_limit)
     if key in running:
         return False
     if store.has_running_task_key(key):
@@ -10898,6 +12189,14 @@ def _submit_if_slot_uncoordinated(
             prev = store.last_task_started_at(key)
             if prev > 0 and time.time() - float(prev) < float(min_repeat):
                 return False
+    # A manual/operator request is the one explicit exception to the normal
+    # shared-capacity and round-robin budget.  It may occupy one additional
+    # slot, but every ownership, duplicate, dependency, import-singleton and
+    # update-admission lock above/below still applies.  The manual worker is
+    # deliberately kept in ``running`` so normal admission sees the true
+    # overcommit and waits until capacity is genuinely free again.
+    if not manual_override and not _scheduler_shared_admission_allowed(root, task_type):
+        return False
     baseline_lane = _scheduler_baseline_lane(task_type)
     baseline_admission = bool(
         str(task_type or "").strip().lower() != "import"
@@ -10908,20 +12207,22 @@ def _submit_if_slot_uncoordinated(
     if (
         baseline_admission
         and not bypass_baseline_admission
+        and not manual_override
         and not _scheduler_baseline_launch_due(str(baseline_lane))
     ):
         return False
     host_slots = _scheduler_host_slots_available(config, running, task_type, root=root)
-    if not ignore_limit and host_slots is not None and host_slots <= 0:
+    if not manual_override and host_slots is not None and host_slots <= 0:
         return False
-    instance_slots = _scheduler_instance_slots_available(
-        config,
-        running,
-        root=root,
-        task_type=task_type,
-    )
-    if instance_slots is not None and instance_slots <= 0:
-        return False
+    if not manual_override:
+        instance_slots = _scheduler_instance_slots_available(
+            config,
+            running,
+            root=root,
+            task_type=task_type,
+        )
+        if instance_slots is not None and instance_slots <= 0:
+            return False
     if not ignore_limit and _running_count(running, root, task_type) >= max_parallel_for_type:
         return False
 
@@ -10963,9 +12264,12 @@ def _submit_if_slot_uncoordinated(
     task.row_id = store.add_running(task)
     _segment_runtime_marker_write(store, task, status="running", now_ts=task.started_at)
     running[key] = task
-    if baseline_admission and not bypass_baseline_admission:
+    if not manual_override:
+        _mark_scheduler_shared_admission(root, task_type)
+    if baseline_admission and not bypass_baseline_admission and not manual_override:
         _mark_scheduler_baseline_launch(str(baseline_lane), task.started_at)
-    _mark_scheduler_fairness_claim(root, task_type)
+    if not manual_override:
+        _mark_scheduler_fairness_claim(root, task_type)
     if popens is not None:
         popens[key] = proc
     _ENTITY_LAUNCH_GUARD[_entity_launch_guard_key(root, task_type, entity_id)] = task.started_at
@@ -12195,6 +13499,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
 
         if task.entity_id is None or task.task_type not in _SEGMENT_RUNTIME_TASK_TYPES:
             return {}
+        chain_ids = _segment_chain_entity_ids(store, task.root, int(task.entity_id))
         sid = int(task.entity_id)
         db_cfg = db_configs_by_root.get(str(task.root))
         db_active = False
@@ -12208,13 +13513,13 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                         continue
                     if "lead_lists" not in info and "leadlist" not in info and "segment" not in info:
                         continue
-                    if re.search(rf"(?<!\d){sid}(?!\d)", info):
+                    if any(re.search(rf"(?<!\d){int(chain_id)}(?!\d)", info) for chain_id in chain_ids):
                         db_active = True
                         break
             except Exception:
                 db_active = False
             try:
-                rows = MauticDB(db_cfg).fetch_segment_definitions([sid])
+                rows = MauticDB(db_cfg).fetch_segment_definitions(chain_ids)
                 for row in rows:
                     built_raw = row.get("last_built_date") if isinstance(row, Mapping) else None
                     built_at = _parse_mysql_datetime_ts(str(built_raw or ""))
@@ -12657,6 +13962,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
             retry_ids = [*(_normalize_segment_ids(state.get("errors"))), *(_normalize_segment_ids(state.get("manual_retry_ids")))]
             never_built = _never_built_segment_ids(dep_rows)
             lazy_segment_plan = bool(getattr(config, "segment_lazy_update_enabled", False))
+            plan_groups: dict[str, list[int]] = {}
             standard_ids = _ordinary_segment_snapshot_order(
                 dep_rows,
                 observed,
@@ -12669,6 +13975,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                 ),
                 now_ts=float(now_plan),
                 include_fresh_remaining=not lazy_segment_plan,
+                groups=plan_groups,
             )
             if observed and not standard_ids and not lazy_segment_plan:
                 # In full-scan mode the published snapshot is deliberately
@@ -12676,6 +13983,10 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                 # mode an empty plan is meaningful: do not turn a fresh
                 # current snapshot back into ordinary work.
                 standard_ids = list(observed)
+                plan_groups["important"] = list(standard_ids)
+                plan_groups["remaining"] = []
+            important_ids = set(_normalize_segment_ids(plan_groups.get("important")))
+            important_ids.update(_normalize_segment_ids(never_built))
             if int(getattr(inst, "mautic_major", 0) or 0) >= 7:
                 standard_ids, _suppressed = mautic7_terminal_segment_plan(standard_ids, dependency_children)
             else:
@@ -12686,7 +13997,20 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                     dependency_children,
                 )
                 standard_ids = list(dict.fromkeys([*standard_ids, *dependent_ids]))
+            # Dependencies required by an important seed are important too;
+            # otherwise a parent could be delayed behind the fresh tail.
+            important_closure = set(important_ids)
+            frontier = list(important_ids)
+            while frontier:
+                child = frontier.pop()
+                for parent in dependency_parents.get(int(child), set()):
+                    if int(parent) not in important_closure:
+                        important_closure.add(int(parent))
+                        frontier.append(int(parent))
             standard_ids = [sid for sid in standard_ids if sid not in static_excluded]
+            important_ids.intersection_update(standard_ids)
+            important_ids.update(int(sid) for sid in standard_ids if int(sid) in important_closure)
+            remaining_ids = set(standard_ids) - important_ids
             if not standard_ids and not never_built:
                 return {"root": root, "status": "no_new_cycle"}
 
@@ -12722,6 +14046,9 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                 excluded_ids=static_excluded,
                 now_ts=now_plan,
                 source_snapshot=_ordinary_segment_source_baseline(dep_rows),
+                important_ids=[sid for sid in cycle_planned if sid in important_ids]
+                + [sid for sid in cycle_never_built if sid in important_ids],
+                remaining_ids=[sid for sid in cycle_planned if sid in remaining_ids],
             )
             pending = _segment_cycle_pending_order(cycle_state, excluded_ids=static_excluded)
             invalid_ids: set[int] = set()
@@ -12768,6 +14095,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
             context = {
                 "schema": "mcd-segment-dispatch-context-v1",
                 "root": root,
+                "mautic_major": int(getattr(inst, "mautic_major", 0) or 0),
                 "updated_at": float(time.time()),
                 "cycle_id": cycle_state.get("cycle_id"),
                 "cycle_status": str(cycle_state.get("status") or ""),
@@ -13634,6 +14962,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                         root=root,
                         task_type="campaign_native_fallback",
                         entity_id=0,
+                        running=running,
                         args=_campaign_native_fallback_args(cfg, root),
                         interval_sec=fallback_interval,
                         max_parallel=1,
@@ -13663,6 +14992,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                 segment_priority_ids = _segment_priority_effective_setting(cfg, inst)
                 segment_super_priority_ids = _segment_super_priority_effective_setting(cfg, inst)
                 static_plans = {_SEGMENT_SUPER_PRIORITY_LANE: [], _SEGMENT_PRIORITY_LANE: []}
+                static_children: dict[int, set[int]] = {}
                 static_parents: dict[int, set[int]] = {}
                 if segment_priority_ids or segment_super_priority_ids:
                     try:
@@ -13723,7 +15053,6 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                     for lane_name in (_SEGMENT_SUPER_PRIORITY_LANE, _SEGMENT_PRIORITY_LANE)
                 }
                 static_host_limit = _scheduler_host_lane_limit(cfg, "segment")
-                static_host_used = _scheduler_host_running_count(running, "segment")
                 for lane_name, task_type, interval_sec, max_parallel in (
                     (
                         _SEGMENT_SUPER_PRIORITY_LANE,
@@ -13739,8 +15068,74 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                     ),
                 ):
                     for segment_id in static_pending[lane_name]:
-                        if static_host_limit > 0 and static_host_used >= static_host_limit:
+                        static_chain_ids = [int(segment_id)]
+                        for candidate_chain in dependency_execution_chains(
+                            list(static_pending[lane_name]),
+                            static_parents,
+                            static_children,
+                            mautic_major=int(getattr(inst, "mautic_major", 0) or 0),
+                        ):
+                            if int(segment_id) in candidate_chain:
+                                static_chain_ids = [int(value) for value in candidate_chain]
+                                break
+                        if static_chain_ids[0] != int(segment_id):
+                            # The topological owner admits the complete
+                            # closure; child entries remain durable lane
+                            # members but never spawn a second worker.
+                            continue
+                        static_native_command_ids: list[int] | None = None
+                        static_native_excludes: dict[int, list[int]] = {}
+                        static_major = int(getattr(inst, "mautic_major", 0) or 0)
+                        if static_major >= 7:
+                            (
+                                static_native_command_ids,
+                                static_native_excludes,
+                            ) = _segment_native_chain_command_plan(
+                                static_chain_ids,
+                                static_parents,
+                                static_children,
+                            )
+                            if any(static_native_excludes.values()) and not _segment_native_exclude_capability(
+                                store,
+                                root=root,
+                                config=cfg,
+                                mautic_major=static_major,
+                            ):
+                                logging.warning(
+                                    "[%s] static Mautic 7 segment closure waits for native --exclude capability",
+                                    root,
+                                )
+                                continue
+                        if (
+                            task_type != "segment_super_priority"
+                            and
+                            static_host_limit > 0
+                            and _scheduler_host_running_count(
+                                running,
+                                "segment",
+                                priority_executor=priority_executor,
+                            ) >= static_host_limit
+                        ):
                             break
+                        if task_type != "segment_super_priority":
+                            static_host_slots = _scheduler_host_slots_available(
+                                cfg,
+                                running,
+                                task_type,
+                                root=root,
+                                priority_executor=priority_executor,
+                            )
+                            if static_host_slots is not None and static_host_slots <= 0:
+                                break
+                            static_instance_slots = _scheduler_instance_slots_available(
+                                cfg,
+                                running,
+                                root=root,
+                                task_type=task_type,
+                                priority_executor=priority_executor,
+                            )
+                            if static_instance_slots is not None and static_instance_slots <= 0:
+                                break
                         active_ids = _static_lane_running_ids()
                         if _segment_static_closure_conflict(
                             int(segment_id),
@@ -13756,20 +15151,57 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                             root=root,
                             lane=lane_name,
                             entity_id=int(segment_id),
-                            blocked_ids={int(segment_id)} if int(segment_id) in active_ids else set(),
+                            blocked_ids=set(static_chain_ids) & active_ids,
                             globally_running_ids=active_ids,
                             now_ts=time.time(),
                         )
-                        if not claimed:
+                        claimed_static_ids = [int(segment_id)] if claimed else []
+                        if claimed:
+                            for chain_id in static_chain_ids[1:]:
+                                chain_claimed = _static_lane_claim(
+                                    store,
+                                    root=root,
+                                    lane=lane_name,
+                                    entity_id=int(chain_id),
+                                    blocked_ids=set(static_chain_ids) & active_ids,
+                                    globally_running_ids=active_ids | set(claimed_static_ids),
+                                    now_ts=time.time(),
+                                )
+                                if not chain_claimed:
+                                    break
+                                claimed_static_ids.append(int(chain_id))
+                        if len(claimed_static_ids) != len(static_chain_ids):
+                            for chain_id in claimed_static_ids:
+                                _static_lane_release(
+                                    store,
+                                    root=root,
+                                    lane=lane_name,
+                                    entity_id=int(chain_id),
+                                    now_ts=time.time(),
+                                )
                             continue
 
-                        static_args = render_mautic_command(
-                            php_bin=cfg.php_bin,
-                            run_as_user=cfg.mautic_run_as_user,
+                        static_args = _segment_chain_command_args(
+                            lambda sid: render_mautic_command(
+                                php_bin=cfg.php_bin,
+                                run_as_user=cfg.mautic_run_as_user,
+                                root=root,
+                                template=cfg.cmd_segment_update_template,
+                                id=int(sid),
+                                batch_limit=cfg.segment_batch_limit,
+                            ),
+                            static_chain_ids,
+                            command_entity_ids=static_native_command_ids,
+                            exclude_ids_by_entity=static_native_excludes,
+                        )
+                        _segment_chain_runtime_write(
+                            store,
                             root=root,
-                            template=cfg.cmd_segment_update_template,
-                            id=int(segment_id),
-                            batch_limit=cfg.segment_batch_limit,
+                            owner_id=int(segment_id),
+                            entity_ids=static_chain_ids,
+                            status="admitting",
+                            now_ts=time.time(),
+                            command_str=shlex.join(static_args),
                         )
                         static_started_at = time.time()
                         static_timeout_sec = max(
@@ -13805,15 +15237,28 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                             pid: int,
                             *,
                             started_at: float = static_started_at,
+                            chain_ids: tuple[int, ...] = tuple(static_chain_ids),
+                            owner_id: int = int(segment_id),
                         ) -> None:
-                            task = _static_segment_marker_task(pid)
-                            _segment_runtime_marker_write(
+                            marker_at = max(float(started_at), time.time())
+                            for chain_id in chain_ids:
+                                task = _static_segment_marker_task(pid, segment_id=int(chain_id))
+                                _segment_runtime_marker_write(
+                                    store,
+                                    task,
+                                    status="running",
+                                    now_ts=marker_at,
+                                    pid=int(pid),
+                                    command_str=static_command_str,
+                                )
+                            _segment_chain_runtime_write(
                                 store,
-                                task,
+                                root=root,
+                                owner_id=owner_id,
+                                entity_ids=chain_ids,
                                 status="running",
-                                now_ts=max(float(started_at), time.time()),
-                                pid=int(pid),
-                                command_str=static_command_str,
+                                now_ts=marker_at,
+                                task=_static_segment_marker_task(pid),
                             )
 
                         def _static_segment_complete(
@@ -13822,27 +15267,40 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                             root: str = root,
                             lane_name: str = lane_name,
                             segment_id: int = int(segment_id),
+                            chain_ids: tuple[int, ...] = tuple(static_chain_ids),
                         ) -> None:
                             note = None if rc == 0 else (
                                 "task_lock_busy" if rc == _TASK_LOCK_BUSY_RC else "static_segment_error"
                             )
-                            _segment_runtime_marker_write(
-                                store,
-                                _static_segment_marker_task(0),
-                                status="terminal",
-                                now_ts=time.time(),
-                                note=note,
-                                pid=0,
-                                command_str=static_command_str,
-                            )
-                            _static_lane_terminal(
+                            terminal_at = time.time()
+                            for chain_id in chain_ids:
+                                _segment_runtime_marker_write(
+                                    store,
+                                    _static_segment_marker_task(0, segment_id=int(chain_id)),
+                                    status="terminal",
+                                    now_ts=terminal_at,
+                                    note=note,
+                                    pid=0,
+                                    command_str=static_command_str,
+                                )
+                                _static_lane_terminal(
+                                    store,
+                                    root=root,
+                                    lane=lane_name,
+                                    entity_id=int(chain_id),
+                                    success=bool(rc == 0),
+                                    note=note,
+                                    now_ts=terminal_at,
+                                )
+                                _mark_segment_finished(root, int(chain_id), now_ts=terminal_at)
+                            _segment_chain_runtime_write(
                                 store,
                                 root=root,
-                                lane=lane_name,
-                                entity_id=segment_id,
-                                success=bool(rc == 0),
-                                note=note,
-                                now_ts=time.time(),
+                                owner_id=segment_id,
+                                entity_ids=chain_ids,
+                                status="terminal",
+                                now_ts=terminal_at,
+                                task=_static_segment_marker_task(0),
                             )
                             segment_dispatch_wakeup.set()
 
@@ -13851,14 +15309,14 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                             root=root,
                             task_type=task_type,
                             entity_id=int(segment_id),
+                            running=running,
                             args=static_args,
                             interval_sec=interval_sec,
                             max_parallel=max_parallel,
                             timeout_sec=static_timeout_sec,
-                            on_success=lambda root=root, segment_id=int(segment_id): _mark_segment_finished(
-                                root,
-                                segment_id,
-                            ),
+                            on_success=lambda root=root, chain_ids=tuple(static_chain_ids): [
+                                _mark_segment_finished(root, int(chain_id)) for chain_id in chain_ids
+                            ],
                             on_complete=_static_segment_complete,
                             on_start=_static_segment_started,
                             execution_lock_key=_segment_static_closure_lock_key(
@@ -13869,22 +15327,24 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                             ),
                         )
                         if started:
-                            _static_lane_running(
-                                store,
-                                root=root,
-                                lane=lane_name,
-                                entity_id=int(segment_id),
-                                now_ts=time.time(),
-                            )
-                            static_host_used += 1
+                            running_at = time.time()
+                            for chain_id in static_chain_ids:
+                                _static_lane_running(
+                                    store,
+                                    root=root,
+                                    lane=lane_name,
+                                    entity_id=int(chain_id),
+                                    now_ts=running_at,
+                                )
                         else:
-                            _static_lane_release(
-                                store,
-                                root=root,
-                                lane=lane_name,
-                                entity_id=int(segment_id),
-                                now_ts=time.time(),
-                            )
+                            for chain_id in static_chain_ids:
+                                _static_lane_release(
+                                    store,
+                                    root=root,
+                                    lane=lane_name,
+                                    entity_id=int(chain_id),
+                                    now_ts=time.time(),
+                                )
 
                 for segment_id in sorted(_priority_realtime_segment_ids(segment_realtime)):
                     priority_executor.launch(
@@ -13892,6 +15352,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                         root=root,
                         task_type="segment",
                         entity_id=int(segment_id),
+                        running=running,
                         args=render_mautic_command(
                             php_bin=cfg.php_bin,
                             run_as_user=cfg.mautic_run_as_user,
@@ -13921,6 +15382,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                         root=root,
                         task_type="campaign_rebuild",
                         entity_id=campaign_id,
+                        running=running,
                         args=render_mautic_command(
                             php_bin=cfg.php_bin,
                             run_as_user=cfg.mautic_run_as_user,
@@ -13991,6 +15453,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                             root=root,
                             task_type="campaign_trigger",
                             entity_id=campaign_id,
+                            running=running,
                             args=render_mautic_command(
                                 php_bin=cfg.php_bin,
                                 run_as_user=cfg.mautic_run_as_user,
@@ -15618,6 +17081,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                         for lane_ids in static_plans.values():
                             static_excluded_ids.update(int(sid) for sid in lane_ids if int(sid) > 0)
                         lazy_segment_plan = bool(getattr(config, "segment_lazy_update_enabled", False))
+                        plan_groups: dict[str, list[int]] = {}
                         standard_segment_ids = _ordinary_segment_snapshot_order(
                             dep_rows,
                             observed_segment_ids,
@@ -15630,6 +17094,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                             ),
                             now_ts=float(now),
                             include_fresh_remaining=bool(force_segment_full_scan or not lazy_segment_plan),
+                            groups=plan_groups,
                         )
                         if observed_segment_ids and not standard_segment_ids and not lazy_segment_plan:
                             # The due query is already an eligibility decision.
@@ -15639,6 +17104,8 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                             # durable cycle and scheduler lanes. In lazy mode
                             # an empty plan is intentional and must stay empty.
                             standard_segment_ids = list(observed_segment_ids)
+                            plan_groups["important"] = list(standard_segment_ids)
+                            plan_groups["remaining"] = []
                             logging.info(
                                 "[%s] segment due-plan materialized after empty snapshot filter ids=%s",
                                 root,
@@ -15693,15 +17160,32 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                                         ",".join(str(x) for x in sorted(recently_finished)[:30]),
                                         ",".join(str(x) for x in added[:50]),
                                     )
+                        important_ids = set(_normalize_segment_ids(plan_groups.get("important")))
+                        important_ids.update(_normalize_segment_ids(never_built_segment_ids))
+                        important_closure = set(important_ids)
+                        frontier = list(important_ids)
+                        while frontier:
+                            child = frontier.pop()
+                            for parent in dependency_parents.get(int(child), set()):
+                                if int(parent) not in important_closure:
+                                    important_closure.add(int(parent))
+                                    frontier.append(int(parent))
                     except Exception as e:
                         dependency_children = segment_dependencies_by_root.get(root, {})
                         dependency_parents = segment_parents_by_root.get(root, {})
+                        important_ids = set(_normalize_segment_ids(standard_segment_ids))
+                        important_closure = set(important_ids)
                         logging.warning("[%s] segment dependency planning failed: %s", root, e)
                     # Static priority/super-priority own their full closure;
                     # ordinary scheduling must not duplicate those entities.
                     standard_segment_ids = [
                         sid for sid in standard_segment_ids if sid not in static_excluded_ids
                     ]
+                    important_ids.intersection_update(standard_segment_ids)
+                    important_ids.update(
+                        int(sid) for sid in standard_segment_ids if int(sid) in important_closure
+                    )
+                    remaining_ids = set(standard_segment_ids) - important_ids
                     # Full-scan admissions must enter the durable ordinary
                     # cycle before claim/dispatch is built.  Keeping this
                     # reconciliation after cycle sync leaves the ID visible
@@ -15747,6 +17231,9 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                         excluded_ids=static_excluded_ids,
                         now_ts=float(now),
                         source_snapshot=source_snapshot,
+                        important_ids=[sid for sid in cycle_planned_ids if sid in important_ids]
+                        + [sid for sid in cycle_never_built_ids if sid in important_ids],
+                        remaining_ids=[sid for sid in cycle_planned_ids if sid in remaining_ids],
                     )
                     # Every unfinished item in the durable current cycle is
                     # already admitted work. The regular ring is rebuilt from
@@ -16823,6 +18310,37 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
             now_ts=now,
             watchdog_sec=int(getattr(config, "scheduler_fairness_watchdog_sec", 300) or 300),
         )
+        shared_ready_roots = [
+            str(getattr(inst, "root", "") or "").strip()
+            for inst in dispatch_installs
+            if str(getattr(inst, "root", "") or "").strip() in pending_roots
+        ]
+        shared_worker_slots = max(
+            1,
+            int(getattr(config, "scheduler_host_max_parallel", 0) or 0),
+            int(getattr(config, "jobs_max_workers", 0) or 0),
+        )
+        persisted_fairness = store.get_runtime_sync("scheduler_fairness_state") or {}
+        persisted_distribution_cursor = None
+        if isinstance(persisted_fairness, Mapping):
+            try:
+                persisted_distribution_cursor = int(
+                    persisted_fairness.get("shared_distribution_cursor")
+                )
+            except (TypeError, ValueError):
+                persisted_distribution_cursor = None
+        _set_scheduler_distribution_roots(
+            shared_ready_roots,
+            worker_slots=shared_worker_slots,
+            cursor=(
+                persisted_distribution_cursor
+                if not _SCHEDULER_DISTRIBUTION_READY_ROOTS
+                else None
+            ),
+        )
+        _set_scheduler_important_pending_roots(set())
+        for ready_root in dict.fromkeys(shared_ready_roots):
+            _refresh_scheduler_important_root(store, ready_root)
         _set_scheduler_fairness_promoted_roots(promoted_roots)
         promoted_signature = frozenset(promoted_roots)
         oldest_wait_sec = max(
@@ -16858,6 +18376,9 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                 "instance_limit": max(0, int(getattr(config, "scheduler_instance_max_parallel", 0) or 0)),
                 "pending_roots": sorted(pending_roots),
                 "priority_pending_roots": sorted(priority_pending_roots),
+                "important_pending_roots": sorted(_SCHEDULER_IMPORTANT_PENDING_ROOTS),
+                "shared_distribution_roots": list(_SCHEDULER_DISTRIBUTION_READY_ROOTS),
+                "shared_distribution_cursor": int(_SCHEDULER_DISTRIBUTION_CURSOR),
                 "promoted_roots": promoted_roots,
                 "reserved_roots": promoted_roots[:1],
                 "oldest_wait_sec": oldest_wait_sec,
@@ -16943,6 +18464,11 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
             segment_cycle_payload = store.get_runtime_sync(_segment_cycle_key(root)) or {}
             if not isinstance(segment_cycle_payload, Mapping):
                 segment_cycle_payload = {}
+            _refresh_scheduler_important_root(
+                store,
+                root,
+                blocked_ids=segment_blocked_ids,
+            )
             persisted_pending_cycle_order = _segment_cycle_pending_order(
                 segment_cycle_payload,
                 excluded_ids=sql_managed_segment_ids | set(segment_static_ids_for_inst),
@@ -17349,6 +18875,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                 context = {
                     "schema": "mcd-segment-dispatch-context-v1",
                     "root": root,
+                    "mautic_major": int(getattr(inst, "mautic_major", 0) or 0),
                     "updated_at": float(time.time()),
                     "cycle_id": segment_cycle_payload.get("cycle_id"),
                     "cycle_status": str(segment_cycle_payload.get("status") or ""),

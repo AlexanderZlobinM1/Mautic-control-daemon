@@ -75,8 +75,46 @@ TaskStore fixture должен сохранять `cycle_id`, `updated_at` и sp
    slots по очереди dispatch. Один root не может навсегда удерживать cursor
    active только потому, что другой root первым использовал global baseline.
 5. Повторить пункты 1–4 для Mautic 6 и Mautic 7. M6 сохраняет dependency
-   closure order; M7 сохраняет native terminal/root plan и не создаёт
-   искусственные internal items.
+   closure order. Для M6 fork/diamond receipt обязан показать один
+   TaskStore running row/PID на всю deduplicated closure, все IDs в
+   `claimed/running`, sequential topological command execution и terminal
+   `done/errors` для каждого ID; независимые closures могут идти параллельно.
+   M7 сохраняет native traversal: каждая overlapping closure получает один
+   TaskStore running row/PID до terminal всех IDs, а несколько native leaf-root
+   commands идут последовательно в этом worker с `--exclude=<covered-parent>`.
+   Независимые closures остаются отдельными workers. Receipt обязан показать
+   read-only help capability `--exclude`, exact parent rebuild count, durable
+   covered IDs и отсутствие второго PID для одной closure; `--exclude`
+   передаётся повторяемым option, не CSV. Failed/timeout root не считается
+   covered.
+
+6. Для host с тремя и более готовыми roots проверяется aggregate capacity:
+   shared/host/instance counters считаются по фактически running tasks,
+   включая baseline и SQL. Ротация и fairness должны передавать доступный
+   слот следующему root, но не могут обойти явный
+   `scheduler_host_max_parallel` или `scheduler_instance_max_parallel`.
+   Один root не может занять больше hard cap, а несколько roots не могут
+   превратить host cap в сумму своих baseline slots.
+
+7. Проверяется sliding regular distribution: при 40 ready roots и 12 workers
+   первые 12 regular launches принадлежат 12 разным roots; после освобождения
+   slot admission продолжает durable round-robin. Если ready roots меньше
+   workers, независимые workers одного root разрешены только в пределах
+   instance/profile cap. Long-live root не ставит all-roots barrier.
+
+8. Проверяется durable tier ordering для full/nonlazy cycle: `important`
+   (never-built, changed/unknown, retry, stale и нужные dependency parents)
+   сохраняется отдельно от `remaining` fresh tail. Global dispatcher назначает
+   ready unclaimed important всех roots раньше remaining; claimed/running
+   important не удерживает remaining после assignment. Pending important root,
+   который фактически не может получить admission из-за instance cap или
+   текущего round-robin ownership, не блокирует свободный host-slot другого
+   root; после освобождения capacity precedence восстанавливается. Lazy cycle
+   не создаёт remaining.
+
+9. Проверяется dedicated super lane: четыре enabled super-instance worker-а
+   работают outside shared regular `11` capacity (`4 outside 11`), не
+   вычитаются из host/instance regular counters и не дублируют closure/lock.
 
 ## Guard assertions
 
@@ -90,6 +128,20 @@ repeat interval, TaskStore duplicate key и OS execution lock. Pending запу�
 обновляет global baseline timestamp. New admission при том же baseline guard
 остаётся заблокированным.
 
+Capacity invariant: при явном `scheduler_host_max_parallel > 0` это hard
+shared regular host-wide ceiling для штатного ordinary/priority/import/campaign/
+SQL work, включая baseline; dedicated super-priority lane считается отдельно.
+При явном `scheduler_instance_max_parallel > 0` это hard shared regular
+per-root ceiling, также включая baseline; super lane ограничен только своим
+lane budget. Implicit per-root baseline разрешён только при отсутствии
+соответствующего explicit cap. Fairness reservation может лишь выбрать
+следующий root среди реально свободных slots и не может добавить capacity
+сверх cap. Manual/operator override — единственное документированное
+исключение: один extra slot на instance без host-wide manual overflow cap,
+но manual worker всё равно входит в occupancy, поэтому normal refill ждёт
+возврата ниже hard cap. Receipt выше explicit ceiling без такого manual
+evidence — FAIL.
+
 Для каждого ordinary tick дополнительно проверяется инвариант:
 `regular_ring == ordered(durable cycle.items - done - errors - claimed - running
 - static/sql-managed IDs)`. ID, отсутствующий в `cycle.items`, не может быть в
@@ -97,6 +149,33 @@ ring или TaskStore claim path. Если segment launches отсутствую
 receipt обязан отдельно показать состояние global scheduler/backup pause,
 cluster cron route, root-local DB circuit-breaker, campaign pressure и
 effective segment slots; пустой ring без причины считается FAIL.
+
+Manual/operator override проверяется двумя уровнями N+1: при явных
+host/instance cap `4`, четырёх обычных running tasks и root, который уже был
+served или не является текущей round-robin head, manual request обязан занять
+пятый TaskStore/PID slot. После завершения одной обычной task (occupancy `4`)
+обычный launch остаётся заблокирован; после второй (occupancy `3`) ordinary
+admission возвращается до `4`. Отдельный per-instance сценарий проверяет
+normal host cap `11`: 11 обычных workers и по одному manual request на трёх
+разных instances дают `14`, normal refill не срабатывает при `14→13→12→11` и
+возвращается при `10→11`; dedicated super lane исключён. Manual bypass-ит
+только shared capacity и fairness gate; duplicate key, dependency/closure,
+import singleton, OS execution lock, scheduler pause и self-update critical
+barrier остаются обязательными.
+
+## Rule → code → test/live receipt matrix
+
+| Обязательное правило | Канонический код | Проверка и live evidence |
+|---|---|---|
+| ordinary Mautic/PHP work не блокирует update; MCD critical barriers блокируют | `mcd_agent/self_update.py`, `mcd_agent/daemon.py`, `systemd/mcd.service` | self-update lifecycle tests + fresh M6/M7 receipt with worker PID adoption and barrier reasons |
+| TaskStore/runtime_sync queues, claims/running/follow-up/retry/monitor state переживают restart/reinstall | `mcd_agent/task_store.py`, `mcd_agent/daemon.py` | restart/adoption tests + fresh M6/M7 seeded-cycle receipt |
+| roots/instances независимы; нет all-roots barrier/loop одного root | `_iter_instances_with_root_dispatch_gate`, root-local monitor/refill workers | `tests/test_segment_liveness.py` + fresh M6/M7 receipt with every B/C root cycle_count and terminal seeded IDs |
+| explicit caps, sliding fairness и dedicated super lane считают правильный budget | `_scheduler_host_slots_available`, `_scheduler_instance_slots_available`, `_scheduler_round_robin_order` | `tests/test_campaign_ring_dispatch.py` hard-cap/3+ root/40+12/4-outside-11 rows + fresh aggregate slot receipt |
+| important tier получает precedence только при фактической admission-ready capacity; full root не ставит global barrier | `_scheduler_segment_entity_allowed`, `_scheduler_important_root_dispatchable`, `mcd_agent/segment_admission.py` | `test_remaining_root_uses_free_host_slot_when_important_root_is_instance_full` + durable tier receipt |
+| lazy empty plan остаётся пустым, full mode сохраняет observed IDs | ordinary snapshot/planning paths in `mcd_agent/daemon.py` | lazy/full planner tests + fresh M6/M7 planner receipt |
+| manual N+1 override — per-instance exception без host-wide overflow и с сохранением locks | `_submit_if_slot_uncoordinated`, manual admission path | `tests/test_segment_admission.py` cap-4→5→4→3 и per-instance `11+3→14→...→10→11` receipts |
+| M6 closure занимает один worker/PID, M7 covered roots не параллелятся | `dependency_execution_chains`, `_segment_chain_command_args`, `_segment_chain_runtime_*`, static closure lock | `tests/test_segment_chain_runtime.py` actual TaskStore/PID receipt + fresh M6/M7 sandbox evidence |
+| M7 native parent coverage дедуплицируется через capability-backed `--exclude` | `_segment_native_coverage_*`, `_segment_native_exclude_capability`, `_append_segment_native_excludes` | read-only `help ... --format=json` receipt + actual parent-count/PID receipt |
 
 ## Acceptance gate
 

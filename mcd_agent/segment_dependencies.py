@@ -4,7 +4,7 @@ import re
 from io import BytesIO
 from collections import deque
 from datetime import datetime
-from typing import Any
+from typing import Any, Iterable
 
 import phpserialize
 
@@ -171,6 +171,123 @@ def dependency_expanded_segment_plan(
     if len(ordered) == len(planned_set):
         return ordered
     return ordered + [sid for sid in sorted(planned_set) if sid not in set(ordered)]
+
+
+def dependency_execution_chains(
+    candidate_ids: list[int],
+    parents_by_child: dict[int, set[int]],
+    children_by_parent: dict[int, set[int]],
+    *,
+    mautic_major: int,
+    eligible_ids: Iterable[int] | None = None,
+) -> list[list[int]]:
+    """Partition one dispatch snapshot into executable dependency chains.
+
+    Mautic 6 and older do not rebuild a lead-list dependency closure when a
+    child is requested with ``-i``.  A connected closure therefore owns one
+    scheduler slot and is executed in one topological worker command.  The
+    input is already the durable pending projection, so a parent that is
+    already terminal or running is intentionally not pulled into a later
+    chain; the normal dependency guard will release the child afterward.
+    ``eligible_ids`` optionally projects that pending graph onto one durable
+    tier.  This is required when a full-plan ring contains a fresh remaining
+    descendant: it must not be pulled into an important parent's worker merely
+    because the graph component is connected.
+
+    Mautic 7 has native dependency traversal.  Independent components keep
+    independent workers, but one connected overlap owns one worker for its
+    complete durable closure.  The scheduler executes only the component's
+    native leaf roots sequentially; already-covered ancestors are represented
+    in the chain for claim/terminal accounting and are excluded from later
+    native roots by the runtime dispatcher.
+    """
+
+    eligible: set[int] | None = None
+    if eligible_ids is not None:
+        eligible = set()
+        for raw_value in eligible_ids:
+            try:
+                value = int(raw_value)
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                eligible.add(value)
+
+    ordered: list[int] = []
+    for raw_value in candidate_ids:
+        try:
+            value = int(raw_value)
+        except (TypeError, ValueError):
+            continue
+        if value > 0 and (eligible is None or value in eligible) and value not in ordered:
+            ordered.append(value)
+    if not ordered:
+        return []
+    candidate_set = set(ordered)
+    position = {sid: index for index, sid in enumerate(ordered)}
+    parents = parents_by_child or {}
+    children = children_by_parent or {}
+    components: list[list[int]] = []
+    unseen = set(candidate_set)
+    while unseen:
+        seed = min(unseen, key=lambda sid: position[sid])
+        component: set[int] = set()
+        frontier = [seed]
+        while frontier:
+            current = frontier.pop()
+            if current in component or current not in candidate_set:
+                continue
+            component.add(current)
+            neighbours = set(parents.get(current, set())) | set(children.get(current, set()))
+            frontier.extend(value for value in neighbours if value in candidate_set and value not in component)
+        unseen.difference_update(component)
+        components.append(sorted(component, key=lambda sid: position[sid]))
+
+    chains: list[list[int]] = []
+    for component in sorted(components, key=lambda values: position[values[0]]):
+        component_set = set(component)
+        if int(mautic_major or 0) >= 7:
+            native_roots = [
+                sid
+                for sid in component
+                if not (set(children.get(sid, set())) & component_set)
+            ]
+            if not native_roots:
+                # Cyclic or incomplete dependency data must still remain one
+                # durable ownership unit; the runtime command will fail
+                # closed rather than silently creating overlapping workers.
+                native_roots = [component[0]]
+            covered_members = [sid for sid in component if sid not in native_roots]
+            chains.append([*native_roots, *covered_members])
+            continue
+        outgoing: dict[int, set[int]] = {sid: set() for sid in component}
+        indegree: dict[int, int] = {sid: 0 for sid in component}
+        for child in component:
+            for parent in parents.get(child, set()):
+                if parent not in component_set or child in outgoing[parent]:
+                    continue
+                outgoing[parent].add(child)
+                indegree[child] += 1
+        ready = sorted(
+            (sid for sid in component if indegree[sid] == 0),
+            key=lambda sid: position[sid],
+        )
+        chain: list[int] = []
+        while ready:
+            current = ready.pop(0)
+            chain.append(current)
+            for child in sorted(outgoing[current], key=lambda sid: position[sid]):
+                indegree[child] = max(0, indegree[child] - 1)
+                if indegree[child] == 0:
+                    ready.append(child)
+                    ready.sort(key=lambda sid: position[sid])
+        if len(chain) != len(component):
+            # Invalid/cyclic dependency data must not drop work. Preserve the
+            # durable observed order for the unresolved remainder; the normal
+            # dependency conflict guard remains fail-closed for the launch.
+            chain.extend(sid for sid in component if sid not in set(chain))
+        chains.append(chain)
+    return chains
 
 
 def segment_related_ids(

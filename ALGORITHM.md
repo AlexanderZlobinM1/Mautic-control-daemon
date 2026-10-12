@@ -10,8 +10,9 @@
 запрошенными per-key наблюдениями. Host ACK строится только по ключам
 canonical desired envelope; expanded effective snapshot не добавляет ключи в
 chunk. Recurring super-priority admission сохраняет резерв для уже admitted
-ordinary cycle, а active static/super-priority work не вычитается из ordinary
-shared capacity: постоянный super-ring не может голодать обычный tail.
+ordinary cycle. Active dedicated super-priority work не вычитается из ordinary
+shared capacity: постоянный super-ring не может голодать обычный tail; обычная
+priority остаётся частью shared regular accounting.
 
 При materialization instance rows bare modern empty `segments: []` не очищает
 непустой legacy whitelist: IDs переносятся в canonical priority lane. Очистка
@@ -124,9 +125,16 @@ profile/config и manual `segments:update` для admission не меняютс�
 `super-priority → priority → ordinary`. Любой опубликованный segment/closure
 принадлежит только одной линии; статические линии полностью исключены из
 ordinary snapshot. Обе статические линии имеют собственные persisted queues,
-собственный lane accounting и execution locks; dependency overlap и явно
-заданный host safety cap остаются отдельными защитами и не уменьшают
-configured ordinary worker budget.
+собственный lane accounting и execution locks.
+
+`super-priority` для каждой включённой instance — отдельное dedicated worker/ring
+вне общего regular host/instance budget. Поэтому при общей capacity `8+3` и
+четырёх super-instance общий regular budget остаётся `8+3`, а не уменьшается до
+`8+3−4`. Super-ring может работать на каждом minute tick независимо от
+обычной очереди; `slots_override` меняет только его собственный per-instance
+лимит. Dependency closure, overlap, exact-task lock, durable claim и duplicate
+защиты сохраняются и для dedicated lane. Обычная `priority`-работа остаётся в
+shared regular accounting.
 
 `super-priority` проверяется чаще `priority`; частота не меняет precedence и
 не убивает running job. Если ordinary worker свободен, независимая работа
@@ -160,7 +168,12 @@ config на его profile baseline и только после этого при
    `priority`/`super-priority` IDs и строит полный текущий ordinary cycle.
    Явный lazy-флаг `segment_lazy_update_enabled = true` переключает только
    новый план на due-only SQL и исключает fresh/current remaining IDs из этого
-   нового admission. Он никогда не удаляет и не пересобирает уже сохранённые
+   нового admission. Пустой lazy-plan является штатным результатом и не имеет
+   fallback на fresh/current tail. Full mode, напротив, имеет fail-safe fallback:
+   если observed published IDs есть, а вторичное snapshot/definition чтение
+   вернуло пустой список, observed IDs всё равно материализуются в durable plan,
+   чтобы запаздывающее dependency-чтение не стёрло полный цикл. Ни один режим
+   не удаляет и не пересобирает уже сохранённые
    `cycle.items`, `follow_up`, claims или running state в TaskStore.
 2. Read-only definitions добавляют опубликованные never-built IDs, которых не
    было в due query. Ordinary snapshot строится строго по категориям:
@@ -176,13 +189,40 @@ config на его profile baseline и только после этого при
    повреждён, действует fail-open bootstrap: такой segment считается `changed`
    и попадает во вторую категорию (после never-built) в ближайшее новое
    ordinary ring, не ожидая stale threshold, кроме static lanes.
+   Внутри durable cycle сохраняются две явные группы: `important` (never-built,
+   changed/unknown, retry и stale) и `remaining` (только fresh/current tail
+   full-mode). Lazy mode исключает `remaining`. Dispatch сначала назначает
+   готовую неназначенную `important`-работу всех ready roots; уже claimed или
+   running important не образует host-wide барьер. Remaining может начаться,
+   когда вся ready important уже назначена, даже если часть important ещё
+   выполняется. Это не terminal barrier и не сброс cycle.
+   Важной считается только admission-ready работа: pending important root с
+   заполненным instance cap или временно не принадлежащий его RR admission
+   не удерживает свободный slot другого root; после освобождения capacity
+   precedence этого root восстанавливается.
    Внутри каждой категории сохраняется FIFO стабильного observed order. Weight,
    recent activity, numeric ID, stale promotion и threshold не могут
    переставлять ordinary.
 3. IDs и dependency edges дедуплицируются. На Mautic ≤6 closure превращается в
-   одну topological последовательность на worker: родители перед детьми. На
-   Mautic 7 MCD оставляет только native terminal/root plan; внутренние
-   dependencies не запускаются отдельными MCD элементами.
+   одну topological последовательность на один worker/slot: родители
+   выполняются перед детьми внутри одного chain command, а все IDs closure
+   одновременно имеют durable `claimed/running` state и один TaskStore
+   running row/PID. Поэтому fork/diamond с общим родителем не порождает
+   отдельные процессы на каждый `-i`; независимые connected closures получают
+   отдельные workers. Если parent уже terminal/running в предыдущей admission,
+   child остаётся отдельным pending item и запускается после dependency guard.
+   На Mautic 7 MCD оставляет native traversal semantics: connected overlapping
+   roots получают одну durable closure ownership с одним TaskStore running
+   row/PID до terminal всех IDs, а несколько native leaf-root commands идут
+   последовательно внутри этого worker. Внутренние parents не запускаются
+   отдельными MCD elements: первый native root покрывает свою parent closure,
+   следующий получает повторяемый `--exclude=<already-covered-parent>` (не
+   CSV). Independent connected closures получают отдельные workers. Capability
+   `mautic:segments:update --format=json --no-interaction` читается read-only и
+   должна подтвердить `--exclude` с `is_multiple=true`. Уже покрытый root
+   закрывается terminal receipt без нового процесса, а failed/timeout root не
+   добавляет coverage. Если capability явно не подтверждена, пересечение
+   fail-closed ждёт свежего read-only probe, а не повторяет parent молча.
 4. Новый/never-built ID не ждёт нового frozen snapshot. Если он найден
    уже после admission active ordinary cycle, `cycle.items` и его cursor не
    меняются: ID атомарно добавляется в durable FIFO `follow_up`. Follow-up
@@ -242,7 +282,10 @@ config на его profile baseline и только после этого при
    backward-compatible чтения конфигурации и не меняет admission. Это правило
    проверяется одновременно source, tests, systemd unit и runtime receipt.
 10. После полного terminal ordinary cycle следующий snapshot создаёт новый
-   cycle. Пока цикл не terminal, его порядок не пересобирается.
+   cycle только для этого root. Пока цикл не terminal, его порядок не
+   пересобирается; unfinished cycle одного root не задерживает следующий
+   terminal/nearest-tick cycle другого root. Pending `remaining`, claims,
+   running и retry сохраняются durable до следующего свободного slot.
 11. Cycle хранит отдельно `observed_snapshot`/generation и применённый
    `baseline`/generation. Наблюдения во время active cycle не продвигают
    baseline; он фиксируется только при переходе в terminal. Успешные элементы
@@ -269,7 +312,14 @@ config на его profile baseline и только после этого при
    нет. Непрерывный persisted refill worker обслуживает каждый root
    независимо, использует тот же monitor/claim/spawn/terminal lifecycle и
    уступает только короткому lock-gated проходу main dispatcher; slow root не
-   останавливает другие roots, а global all-roots barrier запрещён.
+   останавливает другие roots, а global all-roots barrier запрещён. Main
+   dispatcher помечает busy только текущий root через
+   `_iter_instances_with_root_dispatch_gate`; canonical lifecycle monitor и
+   persisted refill запускаются root-local slices через отдельные executors,
+   а `_SCHEDULER_RUNTIME_LOCK`/`_SchedulerRuntimeRegistry` сериализуют только
+   claim-to-spawn и общий running registry, не planning/DB работу. Terminal
+   callback немедленно будит refill, поэтому slow probe одного root не может
+   удерживать terminal/adoption/refill другого.
 
 Статические queues строятся отдельно: общие dependencies двух линий принадлежат
 линии с более высоким precedence и выполняются ровно один раз. Например,
@@ -281,8 +331,9 @@ root запускается не более одного раза в своей 
 покрытие допускается только внутри native Mautic closure. Source/CLI и
 TaskStore receipt обязаны фиксировать deduplicated root plan и union closure,
 без неоднозначного ручного подтверждения алгоритма. Пересекающиеся native
-closures (например sibling `58`/`59` через parent `57`) получают общий
-execution lock и не выполняются одновременно; независимые closures сохраняют
+closures (например sibling `58`/`59` через parent `57`) получают одну
+execution ownership/slot на всю closure и выполняются последовательными
+native commands с deduplicated parent coverage; независимые closures сохраняют
 параллелизм.
 
 ### Reconcile persisted static claims after restart/update
@@ -307,21 +358,63 @@ duplicate.
 
 ## 4. Claim, worker и slots
 
+### Явные capacity caps и fairness
+
+`scheduler_host_max_parallel > 0` — жёсткий shared regular host-wide ceiling.
+В его фактическую занятость входят ordinary, обычная priority, import,
+campaign и SQL, включая implicit baseline; `super-priority` в этот shared
+счётчик не входит, потому что имеет dedicated budget. Поэтому baseline и
+super-ring не превращают regular host limit в сумму per-root лимитов.
+`scheduler_instance_max_parallel > 0` аналогично является hard shared regular
+ceiling конкретного root; dedicated super-instance worker учитывается только в
+своём super lane limit. Значение `0` означает отсутствие именно этого явного
+cap; только в этом режиме действует implicit baseline lane профиля.
+
+Shared regular admission скользит по ready roots, а не заполняет один root до
+его локального лимита: при 40 ready roots и 12 workers первые 12 назначений
+получают 12 разных roots, затем освободившийся slot идёт следующему root в
+durable round-robin. Если ready roots меньше workers, несколько независимых
+workers одного root разрешены в пределах shared instance/profile cap. Long-live
+root не задерживает другие roots; root с завершённым cycle строит только свой
+следующий cycle на ближайшем tick. Fairness rotation никогда не создаёт слот
+сверх hard cap. Это проверяется unit-сценарием 40/12, сценарием roots<workers,
+super `4 outside 11`, closure overlap и disposable M6/M7 receipt.
+
+`important` имеет precedence только там, где его root реально может получить
+admission. Если у root A уже занят explicit instance cap (или текущий
+round-robin ownership не даёт ему admission), его pending important не
+превращается в глобальный barrier для fresh `remaining` root B: свободный
+host-slot может обслужить B. Когда slot A освобождается, его important снова
+становится первой eligible работой. Это не tier bypass: dependency/claim,
+host/instance cap, fairness, pause и MCD critical locks по-прежнему проверяются
+на фактическом submit.
+
+Для admission используется единый `_scheduler_actual_work_items`: он
+канонизирует capacity key по `root/lane/entity`, объединяет обычные rows,
+adopted/static/native priority workers и SQL workers, а wrapper/повторную
+проекцию одной логической работы дедуплицирует. Dedicated super workers
+учитываются отдельным lane counter и не вычитаются из shared regular cap.
+Остальные priority reservations записываются под тем же
+`_SCHEDULER_RUNTIME_LOCK`, что и обычный submit, поэтому concurrent ordinary и
+priority launch не могут вместе пересечь explicit cap; независимые lane
+budgets при этом не сливаются.
+
 ### Import lifecycle and segment ownership
 
-Import ownership is based on lifecycle evidence, not on numeric status alone.
-For Mautic 4-7 a non-empty `date_ended` is terminal evidence and overrides
-stale queued or running status values. Failed, paused, cancelled and completed
-imports remain observable in the `done` lane, but their target segments do not
-enter `active_import_target_ids` and cannot block an ordinary segment or an
-import follow-up. The pending-import SQL count also requires
+Владение import определяется признаками lifecycle, а не только числовым
+status. Для Mautic 4–7 непустой `date_ended` — terminal evidence, который
+перекрывает устаревший `queued` или `running` status. Failed, paused, cancelled
+и completed imports остаются видимыми в lane `done`, но их target segments не
+попадают в `active_import_target_ids` и не блокируют ordinary segment или
+import follow-up. SQL-подсчёт pending imports также требует
 `date_ended IS NULL`.
 
-Only imports classified as queued or running with no terminal date may reserve
-their explicit `defaults.list` segment targets. This preserves FIFO ordering
-among eligible imports while allowing a historical row such as status `1` with
-`date_ended` to release its singleton. Retry/recovery remains governed by the
-existing import recovery path and its independent process evidence.
+Только import со статусом `queued` или `running` без terminal date может
+зарезервировать явно указанные в `defaults.list` segment targets. Это сохраняет
+FIFO среди eligible imports и позволяет исторической строке, например с
+status `1`, освободить свой singleton после появления `date_ended`. Retry и
+recovery остаются в существующем import recovery path и используют независимые
+признаки живого процесса.
 
 ### Runtime override ACK truthfulness
 
@@ -379,8 +472,9 @@ Follow-up FIFO получает следующий свободный ordinary w
 cursor; campaign/queue pressure блокирует только новую admission. При active
 pressure каждый сохранённый pending cursor и follow-up продолжает dispatch.
 Persisted ordinary work использует только effective regular worker budget;
-static priority/super-priority capacity не расширяет ordinary lane и не
-вычитается из неё. Если throttled whitelist profile даёт regular budget `0`,
+ordinary priority участвует в shared regular accounting, а dedicated
+super-priority capacity не потребляет и не расширяет этот budget. Если
+throttled whitelist profile даёт regular budget `0`,
 уже admitted cursor сохраняет ровно один shared slot.
 Если обычный ring временно получил нулевой throttled limit, для такого cursor
 сохраняется один shared slot при его фактической доступности.
@@ -446,13 +540,18 @@ lock. Pending automatic item тем самым выполняется manual req
 manual retry marker как due. `manual_request_id` сохраняется в TaskStore, а
 persisted admission receipt переживает restart.
 
-Ручной dispatch может временно превысить только общую segment capacity: при
-host-profile limit 4 и четырёх обычных running tasks manual request может
-запустить пятый. Пока общее число равно 5 или после завершения одной обычной
-task возвращается к 4, обычный dispatcher не делает refill. Когда общее число
-снизится до 3, обычный admission может восстановить его до 4. Этот временный
-slot не меняет profile, config или data и по-прежнему соблюдает same-entity,
-dependency и execution locks.
+Hard ceiling относится только к штатным admissions. Ручной dispatch —
+единственное исключение к обычному shared host/instance budget и round-robin
+head: он добавляет максимум один extra manual slot на каждый запрошенный
+instance, даже если root уже served или сейчас не его очередь. Например, при
+normal host cap `11`, 11 обычных workers и по одному manual request на трёх
+разных instances допустимы одновременно `14` workers; dedicated super lane в
+этот regular budget не входит. Manual workers всё равно остаются в shared
+occupancy, поэтому normal refill не выполняется при переходах `14→13→12→11` и
+возвращается только при `10→11`. Manual override не меняет profile, config или
+data и не отменяет same-entity, dependency/closure, import-singleton,
+TaskStore duplicate, OS execution и self-update critical locks; он только
+пропускает normal capacity/fairness gate.
 
 ## 5. Retry и terminal/error
 
@@ -502,6 +601,10 @@ cycle без ручного `segments:update`, profile/capacity/data changes. Ad
 | dependency closure и terminal plan | `mcd_agent/segment_dependencies.py`, `daemon.py` | `tests/test_segment_dependencies.py` |
 | persisted cycle, never-built admission и atomic claim | `mcd_agent/segment_admission.py`, `daemon.py` | `tests/test_segment_admission.py` |
 | host/instance slots и rotation | `mcd_agent/daemon.py` | `tests/test_campaign_ring_dispatch.py` |
+| normal hard caps, manual per-instance N+1 и dedicated super budget не смешиваются | `mcd_agent/daemon.py:_scheduler_host_slots_available`, `_scheduler_instance_slots_available`, `_submit_if_slot_uncoordinated` | `tests/test_campaign_ring_dispatch.py` hard-cap/3+ root rows; `tests/test_segment_admission.py` cap-4 и `11+3→14→...→10→11` receipts |
+| важный root с заполненной capacity не ставит global remaining barrier | `mcd_agent/daemon.py:_scheduler_segment_entity_allowed`, `_scheduler_important_root_dispatchable` | `test_remaining_root_uses_free_host_slot_when_important_root_is_instance_full` |
+| root-local continuous monitor/refill and shared claim lifecycle | `mcd_agent/daemon.py:_iter_instances_with_root_dispatch_gate`, `_SchedulerRuntimeRegistry`, `_lifecycle_monitor_scheduler`, `_ordinary_persisted_refill_worker` | `tests/test_segment_liveness.py` root-gate/registry/monitor rows; fresh M6/M7 root-local cycle receipt |
+| lazy empty plan versus full-mode observed-ID fallback | `mcd_agent/daemon.py` ordinary snapshot planners | `tests/test_segment_liveness.py` lazy snapshot row; fresh M6/M7 full/lazy planning receipt |
 | profile retry budget, three starts and bounded orphan expiry | `mcd_agent/config.py`, `mcd_agent/daemon.py` | `tests/test_segment_admission.py` |
 | monitor queued/running/done/error receipt | `mcd_agent/daemon.py` | `tests/test_scheduler_monitor_cycle.py`, `tests/test_signals_scheduler_history.py` |
 | heavy-plan deferral and durable pending guard | `mcd_agent/daemon.py` | `tests/test_segment_liveness.py`, live M6/M7 acceptance receipt |

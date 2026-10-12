@@ -207,6 +207,7 @@ def ordinary_snapshot_order(
     stale_after_sec: int = 24 * 60 * 60,
     now_ts: float,
     include_fresh_remaining: bool = False,
+    groups: dict[str, list[int]] | None = None,
 ) -> list[int]:
     """Build the deterministic ordinary snapshot.
 
@@ -287,6 +288,9 @@ def ordinary_snapshot_order(
         key=lambda sid: (int(category(sid) or 0), observed_position[sid]),
     )
     if not include_fresh_remaining:
+        if groups is not None:
+            groups["important"] = list(ordered_due)
+            groups["remaining"] = []
         return ordered_due
     due_set = set(ordered_due)
     # Full scans intentionally reconcile every published definition. Fresh
@@ -294,6 +298,9 @@ def ordinary_snapshot_order(
     # the category priority while ensuring a mixed full snapshot cannot drop
     # the fresh tail.
     fresh_remaining = [sid for sid in candidates if sid not in due_set]
+    if groups is not None:
+        groups["important"] = list(ordered_due)
+        groups["remaining"] = list(fresh_remaining)
     return [*ordered_due, *fresh_remaining]
 
 
@@ -344,17 +351,39 @@ def _new_cycle(
     cycle_baseline: Mapping[object, object] | None = None,
     observed_snapshot: Mapping[object, object] | None = None,
     observed_generation: int = 0,
+    important_ids: Iterable[object] | None = None,
+    remaining_ids: Iterable[object] | None = None,
 ) -> dict[str, object]:
     cycle_snapshot = _normalize_baseline(cycle_baseline)
     observed = _normalize_baseline(
         observed_snapshot if observed_snapshot is not None else cycle_snapshot
     )
+    item_set = set(items)
+    important = [sid for sid in normalize_ids(important_ids) if sid in item_set]
+    remaining = [
+        sid
+        for sid in normalize_ids(remaining_ids)
+        if sid in item_set and sid not in set(important)
+    ]
+    if important_ids is None and remaining_ids is None:
+        # State written by older callers remains safe: before a planner has
+        # supplied explicit tier metadata, every admitted item is important.
+        important = list(items)
+    elif not important and not remaining and items:
+        important = list(items)
+    # A malformed or partial planner result must never make an item vanish
+    # from the durable tier projection.
+    unclassified = [sid for sid in items if sid not in set(important) and sid not in set(remaining)]
+    important.extend(unclassified)
     return {
         "schema": SCHEMA,
         "cycle_id": _cycle_id(now_ts, items),
         "status": "active" if items else "terminal",
         "items": list(items),
         "follow_up": [],
+        "important_items": normalize_ids(important),
+        "remaining_items": normalize_ids(remaining),
+        "importance_classified": True,
         "claimed": [],
         "running": [],
         "done": [],
@@ -378,6 +407,18 @@ def normalize_state(raw: Mapping[str, Any] | None) -> dict[str, object]:
     items = normalize_ids(source.get("items"))
     follow_up = [sid for sid in normalize_ids(source.get("follow_up")) if sid not in set(items)]
     item_set = set(items) | set(follow_up)
+    importance_classified = "important_items" in source or "remaining_items" in source
+    important_items = [sid for sid in normalize_ids(source.get("important_items")) if sid in item_set]
+    remaining_items = [
+        sid
+        for sid in normalize_ids(source.get("remaining_items"))
+        if sid in item_set and sid not in set(important_items)
+    ]
+    if not importance_classified and item_set:
+        # Legacy state has no tier metadata. Treat its pending projection as
+        # important until the next planner persists an explicit split.
+        important_items = [*items, *follow_up]
+        remaining_items = []
     done = [x for x in normalize_ids(source.get("done")) if x in item_set]
     errors = [x for x in normalize_ids(source.get("errors")) if x in item_set and x not in done]
     claimed = [x for x in normalize_ids(source.get("claimed")) if x in item_set and x not in done and x not in errors]
@@ -402,6 +443,9 @@ def normalize_state(raw: Mapping[str, Any] | None) -> dict[str, object]:
         "status": status,
         "items": items,
         "follow_up": follow_up,
+        "important_items": normalize_ids(important_items),
+        "remaining_items": normalize_ids(remaining_items),
+        "importance_classified": bool(importance_classified),
         "claimed": claimed,
         "running": running,
         "done": done,
@@ -435,6 +479,32 @@ def _mark_terminal_if_complete(state: dict[str, object]) -> None:
         state["status"] = "terminal"
     else:
         state["status"] = "active"
+
+
+def cycle_item_tier(raw: Mapping[str, Any] | None, entity_id: object) -> str | None:
+    """Return the durable tier for one admitted ordinary item."""
+
+    state = normalize_state(raw)
+    try:
+        sid = int(entity_id)
+    except (TypeError, ValueError):
+        return None
+    if sid in set(normalize_ids(state.get("important_items"))):
+        return "important"
+    if sid in set(normalize_ids(state.get("remaining_items"))):
+        return "remaining"
+    items = set(normalize_ids(state.get("items"))) | set(normalize_ids(state.get("follow_up")))
+    return "important" if sid in items else None
+
+
+def pending_important_ids(raw: Mapping[str, Any] | None) -> set[int]:
+    """Return ready, unassigned important IDs, excluding claimed/running work."""
+
+    state = normalize_state(raw)
+    important = set(normalize_ids(state.get("important_items")))
+    finished = set(normalize_ids(state.get("done"))) | set(normalize_ids(state.get("errors")))
+    active = set(normalize_ids(state.get("claimed"))) | set(normalize_ids(state.get("running")))
+    return important - finished - active
 
 
 def _observe_source(
@@ -676,6 +746,8 @@ def sync_cycle(
     excluded_ids: Iterable[object] | None = None,
     now_ts: float,
     source_snapshot: Mapping[object, object] | None = None,
+    important_ids: Iterable[object] | None = None,
+    remaining_ids: Iterable[object] | None = None,
 ) -> tuple[dict[str, object], list[int], bool]:
     """Reconcile planning observations without resetting an active cycle.
 
@@ -688,6 +760,14 @@ def sync_cycle(
     excluded = set(normalize_ids(excluded_ids))
     planned = [sid for sid in normalize_ids(planned_ids) if sid not in excluded]
     never = {sid for sid in normalize_ids(never_built) if sid not in excluded}
+    planned_set = set(planned)
+    supplied_important = [sid for sid in normalize_ids(important_ids) if sid in planned_set]
+    supplied_remaining = [
+        sid
+        for sid in normalize_ids(remaining_ids)
+        if sid in planned_set and sid not in set(supplied_important)
+    ]
+    explicit_tiers = important_ids is not None or remaining_ids is not None
     running = set(normalize_ids(running_ids))
     current = normalize_state(raw)
     current_items = normalize_ids(current.get("items"))
@@ -714,6 +794,8 @@ def sync_cycle(
             cycle_baseline=cycle_snapshot,
             observed_snapshot=cycle_snapshot,
             observed_generation=max(0, int(current.get("observed_generation") or 0)) + 1,
+            important_ids=supplied_important if explicit_tiers else None,
+            remaining_ids=supplied_remaining if explicit_tiers else None,
         )
         added = list(planned)
         _mark_terminal_if_complete(state)
@@ -733,6 +815,29 @@ def sync_cycle(
         # so a late segment cannot rewrite the frozen order.
         state["items"] = list(current_items)
         state["follow_up"] = normalize_ids([*current_follow_up, *additions])
+        if explicit_tiers:
+            existing_items = set(current_items) | set(current_follow_up)
+            current_important = set(normalize_ids(state.get("important_items")))
+            current_remaining = set(normalize_ids(state.get("remaining_items")))
+            if not bool(state.get("importance_classified")):
+                current_important = set(existing_items)
+                current_remaining = set()
+            current_important.update(sid for sid in additions if sid in set(supplied_important))
+            current_remaining.update(sid for sid in additions if sid in set(supplied_remaining))
+            classified_additions = set(supplied_important) | set(supplied_remaining)
+            current_important.update(sid for sid in additions if sid not in classified_additions)
+            current_remaining.difference_update(current_important)
+            state["important_items"] = normalize_ids(current_important)
+            state["remaining_items"] = normalize_ids(current_remaining)
+            state["importance_classified"] = True
+        else:
+            # Callers that have not yet supplied planner tiers still retain
+            # the historical follow-up precedence: a newly discovered ID is
+            # important until a planner explicitly classifies it as fresh
+            # remaining work.
+            state["important_items"] = normalize_ids(
+                [*state.get("important_items", []), *additions]
+            )
         added = additions
 
     state_items = set(normalize_ids(state.get("items"))) | set(normalize_ids(state.get("follow_up")))

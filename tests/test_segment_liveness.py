@@ -18,6 +18,7 @@ from mcd_agent.daemon import (
     _segment_cycle_claim,
     _segment_cycle_pending_order,
     _segment_cycle_pending_ids,
+    _segment_cycle_release,
     _segment_cycle_running,
     _segment_cycle_terminal,
     _active_persisted_segment_cycle_roots,
@@ -27,6 +28,7 @@ from mcd_agent.daemon import (
     _fill_from_ring,
     _iter_instances_with_root_dispatch_gate,
     _SchedulerRuntimeRegistry,
+    _task_key,
 )
 from mcd_agent.segment_admission import (
     cycle_key,
@@ -869,7 +871,12 @@ class SegmentLivenessTests(unittest.TestCase):
             build_args=lambda sid: ["php", "bin/console", "mautic:segments:update", "-i", str(sid)],
             admission_claim=claim,
             admission_running=mark_running,
-            admission_release=lambda sid: None,
+            admission_release=lambda sid: _segment_cycle_release(
+                store,
+                root=root,
+                entity_id=sid,
+                now_ts=202.0,
+            ),
             bypass_baseline_admission=True,
             max_launches=1,
         )
@@ -1193,11 +1200,48 @@ class SegmentLivenessTests(unittest.TestCase):
                     for index, root in enumerate(roots, start=1)
                 ]
 
-            self.assertEqual(launched, [1, 1, 1])
-            self.assertEqual(len(running), 3)
+            self.assertEqual(launched, [1, 0, 0])
+            self.assertEqual(len(running), 1)
+            # The explicit host cap is hard: the next roots wait while the
+            # first real worker occupies the remaining effective slot.
+            running.pop(_task_key(roots[0], "segment", 1))
+            with patch.object(daemon, "_spawn_command", side_effect=lambda **_kwargs: SimpleNamespace(pid=next(pids))), patch.object(
+                daemon, "_task_locked_args", side_effect=lambda _key, args, **_kwargs: args
+            ), patch.object(daemon, "_scheduler_baseline_launch_due", return_value=False), patch.object(
+                daemon, "_SEGMENT_DISPATCH_WAKEUP", None
+            ):
+                self.assertEqual(
+                    self._launch_persisted_item(
+                        store=store,
+                        root=roots[1],
+                        entity_id=2,
+                        eligible_ids=[2],
+                        running=running,
+                        pid=8102,
+                    ),
+                    1,
+                )
+            running.pop(_task_key(roots[1], "segment", 2))
+            with patch.object(daemon, "_spawn_command", side_effect=lambda **_kwargs: SimpleNamespace(pid=next(pids))), patch.object(
+                daemon, "_task_locked_args", side_effect=lambda _key, args, **_kwargs: args
+            ), patch.object(daemon, "_scheduler_baseline_launch_due", return_value=False), patch.object(
+                daemon, "_SEGMENT_DISPATCH_WAKEUP", None
+            ):
+                self.assertEqual(
+                    self._launch_persisted_item(
+                        store=store,
+                        root=roots[2],
+                        entity_id=3,
+                        eligible_ids=[3],
+                        running=running,
+                        pid=8103,
+                    ),
+                    1,
+                )
+            self.assertEqual(len(running), 1)
             self.assertEqual(
                 sorted(task.entity_id for task in running.values()),
-                [1, 2, 3],
+                [3],
             )
             for root, index in zip(roots, range(1, 4)):
                 state = store.get_runtime_sync(cycle_key(root))

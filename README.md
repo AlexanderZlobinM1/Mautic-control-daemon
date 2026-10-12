@@ -11,7 +11,14 @@ MCD (MauticControlDaemon) is a host-level service that can run in two modes:
 - Mautic 7 dependency planning preserves every published due customer-visible
   segment as explicit work. A terminal lead-list dependency may serialize the
   chain but never counts the referenced segment as rebuilt or removes it from
-  the scheduler plan.
+  the scheduler plan; a connected overlapping closure uses one TaskStore/PID
+  and sequential native leaf-root commands, while a read-only native help
+  capability check enables repeatable `--exclude=<covered-parent>` options so
+  successful parent rebuilds are counted once. Independent closures retain
+  independent workers.
+- Mautic 6 and older dependency closures are admitted as one topological
+  chain worker: the whole deduplicated fork/diamond shares one TaskStore
+  running row/PID, while independent closures retain independent workers.
 - `mcd-cli report:contact-field-metadata --root <instance> --json` publishes
   `mcd-contact-field-metadata-v1`: instance-local Mautic contact field aliases,
   labels, native/custom classification, types and safe physical column sizes.
@@ -196,17 +203,25 @@ Scheduler host/instance capacity presets are literal MCD values: `passive=0/0`,
 Custom profiles retain explicit operator values. Hardware affects only the
 recommendation and warning, never the selected profile's effective capacity.
 
-All active profiles use one elastic host budget. Segment rebuilds may borrow idle
-capacity but leave one emergency slot when the host has at least two slots;
-campaign and import work may claim that slot immediately. The fairness watchdog
-promotes any instance whose queued work has waited for five minutes. Every
-instance owns one segment/import slot and one combined campaign
-trigger/rebuild slot independently of shared-pool occupancy. Additional work
-borrows the dynamic host pool. The oldest promoted owner also protects one
-shared slot until it launches; a successful launch resets its wait age so the
-next overdue instance advances. Queue throttle can reduce additional segment
-capacity to whitelist-only, but retains one automatic segment baseline per
-instance. Baseline starts in each lane are globally spaced by five seconds in
+All active profiles use one elastic shared regular host budget. Segment rebuilds
+may borrow idle capacity but leave one emergency slot when the host has at least
+two slots; campaign and import work may claim that slot immediately. The
+fairness watchdog
+promotes any instance whose queued work has waited for five minutes. An implicit
+baseline gives each instance one segment/import lane and one combined campaign
+trigger/rebuild lane only when the operator has not set an explicit host or
+instance cap. `scheduler_host_max_parallel > 0` is a hard host-wide ceiling on
+real work (ordinary, static, import, campaign and SQL), including those
+baselines; `scheduler_instance_max_parallel > 0` is the equivalent hard
+per-root ceiling. Dedicated `super-priority` rings have one worker per enabled
+instance by default and are outside these shared regular host/instance caps;
+their optional `slots_override` applies only to that super lane. No baseline
+shortcut, fairness reservation or promoted-root rotation may create capacity
+above either explicit shared ceiling. The oldest
+promoted owner protects only an actually free shared slot until it launches; a
+successful launch resets its wait age so the next overdue instance advances.
+Queue throttle can reduce additional segment capacity to whitelist-only.
+Baseline starts in each lane are globally spaced by five seconds in
 deterministic scheduler order. Pending imports are dispatched before segment
 rings and own the shared segment/import baseline while active; segments may use
 only remaining dynamic capacity. Exact-task locks, plugin operations,
@@ -289,8 +304,16 @@ Source/dev equivalent (same command surface):
 Manual command behavior:
 - In active profiles, `exec` and shorthand commands are scheduler-aware:
   - request is queued into local state DB and picked by daemon on next dispatch cycle;
-  - launch is immediate relative to dispatch tick and can temporarily exceed ring slot formula by one manual task;
-  - scheduler then holds new auto launches until total active tasks return to configured profile limits.
+  - hard caps apply to normal admission; manual override adds at most one extra
+    slot per requested instance, with no host-wide manual-overflow cap. Thus a
+    normal host cap `11` can have `14` active workers with one manual request on
+    each of three instances; the manual workers still count in shared occupancy,
+    so normal refill waits through `14→13→12→11` and resumes at `10→11`;
+  - the manual worker remains in durable running accounting, so normal dispatch
+    holds new auto launches until total active tasks return below configured limits;
+  - only normal capacity/fairness is bypassed: duplicate, dependency,
+    import-singleton, execution-lock, scheduler-pause and MCD update-barrier
+    checks still apply.
 - If daemon does not pick queued request quickly, CLI cancels queue row and falls back to direct one-shot execution.
 - `python -m mcd_agent instances --config ./etc/mcd-agent.example.toml list`
 - `python -m mcd_agent env ipv6 status`
@@ -514,8 +537,9 @@ Important:
     when no older state exists.
 - Segment planning:
   - `runtime.segment_lazy_update_enabled = false` is the default and plans a
-    full published-segment cycle: never-built/changed/stale work is followed
-    by the remaining fresh published IDs in stable observed order; `true`
+    full published-segment cycle: durable `important` work
+    (never-built/changed/unknown/retry/stale) is followed by the `remaining`
+    fresh published IDs in stable observed order; `true`
     explicitly opts into due-only lazy planning and excludes fresh/current
     remaining IDs from new admission.
   - The lazy flag never deletes or rebuilds durable `cycle.items`, `follow_up`,
@@ -524,6 +548,17 @@ Important:
     enter durable follow-up FIFO; an already-built segment modified mid-cycle
     waits for the next terminal snapshot so the active FIFO cannot be
     repeatedly reshuffled.
+  - Shared dispatch is sliding across ready roots: the first regular pass gives
+    at most one worker to each ready root (40 roots/12 workers means 12
+    different roots); after all important work is assigned, remaining work may
+    use released slots while claims, dependency closure and per-root/profile
+    limits remain enforced. A long-lived root never creates an all-roots
+    barrier, and a terminal root builds only its own next cycle.
+  - Important precedence is admission-aware: a pending important item on a
+    root whose explicit instance cap is full, or which is not the current
+    round-robin owner, does not turn into a global remaining barrier. A free
+    host slot may run ready remaining work on another root; once the important
+    root can admit work again, important precedence resumes.
   - A slow full inventory/DB/filter plan is deferred per root while that root's
     durable ordinary cycle still has pending, claimed, or running work; other
     roots continue independent planning. Bounded due-only discovery appends
