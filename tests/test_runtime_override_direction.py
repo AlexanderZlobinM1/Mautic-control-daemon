@@ -325,6 +325,30 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
         self.assertEqual(row["status"], "unchanged")
         self.assertEqual(row["effective"], {"adonis@Farm02": {"segments": [58, 59]}})
 
+    def test_instance_ack_preserves_already_scoped_lane_records(self) -> None:
+        cfg = SimpleNamespace(
+            profile_name="custom",
+            segment_priority_instance_settings={"adonis@Farm02": {"segments": []}},
+            segment_super_priority_instance_settings={"adonis@Farm02": {"segments": [58, 59]}},
+        )
+        observed = runtime_key_observation(
+            cfg,
+            {
+                "segment_priority_instance_settings": {"segments": []},
+                "segment_super_priority_instance_settings": {"segments": [58, 59]},
+            },
+            revision=196,
+            source="mcc",
+            scope_key="adonis@Farm02",
+        )
+        self.assertEqual(
+            {key: row["status"] for key, row in observed["keys"].items()},
+            {
+                "segment_priority_instance_settings": "unchanged",
+                "segment_super_priority_instance_settings": "unchanged",
+            },
+        )
+
     def test_rejected_nonempty_ack_is_retried_after_effective_value_is_fixed(self) -> None:
         class MemoryStore:
             def __init__(self):

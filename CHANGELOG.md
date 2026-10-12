@@ -1,3 +1,9 @@
+## 1.5.112 - 2026-10-12
+
+- Preserve already-canonical instance lane records in ACK observations instead
+  of projecting them through the UID map a second time; explicit empty lanes
+  remain tombstones.
+
 ## 1.5.111 - 2026-10-12
 
 - Retry instance ACK publication from the current canonical response when a

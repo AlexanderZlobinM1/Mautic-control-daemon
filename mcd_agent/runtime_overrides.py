@@ -637,11 +637,22 @@ def runtime_key_observation(
     observations: dict[str, dict[str, Any]] = {}
     for key, desired in normalized.items():
         if scope_key and key.endswith("_instance_settings") and isinstance(desired, dict):
-            desired_scope = desired.get(scope_key)
-            desired = desired_scope if desired_scope is not None else {}
+            if scope_key in desired:
+                desired = desired[scope_key]
+            elif set(desired).issubset({"segments", "slots_override"}):
+                # Instance desired-state rows are already canonical scoped
+                # records. Do not project them through the UID map again.
+                desired = desired
+            else:
+                desired = {}
         effective_value = effective.get(key)
         if scope_key and key.endswith("_instance_settings") and isinstance(effective_value, dict):
-            effective_value = effective_value.get(scope_key)
+            if scope_key in effective_value:
+                effective_value = effective_value[scope_key]
+            elif set(effective_value).issubset({"segments", "slots_override"}):
+                effective_value = effective_value
+            else:
+                effective_value = {}
         elif key.endswith("_instance_settings") and isinstance(desired, dict) and isinstance(effective_value, dict):
             # Host ACKs carry a sparse desired map. Compare only the exact
             # requested UIDs, including explicit empty tombstones; unrelated
