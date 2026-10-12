@@ -81,6 +81,32 @@ class SegmentLivenessTests(unittest.TestCase):
         )
         self.assertEqual(cycle_planned, [151])
 
+    def test_persisted_full_scan_item_bypasses_stale_repeat_cadence(self) -> None:
+        root = "/var/www/full-scan/public_html"
+        store = TaskStore(":memory:")
+        state, _added, _started = sync_cycle(
+            None, planned_ids=[151], never_built=[], running_ids=[], now_ts=100.0
+        )
+        store.put_runtime_sync(cycle_key(root), state)
+        with patch.dict(
+            daemon._ENTITY_LAUNCH_GUARD,
+            {daemon._entity_launch_guard_key(root, "segment", 151): 200.0},
+        ), patch.object(daemon, "_spawn_command", return_value=SimpleNamespace(pid=151)), patch.object(
+            daemon, "_segment_runtime_marker_write"
+        ):
+            launched = _fill_from_ring(
+                ring=deque([151]), ring_limit=1, total_limit=1, root=root,
+                task_type="segment", running={}, ring_entities={151},
+                config=self._config(), store=store, popens={},
+                build_args=lambda sid: ["php", "segments:update", str(sid)],
+                admission_claim=lambda sid: _segment_cycle_claim(
+                    store, root=root, entity_id=sid, eligible_ids=[151],
+                    blocked_ids=set(), running_ids=set(), now_ts=201.0,
+                ),
+                bypass_repeat_guard_entities={151}, bypass_baseline_admission=True,
+            )
+        self.assertEqual(launched, 1)
+
     def _launch_persisted_item(
         self,
         *,

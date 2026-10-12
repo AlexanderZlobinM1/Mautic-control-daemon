@@ -16144,6 +16144,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                         dynamic_blocked=_segment_chain_running_conflict,
                         on_launch=_mark_segment_cycle,
                         remove_on_launch=True,
+                        bypass_repeat_guard_entities=persisted_pending_cycle_ids,
                         bypass_baseline_admission=True,
                         max_launches=pending_slot_limit,
                     )

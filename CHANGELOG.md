@@ -1,3 +1,8 @@
+## 1.5.125 - 2026-10-12
+
+- Let persisted full-scan cycle items bypass stale per-entity repeat cadence;
+  capacity, running, dependency, and durable claim guards remain enforced.
+
 ## 1.5.124 - 2026-10-12
 
 - Preserve stable priority ID order across legacy alias and modern projection
