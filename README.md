@@ -514,10 +514,26 @@ Important:
     when no older state exists.
 - Segment planning:
   - `runtime.segment_lazy_update_enabled = false` is the default and plans a
-    full published-segment cycle; `true` explicitly opts into due-only lazy
-    planning and excludes fresh/current remaining IDs from new admission.
+    full published-segment cycle: never-built/changed/stale work is followed
+    by the remaining fresh published IDs in stable observed order; `true`
+    explicitly opts into due-only lazy planning and excludes fresh/current
+    remaining IDs from new admission.
   - The lazy flag never deletes or rebuilds durable `cycle.items`, `follow_up`,
     claims, running rows, or queue state already held by TaskStore.
+  - During an active cycle, newly created or pre-existing never-built segments
+    enter durable follow-up FIFO; an already-built segment modified mid-cycle
+    waits for the next terminal snapshot so the active FIFO cannot be
+    repeatedly reshuffled.
+  - A slow full inventory/DB/filter plan is deferred per root while that root's
+    durable ordinary cycle still has pending, claimed, or running work; other
+    roots continue independent planning. Bounded due-only discovery appends
+    late IDs to the durable follow-up FIFO. `mcd-segment-pending-guard-v1`
+    records the exact eligibility, exclusions, pause reason, capacity, and
+    launches for each active root so a stale monitor projection cannot hide a
+    live queue. The persisted refill worker runs continuously per root from
+    the full `mcd-segment-dispatch-context-v1`; the guard is telemetry only
+    and may truncate display lists. It yields to the lock-gated main dispatch
+    pass, so there is one task lifecycle and no all-roots barrier.
 - Import and retry invariants:
   - Imports are singleton per instance/root, while different instances may
     import in parallel within host/profile capacity.

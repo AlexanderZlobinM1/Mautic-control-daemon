@@ -30,6 +30,7 @@ from mcd_agent.segment_admission import (
     never_built_ids,
     normalize_state,
     ordinary_snapshot_order,
+    active_cycle_follow_up_rows,
     source_baseline,
     sync_cycle,
 )
@@ -232,6 +233,59 @@ class SegmentAdmissionTests(unittest.TestCase):
             ),
             [1, 6, 2, 4],
         )
+
+    def test_full_snapshot_appends_fresh_rows_after_due_categories(self) -> None:
+        rows = [
+            {"id": 4, "last_built_date": 190, "date_modified": 190},
+            {"id": 2, "last_built_date": 90, "date_modified": 120},
+            {"id": 3, "last_built_date": 20, "date_modified": 20},
+            {"id": 1, "last_built_date": None, "date_modified": 200},
+        ]
+        kwargs = {
+            "static_priority_ids": [],
+            "stale_after_sec": 100,
+            "now_ts": 200,
+        }
+        lazy = ordinary_snapshot_order(rows, [4, 2, 3, 1], **kwargs)
+        full = ordinary_snapshot_order(
+            rows,
+            [4, 2, 3, 1],
+            include_fresh_remaining=True,
+            **kwargs,
+        )
+        self.assertEqual(lazy, [1, 2, 3])
+        self.assertEqual(full, [1, 2, 3, 4])
+        self.assertEqual(full[: len(lazy)], lazy)
+
+    def test_active_cycle_follow_up_excludes_modified_existing_but_keeps_new(self) -> None:
+        rows = [
+            {
+                "id": 11,
+                "date_added": 50,
+                "date_modified": 150,
+                "last_built_date": 80,
+            },
+            {
+                "id": 12,
+                "date_added": 110,
+                "date_modified": 110,
+                "last_built_date": 100,
+            },
+            {
+                "id": 13,
+                "date_added": 40,
+                "date_modified": 150,
+                "last_built_date": None,
+            },
+            {
+                "id": 12,
+                "date_added": 110,
+                "date_modified": 110,
+                "last_built_date": 100,
+            },
+        ]
+        selected = active_cycle_follow_up_rows(rows, admitted_at=100)
+        self.assertEqual([int(row["id"]) for row in selected], [12, 13])
 
     def test_terminal_item_immediately_claims_next_item_without_tick_state(self) -> None:
         state, _added, _started = sync_cycle(

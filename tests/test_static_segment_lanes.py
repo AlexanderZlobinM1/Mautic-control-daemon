@@ -5,6 +5,8 @@ from types import SimpleNamespace
 
 from mcd_agent.daemon import (
     _manual_static_lane_for_ids,
+    _segment_static_closure_conflict,
+    _segment_static_closure_lock_key,
     _segment_priority_effective_setting,
     _segment_super_priority_effective_setting,
     _static_lane_runtime_evidence,
@@ -71,6 +73,16 @@ class StaticSegmentLaneTests(unittest.TestCase):
         )
         self.assertEqual(plans[SUPER_PRIORITY], [58, 59])
         self.assertNotIn(57, plans[SUPER_PRIORITY])
+
+    def test_mautic7_sibling_terminals_share_native_closure_execution_lock(self) -> None:
+        parents = {58: {57}, 59: {57}}
+        children = {57: {58, 59}}
+        self.assertTrue(_segment_static_closure_conflict(59, {58}, parents, children))
+        self.assertEqual(
+            _segment_static_closure_lock_key("/var/www/m7", 58, parents, children),
+            _segment_static_closure_lock_key("/var/www/m7", 59, parents, children),
+        )
+        self.assertFalse(_segment_static_closure_conflict(60, {58}, parents, children))
 
     def test_persisted_lanes_keep_priority_behind_super_and_allow_independent_claim(self) -> None:
         plans = {

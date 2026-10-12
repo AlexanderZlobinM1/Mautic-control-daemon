@@ -206,12 +206,17 @@ def ordinary_snapshot_order(
     retry_ids: Iterable[object] | None = None,
     stale_after_sec: int = 24 * 60 * 60,
     now_ts: float,
+    include_fresh_remaining: bool = False,
 ) -> list[int]:
     """Build the deterministic ordinary snapshot.
 
     The two static MCC lanes are excluded by ``static_priority_ids``. The
     remaining due candidates are grouped as never-built, changed, then stale;
-    currently-fresh published rows are discovery-only and are not admitted.
+    currently-fresh published rows are discovery-only and are not admitted in
+    lazy mode. A full published snapshot can set ``include_fresh_remaining``
+    to append those remaining rows after the due groups, preserving the same
+    deterministic observed order. This keeps full and lazy planning on one
+    classifier instead of maintaining two subtly different orderings.
     When ``baseline_snapshot`` is supplied, changed means newer than the
     previous fully completed ordinary-cycle snapshot rather than merely newer
     than the row's last build marker. ``retry_ids`` keeps terminal failures
@@ -277,7 +282,51 @@ def ordinary_snapshot_order(
         return None
 
     due_candidates = [sid for sid in candidates if category(sid) is not None]
-    return sorted(due_candidates, key=lambda sid: (int(category(sid) or 0), observed_position[sid]))
+    ordered_due = sorted(
+        due_candidates,
+        key=lambda sid: (int(category(sid) or 0), observed_position[sid]),
+    )
+    if not include_fresh_remaining:
+        return ordered_due
+    due_set = set(ordered_due)
+    # Full scans intentionally reconcile every published definition. Fresh
+    # rows are appended only after never-built/changed/stale work, retaining
+    # the category priority while ensuring a mixed full snapshot cannot drop
+    # the fresh tail.
+    fresh_remaining = [sid for sid in candidates if sid not in due_set]
+    return [*ordered_due, *fresh_remaining]
+
+
+def active_cycle_follow_up_rows(
+    rows: Iterable[Mapping[str, Any]] | None,
+    *,
+    admitted_at: object,
+) -> list[Mapping[str, Any]]:
+    """Keep only safe admissions discovered while an ordinary cycle runs.
+
+    A segment created after the cycle admission belongs in that cycle's FIFO
+    follow-up. A pre-existing never-built segment is also safe to add because
+    it was not represented by the completed baseline. A built segment whose
+    ``date_modified`` changed after admission is deliberately excluded: it is
+    planned by the next terminal snapshot, so an in-flight cycle keeps its
+    deterministic order and does not repeatedly chase one edited segment.
+    """
+
+    cutoff = _timestamp_seconds(admitted_at)
+    result: list[Mapping[str, Any]] = []
+    seen: set[int] = set()
+    for row in rows or ():
+        if not isinstance(row, Mapping):
+            continue
+        sid = _row_id(row)
+        if sid <= 0 or sid in seen:
+            continue
+        built = _row_timestamp(row, "last_built_date", "last_built", "built_ts")
+        created = _row_timestamp(row, "date_added", "created_ts")
+        if built is None or (cutoff is not None and created is not None and created >= cutoff):
+            result.append(row)
+            seen.add(sid)
+    return result
 
 
 def _cycle_id(now_ts: float, items: list[int]) -> str:

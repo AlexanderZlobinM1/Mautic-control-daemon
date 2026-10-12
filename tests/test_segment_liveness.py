@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import threading
 import tempfile
+import time
 import unittest
 from collections import deque
 from copy import deepcopy
@@ -18,12 +20,19 @@ from mcd_agent.daemon import (
     _segment_cycle_pending_ids,
     _segment_cycle_running,
     _segment_cycle_terminal,
+    _active_persisted_segment_cycle_roots,
     _effective_segment_regular_slot_limit,
     _segment_pending_dispatch_limits,
     _segment_shared_slots_available,
     _fill_from_ring,
 )
-from mcd_agent.segment_admission import cycle_key, mark_terminal, sync_cycle
+from mcd_agent.segment_admission import (
+    cycle_key,
+    mark_terminal,
+    ordinary_snapshot_order,
+    sync_cycle,
+)
+from mcd_agent.daemon import RunningTask
 
 
 class SegmentLivenessTests(unittest.TestCase):
@@ -53,6 +62,11 @@ class SegmentLivenessTests(unittest.TestCase):
             )
             lazy_cfg = load_config(str(config_path), allow_recover_from_mcc=False)
             self.assertTrue(lazy_cfg.segment_lazy_update_enabled)
+
+    def test_main_and_root_local_use_the_same_snapshot_planner(self) -> None:
+        self.assertIs(daemon._ordinary_segment_snapshot_order, ordinary_snapshot_order)
+        self.assertIn("ll.last_built_date IS NULL", daemon._SQL_SEGMENTS_LATE_DISCOVERY)
+        self.assertNotIn("OR ll.date_modified", daemon._SQL_SEGMENTS_LATE_DISCOVERY)
 
     def test_recurring_priority_leaves_slot_for_admitted_ordinary_cycle(self) -> None:
         root = "/srv/mautic"
@@ -143,6 +157,122 @@ class SegmentLivenessTests(unittest.TestCase):
             ),
             [],
         )
+
+    def test_heavy_plan_deferral_tracks_only_nonterminal_persisted_cycles(self) -> None:
+        root = "/var/www/active-cycle/public_html"
+        other_root = "/var/www/terminal-cycle/public_html"
+        store = TaskStore(":memory:")
+        active, _added, _started = sync_cycle(
+            None,
+            planned_ids=[101, 102, 103],
+            never_built=[],
+            running_ids=[],
+            now_ts=100.0,
+        )
+        terminal, _added, _started = sync_cycle(
+            None,
+            planned_ids=[201],
+            never_built=[],
+            running_ids=[],
+            now_ts=100.0,
+        )
+        terminal = mark_terminal(terminal, entity_id=201, success=True, now_ts=101.0)
+        store.put_runtime_sync(cycle_key(root), active)
+        store.put_runtime_sync(cycle_key(other_root), terminal)
+
+        self.assertEqual(
+            _active_persisted_segment_cycle_roots(store, [root, other_root]),
+            {root},
+        )
+
+        active = mark_terminal(active, entity_id=101, success=True, now_ts=102.0)
+        active = mark_terminal(active, entity_id=102, success=True, now_ts=103.0)
+        active = mark_terminal(active, entity_id=103, success=True, now_ts=104.0)
+        store.put_runtime_sync(cycle_key(root), active)
+        self.assertEqual(_active_persisted_segment_cycle_roots(store, [root, other_root]), set())
+        store.close()
+
+    def test_slow_root_liveness_probe_does_not_hold_shared_dispatch_lock(self) -> None:
+        """A slow A probe must not prevent an independent B launch."""
+        with tempfile.TemporaryDirectory() as td:
+            store = TaskStore(str(Path(td) / "state.db"))
+            root_a = "/var/www/root-a"
+            root_b = "/var/www/root-b"
+            task_a = RunningTask(
+                row_id=0,
+                root=root_a,
+                task_key=f"{root_a}|segment|101",
+                task_type="segment",
+                entity_id=101,
+                command_str="php bin/console mautic:segments:update -i 101",
+                timeout_sec=3600,
+                attempts=1,
+                started_at=time.time(),
+                pid=9101,
+            )
+            running = {task_a.task_key: task_a}
+            popens: dict[str, object] = {}
+            entered = threading.Event()
+            release = threading.Event()
+
+            config = SimpleNamespace(
+                worker_watchdog_sec=0,
+                segment_kill_grace_sec=1,
+                scheduler_pause_flag_path=str(Path(td) / "scheduler.pause"),
+                scheduler_host_max_parallel=0,
+                scheduler_instance_max_parallel=0,
+                scheduler_elastic_slots_enabled=True,
+                scheduler_emergency_reserved_slots=0,
+            )
+
+            def slow_segment_probe(_task: RunningTask) -> dict[str, object]:
+                entered.set()
+                release.wait(timeout=2.0)
+                return {"active": True}
+
+            monitor_thread = threading.Thread(
+                target=daemon._monitor_running,
+                kwargs={
+                    "config": config,
+                    "store": store,
+                    "running": running,
+                    "popens": popens,
+                    "segment_liveness_probe": slow_segment_probe,
+                },
+                daemon=True,
+            )
+            with patch.object(daemon, "_is_pid_alive", return_value=True), patch.object(
+                daemon, "_pid_matches_task_command", return_value=False
+            ), patch.object(daemon, "_spawn_command", return_value=SimpleNamespace(pid=9201)), patch.object(
+                daemon, "_task_locked_args", side_effect=lambda _key, args, **_kwargs: args
+            ), patch.object(daemon, "_scheduler_host_slots_available", return_value=None), patch.object(
+                daemon, "_scheduler_instance_slots_available", return_value=None
+            ):
+                monitor_thread.start()
+                self.assertTrue(entered.wait(timeout=1.0))
+                started = time.monotonic()
+                launched = daemon._submit_if_slot_uncoordinated(
+                    config=config,
+                    store=store,
+                    running=running,
+                    root=root_b,
+                    task_type="segment",
+                    entity_id=202,
+                    args=["fixture", "segment", "202"],
+                    timeout_sec=60,
+                    max_parallel_for_type=1,
+                    popens=popens,
+                    bypass_repeat_guard=True,
+                    bypass_baseline_admission=True,
+                )
+                elapsed = time.monotonic() - started
+                release.set()
+                monitor_thread.join(timeout=1.0)
+
+            self.assertTrue(launched)
+            self.assertLess(elapsed, 0.5)
+            self.assertIn(f"{root_b}|segment|202", running)
+            store.close()
 
     def test_persisted_full_scan_item_bypasses_stale_repeat_cadence(self) -> None:
         root = "/var/www/full-scan/public_html"

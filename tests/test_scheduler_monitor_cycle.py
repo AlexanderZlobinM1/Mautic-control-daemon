@@ -9,6 +9,7 @@ from mcd_agent.daemon import (
     RunningTask,
     TaskStore,
     _monitor_cycle_mark_launched,
+    _merge_persisted_segment_monitor_cycle,
     _publish_scheduler_monitor_cycles,
     _publish_segment_monitor_cycle,
     _scheduler_monitor_plan_key,
@@ -120,6 +121,64 @@ class SchedulerMonitorCycleTests(unittest.TestCase):
             self.assertEqual(cycle["done"], [])
             self.assertEqual(cycle["running"], [])
             self.assertEqual(cycle["total"], 5)
+
+    def test_persisted_refill_merges_segment_without_erasing_campaign_or_import_cycles(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "state.db"
+            store = TaskStore(str(db_path))
+            root = "/var/www/parallel-roots"
+            _publish_scheduler_monitor_cycles(
+                store=store,
+                root=root,
+                cycle_done={(root, "segment"): set()},
+                running={},
+                now_ts=1000.0,
+                seg_sql_ring=deque(),
+                seg_resume_ring=deque(),
+                seg_prio_ring=deque(),
+                seg_reg_ring=deque(),
+                campaign_trigger_prio_ring=deque([501]),
+                campaign_trigger_reg_ring=deque(),
+                campaign_rebuild_prio_ring=deque(),
+                campaign_rebuild_reg_ring=deque(),
+                import_monitor={
+                    "queued": [701],
+                    "running": [],
+                    "done": [700],
+                    "item_statuses": {"700": "success", "701": "queued"},
+                },
+            )
+
+            _merge_persisted_segment_monitor_cycle(
+                store=store,
+                root=root,
+                pending_ids=[101, 102],
+                done_ids=[100],
+                running={
+                    "segment-102": RunningTask(
+                        row_id=1,
+                        root=root,
+                        task_key=f"{root}|segment|102",
+                        task_type="segment",
+                        entity_id=102,
+                        command_str="php bin/console mautic:segments:update -i 102",
+                        timeout_sec=3600,
+                        attempts=1,
+                        started_at=999.0,
+                        pid=1234,
+                    )
+                },
+                now_ts=1001.0,
+            )
+
+            payload = self._read_payload(db_path, root)
+            cycles = {cycle["task_type"]: cycle for cycle in payload["cycles"]}
+            self.assertEqual(cycles["segment"]["queued"], [101])
+            self.assertEqual(cycles["segment"]["running"], [102])
+            self.assertEqual(cycles["segment"]["done"], [100])
+            self.assertEqual(cycles["campaign_trigger"]["queued"], [501])
+            self.assertEqual(cycles["import"]["queued"], [701])
+            self.assertEqual(cycles["import"]["done"], [700])
 
     def test_campaign_cycles_publish_queued_running_and_done_items(self) -> None:
         with tempfile.TemporaryDirectory() as td:

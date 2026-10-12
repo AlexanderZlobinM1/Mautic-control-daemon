@@ -4,7 +4,7 @@
 фактическую схему после исправления admission и должен обновляться вместе с
 кодом, тестами и runtime receipt. Документ не является разрешением на
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.131 (follow-up после immutable
+Актуальная редакция этого канона — MCD 1.5.132 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам
@@ -165,11 +165,13 @@ config на его profile baseline и только после этого при
 2. Read-only definitions добавляют опубликованные never-built IDs, которых не
    было в due query. Ordinary snapshot строится строго по категориям:
    `never-built → changed → stale`, где stale threshold берётся из выбранного
-   host profile (`segment_stale_after_sec`). Fresh/current published rows,
-   обнаруженные bounded full scan, являются только discovery и не становятся
-   ordinary work. После первого полностью завершённого цикла fresh/current
-   определяется относительно persisted bounded source fingerprint предыдущего
-   terminal ordinary cycle, а не относительно `last_built_date` текущей строки.
+   host profile (`segment_stale_after_sec`). В full snapshot fresh/current
+   published rows не теряются: после трёх due-категорий они дописываются в
+   стабильном observed order и становятся частью полного ordinary cycle. В
+   lazy snapshot они остаются discovery-only и не становятся новым admission.
+   После первого полностью завершённого цикла due-классификация определяется
+   относительно persisted bounded source fingerprint предыдущего terminal
+   ordinary cycle, а не только относительно `last_built_date` текущей строки.
    Если built segment отсутствует в этом baseline либо baseline пустой/
    повреждён, действует fail-open bootstrap: такой segment считается `changed`
    и попадает во вторую категорию (после never-built) в ближайшее новое
@@ -186,9 +188,13 @@ config на его profile baseline и только после этого при
    меняются: ID атомарно добавляется в durable FIFO `follow_up`. Follow-up
    конкурирует за следующий свободный ordinary worker и выбирается раньше
    следующего pending ID frozen cycle; он не создаёт duplicate и не меняет
-   порядок исходного `cycle.items`. Уже claimed/running и terminal элементы не
-   двигаются. Follow-up state переживает restart, а terminal success/error,
-   retry и dead-letter остаются привязаны к его текущему generation.
+   порядок исходного `cycle.items`. Позднее изменение уже существующего
+   built-сегмента в active cycle не добавляется в этот FIFO: оно попадёт в
+   следующий terminal snapshot, иначе один редактируемый сегмент мог бы
+   бесконечно переставлять/расширять текущую очередь. Уже claimed/running и
+   terminal элементы не двигаются. Follow-up state переживает restart, а
+   terminal success/error, retry и dead-letter остаются привязаны к его
+   текущему generation.
    После `segment_cycle_sync` dispatch строит projection из durable
    `follow_up` FIFO, затем pending `cycle.items`, исключая
    `done/errors/claimed/running`, static и SQL-managed IDs. Наблюдённый, но
@@ -244,6 +250,26 @@ config на его profile baseline и только после этого при
    fingerprint (или отсутствие записи) и retry-ятся в следующем cycle, даже
    если их source timestamp не изменился. Partial/error до terminal не могут
    создать новый completed-cycle baseline; state переживает restart.
+12. Тяжёлый full inventory/DB/filter planner не имеет права удерживать
+   dispatch для root, пока у этого root существует durable ordinary cycle с
+   `pending`, `claimed` или `running` работой. Для него dispatcher продолжает
+   брать уже admitted IDs из `TaskStore.runtime_sync`, а root-local full plan
+   откладывается до terminal cycle; другие roots продолжают независимое
+   планирование. Ограниченный due-only discovery (не более bounded batch)
+   может добавить поздние IDs в durable `follow_up`, но не сбрасывает cursor,
+   claims или FIFO. Каждый такой проход записывает
+   `mcd-segment-pending-guard-v1` с `eligible_pending_count`,
+   `projected_pending_count`, blocked IDs/reason, SQL/static exclusions,
+   DB/pause reasons, absolute limit, free launch budget и фактическим
+   `launched` count. Этот receipt является обязательным доказательством
+   того, почему pending был запущен или удержан, и должен обновляться после
+   restart/update вместе с остальным runtime state. Для исполнения worker
+   читает отдельный полный `mcd-segment-dispatch-context-v1`: display-receipt
+   guard может ограничивать списки до 100 элементов, authoritative context —
+   нет. Непрерывный persisted refill worker обслуживает каждый root
+   независимо, использует тот же monitor/claim/spawn/terminal lifecycle и
+   уступает только короткому lock-gated проходу main dispatcher; slow root не
+   останавливает другие roots, а global all-roots barrier запрещён.
 
 Статические queues строятся отдельно: общие dependencies двух линий принадлежат
 линии с более высоким precedence и выполняются ровно один раз. Например,
@@ -254,7 +280,10 @@ root запускается не более одного раза в своей 
 создаётся отдельной MCD task и не дублируется между sibling commands; его
 покрытие допускается только внутри native Mautic closure. Source/CLI и
 TaskStore receipt обязаны фиксировать deduplicated root plan и union closure,
-без неоднозначного ручного подтверждения алгоритма.
+без неоднозначного ручного подтверждения алгоритма. Пересекающиеся native
+closures (например sibling `58`/`59` через parent `57`) получают общий
+execution lock и не выполняются одновременно; независимые closures сохраняют
+параллелизм.
 
 ### Reconcile persisted static claims after restart/update
 
@@ -475,6 +504,7 @@ cycle без ручного `segments:update`, profile/capacity/data changes. Ad
 | host/instance slots и rotation | `mcd_agent/daemon.py` | `tests/test_campaign_ring_dispatch.py` |
 | profile retry budget, three starts and bounded orphan expiry | `mcd_agent/config.py`, `mcd_agent/daemon.py` | `tests/test_segment_admission.py` |
 | monitor queued/running/done/error receipt | `mcd_agent/daemon.py` | `tests/test_scheduler_monitor_cycle.py`, `tests/test_signals_scheduler_history.py` |
+| heavy-plan deferral and durable pending guard | `mcd_agent/daemon.py` | `tests/test_segment_liveness.py`, live M6/M7 acceptance receipt |
 | self-update preserves ordinary application work and all durable queues | `mcd_agent/self_update.py`, `daemon.py`, systemd unit | `tests/test_self_update_version_reporting.py` |
 | authority-safe desired runtime projection | `mcd_agent/config.py`, `mcd_agent/runtime_overrides.py` | `tests/test_runtime_override_direction.py`, `tests/test_runtime_stable_keys.py`, `tests/test_runtime_migration_adapter.py` |
 | natural b2bss/Adonis evidence | runtime TaskStore/MCC receipts | rollout acceptance (после package/install) |

@@ -1,3 +1,29 @@
+## 1.5.132 - 2026-10-12
+
+- Prevent a slow full inventory/DB/filter plan from suspending dispatch for a
+  root whose durable ordinary segment cycle still has pending, claimed, or
+  running work; that root continues from `TaskStore.runtime_sync` while other
+  roots plan independently, and its heavy refresh waits for terminal state.
+- Add the `mcd-segment-pending-guard-v1` runtime receipt with per-root pending,
+  SQL/static exclusions, blocking reasons, pause state, capacity, and actual
+  launch diagnostics so stale monitor projections cannot hide live work.
+- Add regression coverage for nonterminal-cycle deferral and retain the
+  mandatory self-update/queue-state preservation contract.
+- Record the operational invariant explicitly: ordinary Mautic/PHP operations
+  are never update blockers, their durable queues/claims/running/follow-up/
+  retry/monitor state survives restart or self-update, and only explicit
+  MCD-owned critical barriers may defer an update. Persisted refill is
+  continuous per root and never becomes a global host barrier.
+- Add root-local terminal-cycle planning so a slow DB/full plan for one root
+  cannot delay another root's next ordinary admission; Mautic 7 sibling
+  terminal IDs also share a native-closure execution lock when their graph
+  overlaps, while independent closures remain parallel.
+- Use one shared full/lazy ordinary snapshot classifier for the main and
+  root-local planners: full scans append the fresh published tail after
+  never-built/changed/stale work, while lazy scans retain due-only behavior.
+  Active-cycle discovery admits only newly created or never-built rows; a
+  modified already-built row waits for the next terminal snapshot.
+
 ## 1.5.131 - 2026-10-12
 
 - Keep the absolute ordinary-cycle regular-worker limit separate from the
