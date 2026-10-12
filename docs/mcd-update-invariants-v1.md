@@ -1,8 +1,9 @@
 # MCD update invariants
 
-This is an acceptance contract, not an operator preference. A release is not
-complete until the source, tests, published artifact, and target-host receipt
-all agree with these rules.
+This is an implementation and release-evidence reference, not a second
+algorithm. The normative scheduler algorithm is `ALGORITHM.md`. A release is
+not complete until the source, tests, published artifact, and target-host
+receipt all agree with both documents.
 
 ## Admission and blockers
 

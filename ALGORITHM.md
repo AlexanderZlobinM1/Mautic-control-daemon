@@ -4,7 +4,7 @@
 фактическую схему после исправления admission и должен обновляться вместе с
 кодом, тестами и runtime receipt. Документ не является разрешением на
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.133 (follow-up после immutable
+Актуальная редакция этого канона — MCD 1.5.136 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам
@@ -173,7 +173,10 @@ config на его profile baseline и только после этого при
    Частичная UID-запись мержится транзакционно; пропуск UID или поля не
    означает clear. При удалении последнего локального поля MCD обязан
    отправить явную пустую `instance_desired_states[uid]` с текущей revision,
-   иначе replace-публикация может воскресить старую sparse map MCC.
+   и верхнеуровневую `segment_lazy_update_instance_settings={}` при очистке
+   последней записи. При удалении только A полная sparse map для остальных
+   UID, например B с более новой revision, сохраняется без A; отдельная
+   операция очистки всей map всегда выражается явным `{}`.
    Поэтому один host может одновременно иметь `lazy=true`, `false`, `true`
    для трёх разных roots. Явный lazy-флаг instance `true` переключает только
    новый план этого root на due-only SQL и исключает fresh/current remaining
@@ -442,10 +445,10 @@ recovery остаются в существующем import recovery path и и
 
 ### Runtime override ACK truthfulness
 
-Runtime ACKs are per-key observations, not an echo of the requested payload.
-Each key reports `status` (`applied`, `profile_locked`, `rejected`, or
-`unchanged`), `desired`, `effective`, `source`, `revision`, and an explicit
-reason. ACK содержит только запрошенные keys; `effective_runtime` присутствует
+Runtime ACK — это наблюдение по каждому ключу, а не эхо запрошенного payload.
+Каждый ключ сообщает `status` (`applied`, `profile_locked`, `rejected` или
+`unchanged`), `desired`, `effective`, `source`, `revision` и явную причину.
+ACK содержит только запрошенные keys; `effective_runtime` присутствует
 только как per-key readback с теми же keys и не является whole-host snapshot,
 поэтому размер остаётся в пределах лимита MCC. Пустой instance desired state
 получает `unverified` ACK без runtime dump.
@@ -459,15 +462,15 @@ effective `plugin_operations` содержит большой structured payload
 Если отдельное `desired` или `effective` значение само превышает safety
 budget, оно заменяется строго проверяемой ссылкой
 `{encoding:"canonical-json-sha256",sha256,bytes}`; key не отбрасывается.
-Profile-locked workload keys retain the selected profile as authority
-and report the effective profile value; they are never labelled as applied from
-MCC. `jobs_max_workers` and other hot-effective keys are read back from the
-effective runtime map. When a scope has more than 128 requested keys or the
-bounded ACK would exceed MCC's byte limit, MCD emits deterministic
-`mcd-runtime-key-observation-chunk-v1` parts with a stable batch ID and resumes
-only missing parts after restart. The top-level ACK is `applied` only when
-every requested key is effective; a profile discrepancy or rejection remains
-visible to MCC.
+Для profile-locked workload keys выбранный profile остаётся authority,
+а ACK сообщает effective profile value; такие ключи никогда не помечаются как
+применённые из MCC. `jobs_max_workers` и другие hot-effective keys читаются из
+effective runtime map. Если scope содержит больше 128 запрошенных keys или
+ограниченный ACK превысил бы лимит MCC по размеру, MCD выдаёт детерминированные
+`mcd-runtime-key-observation-chunk-v1` parts со стабильным batch ID и после
+restart продолжает только отсутствующие parts. Верхнеуровневый ACK получает
+`applied` только когда effective стали все запрошенные keys; расхождение
+profile или rejection остаётся видимым MCC.
 
 Перед spawn worker атомарно claim-ит следующий eligible item из persisted
 cycle или статической queue. Claim проверяет `done/errors/claimed/running`,

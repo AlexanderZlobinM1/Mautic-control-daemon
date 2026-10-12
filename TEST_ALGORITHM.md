@@ -125,9 +125,10 @@ TaskStore fixture должен сохранять `cycle_id`, `updated_at` и sp
    root использует новое значение. После restart/reconcile UID-scoped desired
    row и host fallback восстанавливаются без сброса очереди. Отдельно
    проверяется clear-контракт: удаление последнего локального поля публикует
-   явную пустую UID-строку с текущей revision; простое отсутствие UID не
-   используется как команда очистки и не должно воскресить старую MCC sparse
-   map.
+   явную пустую UID-строку с текущей revision и верхнеуровневую пустую
+   `segment_lazy_update_instance_settings={}`; при удалении A sparse map B с
+   более новой revision сохраняется, а простое отсутствие UID не используется
+   как команда очистки. Очистка всей map — отдельная явная операция.
 
 10. Проверяется dedicated super lane: четыре enabled super-instance worker-а
    работают outside shared regular `11` capacity (`4 outside 11`), не
