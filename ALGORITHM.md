@@ -203,10 +203,14 @@ config на его profile baseline и только после этого при
    межпроцессным `scheduler.pause.lock`. Каждый новый запуск, включая
    ordinary, priority, super-priority, manual, import и retry, перед
    фактическим `spawn` получает тот же lock и повторно проверяет barrier.
-   Поэтому после момента публикации barrier новые процессы не появляются;
-   уже запущенные процессы продолжают drain, а update повторяет попытку до
-   безопасного apply. Barrier переживает scheduler tick и restart и снимается
-   только после успешного apply либо штатной terminal-cleanup операции.
+   Поэтому после момента публикации barrier новые MCD-managed процессы не
+   появляются; уже запущенные обычные Mautic/PHP процессы продолжают работу
+   независимо от update и не являются условием его завершения. Supervisor
+   restart сохраняет их через `KillMode=process`, а startup re-adopts их из
+   TaskStore. Update повторяет попытку только для явных MCD-owned barriers
+   (backup/source/update/migration), а не ждёт завершения app process. Barrier
+   переживает scheduler tick и restart и снимается только после успешного
+   apply либо штатной terminal-cleanup операции.
 7. Обязательная граница self-update: живой обычный PHP/Mautic console process
    (`segments`, `campaigns`, `import` и любой другой application command) не
    является blocker-ом. Он должен пережить restart/reinstall MCD, сохранить

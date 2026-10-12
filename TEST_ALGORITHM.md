@@ -1,9 +1,11 @@
 # Segment scheduler liveness test algorithm
 
 Этот документ описывает исполняемую матрицу M6/M7 для ordinary segment
-cycles. Тесты не используют production host, не запускают реальный Mautic и
-не меняют profile/config/data. Реальный MCC gate является отдельным
-read-only/package/install шагом после unit matrix.
+cycles. Локальная unit-матрица не использует production host, не запускает
+реальный Mautic и не меняет profile/config/data; её зелёный результат не
+является доказательством live acceptance. Полный gate дополнительно требует
+owner-labelled disposable M6/M7 sandbox, штатные Mautic commands, exact
+package/runtime SHA и реальный MCC/package/install receipt.
 
 ## Mandatory self-update lifecycle gate
 
@@ -117,8 +119,9 @@ guard reason и результат каждого gate. Любое расхож�
 disposable Mautic 6/7 sandboxes. Production не используется даже для fake
 state. Для host с несколькими instances receipt обязан подтверждать:
 
-1. `max_concurrent_imports == 1` по всему host, включая imports на разных
-   instances; второй pending import остаётся FIFO pending.
+1. `max_concurrent_imports == 1` на каждый instance/root. Imports разных
+   instances могут идти параллельно в пределах host/profile capacity; второй
+   pending import того же instance остаётся FIFO pending.
 2. Pending, healthy-running, completed, paused, cancelled/stopped,
    failed/broken, retry/recovery и invalid/missing DB-row outcomes с exact
    TaskStore state, PID, timestamps, slot count и terminal reason.
@@ -144,9 +147,9 @@ state. Для host с несколькими instances receipt обязан по
 
 | Row | Проверка |
 |---|---|
-| 1 | pending imports FIFO и первый eligible получает host-wide slot |
-| 2 | active import на одном root блокирует другой root |
-| 3 | healthy import не допускает второй process-level `mautic:import` |
+| 1 | pending imports FIFO и первый eligible каждого instance получает свой slot |
+| 2 | active import на одном root не блокирует другой root при свободной host/profile capacity |
+| 3 | healthy import не допускает второй process-level `mautic:import` на том же instance |
 | 4 | completed import немедленно освобождает slot |
 | 5 | paused route не запускает import |
 | 6 | cancelled/stopped row снова виден как pending |
@@ -182,5 +185,6 @@ invalid/missing mapping/header, parser/validation failure, hung watchdog и
 mid-import process crash. Для каждого row сохраняются exact source SHA/path,
 Mautic major, fixture IDs, command, PID/timeline, TaskStore/DB terminal state,
 slot timeline и cleanup proof. Приёмка запрещена, если matrix не показывает
-`PASS` по обеим major, не подтверждает `1` active import globally или
-переиспользует старый receipt/source.
+`PASS` по обеим major, не подтверждает ровно один active import на instance
+(и допустимый parallelism между instances), или переиспользует старый
+receipt/source.
