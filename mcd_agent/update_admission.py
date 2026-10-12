@@ -14,7 +14,9 @@ except Exception:  # pragma: no cover - non-POSIX development environments
 
 
 def scheduler_pause_path(config_or_path: object) -> Path:
-    raw = getattr(config_or_path, "scheduler_pause_flag_path", config_or_path)
+    raw = getattr(config_or_path, "scheduler_pause_flag_path", None)
+    if raw is None:
+        raw = config_or_path if isinstance(config_or_path, (str, Path)) else "/opt/mcd/var/scheduler.pause"
     return Path(str(raw or "/opt/mcd/var/scheduler.pause"))
 
 
