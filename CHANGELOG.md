@@ -1,3 +1,13 @@
+## 1.5.142 - 2026-10-12
+
+- Derive ordinary orphan grace from the existing profile-managed
+  `segment_sql_orphan_after_sec` observation window instead of a private fixed
+  value. Require PID start identity in addition to liveness and command
+  matching, and refresh that identity when adopting legacy TaskStore rows.
+- Keep every covered member of a live dependency closure claimed while its
+  owner remains live, preventing duplicate member launches; add recycled-PID,
+  profile-window, and healthy-owner closure regressions.
+
 ## 1.5.141 - 2026-10-12
 
 - Reconcile ordinary persisted segment claims against current-cycle identity
@@ -9,6 +19,11 @@
   report honest pending-guard reasons instead of `cron_disallowed` when the
   cluster route is allowed. Add the exact 132-item stale-claim fixture,
   current-generation/next-cycle regression, and daemon integration coverage.
+- Derive ordinary orphan grace from the existing profile-managed
+  `segment_sql_orphan_after_sec` window. Require PID start identity alongside
+  liveness/command checks, and retain every member of a live dependency
+  closure while its owner worker remains alive; add recycled-PID and
+  covered-member regressions.
 
 ## 1.5.140 - 2026-10-12
 

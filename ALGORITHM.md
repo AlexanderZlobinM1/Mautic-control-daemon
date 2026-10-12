@@ -4,7 +4,7 @@
 фактическую схему после исправления admission и должен обновляться вместе с
 кодом, тестами и runtime receipt. Документ не является разрешением на
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.141 (follow-up после immutable
+Актуальная редакция этого канона — MCD 1.5.142 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам
@@ -513,14 +513,22 @@ pending ring после bounded grace.
 Обычный cycle применяет ту же liveness-грань, но с обязательной identity
 проверкой. Перед каждым pending projection MCD сверяет каждый persisted
 `claimed/running` item с текущим TaskStore/executor/process evidence и с
-`cycle_id`/`admitted_at` runtime marker-а. Marker-only запись не считается
-живым worker-ом. Terminal marker другого поколения, либо marker, начавшийся до
+`cycle_id`/`admitted_at` runtime marker-а. Для PID evidence дополнительно
+сверяется сохранённый `/proc` start identity (`pid_start_time`); alive PID,
+даже с совпавшей командой, но без совпавшего start identity не считается
+independent proof. Marker-only запись не считается живым worker-ом. Terminal
+marker другого поколения, либо marker, начавшийся до
 admission текущего cycle, освобождает claim в месте, не переносит старый
 `done` в новый cycle и не превращает старый terminal в успех текущего item.
-При отсутствии evidence сохраняется bounded `active_meta.orphan_since`;
-после grace item возвращается в тот же durable pending order. Следующий
+При отсутствии evidence сохраняется bounded `active_meta.orphan_since`; окно
+берётся из существующего profile-managed `segment_sql_orphan_after_sec` (с
+безопасным fallback), а не из private host/instance настройки. После grace
+item возвращается в тот же durable pending order. Следующий
 current-generation worker проходит обычный `claim -> start -> terminal`, а
 новый cycle создаётся только после честного terminal всего текущего cycle.
+Для dependency closure live owner marker распространяется на все его covered
+members: member не release-ится и не запускает duplicate, пока owner PID и
+его start identity живы.
 Ложный `cron_disallowed` при разрешённом route не допускается: receipt
 различает `cron_disallowed`, `cycle_claim_or_terminal_reconcile` и
 `no_projected_pending`. Это root-local reconciliation и не становится

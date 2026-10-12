@@ -178,7 +178,7 @@ from mcd_agent.static_segment_lanes import (
 )
 from mcd_agent.service_profiles import service_profiles_apply_once
 from mcd_agent.self_update import _ensure_mcd_service_kill_mode, maybe_auto_update
-from mcd_agent.update_admission import scheduler_admission_lock, scheduler_pause_path
+from mcd_agent.update_admission import _pid_start_time, scheduler_admission_lock, scheduler_pause_path
 from mcd_agent.segment_filter_safety import format_segment_filter_issues, segment_invalid_filter_issues
 from mcd_agent.segment_recurring_priority import entries_for_instance as recurring_priority_entries_for_instance
 from mcd_agent.segment_recurring_priority import state_key as recurring_priority_state_key
@@ -2290,6 +2290,9 @@ def _segment_runtime_marker_write(
                 marker["cycle_admitted_at"] = float(cycle_state.get("admitted_at") or 0.0)
             except (TypeError, ValueError):
                 marker.pop("cycle_admitted_at", None)
+        pid_start_time = _pid_start_time(int(pid if pid is not None else task.pid))
+        if pid_start_time is not None:
+            marker["pid_start_time"] = int(pid_start_time)
         marker["last_independent_at"] = float(now_ts)
         marker.pop("lost_at", None)
         marker.pop("terminal_at", None)
@@ -2702,6 +2705,10 @@ def _segment_chain_runtime_write(
         )
     elif command_str:
         payload["command_str"] = str(command_str)
+    if str(status or "").strip().lower() in {"running", "admitting"} and task is not None:
+        pid_start_time = _pid_start_time(int(task.pid))
+        if pid_start_time is not None:
+            payload["pid_start_time"] = int(pid_start_time)
     # Keep a small reverse index under every member as well as under the
     # owner.  Restart/liveness reconciliation can then find the one worker
     # from any claimed closure member without adding a second TaskStore row.
@@ -2913,8 +2920,26 @@ def _segment_cycle_marker_process_live(marker: Mapping[str, object]) -> bool:
         return False
     if pid <= 0 or not _is_pid_alive(pid):
         return False
+    try:
+        expected_start = int(marker.get("pid_start_time") or 0)
+    except (TypeError, ValueError):
+        expected_start = 0
+    if expected_start <= 0 or _pid_start_time(pid) != expected_start:
+        return False
     command = str(marker.get("command_str") or "").strip()
     return not command or _pid_matches_task_command(pid, command)
+
+
+def _segment_cycle_orphan_grace_sec(config: object) -> int:
+    """Use the existing profile-managed orphan observation window."""
+
+    raw = getattr(config, "segment_sql_orphan_after_sec", None)
+    if raw is None:
+        return max(1, int(_SEGMENT_ORPHAN_GRACE_SEC or 1))
+    try:
+        return max(30, int(raw or _SEGMENT_ORPHAN_GRACE_SEC))
+    except (TypeError, ValueError):
+        return max(1, int(_SEGMENT_ORPHAN_GRACE_SEC or 1))
 
 
 def _segment_cycle_active_evidence(
@@ -3039,6 +3064,7 @@ def _segment_cycle_reconcile_orphans(
     root: str,
     running: Mapping[str, "RunningTask"],
     now_ts: float,
+    orphan_grace_sec: int = _SEGMENT_ORPHAN_GRACE_SEC,
 ) -> tuple[dict[str, object], list[int]]:
     """Release only proven stale ordinary claims before pending projection."""
 
@@ -3057,6 +3083,7 @@ def _segment_cycle_reconcile_orphans(
             raw_state,
             active_evidence=evidence,
             now_ts=float(now_ts),
+            orphan_grace_sec=int(orphan_grace_sec or _SEGMENT_ORPHAN_GRACE_SEC),
         )
         if state != dict(raw_state):
             store.put_runtime_sync(key, state)
@@ -13347,6 +13374,13 @@ def _reconcile_running_state(
             stats["lost_cmd"] += 1
             continue
 
+        # Refresh the persisted marker for adopted runtime work.  This records
+        # the PID start ticks through the same PID-reuse-safe primitive used by
+        # update admission, so a legacy marker cannot make a recycled PID look
+        # like independent liveness evidence.
+        if task.task_type in _SEGMENT_RUNTIME_TASK_TYPES:
+            _segment_runtime_marker_write(store, task, status="running", now_ts=time.time())
+
         prev = valid_by_key.get(task.task_key)
         if prev is None:
             valid_by_key[task.task_key] = task
@@ -18757,6 +18791,7 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                 root=root,
                 running=running,
                 now_ts=time.time(),
+                orphan_grace_sec=_segment_cycle_orphan_grace_sec(config),
             )
             if reconciled_orphan_ids:
                 logging.warning(

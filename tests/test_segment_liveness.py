@@ -833,6 +833,139 @@ class SegmentLivenessTests(unittest.TestCase):
         self.assertEqual(store.get_runtime_sync(cycle_key(root))["claimed"], [])
         store.close()
 
+    def test_ordinary_orphan_grace_uses_existing_profile_window(self) -> None:
+        self.assertEqual(
+            daemon._segment_cycle_orphan_grace_sec(
+                SimpleNamespace(segment_sql_orphan_after_sec=777)
+            ),
+            777,
+        )
+        self.assertEqual(
+            daemon._segment_cycle_orphan_grace_sec(SimpleNamespace()),
+            daemon._SEGMENT_ORPHAN_GRACE_SEC,
+        )
+
+    def test_marker_pid_reuse_is_not_independent_liveness_without_start_identity(self) -> None:
+        marker = {
+            "pid": 123,
+            "pid_start_time": 456,
+            "status": "running",
+            "command_str": "",
+        }
+        with patch.object(daemon, "_is_pid_alive", return_value=True), patch.object(
+            daemon, "_pid_start_time", return_value=999
+        ):
+            self.assertFalse(daemon._segment_cycle_marker_process_live(marker))
+        with patch.object(daemon, "_is_pid_alive", return_value=True), patch.object(
+            daemon, "_pid_start_time", return_value=456
+        ):
+            self.assertTrue(daemon._segment_cycle_marker_process_live(marker))
+
+    def test_live_chain_owner_keeps_all_covered_members_claimed(self) -> None:
+        root = "/var/www/alex/chain"
+        store = TaskStore(":memory:")
+        state, _added, _started = sync_cycle(
+            None,
+            planned_ids=[61, 62],
+            never_built=[],
+            running_ids=[],
+            now_ts=100.0,
+        )
+        state["claimed"] = [61, 62]
+        state["running"] = [61, 62]
+        state["status"] = "active"
+        store.put_runtime_sync(cycle_key(root), state)
+        chain_marker = {
+            "schema": "mcd-segment-execution-chain-v1",
+            "root": root,
+            "owner_id": 61,
+            "entity_ids": [61, 62],
+            "status": "running",
+            "cycle_id": state["cycle_id"],
+            "started_at": 100.1,
+            "pid": 123,
+            "pid_start_time": 456,
+            "command_str": "php bin/console mautic:segments:update -i 61",
+        }
+        for sid in (61, 62):
+            store.put_runtime_sync(daemon._segment_chain_runtime_key(root, sid), chain_marker)
+        with patch.object(daemon, "_is_pid_alive", return_value=True), patch.object(
+            daemon, "_pid_start_time", return_value=456
+        ), patch.object(daemon, "_pid_matches_task_command", return_value=True), patch.object(
+            daemon, "_refresh_scheduler_important_root"
+        ):
+            repaired, released = daemon._segment_cycle_reconcile_orphans(
+                store,
+                root=root,
+                running={},
+                now_ts=101.0,
+                orphan_grace_sec=30,
+            )
+        self.assertEqual(released, [])
+        self.assertEqual(repaired["claimed"], [61, 62])
+        self.assertEqual(repaired["running"], [61, 62])
+        self.assertEqual(daemon._segment_cycle_pending_order(repaired), [])
+        store.close()
+
+    def test_recycled_marker_pid_enters_grace_then_releases_without_duplicate(self) -> None:
+        root = "/var/www/alex/recycled"
+        store = TaskStore(":memory:")
+        state, _added, _started = sync_cycle(
+            None,
+            planned_ids=[61],
+            never_built=[],
+            running_ids=[],
+            now_ts=100.0,
+        )
+        state["claimed"] = [61]
+        state["running"] = [61]
+        state["status"] = "active"
+        store.put_runtime_sync(cycle_key(root), state)
+        store.put_runtime_sync(
+            daemon._segment_runtime_marker_key(root, 61),
+            {
+                "schema": "mcd-segment-runtime-marker-v1",
+                "root": root,
+                "entity_id": 61,
+                "status": "running",
+                "cycle_id": state["cycle_id"],
+                "started_at": 100.1,
+                "pid": 123,
+                "pid_start_time": 456,
+                "command_str": "php bin/console mautic:segments:update -i 61",
+            },
+        )
+        with patch.object(daemon, "_is_pid_alive", return_value=True), patch.object(
+            daemon, "_pid_start_time", return_value=999
+        ), patch.object(daemon, "_pid_matches_task_command", return_value=True):
+            held, released = daemon._segment_cycle_reconcile_orphans(
+                store,
+                root=root,
+                running={},
+                now_ts=101.0,
+                orphan_grace_sec=60,
+            )
+        self.assertEqual(released, [])
+        self.assertEqual(held["claimed"], [61])
+        self.assertIn("orphan_since", held["active_meta"]["61"])
+        self.assertNotIn("last_independent_at", held["active_meta"]["61"])
+        with patch.object(daemon, "_is_pid_alive", return_value=True), patch.object(
+            daemon, "_pid_start_time", return_value=999
+        ), patch.object(daemon, "_pid_matches_task_command", return_value=True), patch.object(
+            daemon, "_refresh_scheduler_important_root"
+        ):
+            released_state, released = daemon._segment_cycle_reconcile_orphans(
+                store,
+                root=root,
+                running={},
+                now_ts=161.0,
+                orphan_grace_sec=60,
+            )
+        self.assertEqual(released, [61])
+        self.assertEqual(released_state["claimed"], [])
+        self.assertEqual(daemon._segment_cycle_pending_order(released_state), [61])
+        store.close()
+
     def test_canonical_lifecycle_monitor_is_root_local(self) -> None:
         """A slow A probe cannot delay B terminal cleanup in the same monitor."""
         with tempfile.TemporaryDirectory() as td:
