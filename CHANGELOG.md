@@ -1,3 +1,9 @@
+## 1.5.116 - 2026-10-12
+
+- Canonicalize legacy `segment_whitelist` instance records to the priority
+  lane `segments` representation for ACK comparison without dropping nonempty
+  IDs or weakening unrelated mismatch checks.
+
 ## 1.5.115 - 2026-10-12
 
 - Make `segment_lazy_update_enabled` a bidirectional runtime setting: false

@@ -62,6 +62,25 @@ _INSTANCE_RUNTIME_KEYS = {
 
 _SPECIAL_RING_RUNTIME_KEY = "segment_special_rings_v1"
 _RUNTIME_CAPABILITY_KEYS = frozenset({"segment_lazy_update_enabled"})
+
+
+def _canonical_legacy_whitelist_value(value: object) -> object:
+    if not isinstance(value, dict):
+        return value
+    legacy_keys = ("segment_whitelist", "whitelist", "priority", "ids")
+    if any(key in value for key in legacy_keys):
+        raw = next((value.get(key) for key in legacy_keys if key in value), [])
+        if isinstance(raw, (list, tuple, set)):
+            segments = [int(item) for item in raw if str(item).strip().lstrip("-").isdigit()]
+        else:
+            segments = []
+        result: dict[str, Any] = {"segments": segments}
+        if "slots_override" in value:
+            result["slots_override"] = value["slots_override"]
+        return result
+    if set(value).issubset({"segments", "slots_override"}):
+        return dict(value)
+    return {str(uid): _canonical_legacy_whitelist_value(item) for uid, item in value.items()}
 _SPECIAL_RING_TARGET_KEYS = {
     "priority": "segment_priority_instance_settings",
     "super_priority": "segment_super_priority_instance_settings",
@@ -637,6 +656,8 @@ def runtime_key_observation(
     profile = str(getattr(cfg, "profile_name", "") or "").strip().lower()
     observations: dict[str, dict[str, Any]] = {}
     for key, desired in normalized.items():
+        if key == "segment_whitelist_instance_settings":
+            desired = _canonical_legacy_whitelist_value(desired)
         if scope_key and key.endswith("_instance_settings") and isinstance(desired, dict):
             if scope_key in desired:
                 desired = desired[scope_key]
@@ -650,6 +671,7 @@ def runtime_key_observation(
             # Legacy whitelist is the wire alias of canonical priority; it is
             # not an independent scheduler lane.
             effective_value = effective.get("segment_priority_instance_settings")
+            effective_value = _canonical_legacy_whitelist_value(effective_value)
         else:
             effective_value = False if key in _RUNTIME_CAPABILITY_KEYS else effective.get(key)
         if scope_key and key.endswith("_instance_settings") and isinstance(effective_value, dict):

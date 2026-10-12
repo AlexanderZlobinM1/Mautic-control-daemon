@@ -3332,24 +3332,30 @@ def _segment_priority_effective_setting(config: AgentConfig, inst: object) -> se
     global_ids = set(getattr(config, "segment_priority", []) or [])
     global_ids.update(getattr(config, "segment_whitelist", []) or [])
     global_ids |= _load_segment_whitelist_file(getattr(config, "segment_whitelist_file", None), inst)
-    found, raw = _static_segment_setting_value(
+    found_priority, raw_priority = _static_segment_setting_value(
         getattr(config, "segment_priority_instance_settings", {}),
         inst,
     )
-    if not found:
-        found, raw = _static_segment_setting_value(
-            getattr(config, "segment_whitelist_instance_settings", {}),
-            inst,
-        )
-    if not found:
+    found_legacy, raw_legacy = _static_segment_setting_value(
+        getattr(config, "segment_whitelist_instance_settings", {}),
+        inst,
+    )
+    if not found_priority and not found_legacy:
         return global_ids
-    if isinstance(raw, bool):
-        return global_ids if raw else set()
-    ids = _static_segment_ids_from_value(raw, super_priority=False)
-    if isinstance(raw, dict):
-        file_raw = str(raw.get("segment_priority_file", raw.get("segment_whitelist_file", "")) or "").strip()
-        if file_raw:
-            ids |= _load_segment_whitelist_file(file_raw, inst)
+    # An instance-scoped entry replaces the global baseline, while priority
+    # and legacy-whitelist entries for that same instance are one merged
+    # entity and are deduplicated below.
+    ids: set[int] = set()
+    for raw in (raw_priority if found_priority else None, raw_legacy if found_legacy else None):
+        if isinstance(raw, bool):
+            if not raw:
+                continue
+        else:
+            ids |= _static_segment_ids_from_value(raw, super_priority=False)
+        if isinstance(raw, dict):
+            file_raw = str(raw.get("segment_priority_file", raw.get("segment_whitelist_file", "")) or "").strip()
+            if file_raw:
+                ids |= _load_segment_whitelist_file(file_raw, inst)
     return ids
 
 
