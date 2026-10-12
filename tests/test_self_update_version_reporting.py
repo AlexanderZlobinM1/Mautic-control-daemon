@@ -42,6 +42,9 @@ class SelfUpdateVersionReportingTests(unittest.TestCase):
         content = unit.read_text(encoding="utf-8")
         self.assertIn("KillMode=process", content)
         self.assertNotIn("KillMode=control-group", content)
+        self.assertIn("WorkingDirectory=/opt/mcd", content)
+        self.assertIn("ExecStart=/opt/mcd/venv/bin/python -m mcd_agent", content)
+        self.assertNotIn("ExecStart=/usr/bin/python3 -m mcd_agent", content)
 
     def test_apply_update_allows_active_mautic_console_process(self) -> None:
         with TemporaryDirectory() as tmp:

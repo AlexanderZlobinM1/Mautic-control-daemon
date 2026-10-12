@@ -250,7 +250,17 @@ config на его profile baseline и только после этого при
    backup pause, cluster cron-route mismatch и root-local DB circuit-breaker
    являются отдельными явными stop-gates и должны иметь reason в runtime
    receipt; они не должны маскироваться пустым ordinary ring.
-6. Self-update сначала публикует persisted `scheduler.pause` под общим
+6. Release packaging and self-update use a detached runtime payload. The
+   production archive contains the installed `mcd_agent` runtime package,
+   resources, requirements, wheel and `mcd-runtime-manifest.json`, but no
+   checkout docs/tests/build files or `.git` data. The source checkout is
+   retained only as bounded `src`/`src.next` staging or rollback material;
+   after runtime import/smoke, systemd verification and adoption proof it is
+   not an active production runtime or duplicate test tree. The manifest binds
+   payload hashes while an external receipt binds archive/source/wheel
+   identity, avoiding self-referential provenance. See
+   `docs/mcd-update-invariants-v1.md` for the release evidence contract.
+   Self-update сначала публикует persisted `scheduler.pause` под общим
    межпроцессным `scheduler.pause.lock`. Каждый новый запуск, включая
    ordinary, priority, super-priority, manual, import и retry, перед
    фактическим `spawn` получает тот же lock и повторно проверяет barrier.

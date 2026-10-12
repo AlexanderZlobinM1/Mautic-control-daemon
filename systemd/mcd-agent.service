@@ -5,8 +5,8 @@ After=network.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/opt/mcd-agent
-ExecStart=/usr/bin/python3 -m mcd_agent run --config /etc/mcd-agent.toml
+WorkingDirectory=/opt/mcd
+ExecStart=/opt/mcd/venv/bin/python -m mcd_agent run --config /opt/mcd/etc/mcd.toml
 Restart=always
 RestartSec=3
 # Mautic PHP console workers are independent work and must survive an MCD

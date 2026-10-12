@@ -1,3 +1,18 @@
+## 1.5.134 - 2026-10-12
+
+- Separate the production runtime payload from the MCD source checkout:
+  runtime-only archives contain the installed package, runtime resources,
+  requirements, wheel, and detached payload manifest, while tests, docs,
+  build files, and `.git` material remain release-gate inputs only.
+- Install and verify the runtime wheel from the staged artifact, record its
+  source/wheel/manifest/import provenance, and fail closed on source-tree
+  shadowing or payload hash drift. Preserve the existing bounded source
+  staging/rollback and durable TaskStore adoption path.
+- Make the shipped systemd unit import from `/opt/mcd/venv` with
+  `KillMode=process`; ordinary Mautic/PHP work remains non-blocking during
+  self-update. Record the mandatory invariant contract in
+  `docs/mcd-update-invariants-v1.md`.
+
 ## 1.5.133 - 2026-10-12
 
 - Make the historical `runtime.segment_retry_count` key an explicit inclusive

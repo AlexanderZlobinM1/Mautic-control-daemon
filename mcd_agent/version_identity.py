@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from importlib import metadata
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -16,10 +17,22 @@ def source_version(source_dir: Path | str | None = None) -> str | None:
     try:
         text = init_py.read_text(encoding="utf-8", errors="ignore")
     except Exception:
-        return None
+        manifest = src / "mcd-runtime-manifest.json"
+        try:
+            raw = json.loads(manifest.read_text(encoding="utf-8"))
+            version = str(raw.get("version") or "").strip() if isinstance(raw, dict) else ""
+            return version or None
+        except Exception:
+            return None
     match = _VERSION_RE.search(text)
     if not match:
-        return None
+        manifest = src / "mcd-runtime-manifest.json"
+        try:
+            raw = json.loads(manifest.read_text(encoding="utf-8"))
+            version = str(raw.get("version") or "").strip() if isinstance(raw, dict) else ""
+            return version or None
+        except Exception:
+            return None
     version = match.group(1).strip()
     return version or None
 

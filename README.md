@@ -144,9 +144,17 @@ MCD (MauticControlDaemon) is a host-level service that can run in two modes:
 - MCD self-update model:
   - MCC returns build plan (`test|approved|lts`) via authenticated API.
   - MCD performs update locally (download/stage/atomic source switch/restart) and reports result back to MCC.
-  - apply path switches the source tree and synchronizes the actual venv
-    `mcd_agent` package/console scripts from that exact source; metadata and
-    imported code are verified before restart.
+  - the production payload is runtime-only: `mcd_agent`, runtime resources,
+    requirements, a wheel, and `mcd-runtime-manifest.json`; checkout docs,
+    tests, build files, and `.git` data are excluded.
+  - the source tree is used only as bounded staging/rollback material. The
+    apply path installs the wheel into the actual venv and verifies that
+    systemd/import resolve from venv `site-packages`, not `/opt/mcd/src`.
+  - ordinary Mautic/PHP processes do not defer update; only explicit durable
+    MCD-owned critical locks do. TaskStore queues, claims, running/follow-up,
+    retry and monitor state survive restart and are re-adopted.
+  - see `docs/mcd-update-invariants-v1.md` for the mandatory acceptance
+    contract and external runtime/provenance receipt.
   - MCC limits concurrent update sessions (`10` by default); extra nodes receive wait/retry signal.
   - MCD auto-cleans old self-update artifacts (`/opt/mcd/var/updates` archives + `/opt/mcd/var/backup/mcd-src-preupdate-*`) by retention policy.
     - default: keep last `3` archives and `3` preupdate backups, max age `30` days, cleanup once per day.

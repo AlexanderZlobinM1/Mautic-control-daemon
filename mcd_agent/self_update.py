@@ -5,14 +5,17 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tarfile
 import tempfile
 import time
+from datetime import datetime, timezone
 from typing import Any
 from urllib import request
 from urllib.error import HTTPError, URLError
+import zipfile
 
 from mcd_agent import __version__
 from mcd_agent.backup import backup_lock_active
@@ -40,6 +43,23 @@ _CLUSTER_UPDATE_SYNC_KEY = "mcd_update_cluster"
 _CLUSTER_UPDATE_DOWNLOAD_LOCK_TTL_SEC = 900
 _CLUSTER_UPDATE_INSTALL_LOCK_TTL_SEC = 900
 _CLUSTER_UPDATE_HEALTH_STALE_SEC = 300
+_RUNTIME_MANIFEST_NAME = "mcd-runtime-manifest.json"
+_RUNTIME_MANIFEST_SCHEMA = "mcd-runtime-package-v1"
+_RUNTIME_FORBIDDEN_TOP_LEVEL = {
+    ".git",
+    ".pytest_cache",
+    "ALGORITHM.md",
+    "CHANGELOG.md",
+    "README.md",
+    "TECHNICAL_DEBT.md",
+    "TEST_ALGORITHM.md",
+    "docs",
+    "tests",
+    "pyproject.toml",
+    "setup.py",
+    "setup.cfg",
+    "tox.ini",
+}
 
 
 def _semver(v: str) -> tuple[int, int, int]:
@@ -303,6 +323,127 @@ def _copytree_ignore_artifacts(_src_dir: str, names: list[str]) -> set[str]:
     return ignored
 
 
+def _runtime_manifest(source_dir: Path) -> dict[str, Any] | None:
+    """Read and verify the detached runtime payload manifest.
+
+    Older source archives intentionally remain supported for rollback.  A
+    manifest is therefore an opt-in marker for the runtime-only path; once it
+    is present, every listed payload hash and the absence of checkout material
+    are verified fail-closed before install or rollback adoption.
+    """
+    path = source_dir / _RUNTIME_MANIFEST_NAME
+    if not path.is_file():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise RuntimeError(f"runtime manifest is unreadable: {path}: {exc}") from exc
+    if not isinstance(raw, dict) or str(raw.get("schema") or "") != _RUNTIME_MANIFEST_SCHEMA:
+        raise RuntimeError(f"unsupported runtime manifest schema: {path}")
+    version = str(raw.get("version") or "").strip()
+    wheel_name = str(raw.get("wheel") or "").strip()
+    requirements_name = str(raw.get("requirements") or "").strip()
+    payload = raw.get("payload_sha256")
+    if not version or not wheel_name or not requirements_name or not isinstance(payload, dict):
+        raise RuntimeError(f"runtime manifest is incomplete: {path}")
+
+    root = source_dir.resolve()
+
+    def safe_path(raw_name: str) -> Path:
+        candidate = (source_dir / raw_name).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError as exc:
+            raise RuntimeError(f"runtime manifest path escapes staging root: {raw_name}") from exc
+        return candidate
+
+    listed_files: set[str] = set()
+    for rel_name, expected in payload.items():
+        rel = str(rel_name or "").strip()
+        expected_sha = str(expected or "").strip().lower()
+        candidate = safe_path(rel)
+        if not candidate.is_file() or not re.fullmatch(r"[0-9a-f]{64}", expected_sha):
+            raise RuntimeError(f"runtime manifest payload is invalid: {rel}")
+        actual = _sha256_file(candidate).lower()
+        if actual != expected_sha:
+            raise RuntimeError(f"runtime manifest payload checksum mismatch: {rel}")
+        listed_files.add(rel)
+
+    actual_files = {
+        path.relative_to(source_dir).as_posix()
+        for path in source_dir.rglob("*")
+        if path.is_file()
+        and path.name != _RUNTIME_MANIFEST_NAME
+        and "__pycache__" not in path.parts
+        and path.suffix != ".pyc"
+    }
+    unlisted = sorted(actual_files - listed_files)
+    if unlisted:
+        raise RuntimeError(f"runtime manifest has unlisted payload files: {unlisted[:8]}")
+
+    for forbidden in _RUNTIME_FORBIDDEN_TOP_LEVEL:
+        if (source_dir / forbidden).exists():
+            raise RuntimeError(f"runtime-only payload contains source checkout material: {forbidden}")
+
+    wheel_path = safe_path(wheel_name)
+    requirements_path = safe_path(requirements_name)
+    if not wheel_path.is_file() or not requirements_path.is_file():
+        raise RuntimeError("runtime manifest points to missing wheel or requirements")
+    package_root = source_dir / "mcd_agent"
+    if not (package_root / "__init__.py").is_file():
+        raise RuntimeError("runtime-only payload is missing mcd_agent package")
+    return raw
+
+
+def _runtime_wheel(source_dir: Path) -> Path | None:
+    manifest = _runtime_manifest(source_dir)
+    if manifest is None:
+        return None
+    raw_name = str(manifest.get("wheel") or "").strip()
+    return (source_dir / raw_name).resolve()
+
+
+def _runtime_requirements(source_dir: Path) -> Path:
+    manifest = _runtime_manifest(source_dir)
+    if manifest is not None:
+        return (source_dir / str(manifest["requirements"])).resolve()
+    return source_dir / "requirements.txt"
+
+
+def _write_runtime_package_receipt(
+    install_dir: Path,
+    source_dir: Path,
+    wheel_path: Path,
+    *,
+    package_version: str,
+    imported_path: str,
+) -> None:
+    manifest_path = source_dir / _RUNTIME_MANIFEST_NAME
+    manifest = _runtime_manifest(source_dir) or {}
+    receipt = {
+        "schema": "mcd-runtime-package-receipt-v1",
+        "runtime_only": True,
+        "package_version": package_version,
+        "source_version": str(manifest.get("version") or source_version(source_dir) or ""),
+        "source_commit": str(manifest.get("source_commit") or ""),
+        "source_archive_sha256": str(manifest.get("source_archive_sha256") or ""),
+        "source_tree": str(source_dir),
+        "wheel": str(wheel_path),
+        "wheel_sha256": _sha256_file(wheel_path),
+        "manifest": str(manifest_path),
+        "manifest_sha256": _sha256_file(manifest_path),
+        "requirements_sha256": _sha256_file(_runtime_requirements(source_dir)),
+        "imported_path": str(Path(imported_path).resolve()),
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "forbidden_source_material": [],
+    }
+    destination = install_dir / "var" / "runtime-package-receipt.json"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(receipt, ensure_ascii=True, indent=2) + "\n", encoding="utf-8")
+    os.replace(temporary, destination)
+
+
 def _isolated_venv_env() -> dict[str, str]:
     """Run venv probes without source-tree path injection from the daemon."""
     env = os.environ.copy()
@@ -375,10 +516,14 @@ def _extract_archive_to_dir(archive_path: Path, dst_dir: Path) -> None:
             symlinks=True,
             ignore=_copytree_ignore_artifacts,
         )
+        # A runtime-only release carries a detached manifest and wheel.  Verify
+        # it immediately after extraction, before any source switch or
+        # dependency/package mutation can occur.
+        _runtime_manifest(dst_dir)
 
 
 def _install_requirements_for_staged_source(install_dir: Path, staged_src_dir: Path) -> None:
-    req = staged_src_dir / "requirements.txt"
+    req = _runtime_requirements(staged_src_dir)
     if not req.exists():
         logging.info("MCD self-update: requirements.txt not found in staged source, skip dependency sync")
         return
@@ -402,7 +547,107 @@ def _install_requirements_for_staged_source(install_dir: Path, staged_src_dir: P
         raise RuntimeError(f"dependency install failed: {detail}")
 
 
+def _install_agent_package_from_runtime_wheel(install_dir: Path, source_dir: Path, wheel_path: Path) -> None:
+    """Install the production runtime from the detached wheel payload.
+
+    The source tree remains only the bounded staging/rollback identity.  The
+    supervisor and all post-restart imports must resolve from venv
+    site-packages, never from that tree or from a checkout containing tests
+    and documentation.
+    """
+    venv_python = install_dir / "venv" / "bin" / "python"
+    if not venv_python.exists():
+        raise RuntimeError(f"venv python not found: {venv_python}")
+    _ensure_venv_pip(venv_python)
+    site_proc = subprocess.run(
+        [
+            str(venv_python),
+            "-c",
+            "import site, sysconfig; paths = site.getsitepackages(); print(paths[0] if paths else sysconfig.get_paths()['purelib'])",
+        ],
+        env=_isolated_venv_env(),
+        capture_output=True,
+        text=True,
+    )
+    if site_proc.returncode != 0:
+        detail = (site_proc.stderr or site_proc.stdout or "cannot locate venv site-packages").strip()
+        raise RuntimeError(f"venv site-packages lookup failed: {detail}")
+    site_dir = Path((site_proc.stdout or "").strip())
+    if not site_dir.is_dir():
+        raise RuntimeError(f"venv site-packages directory not found: {site_dir}")
+    removed_hooks = _remove_agent_editable_artifacts(site_dir, source_dir)
+    if removed_hooks:
+        logging.info("MCD self-update: removed stale editable package hooks: %s", removed_hooks)
+    proc = subprocess.run(
+        [
+            str(venv_python),
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            "--no-input",
+            "--no-cache-dir",
+            "--no-deps",
+            "--force-reinstall",
+            str(wheel_path),
+        ],
+        cwd="/",
+        capture_output=True,
+        text=True,
+        env=_isolated_venv_env(),
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "runtime wheel install failed").strip()
+        raise RuntimeError(f"runtime wheel install failed: {detail}")
+
+    verify = subprocess.run(
+        [
+            str(venv_python),
+            "-c",
+            "import importlib.metadata as m, mcd_agent; "
+            "print(m.version('mcd-agent')); print(mcd_agent.__version__); "
+            "print(mcd_agent.__file__)",
+        ],
+        cwd="/",
+        env=_isolated_venv_env(),
+        capture_output=True,
+        text=True,
+    )
+    if verify.returncode != 0:
+        detail = (verify.stderr or verify.stdout or "installed runtime verification failed").strip()
+        raise RuntimeError(f"installed runtime verification failed: {detail}")
+    lines = [line.strip() for line in (verify.stdout or "").splitlines() if line.strip()]
+    if len(lines) < 3:
+        raise RuntimeError("installed runtime verification returned incomplete output")
+    package_ver, imported_ver, imported_path = lines[-3:]
+    expected_path = str((site_dir / "mcd_agent" / "__init__.py").resolve())
+    manifest = _runtime_manifest(source_dir) or {}
+    expected_ver = str(manifest.get("version") or "").strip()
+    if expected_ver and (package_ver != expected_ver or imported_ver != expected_ver):
+        raise RuntimeError(
+            f"installed runtime version mismatch expected={expected_ver} "
+            f"metadata={package_ver} imported={imported_ver}"
+        )
+    if Path(imported_path).resolve() != Path(expected_path):
+        raise RuntimeError(
+            f"installed runtime path mismatch expected={expected_path} imported={imported_path}"
+        )
+    if str(source_dir.resolve()) in str(Path(imported_path).resolve()):
+        raise RuntimeError(f"installed runtime is shadowed by source tree: {imported_path}")
+    _write_runtime_package_receipt(
+        install_dir,
+        source_dir,
+        wheel_path,
+        package_version=package_ver,
+        imported_path=imported_path,
+    )
+
+
 def _install_agent_package_for_source(install_dir: Path, source_dir: Path) -> None:
+    runtime_wheel = _runtime_wheel(source_dir)
+    if runtime_wheel is not None:
+        _install_agent_package_from_runtime_wheel(install_dir, source_dir, runtime_wheel)
+        return
     pyproject = source_dir / "pyproject.toml"
     if not pyproject.exists():
         raise RuntimeError(f"agent pyproject.toml not found: {pyproject}")
@@ -555,6 +800,20 @@ def _pre_switch_smoke_check(install_dir: Path, staged_src_dir: Path) -> None:
     if not venv_python.exists():
         raise RuntimeError(f"venv python not found: {venv_python}")
 
+    runtime_wheel = _runtime_wheel(staged_src_dir)
+    if runtime_wheel is not None:
+        try:
+            with zipfile.ZipFile(runtime_wheel) as wheel:
+                names = [name.rstrip("/") for name in wheel.namelist()]
+                if "mcd_agent/__init__.py" not in names:
+                    raise RuntimeError("runtime wheel is missing mcd_agent/__init__.py")
+                wheel_roots = {name.split("/", 1)[0] for name in names if name}
+                forbidden = wheel_roots & {"tests", "docs", "README.md", "ALGORITHM.md", "TEST_ALGORITHM.md"}
+                if forbidden:
+                    raise RuntimeError(f"runtime wheel contains forbidden source material: {sorted(forbidden)}")
+        except zipfile.BadZipFile as exc:
+            raise RuntimeError(f"runtime wheel is unreadable: {runtime_wheel}") from exc
+
     compile_proc = subprocess.run(
         [str(venv_python), "-m", "compileall", "-q", str(staged_src_dir)],
         env=_isolated_venv_env(),
@@ -595,6 +854,14 @@ if not hasattr(backup, "backup_lock_active"):
     if smoke_proc.returncode != 0:
         detail = (smoke_proc.stderr or smoke_proc.stdout or "import smoke failed").strip()
         raise RuntimeError(f"pre-switch smoke failed (import): {detail}")
+    # compileall/import smoke are validation-only.  Do not leave generated
+    # bytecode in the runtime staging tree that will become /opt/mcd/src.
+    for cache_dir in sorted(staged_src_dir.rglob("__pycache__"), reverse=True):
+        if cache_dir.is_dir():
+            shutil.rmtree(cache_dir, ignore_errors=True)
+    for pyc in staged_src_dir.rglob("*.pyc"):
+        if pyc.is_file():
+            pyc.unlink(missing_ok=True)
 
 
 def _restart_service_async() -> None:
