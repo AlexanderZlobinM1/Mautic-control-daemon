@@ -1,3 +1,9 @@
+## 1.5.96 - 2026-10-12
+
+- Preserve IDs returned by the due-segment query when the secondary snapshot
+  read is temporarily empty or lagging, so eligible work materializes into the
+  durable cycle and scheduler lanes instead of disappearing before claim.
+
 ## 1.5.95 - 2026-10-12
 
 - Align the packaged patch-resolution contract minimum agent version with the

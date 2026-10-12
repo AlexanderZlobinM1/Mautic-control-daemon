@@ -14118,6 +14118,18 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                             ),
                             now_ts=float(now),
                         )
+                        if observed_segment_ids and not standard_segment_ids:
+                            # The due query is already an eligibility decision.
+                            # A secondary definition/snapshot read can lag it
+                            # (notably for newly created segments) and must not
+                            # erase the plan before it reaches the durable
+                            # cycle and scheduler lanes.
+                            standard_segment_ids = list(observed_segment_ids)
+                            logging.info(
+                                "[%s] segment due-plan materialized after empty snapshot filter ids=%s",
+                                root,
+                                ",".join(str(x) for x in standard_segment_ids[:50]),
+                            )
                         if never_built_segment_ids:
                             logging.info(
                                 "[%s] never-built segment admission ids=%s",
