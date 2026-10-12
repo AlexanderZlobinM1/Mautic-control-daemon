@@ -628,6 +628,7 @@ def runtime_key_observation(
     *,
     revision: int,
     source: str = "mcd",
+    scope_key: str | None = None,
 ) -> dict[str, Any]:
     """Return truthful per-key desired/effective runtime status for ACKs."""
     normalized, compatibility_unsupported = normalize_runtime_override_payload(runtime)
@@ -635,7 +636,12 @@ def runtime_key_observation(
     profile = str(getattr(cfg, "profile_name", "") or "").strip().lower()
     observations: dict[str, dict[str, Any]] = {}
     for key, desired in normalized.items():
+        if scope_key and key.endswith("_instance_settings") and isinstance(desired, dict):
+            desired_scope = desired.get(scope_key)
+            desired = desired_scope if desired_scope is not None else {}
         effective_value = effective.get(key)
+        if scope_key and key.endswith("_instance_settings") and isinstance(effective_value, dict):
+            effective_value = effective_value.get(scope_key)
         if key in compatibility_unsupported or key not in runtime_supported_keys():
             status, origin, reason = "rejected", "none", "unsupported_key"
         elif key not in runtime_remote_allowed_keys():
@@ -830,7 +836,13 @@ def acknowledge_desired_runtime_states(
         rejected_keys = sorted(set([*compatibility_unsupported, *unknown_keys, *blocked_keys]))
 
         content_sha256 = overrides_fingerprint(normalized_runtime)
-        key_observation = runtime_key_observation(cfg, normalized_runtime, revision=revision, source="mcc")
+        key_observation = runtime_key_observation(
+            cfg,
+            normalized_runtime,
+            revision=revision,
+            source="mcc",
+            scope_key=scope_key if scope == "instance" else None,
+        )
         key_rows = key_observation.get("keys", {})
         statuses = {str(row.get("status")) for row in key_rows.values() if isinstance(row, dict)}
         all_effective = not statuses or statuses <= {"applied", "unchanged"}

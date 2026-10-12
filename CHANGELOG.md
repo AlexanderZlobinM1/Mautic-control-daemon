@@ -1,3 +1,13 @@
+## 1.5.105 - 2026-10-12
+
+- Enforce exact instance UID projection for runtime ACK observations; missing
+  UIDs remain mismatches and are never synthesized from aliases or defaults.
+
+## 1.5.104 - 2026-10-12
+
+- Project scoped runtime observations to the acknowledged host or instance
+  map before evaluating effective-value equality.
+
 ## 1.5.103 - 2026-10-12
 
 - Retry durable runtime ACK publication from the accepted desired snapshot
