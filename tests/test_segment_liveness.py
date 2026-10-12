@@ -13,6 +13,7 @@ from mcd_agent.daemon import (
     TaskStore,
     _segment_cycle_admission_inputs,
     _segment_cycle_claim,
+    _segment_cycle_pending_order,
     _segment_cycle_pending_ids,
     _segment_cycle_running,
     _segment_cycle_terminal,
@@ -80,6 +81,50 @@ class SegmentLivenessTests(unittest.TestCase):
             pressure=False,
         )
         self.assertEqual(cycle_planned, [151])
+
+    def test_pressure_held_candidate_never_enters_orphan_ordinary_ring(self) -> None:
+        state, _added, _started = sync_cycle(
+            None,
+            planned_ids=[153],
+            never_built=[],
+            running_ids=[],
+            now_ts=100.0,
+        )
+        state = mark_terminal(state, entity_id=153, success=True, now_ts=101.0)
+        planned, never_built = _segment_cycle_admission_inputs(
+            state,
+            [154],
+            [154],
+            pressure=True,
+        )
+        self.assertEqual(planned, [])
+        self.assertEqual(never_built, [])
+
+        next_state, _added, _started = sync_cycle(
+            state,
+            planned_ids=planned,
+            never_built=never_built,
+            running_ids=[],
+            now_ts=102.0,
+        )
+        self.assertNotIn(154, next_state["items"])
+        self.assertEqual(_segment_cycle_pending_order(next_state), [])
+
+        # A planner candidate that was not durably admitted must not be
+        # projected into the ordinary ring merely because it was observed.
+        self.assertEqual(
+            _segment_cycle_pending_order(
+                {
+                    "status": "active",
+                    "items": [153],
+                    "done": [153],
+                    "errors": [],
+                    "claimed": [],
+                    "running": [],
+                }
+            ),
+            [],
+        )
 
     def test_persisted_full_scan_item_bypasses_stale_repeat_cadence(self) -> None:
         root = "/var/www/full-scan/public_html"
@@ -166,7 +211,12 @@ class SegmentLivenessTests(unittest.TestCase):
                 state = mark_terminal(state, entity_id=101, success=True, now_ts=101.0)
                 state = mark_terminal(state, entity_id=102, success=True, now_ts=102.0)
                 store.put_runtime_sync(cycle_key(root), state)
-                self.assertEqual(_segment_cycle_pending_ids(state), {103})
+                store.close()
+                store = TaskStore(str(Path(td) / "state.db"))
+                recovered = store.get_runtime_sync(cycle_key(root))
+                self.assertEqual(_segment_cycle_pending_ids(recovered), {103})
+                self.assertEqual(_segment_cycle_pending_order(recovered), [103])
+                cycle_id = recovered["cycle_id"]
 
                 running: dict[str, daemon.RunningTask] = {}
                 process = SimpleNamespace(pid=7000 + major)
@@ -211,6 +261,7 @@ class SegmentLivenessTests(unittest.TestCase):
                 terminal = store.get_runtime_sync(cycle_key(root))
                 self.assertEqual(terminal["status"], "terminal")
                 self.assertEqual(terminal["done"], items)
+                self.assertEqual(terminal["cycle_id"], cycle_id)
                 restarted, _added, started_new = sync_cycle(
                     terminal,
                     planned_ids=items,

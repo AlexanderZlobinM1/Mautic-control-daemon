@@ -2252,12 +2252,9 @@ def _segment_cycle_sync(
 def _segment_cycle_pending_ids(state: Mapping[str, object] | None) -> set[int]:
     """Return unclaimed, unfinished items from an active persisted cycle.
 
-    The scheduler must distinguish work that was already admitted into the
-    durable ordinary cycle from IDs discovered by the current plan refresh.
-    The former may bypass the global baseline admission cadence when it is
-    waiting; the latter must still respect new-admission pressure and the
-    cadence.  Keeping this projection pure also makes restart/fairness tests
-    exercise the same definition as the dispatcher.
+    This is the durable source of truth for ordinary dispatch.  In-memory
+    planner state is intentionally not part of this projection: a restart or
+    a failed plan refresh must not make an already-admitted cycle invisible.
     """
 
     if not isinstance(state, Mapping):
@@ -2272,6 +2269,31 @@ def _segment_cycle_pending_ids(state: Mapping[str, object] | None) -> set[int]:
         _normalize_segment_ids(state.get("running"))
     )
     return items - finished - active
+
+
+def _segment_cycle_pending_order(
+    state: Mapping[str, object] | None,
+    *,
+    excluded_ids: list[int] | tuple[int, ...] | set[int] | None = None,
+) -> list[int]:
+    """Project an active durable cycle into its ordered pending dispatch list.
+
+    Regular rings are a projection of ``cycle.items`` only.  An ID discovered
+    by a plan refresh is not eligible for claim until ``sync_cycle`` has
+    persisted it, and an item already claimed/running is left to its existing
+    worker.  This single projection is also used after restart so volatile
+    planner caches cannot strand durable work.
+    """
+
+    if not isinstance(state, Mapping):
+        return []
+    pending = _segment_cycle_pending_ids(state)
+    excluded = set(_normalize_segment_ids(excluded_ids))
+    return [
+        sid
+        for sid in _normalize_segment_ids(state.get("items"))
+        if sid in pending and sid not in excluded
+    ]
 
 
 def _segment_cycle_admission_inputs(
@@ -11959,7 +11981,6 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
     segment_last_full_scan_ts: dict[str, float] = {}
     segment_full_scan_pending: dict[str, set[int]] = {}
     segment_force_full_scan_until: dict[str, float] = {}
-    segment_persisted_pending_ids: dict[str, set[int]] = {}
     campaign_pressure_at_plan: dict[str, bool] = {}
     last_cleanup_ts: dict[str, float] = {}
     last_mautic_lock_cleanup_ts: dict[str, float] = {}
@@ -14384,14 +14405,10 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                         source_snapshot=source_snapshot,
                     )
                     # Every unfinished item in the durable current cycle is
-                    # already admitted work. Dispatch it through the pending
-                    # path immediately when a slot is free; restricting this
-                    # to the previous tick's intersection lets newly planned
-                    # items fall into the ordinary baseline cadence and leaves
-                    # a plan with no TaskStore row or runtime marker.
-                    segment_persisted_pending_ids[root] = (
-                        _segment_cycle_pending_ids(cycle_state)
-                    )
+                    # already admitted work. The regular ring is rebuilt from
+                    # this persisted projection only; a candidate held by
+                    # pressure or a failed plan must not become an orphan ring
+                    # entry that can never pass the durable claim guard.
                     if cycle_added_ids:
                         logging.info(
                             "[%s] segment cycle admission cycle_id=%s started_new=%s added=%s",
@@ -14400,18 +14417,10 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
                             cycle_started_new,
                             ",".join(str(x) for x in cycle_added_ids[:50]),
                         )
-                    cycle_done_ids = {int(x) for x in list(cycle_state.get("done") or []) if int(x) > 0}
-                    cycle_error_ids = {int(x) for x in list(cycle_state.get("errors") or []) if int(x) > 0}
-                    cycle_pending_ids = [
-                        int(x)
-                        for x in list(cycle_state.get("items") or [])
-                        if int(x) > 0
-                        and int(x) not in cycle_done_ids
-                        and int(x) not in cycle_error_ids
-                        and int(x) not in static_excluded_ids
-                    ]
-                    if cycle_pending_ids:
-                        standard_segment_ids = cycle_pending_ids
+                    standard_segment_ids = _segment_cycle_pending_order(
+                        cycle_state,
+                        excluded_ids=static_excluded_ids,
+                    )
                     segment_definition_rows: list[dict[str, object]] = []
                     invalid_filter_ids: set[int] = set()
                     if standard_segment_ids:
@@ -15582,10 +15591,12 @@ def run_loop(config: AgentConfig, single_cycle: bool = False) -> None:
             segment_cycle_payload = store.get_runtime_sync(_segment_cycle_key(root)) or {}
             if not isinstance(segment_cycle_payload, Mapping):
                 segment_cycle_payload = {}
-            persisted_pending_cycle_ids = (
-                set(segment_persisted_pending_ids.get(root, set()))
-                & _segment_cycle_pending_ids(segment_cycle_payload)
-            ) - set(sql_managed_segment_ids)
+            persisted_pending_cycle_ids = set(
+                _segment_cycle_pending_order(
+                    segment_cycle_payload,
+                    excluded_ids=sql_managed_segment_ids,
+                )
+            )
             static_lane_payload = store.get_runtime_sync(_static_lane_state_key(root)) or {}
             static_lane_active_ids: set[int] = set()
             static_lanes_payload = static_lane_payload.get("lanes") if isinstance(static_lane_payload, dict) else {}

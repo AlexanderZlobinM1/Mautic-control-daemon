@@ -30,13 +30,20 @@ TaskStore fixture должен сохранять `cycle_id`, `updated_at` и sp
    cycle остаётся `active`; после callback `last` добавляется в `done`, cycle
    становится `terminal`; только следующий planning snapshot может создать
    новый `cycle_id`.
-2. При campaign/admission pressure новый ID не добавляется в active cycle.
-   Уже сохранённый pending ID всё равно claim-ится и стартует. После снятия
-   pressure новый ID может быть добавлен по обычному FIFO/never-built правилу.
-3. Несколько roots/instances с `pending>0` и `running=0` получают свободные
+2. Кандидат, удержанный campaign/admission pressure, не добавляется в
+   `cycle.items`, не появляется в regular ring и не проходит claim guard.
+   После снятия pressure следующий plan атомарно добавляет его в durable
+   cycle, после чего он появляется в ring и запускается.
+3. При restart volatile planner cache пуст: pending projection читается
+   напрямую из durable `runtime_sync`, сохраняет порядок `cycle.items`, один
+   раз claim-ит и запускает последний item, а terminal callback завершает тот
+   же `cycle_id` без ring reset. Уже сохранённый pending ID всё равно
+   claim-ится и стартует. После снятия pressure новый ID может быть добавлен
+   по обычному FIFO/never-built правилу.
+4. Несколько roots/instances с `pending>0` и `running=0` получают свободные
    slots по очереди dispatch. Один root не может навсегда удерживать cursor
    active только потому, что другой root первым использовал global baseline.
-4. Повторить пункты 1–3 для Mautic 6 и Mautic 7. M6 сохраняет dependency
+5. Повторить пункты 1–4 для Mautic 6 и Mautic 7. M6 сохраняет dependency
    closure order; M7 сохраняет native terminal/root plan и не создаёт
    искусственные internal items.
 
@@ -48,6 +55,14 @@ running`, dependency conflict, host/instance capacity, import reservation,
 repeat interval, TaskStore duplicate key и OS execution lock. Pending запуск не
 обновляет global baseline timestamp. New admission при том же baseline guard
 остаётся заблокированным.
+
+Для каждого ordinary tick дополнительно проверяется инвариант:
+`regular_ring == ordered(durable cycle.items - done - errors - claimed - running
+- static/sql-managed IDs)`. ID, отсутствующий в `cycle.items`, не может быть в
+ring или TaskStore claim path. Если segment launches отсутствуют на всём host,
+receipt обязан отдельно показать состояние global scheduler/backup pause,
+cluster cron route, root-local DB circuit-breaker, campaign pressure и
+effective segment slots; пустой ring без причины считается FAIL.
 
 ## Acceptance gate
 

@@ -177,9 +177,21 @@ config на его profile baseline и только после этого при
    changed/stale. Уже claimed/running и terminal элементы не двигаются,
    существующий cursor не сбрасывается, duplicate не создаётся. Прочие новые
    observed IDs добавляются в хвост pending очереди.
+   После `segment_cycle_sync` regular ring является строгой ordered-проекцией
+   только durable `cycle.items` без `done/errors/claimed/running` и static
+   IDs. Наблюдённый, но удержанный campaign/admission pressure кандидат не
+   попадает в ring и claim path до атомарной записи в `cycle.items`; он остаётся
+   кандидатом следующего планирования, а не orphan ring entry. После restart
+   dispatch строит pending projection напрямую из `runtime_sync`, поэтому
+   отсутствие volatile planner cache не может скрыть уже admitted work.
 5. Invalid filters, logical issues, failure cooldown и DB/backup/scheduler
    pause являются блокираторами admission, а не поводом пересортировать или
    потерять persisted cycle.
+   Campaign pressure может удержать только новую admission; уже pending
+   durable cycle продолжает dispatch при доступном slot. Global scheduler/
+   backup pause, cluster cron-route mismatch и root-local DB circuit-breaker
+   являются отдельными явными stop-gates и должны иметь reason в runtime
+   receipt; они не должны маскироваться пустым ordinary ring.
 6. Self-update сначала публикует persisted `scheduler.pause` под общим
    межпроцессным `scheduler.pause.lock`. Каждый новый запуск, включая
    ordinary, priority, super-priority, manual, import и retry, перед
