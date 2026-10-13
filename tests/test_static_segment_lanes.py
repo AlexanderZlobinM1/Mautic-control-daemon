@@ -10,7 +10,9 @@ from mcd_agent.daemon import (
     _manual_static_lane_for_ids,
     _segment_static_closure_conflict,
     _segment_static_closure_lock_key,
+    _segment_chain_command_args,
     _segment_native_chain_command_plan,
+    _static_dispatch_dependency_snapshot,
     _segment_static_dependency_outcome,
     _segment_priority_effective_setting,
     _segment_super_priority_effective_setting,
@@ -67,10 +69,12 @@ class StaticSegmentLaneTests(unittest.TestCase):
             max_attempts=3,
         )
 
+        refill_wakeup = threading.Event()
         with patch.object(daemon, "_pid_start_time", return_value=None):
-            start_b(202)
-            start_a(101)
-            complete_a(0)
+            with patch.object(daemon, "_ORDINARY_REFILL_WAKEUP", refill_wakeup):
+                start_b(202)
+                start_a(101)
+                complete_a(0)
 
         for root, ids, command in (
             (root_a, (10, 11), "A-command"),
@@ -91,6 +95,7 @@ class StaticSegmentLaneTests(unittest.TestCase):
         self.assertIsNone(store.get_runtime_sync(daemon._segment_runtime_marker_key(root_b, 10)))
         self.assertIsNone(store.get_runtime_sync(daemon._segment_chain_runtime_key(root_b, 10)))
         self.assertTrue(wakeup.is_set())
+        self.assertTrue(refill_wakeup.is_set())
         store.close()
 
     def test_whitelist_is_only_priority_migration_alias(self) -> None:
@@ -162,6 +167,90 @@ class StaticSegmentLaneTests(unittest.TestCase):
         )
         self.assertEqual(command_ids, [58, 59])
         self.assertEqual(excludes, {58: [], 59: [57]})
+
+    def test_explicit_empty_native_projection_never_falls_back_to_durable_ids(self) -> None:
+        args = _segment_chain_command_args(
+            lambda sid: ["php", "bin/console", "mautic:segments:update", "-i", str(sid)],
+            [59, 57],
+            command_entity_ids=[],
+        )
+        self.assertEqual(args, [])
+
+    def test_static_dispatch_reuses_verified_graph_when_transient_read_fails(self) -> None:
+        store = daemon.TaskStore(":memory:")
+        root = "/var/www/m7/transient-static-graph"
+        store.put_runtime_sync(
+            daemon._segment_dispatch_context_key(root),
+            {
+                "schema": "mcd-segment-dispatch-context-v1",
+                "root": root,
+                "mautic_major": 7,
+                "cycle_id": "cycle-1",
+                "dependency_snapshot_authoritative": True,
+                "dependency_snapshot_mode": "live_read",
+                "dependency_snapshot_verified": True,
+                "parents_by_child": {"59": [57]},
+                "children_by_parent": {"57": [59]},
+            },
+        )
+
+        def fail_read() -> list[dict[str, object]]:
+            raise RuntimeError("transient db read")
+
+        children, parents, ready, source = _static_dispatch_dependency_snapshot(
+            store,
+            root=root,
+            fetch_rows=fail_read,
+        )
+        self.assertTrue(ready)
+        self.assertEqual(source, "persisted_context")
+        self.assertEqual(parents, {59: {57}})
+        self.assertEqual(children, {57: {59}})
+        command_ids, excludes = _segment_native_chain_command_plan(
+            [59, 57],
+            parents,
+            children,
+        )
+        self.assertEqual(command_ids, [59])
+        self.assertEqual(excludes, {59: []})
+        args = _segment_chain_command_args(
+            lambda sid: ["php", "bin/console", "mautic:segments:update", "-i", str(sid)],
+            [59, 57],
+            command_entity_ids=command_ids,
+            exclude_ids_by_entity=excludes,
+        )
+        self.assertEqual(args[-1], "59")
+        self.assertNotIn("57", args)
+        store.close()
+
+    def test_static_dispatch_rejects_asymmetric_unverified_graph_on_read_error(self) -> None:
+        store = daemon.TaskStore(":memory:")
+        root = "/var/www/m7/incomplete-static-graph"
+        store.put_runtime_sync(
+            daemon._segment_dispatch_context_key(root),
+            {
+                "schema": "mcd-segment-dispatch-context-v1",
+                "root": root,
+                "mautic_major": 7,
+                "dependency_snapshot_authoritative": True,
+                "dependency_snapshot_mode": "preserved_previous",
+                "dependency_snapshot_verified": False,
+                "parents_by_child": {"59": [57]},
+                "children_by_parent": {},
+            },
+        )
+
+        def fail_read() -> list[dict[str, object]]:
+            raise RuntimeError("transient db read")
+
+        _children, _parents, ready, source = _static_dispatch_dependency_snapshot(
+            store,
+            root=root,
+            fetch_rows=fail_read,
+        )
+        self.assertFalse(ready)
+        self.assertEqual(source, "unavailable")
+        store.close()
 
     def test_mautic7_priority_reuses_successful_super_parent_without_rebuild(self) -> None:
         store = daemon.TaskStore(":memory:")

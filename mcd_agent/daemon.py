@@ -1893,6 +1893,7 @@ _SEGMENT_CYCLE_LOCK = threading.RLock()
 _SEGMENT_STATIC_LANE_LOCK = threading.RLock()
 _SEGMENT_ADMISSION_CONTEXT: dict[str, dict[str, object]] = {}
 _SEGMENT_DISPATCH_WAKEUP: threading.Event | None = None
+_ORDINARY_REFILL_WAKEUP: threading.Event | None = None
 _ACTIVE_PRIORITY_EXECUTOR: Any | None = None
 _CAMPAIGN_REBUILD_FINISHED_AT: dict[tuple[str, int], float] = {}
 _SEGMENT_FILTER_WARN_TS: dict[tuple[str, str], float] = {}
@@ -2483,6 +2484,93 @@ def _segment_dispatch_context_parts(
         _relation_map(context.get("parents_by_child")),
         _relation_map(context.get("children_by_parent")),
     )
+
+
+def _segment_dependency_maps_consistent(
+    parents_by_child: Mapping[int, Iterable[int]] | None,
+    children_by_parent: Mapping[int, Iterable[int]] | None,
+) -> bool:
+    """Return whether both directions describe the same dependency edges."""
+
+    parents = {
+        int(child): {int(parent) for parent in values if int(parent) > 0}
+        for child, values in (parents_by_child or {}).items()
+        if int(child) > 0
+    }
+    children = {
+        int(parent): {int(child) for child in values if int(child) > 0}
+        for parent, values in (children_by_parent or {}).items()
+        if int(parent) > 0
+    }
+    for child, parent_ids in parents.items():
+        for parent in parent_ids:
+            if child not in children.get(parent, set()):
+                return False
+    for parent, child_ids in children.items():
+        for child in child_ids:
+            if parent not in parents.get(child, set()):
+                return False
+    return True
+
+
+def _segment_dependency_context_verified(context: Mapping[str, object] | None) -> bool:
+    """Accept only a persisted graph with explicit read provenance."""
+
+    if not isinstance(context, Mapping):
+        return False
+    if context.get("schema") != "mcd-segment-dispatch-context-v1":
+        return False
+    if not bool(context.get("dependency_snapshot_authoritative")):
+        return False
+    verified = context.get("dependency_snapshot_verified")
+    if not isinstance(verified, bool):
+        # 1.5.154 marked a successful live read by mode before the explicit
+        # boolean was added.  Preserve that compatibility evidence, but do
+        # not treat an older preserved empty graph as authoritative.
+        verified = str(context.get("dependency_snapshot_mode") or "").strip() == "live_read"
+    return bool(verified)
+
+
+def _static_dispatch_dependency_snapshot(
+    store: "TaskStore",
+    *,
+    root: str,
+    fetch_rows: Callable[[], list[dict[str, object]]],
+) -> tuple[dict[int, set[int]], dict[int, set[int]], bool, str]:
+    """Resolve one complete graph for the static dispatcher.
+
+    Static priority work runs in its own scheduler thread.  It must consume
+    the same verified root-local graph as ordinary/refill admission instead of
+    rebuilding two independent maps on every tick.  A transient Mautic read
+    failure therefore preserves a verified persisted graph; an unverified or
+    asymmetric graph fails closed for this root and cannot turn one native
+    closure into two commands.
+    """
+
+    context, _major, persisted_parents, persisted_children = _segment_dispatch_context_parts(store, root)
+    if _segment_dependency_context_verified(context) and _segment_dependency_maps_consistent(
+        persisted_parents,
+        persisted_children,
+    ):
+        return persisted_children, persisted_parents, True, "persisted_context"
+
+    try:
+        rows = fetch_rows()
+        children, parents = segment_dependency_maps(rows)
+    except Exception:
+        # A verified non-empty context is still the last authoritative read;
+        # do not replace it with empty maps just because this independent
+        # priority tick observed a transient DB failure.
+        if _segment_dependency_context_verified(context) and _segment_dependency_maps_consistent(
+            persisted_parents,
+            persisted_children,
+        ):
+            return persisted_children, persisted_parents, True, "persisted_context_after_read_error"
+        return {}, {}, False, "unavailable"
+
+    if not _segment_dependency_maps_consistent(parents, children):
+        return {}, {}, False, "inconsistent_live_read"
+    return children, parents, True, "live_read"
 
 
 def _select_segment_dependency_snapshot(
@@ -3237,7 +3325,13 @@ def _segment_chain_command_args(
     and terminalized together.
     """
 
-    command_ids = [int(sid) for sid in (command_entity_ids or entity_ids) if int(sid) > 0]
+    # ``None`` means the caller did not project the durable closure and the
+    # complete entity list is the command set.  An explicit empty projection
+    # means every native root is already covered; falling back to
+    # ``entity_ids`` here would silently re-run a parent (the observed M7
+    # ``59`` followed by ``57`` defect).
+    command_source = entity_ids if command_entity_ids is None else command_entity_ids
+    command_ids = [int(sid) for sid in command_source if int(sid) > 0]
     commands: list[list[str]] = []
     for sid in command_ids:
         command = list(build_args(int(sid)))
@@ -4356,6 +4450,10 @@ def _static_lane_release(store: "TaskStore", *, root: str, lane: str, entity_id:
             now_ts=now_ts,
         )
         store.put_runtime_sync(key, state)
+    if _SEGMENT_DISPATCH_WAKEUP is not None:
+        _SEGMENT_DISPATCH_WAKEUP.set()
+    if _ORDINARY_REFILL_WAKEUP is not None:
+        _ORDINARY_REFILL_WAKEUP.set()
 
 
 def _static_lane_successful_coverage_ids(
@@ -4549,6 +4647,64 @@ def _static_lane_terminal(
             now_ts=now_ts,
         )
         store.put_runtime_sync(key, state)
+    if _SEGMENT_DISPATCH_WAKEUP is not None:
+        _SEGMENT_DISPATCH_WAKEUP.set()
+    if _ORDINARY_REFILL_WAKEUP is not None:
+        _ORDINARY_REFILL_WAKEUP.set()
+
+
+def _static_lane_terminalize_native_covered(
+    store: "TaskStore",
+    *,
+    root: str,
+    lane: str,
+    entity_ids: Iterable[int],
+    note: str = "native_covered_by_prior_root",
+) -> None:
+    """Close a static closure whose native roots are already covered.
+
+    An explicit empty native command projection is a successful no-op, not a
+    request to fall back to the durable IDs.  Mark the durable lane members
+    terminal so the same pending closure cannot spin and eventually issue a
+    duplicate parent command.
+    """
+
+    normalized = _normalize_segment_ids(entity_ids)
+    if not normalized:
+        return
+    now_ts = time.time()
+    cycle_state = store.get_runtime_sync(_segment_cycle_key(str(root))) or {}
+    cycle_id = str(cycle_state.get("cycle_id") or "").strip() if isinstance(cycle_state, Mapping) else ""
+    ordinary_ids = (
+        set(
+            _normalize_segment_ids(
+                [*(cycle_state.get("items") or []), *(cycle_state.get("follow_up") or [])]
+            )
+        )
+        if isinstance(cycle_state, Mapping)
+        else set()
+    )
+    for entity_id in normalized:
+        _static_lane_terminal(
+            store,
+            root=root,
+            lane=lane,
+            entity_id=int(entity_id),
+            success=True,
+            note=note,
+            now_ts=now_ts,
+        )
+        if int(entity_id) in ordinary_ids:
+            _segment_cycle_terminal(
+                store,
+                root=root,
+                entity_id=int(entity_id),
+                success=True,
+                note=note,
+                now_ts=now_ts,
+                expected_cycle_id=cycle_id,
+            )
+        _mark_segment_finished(root, int(entity_id), now_ts=now_ts)
 
 
 def _make_static_segment_callbacks(
@@ -4752,6 +4908,12 @@ def _make_static_segment_callbacks(
             task=marker_task(0, command_override=callback_command),
         )
         segment_dispatch_wakeup.set()
+        # Static priority work is outside the canonical ordinary monitor, so
+        # its terminal callback must wake the persisted refill worker too.
+        # Otherwise a freed slot can wait behind a slow main-root planner and
+        # the next ready ordinary segment is not claimed immediately.
+        if _ORDINARY_REFILL_WAKEUP is not None:
+            _ORDINARY_REFILL_WAKEUP.set()
 
     return on_start, on_complete
 
@@ -14771,7 +14933,7 @@ def run_loop(
     *,
     _test_stop_event: threading.Event | None = None,
 ) -> None:
-    global _ACTIVE_PRIORITY_EXECUTOR, _SEGMENT_DISPATCH_WAKEUP
+    global _ACTIVE_PRIORITY_EXECUTOR, _SEGMENT_DISPATCH_WAKEUP, _ORDINARY_REFILL_WAKEUP
     logging.info("MCD loop started")
     # Per-root context metadata is reset before each root pass below.  Keep a
     # function-scope default as well because the first pass may reach the
@@ -15096,6 +15258,7 @@ def run_loop(
     lifecycle_monitor_executors: dict[str, ThreadPoolExecutor] = {}
     lifecycle_monitor_wakeup = threading.Event()
     _SEGMENT_DISPATCH_WAKEUP = segment_dispatch_wakeup
+    _ORDINARY_REFILL_WAKEUP = ordinary_refill_wakeup
 
     def _segment_terminal_callback(task: RunningTask, success: bool, note: str | None) -> None:
         # A terminal worker frees a slot immediately. Wake the scheduler so
@@ -16551,10 +16714,20 @@ def run_loop(
                 static_plans = {_SEGMENT_SUPER_PRIORITY_LANE: [], _SEGMENT_PRIORITY_LANE: []}
                 static_children: dict[int, set[int]] = {}
                 static_parents: dict[int, set[int]] = {}
+                static_graph_ready = not (segment_priority_ids or segment_super_priority_ids)
+                static_graph_source = "not_configured"
                 if segment_priority_ids or segment_super_priority_ids:
-                    try:
-                        static_rows = MauticDB(inst.db).fetch_published_segment_filters()
-                        static_children, static_parents = segment_dependency_maps(static_rows)
+                    (
+                        static_children,
+                        static_parents,
+                        static_graph_ready,
+                        static_graph_source,
+                    ) = _static_dispatch_dependency_snapshot(
+                        store,
+                        root=root,
+                        fetch_rows=lambda db_config=inst.db: MauticDB(db_config).fetch_published_segment_filters(),
+                    )
+                    if static_graph_ready:
                         static_plans = _build_static_segment_lane_plans(
                             super_priority_ids=segment_super_priority_ids,
                             priority_ids=segment_priority_ids,
@@ -16562,8 +16735,24 @@ def run_loop(
                             children_by_parent=static_children,
                             mautic_major=int(getattr(inst, "mautic_major", 0) or 0),
                         )
-                    except Exception as exc:
-                        logging.warning("[%s] static segment lane planning failed: %s", root, exc)
+                        logging.debug(
+                            "[%s] static segment graph source=%s parent_edges=%s child_edges=%s",
+                            root,
+                            static_graph_source,
+                            sum(len(values) for values in static_parents.values()),
+                            sum(len(values) for values in static_children.values()),
+                        )
+                    else:
+                        # Keep persisted static claims untouched while the
+                        # root-local graph is unavailable.  Rebuilding an
+                        # empty plan here would orphan the durable closure;
+                        # treating the root as independent would also emit a
+                        # second native parent command.
+                        logging.warning(
+                            "[%s] static segment lane planning deferred: dependency graph source=%s",
+                            root,
+                            static_graph_source,
+                        )
                 static_state_before = store.get_runtime_sync(_static_lane_state_key(root)) or {}
                 static_active_evidence = _static_lane_runtime_evidence(
                     store=store,
@@ -16574,14 +16763,26 @@ def run_loop(
                     liveness_probe=_segment_liveness_probe,
                     now_ts=time.time(),
                 )
-                static_state, static_added, static_started_new = _static_lanes_reconcile(
-                    store,
-                    root=root,
-                    plans=static_plans,
-                    now_ts=time.time(),
-                    active_evidence=static_active_evidence,
-                    orphan_grace_sec=_STATIC_LANE_ORPHAN_GRACE_SEC,
-                )
+                if static_graph_ready:
+                    static_state, static_added, static_started_new = _static_lanes_reconcile(
+                        store,
+                        root=root,
+                        plans=static_plans,
+                        now_ts=time.time(),
+                        active_evidence=static_active_evidence,
+                        orphan_grace_sec=_STATIC_LANE_ORPHAN_GRACE_SEC,
+                    )
+                else:
+                    static_state = (
+                        dict(static_state_before)
+                        if isinstance(static_state_before, Mapping)
+                        else {}
+                    )
+                    static_added = {
+                        _SEGMENT_SUPER_PRIORITY_LANE: [],
+                        _SEGMENT_PRIORITY_LANE: [],
+                    }
+                    static_started_new = False
                 if any(static_added.values()):
                     logging.info(
                         "[%s] static segment lanes cycle started_new=%s super_added=%s priority_added=%s",
@@ -16695,6 +16896,23 @@ def run_loop(
                                 logging.warning(
                                     "[%s] static Mautic 7 segment closure waits for native --exclude capability",
                                     root,
+                                )
+                                continue
+                            if not static_native_command_ids:
+                                _static_lane_terminalize_native_covered(
+                                    store,
+                                    root=root,
+                                    lane=lane_name,
+                                    entity_ids=static_chain_ids,
+                                )
+                                static_state = store.get_runtime_sync(
+                                    _static_lane_state_key(root)
+                                ) or static_state
+                                logging.info(
+                                    "[%s] static segment=%s terminalized native-covered closure ids=%s",
+                                    root,
+                                    segment_id,
+                                    ",".join(str(value) for value in static_chain_ids),
                                 )
                                 continue
                         if (
@@ -22449,6 +22667,7 @@ def run_loop(
         if single_cycle:
             _ACTIVE_PRIORITY_EXECUTOR = None
             _SEGMENT_DISPATCH_WAKEUP = None
+            _ORDINARY_REFILL_WAKEUP = None
             return
         segment_dispatch_wakeup.wait(timeout=max(0.1, float(config.dispatch_interval_sec)))
         segment_dispatch_wakeup.clear()

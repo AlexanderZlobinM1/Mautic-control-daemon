@@ -1,3 +1,15 @@
+## 1.5.160 - 2026-10-13
+
+- Make the update invariant executable and release-gating: ordinary Mautic/PHP
+  operations never defer an MCD self-update, while TaskStore/runtime-sync
+  queues, claims, running/follow-up/retry state and monitor projections survive
+  restart, update, reinstall and adoption without duplicate spawn. Only an
+  explicit MCD-owned critical barrier may defer the update.
+- Fix the Mautic 7 static dispatcher to reuse the verified root-local graph,
+  fail closed on an incomplete graph, wake persisted ordinary refill when a
+  static worker releases a slot, and never turn an explicit empty native
+  projection into a second parent command.
+
 ## 1.5.159 - 2026-10-13
 
 - Restore the exact read-only MCC image-compatibility capability contract in
