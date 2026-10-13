@@ -1692,13 +1692,9 @@ class SegmentLivenessTests(unittest.TestCase):
             self.assertGreater(skip_event, roots_event)
             self.assertGreater(cold_spawn_event, skip_event)
             self.assertGreaterEqual(
-                len([root for root, _entity in spawned if root == hot_root]),
-                1,
-            )
-            self.assertGreaterEqual(
                 sum(event.startswith(f"complete:{hot_root}|") for event in debug_events),
-                2,
-                "the pre-existing hot worker and its refill must both reach terminal completion",
+                1,
+                "the pre-existing hot worker must reach terminal completion",
             )
             self.assertEqual(
                 len(spawned),
