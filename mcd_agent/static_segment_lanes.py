@@ -163,6 +163,20 @@ def _lane_complete(lane: Mapping[str, object]) -> bool:
     return not items or items <= finished and not active
 
 
+def _normalize_successful_coverage(
+    raw: object,
+    *,
+    plans: Mapping[str, Iterable[object]],
+) -> dict[str, list[int]]:
+    source = raw if isinstance(raw, Mapping) else {}
+    coverage: dict[str, list[int]] = {}
+    for lane_name in LANES:
+        planned = set(normalize_ids(plans.get(lane_name, [])))
+        lane_raw = source.get(lane_name) if isinstance(source, Mapping) else []
+        coverage[lane_name] = [sid for sid in normalize_ids(lane_raw) if sid in planned]
+    return coverage
+
+
 def _all_complete(state: Mapping[str, object]) -> bool:
     lanes = state.get("lanes") if isinstance(state.get("lanes"), Mapping) else {}
     return all(_lane_complete(lanes.get(lane, {})) for lane in LANES)
@@ -312,6 +326,10 @@ def reconcile_state(
         "status": "active" if any(lane.get("items") for lane in lanes.values()) else "terminal",
         "lanes": lanes,
         "active_meta": active_meta,
+        "successful_coverage": _normalize_successful_coverage(
+            source.get("successful_coverage"),
+            plans=plans,
+        ),
         "updated_at": float(now_ts),
     }
     if all(_lane_complete(lane) for lane in lanes.values()):
@@ -477,6 +495,12 @@ def mark_terminal(
     if success:
         current["done"] = normalize_ids([*current.get("done", []), sid])
         current["errors"] = [x for x in normalize_ids(current.get("errors")) if x != sid]
+        successful_coverage = _normalize_successful_coverage(
+            state.get("successful_coverage"),
+            plans={name: lane.get("items", []) for name, lane in lanes.items()},
+        )
+        successful_coverage[lane] = normalize_ids([*successful_coverage.get(lane, []), sid])
+        state["successful_coverage"] = successful_coverage
     else:
         current["errors"] = normalize_ids([*current.get("errors", []), sid])
         if note:

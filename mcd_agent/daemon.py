@@ -4553,6 +4553,8 @@ def _segment_successful_coverage_ids(
             # leaf in the same cycle, but it is discarded when reconcile_state
             # starts the next independent tick.
             covered.update(_normalize_segment_ids(current.get("done")))
+    preserved = static_state.get("successful_coverage")
+    preserved = preserved if isinstance(preserved, Mapping) else {}
     stronger_names: tuple[str, ...]
     if lane_text == _SEGMENT_PRIORITY_LANE:
         stronger_names = (_SEGMENT_SUPER_PRIORITY_LANE,)
@@ -4564,6 +4566,7 @@ def _segment_successful_coverage_ids(
         stronger = lanes.get(stronger_name)
         if isinstance(stronger, Mapping):
             covered.update(_normalize_segment_ids(stronger.get("done")))
+        covered.update(_normalize_segment_ids(preserved.get(stronger_name)))
     return covered
 
 
@@ -4599,8 +4602,12 @@ def _segment_static_dependency_outcome(
             continue
         done = set(_normalize_segment_ids(stronger.get("done")))
         errors = set(_normalize_segment_ids(stronger.get("errors")))
-        failed.update(related & errors)
-        pending.update(related - done - errors)
+        preserved = static_state.get("successful_coverage") if isinstance(static_state, Mapping) else {}
+        preserved = preserved if isinstance(preserved, Mapping) else {}
+        successful = set(_normalize_segment_ids(preserved.get(stronger_name)))
+        unresolved = related - successful
+        failed.update(unresolved & errors)
+        pending.update(unresolved - done - errors)
     pending.difference_update(failed)
     return failed, pending
 
@@ -6720,6 +6727,40 @@ def _scheduler_pending_roots(
         if root and any(bool(ring_map.get(root)) for ring_map in ring_sources):
             roots.add(root)
     return roots
+
+
+def _scheduler_static_priority_pending_roots(
+    store: object,
+    roots: Iterable[object],
+) -> set[str]:
+    """Expose durable static-priority work to the shared fairness gate."""
+
+    pending_roots: set[str] = set()
+    getter = getattr(store, "get_runtime_sync", None)
+    if not callable(getter):
+        return pending_roots
+    for raw_root in roots:
+        root = str(raw_root or "").strip()
+        if not root:
+            continue
+        try:
+            payload = getter(_static_lane_state_key(root))
+        except Exception:
+            continue
+        lanes = payload.get("lanes") if isinstance(payload, Mapping) else {}
+        priority = lanes.get(_SEGMENT_PRIORITY_LANE) if isinstance(lanes, Mapping) else {}
+        if not isinstance(priority, Mapping):
+            continue
+        items = set(_normalize_segment_ids(priority.get("items")))
+        finished = set(_normalize_segment_ids(priority.get("done"))) | set(
+            _normalize_segment_ids(priority.get("errors"))
+        )
+        active = set(_normalize_segment_ids(priority.get("claimed"))) | set(
+            _normalize_segment_ids(priority.get("running"))
+        )
+        if items - finished - active:
+            pending_roots.add(root)
+    return pending_roots
 
 
 def _set_scheduler_distribution_roots(
@@ -17404,12 +17445,35 @@ def run_loop(
                             if static_instance_slots is not None and static_instance_slots <= 0:
                                 break
                         active_ids = _static_lane_running_ids()
-                        if _segment_static_closure_conflict(
+                        closure_conflict = _segment_static_closure_conflict(
                             int(segment_id),
                             active_ids,
                             static_parents,
                             static_children,
-                        ):
+                        )
+                        allow_covered_m7_overlap = False
+                        if closure_conflict and lane_name == _SEGMENT_PRIORITY_LANE and static_major >= 7:
+                            # A fresh super tick may already be rebuilding the
+                            # same parent closure. Once that parent was
+                            # successfully covered by an earlier super tick,
+                            # the Mautic 7 priority projection contains only
+                            # the lower leaf (with --exclude for the parent),
+                            # so waiting for every new super tick would starve
+                            # the weaker lane forever.
+                            candidate_related = set(
+                                segment_related_ids(
+                                    int(segment_id),
+                                    static_parents,
+                                    static_children,
+                                )
+                            )
+                            active_overlap = candidate_related & active_ids
+                            allow_covered_m7_overlap = bool(
+                                active_overlap
+                                and active_overlap <= set(static_already_covered_ids)
+                                and static_native_command_ids
+                            )
+                        if closure_conflict and not allow_covered_m7_overlap:
                             continue
                         if priority_executor.active_count(root, {task_type}) >= max_parallel:
                             break
@@ -17476,6 +17540,22 @@ def run_loop(
                             int(getattr(cfg, "priority_segment_timeout_sec", 3600) or 0),
                         )
                         static_command_str = shlex.join(static_args)
+                        static_execution_lock_key = _segment_static_closure_lock_key(
+                            root,
+                            int(segment_id),
+                            static_parents,
+                            static_children,
+                        )
+                        if allow_covered_m7_overlap:
+                            # This native projection contains only the leaf;
+                            # its already-covered parents belong to the
+                            # stronger super worker and must not share the
+                            # full-closure flock with that worker.
+                            static_execution_lock_key = _task_key(
+                                root,
+                                task_type,
+                                int(segment_id),
+                            )
 
                         _static_segment_started, _static_segment_complete = _make_static_segment_callbacks(
                             store=store,
@@ -17510,12 +17590,7 @@ def run_loop(
                             ],
                             on_complete=_static_segment_complete,
                             on_start=_static_segment_started,
-                            execution_lock_key=_segment_static_closure_lock_key(
-                                root,
-                                int(segment_id),
-                                static_parents,
-                                static_children,
-                            ),
+                            execution_lock_key=static_execution_lock_key,
                         )
                         if started:
                             running_at = time.time()
@@ -20488,6 +20563,17 @@ def run_loop(
                 or bool(campaign_rebuild_reg_rings.get(root))
             )
         }
+        # A durable static-priority lane is also a shared-slot priority
+        # consumer. Keep one shared slot available for its first leaf after
+        # the stronger super lane has produced successful coverage; otherwise
+        # a continuously refreshed ordinary segment ring can starve the
+        # cross-lane handoff forever.
+        priority_pending_roots.update(
+            _scheduler_static_priority_pending_roots(
+                store,
+                (str(getattr(inst, "root", "") or "") for inst in installs),
+            )
+        )
         # Persisted ordinary cycles are an executable queue even while their
         # volatile planner rings are intentionally empty. Refresh this
         # read-only projection on every dispatch tick so the refill worker's

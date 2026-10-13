@@ -760,6 +760,46 @@ class StaticSegmentLaneTests(unittest.TestCase):
         self.assertEqual(rolled["lanes"][PRIORITY]["claimed"], [100])
         self.assertEqual(rolled["lanes"][PRIORITY]["running"], [100])
 
+    def test_priority_handoff_uses_preserved_super_coverage_after_super_rollover(self) -> None:
+        plans = {
+            SUPER_PRIORITY: [57, 58],
+            PRIORITY: [59],
+        }
+        state, _added, _started = reconcile_state(None, plans=plans, now_ts=100.0)
+        state = mark_terminal(state, lane=SUPER_PRIORITY, entity_id=57, success=True, now_ts=101.0)
+        state = mark_terminal(state, lane=SUPER_PRIORITY, entity_id=58, success=True, now_ts=102.0)
+        rolled, _added, _started = reconcile_state(state, plans=plans, now_ts=103.0)
+
+        self.assertEqual(rolled["successful_coverage"][SUPER_PRIORITY], [57, 58])
+        failed, pending = _static_lane_dependency_outcome(
+            rolled,
+            lane_name=PRIORITY,
+            entity_id=59,
+            parents_by_child={59: {57}},
+        )
+        self.assertEqual(failed, set())
+        self.assertEqual(pending, set())
+
+        root = "/var/www/m7/preserved-super-coverage"
+        store = daemon.TaskStore(":memory:")
+        store.put_runtime_sync(daemon._static_lane_state_key(root), rolled)
+        covered = _static_lane_successful_coverage_ids(
+            store,
+            root=root,
+            static_state=rolled,
+            lane_name=PRIORITY,
+        )
+        self.assertEqual(covered, {57, 58})
+        command_ids, excludes = _segment_native_chain_command_plan(
+            [59],
+            {58: {57}, 59: {57}},
+            {57: {58, 59}},
+            already_covered_ids=covered,
+        )
+        self.assertEqual(command_ids, [59])
+        self.assertEqual(excludes, {59: [57]})
+        store.close()
+
     def test_recurring_m6_m7_super_cycle_state_model_preserves_ordinary_cycle(self) -> None:
         """Unit state/plan model for recurring static-lane ownership.
 
@@ -894,7 +934,10 @@ class StaticSegmentLaneTests(unittest.TestCase):
                         parents_by_child=parents,
                     )
                     self.assertEqual(pending_failed, set())
-                    self.assertIn(57, pending_stronger)
+                    if round_no == 1:
+                        self.assertIn(57, pending_stronger)
+                    else:
+                        self.assertEqual(pending_stronger, set())
 
                     active_ids: set[int] = set()
                     for entity_id in plans[SUPER_PRIORITY]:
