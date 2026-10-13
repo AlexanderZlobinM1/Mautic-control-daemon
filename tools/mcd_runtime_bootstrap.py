@@ -27,6 +27,7 @@ input for the bridge only; the active supervisor imports the installed wheel.
 from __future__ import annotations
 
 import argparse
+import base64
 from contextlib import contextmanager
 import hashlib
 import json
@@ -43,6 +44,11 @@ from datetime import datetime, timezone
 from typing import Any, Iterator
 
 try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10 bridge hosts
+    import tomli as tomllib  # type: ignore[no-redef]
+
+try:
     import fcntl
 except ImportError:  # pragma: no cover - the bridge is POSIX-only
     fcntl = None  # type: ignore[assignment]
@@ -51,6 +57,8 @@ except ImportError:  # pragma: no cover - the bridge is POSIX-only
 MANIFEST_NAME = "mcd-runtime-manifest.json"
 MANIFEST_SCHEMA = "mcd-runtime-package-v1"
 RECEIPT_SCHEMA = "mcd-runtime-bootstrap-receipt-v1"
+PROFILE_AUTHORITY_SCHEMA = "mcd-profile-authority-v1"
+PROFILE_SELECTION_FILE = "hardware-profile-selection.json"
 STATE_NAME = "mcd-self-update.json"
 SERVICE_DROPIN_NAME = "99-mcd-runtime-package.conf"
 FORBIDDEN_TOP_LEVEL = {
@@ -424,6 +432,93 @@ def _backup_lock_probe(install_dir: Path, config: Path) -> dict[str, Any]:
     return {"enabled": bool(payload.get("enabled")), "active": False}
 
 
+def _resolve_mutable_config_path_read_only(config: Path) -> Path:
+    """Resolve the writable split-config include without importing the legacy agent."""
+
+    if not config.is_file():
+        return config
+    try:
+        text = config.read_text(encoding="utf-8")
+        if "MCD_CONFIG_ENTRYPOINT v1" not in text:
+            return config
+        raw = tomllib.loads(text)
+    except Exception:
+        return config
+    include = raw.get("include", {}) if isinstance(raw, dict) else {}
+    files_raw = include.get("files", []) if isinstance(include, dict) else []
+    files = files_raw if isinstance(files_raw, list) else [files_raw]
+    resolved: list[Path] = []
+    for item in files:
+        value = str(item or "").strip()
+        if not value:
+            continue
+        candidate = Path(value)
+        if not candidate.is_absolute():
+            candidate = (config.parent / candidate).resolve()
+        if candidate != config:
+            resolved.append(candidate)
+    for candidate in reversed(resolved):
+        if candidate.exists():
+            return candidate
+    return resolved[-1] if resolved else config
+
+
+def _config_files_read_only(config: Path) -> list[dict[str, Any]]:
+    """Describe the entrypoint and recursive include graph without mutation."""
+
+    files: list[dict[str, Any]] = []
+    seen: set[Path] = set()
+
+    def visit(path: Path) -> None:
+        resolved = path.resolve()
+        if resolved in seen:
+            return
+        seen.add(resolved)
+        files.append({"path": str(resolved), "exists": resolved.is_file()})
+        if not resolved.is_file():
+            return
+        try:
+            text = resolved.read_text(encoding="utf-8")
+            if "MCD_CONFIG_ENTRYPOINT v1" not in text:
+                return
+            raw = tomllib.loads(text)
+        except Exception:
+            return
+        include = raw.get("include", {}) if isinstance(raw, dict) else {}
+        files_raw = include.get("files", []) if isinstance(include, dict) else []
+        values = files_raw if isinstance(files_raw, list) else [files_raw]
+        for item in values:
+            value = str(item or "").strip()
+            if not value:
+                continue
+            child = Path(value)
+            if not child.is_absolute():
+                child = resolved.parent / child
+            visit(child)
+
+    visit(config)
+    return files
+
+
+def _capture_profile_authority(install_dir: Path, config: Path) -> dict[str, Any]:
+    """Capture exact pre-bridge profile-selection bytes without legacy imports."""
+
+    selection_path = install_dir / "var" / PROFILE_SELECTION_FILE
+    selection_exists = selection_path.is_file()
+    selection_bytes = selection_path.read_bytes() if selection_exists else b""
+    return {
+        "schema": PROFILE_AUTHORITY_SCHEMA,
+        "capture_phase": "pre_runtime_install",
+        "config_path": str(config),
+        "config_mutable_path": str(_resolve_mutable_config_path_read_only(config)),
+        "config_files": _config_files_read_only(config),
+        "selection_path": str(selection_path),
+        "selection_exists": selection_exists,
+        "selection_sha256": _sha256(selection_path) if selection_exists else "",
+        "selection_bytes_base64": base64.b64encode(selection_bytes).decode("ascii"),
+    }
+
+
 def _pause_path(install_dir: Path) -> Path:
     return install_dir / "var" / "scheduler.pause"
 
@@ -585,6 +680,8 @@ def bridge(args: argparse.Namespace) -> dict[str, Any]:
     except OSError:
         pass
 
+    profile_authority = _capture_profile_authority(install_dir, config)
+
     updates_dir = install_dir / "var" / "updates"
     updates_dir.mkdir(parents=True, exist_ok=True)
     stage = updates_dir / f"src.next-bridge-{os.getpid()}-{time.time_ns()}"
@@ -669,6 +766,7 @@ def bridge(args: argparse.Namespace) -> dict[str, Any]:
                         "source_path": str(old_src),
                         "state_sha256": before_state_sha,
                         "scheduler": before_scheduler,
+                        "profile_authority": profile_authority,
                     },
                     "after": {
                         "source_version": target,
@@ -744,7 +842,7 @@ def _install_runtime_probe(install_dir: Path, target: str) -> dict[str, str]:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--install-dir", default="/opt/mcd")
-    parser.add_argument("--archive", required=True, help="Locally transported runtime-only archive")
+    parser.add_argument("--archive", help="Locally transported runtime-only archive")
     parser.add_argument("--config")
     parser.add_argument("--expected-archive-sha256")
     parser.add_argument("--expected-manifest-sha256")
@@ -755,12 +853,25 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--health-timeout-sec", type=int, default=45)
     parser.add_argument("--no-systemd", action="store_true", help="Only for disposable sandbox proof")
     parser.add_argument("--sandbox", action="store_true", help="Allow the disposable no-backup-probe path")
+    parser.add_argument(
+        "--capture-profile-authority",
+        action="store_true",
+        help="Read-only pre-bridge profile-selection capture; does not require an archive",
+    )
     parser.add_argument("--json", action="store_true")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.capture_profile_authority:
+        install_dir = Path(args.install_dir).resolve()
+        config = Path(args.config or (install_dir / "etc" / "mcd.toml")).resolve()
+        print(json.dumps(_capture_profile_authority(install_dir, config), ensure_ascii=True, indent=2))
+        return 0
+    if not args.archive:
+        print("--archive is required unless --capture-profile-authority is used", file=sys.stderr)
+        return 2
     if args.no_systemd and not args.sandbox:
         print("--no-systemd is restricted to --sandbox", file=sys.stderr)
         return 2

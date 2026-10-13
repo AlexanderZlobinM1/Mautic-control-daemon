@@ -11,6 +11,7 @@ Mautic installation.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import importlib.util
 import json
@@ -138,6 +139,17 @@ def main(argv: list[str] | None = None) -> int:
         install = root / "install"
         (install / "var").mkdir(parents=True)
         (install / "etc").mkdir()
+        (install / "etc" / "mcd.toml").write_text(
+            '# MCD_CONFIG_ENTRYPOINT v1\n[include]\nfiles = ["mcd.local.toml"]\n',
+            encoding="utf-8",
+        )
+        (install / "etc" / "mcd.local.toml").write_text(
+            '[profile]\nname = "farm-hiload"\n[hardware]\nprofile = "farm-hiload"\n',
+            encoding="utf-8",
+        )
+        selection_path = install / "var" / "hardware-profile-selection.json"
+        selection_bytes = b'{"mode":"manual","profile":"farm-hiload"}\n'
+        selection_path.write_bytes(selection_bytes)
         _write_legacy_source(install)
         _run([args.python, "-m", "venv", str(install / "venv")])
 
@@ -187,6 +199,18 @@ def main(argv: list[str] | None = None) -> int:
             sandbox=True,
         )
         receipt = bridge.bridge(args_ns)
+
+        authority = receipt["before"]["profile_authority"]
+        if authority["schema"] != "mcd-profile-authority-v1":
+            raise RuntimeError("bridge receipt is missing the profile-authority schema")
+        if authority["capture_phase"] != "pre_runtime_install":
+            raise RuntimeError("profile authority was not captured before runtime installation")
+        if authority["selection_path"] != str(selection_path):
+            raise RuntimeError("bridge receipt reported the wrong selection path")
+        if not authority["selection_exists"]:
+            raise RuntimeError("bridge receipt lost an existing selection marker")
+        if base64.b64decode(authority["selection_bytes_base64"]) != selection_bytes:
+            raise RuntimeError("bridge receipt did not preserve exact selection bytes")
 
         reopened = TaskStore(cfg.state_db_path, cfg)
         preserved = all(reopened.get_runtime_sync(key) == payload for key, payload in queue_state.items())
