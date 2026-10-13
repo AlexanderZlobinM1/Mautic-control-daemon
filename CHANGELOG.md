@@ -1,3 +1,13 @@
+## 1.5.168 - 2026-10-13
+
+- Keep the ordinary fair-turn handoff local to the ordinary lane: a root whose
+  instance/dependency guard is full now yields when a shared host worker is
+  free, while a genuinely full host still preserves its local retry priority.
+- Preserve the dedicated super-priority tick and static round-robin lane; it
+  never consumes or waits on the ordinary skip-turn gate.
+- Add native Mautic 6 coverage for a live dependency parent, an independently
+  started root, and the durable dependent follow-up.
+
 ## 1.5.167 - 2026-10-13
 
 - Keep super-priority ticks on their own recurring static round-robin lane;

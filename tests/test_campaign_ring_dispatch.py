@@ -78,6 +78,7 @@ from mcd_agent.daemon import (
     _scheduler_host_running_count,
     _scheduler_host_slots_available,
     _scheduler_instance_slots_available,
+    _scheduler_shared_capacity_available,
     _scheduler_pending_roots,
     _scheduler_round_robin_order,
     _set_scheduler_distribution_roots,
@@ -275,6 +276,48 @@ class CampaignRingDispatchTests(unittest.TestCase):
                 running,
                 root=root,
                 task_type="segment_super_priority",
+            )
+        )
+
+    def test_local_instance_full_yields_when_shared_host_slot_is_free(self) -> None:
+        blocked_root = "/var/www/blocked"
+        cfg = SimpleNamespace(
+            scheduler_host_max_parallel=2,
+            scheduler_instance_max_parallel=1,
+            scheduler_elastic_slots_enabled=True,
+            scheduler_emergency_reserved_slots=0,
+        )
+        running = {
+            "blocked-parent": SimpleNamespace(root=blocked_root, task_type="segment", entity_id=230),
+        }
+
+        self.assertEqual(
+            _scheduler_instance_slots_available(
+                cfg,
+                running,
+                root=blocked_root,
+                task_type="segment",
+            ),
+            0,
+        )
+        self.assertEqual(
+            _scheduler_host_slots_available(cfg, running, "segment", root=blocked_root),
+            1,
+        )
+        self.assertTrue(
+            _scheduler_shared_capacity_available(
+                cfg,
+                running,
+                root=blocked_root,
+            )
+        )
+
+        running["other-root"] = SimpleNamespace(root="/var/www/other", task_type="segment", entity_id=1)
+        self.assertFalse(
+            _scheduler_shared_capacity_available(
+                cfg,
+                running,
+                root=blocked_root,
             )
         )
 

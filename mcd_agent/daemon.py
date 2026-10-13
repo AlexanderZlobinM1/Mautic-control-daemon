@@ -13555,6 +13555,35 @@ def _segment_pending_dispatch_limits(
     return total_limit, launch_budget
 
 
+def _scheduler_shared_capacity_available(
+    config: AgentConfig,
+    running: dict[str, "RunningTask"],
+    *,
+    root: str,
+    store: "TaskStore | None" = None,
+    priority_executor: object | None = None,
+) -> bool:
+    """Tell ordinary fairness whether the shared host lane can still move.
+
+    A root may have zero local segment budget because its instance cap is
+    occupied by a dependency parent while another root can use a free host
+    worker. That is a local fair skip, not global capacity exhaustion. Keep
+    the host check separate from ``_segment_pending_dispatch_limits`` so the
+    persisted cursor yields in that case. Super-priority callers never use
+    this helper: their dedicated tick and capacity remain independent.
+    """
+
+    host_slots = _scheduler_host_slots_available(
+        config,
+        running,
+        "segment",
+        root=str(root),
+        priority_executor=priority_executor,
+        store=store,
+    )
+    return host_slots is None or int(host_slots) > 0
+
+
 def _import_followup_slot_limit(
     running: dict[str, RunningTask],
     root: str,
@@ -16899,6 +16928,19 @@ def run_loop(
                             sql_db_running_count=_segment_sql_worker_count(root),
                         )
                         if launch_budget <= 0:
+                            if _scheduler_shared_capacity_available(
+                                config,
+                                running,
+                                root=root,
+                                store=store,
+                                priority_executor=priority_executor,
+                            ):
+                                # The root-local instance/segment guard is
+                                # full, but the shared host still has a free
+                                # worker. Yield this ordinary turn so another
+                                # root can use it; do not treat local fullness
+                                # as a host-wide barrier.
+                                _mark_scheduler_shared_admission_skip(root, "segment")
                             continue
                         priority_was_root = _peek_ready_refill_priority_root() == root
                         capacity_before = _refill_root_has_capacity(root)
@@ -21687,6 +21729,23 @@ def run_loop(
                     sql_db_running_count=segment_sql_db_running_count,
                 )
                 pending_launched_this_tick = 0
+                if (
+                    pending_cycle_ring
+                    and pending_launch_budget <= 0
+                    and _scheduler_shared_capacity_available(
+                        config,
+                        running,
+                        root=root,
+                        store=store,
+                        priority_executor=priority_executor,
+                    )
+                ):
+                    # A root-local instance/dependency guard can consume its
+                    # own segment budget while the host still has a free
+                    # worker. Complete this ordinary fair turn before the
+                    # next root is considered. A full host cap remains a
+                    # capacity wait and is not marked as a skip.
+                    _mark_scheduler_shared_admission_skip(root, "segment")
                 if pending_cycle_ring and pending_launch_budget > 0:
                     pending_launched_this_tick = _fill_from_ring(
                         ring=pending_cycle_ring,
