@@ -27,6 +27,14 @@ ordinary IDs are present in `cycle.items` before claim validation and survive
 restart without starvation. Persisted full-scan items bypass only stale
 per-entity repeat cadence; capacity, running, dependency, and durable claim
 guards remain enforced.
+
+Static dependency ownership is strongest-lane first. A weaker priority lane
+waits while an overlapping super-priority closure is pending/running, passes
+repeated native `--exclude=<id>` options only for IDs with a durable successful
+stronger-lane receipt, and terminalizes its own overlapping item with a
+dependency error when the stronger owner exhausts its bounded attempts. A red
+stronger owner is never presented as successful native coverage and never
+causes an unbounded parent rebuild in the weaker lane.
 Qualified instance ACK scopes resolve base-UID effective projections before
 canonical lane encoding; missing data is not confused with a populated lane.
 Legacy alias ACK reads its stable legacy projection; modern priority ACK reads

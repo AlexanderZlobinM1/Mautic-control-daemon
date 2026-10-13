@@ -3,7 +3,10 @@
 - Fixed: Mautic 7 static priority closures now receive durable successful
   coverage from the stronger super-priority lane and pass repeated
   `--exclude=<covered-parent>` options, so a shared dependency is rebuilt once
-  across lanes while failed stronger work remains retryable.
+  across lanes while failed stronger work remains distinguishable from
+  coverage. A weaker overlapping item now waits for a bounded stronger owner;
+  after that owner is red it receives a terminal dependency error instead of
+  silently starting a fourth native parent rebuild or remaining pending.
 
 ## 1.5.156 - 2026-10-13
 

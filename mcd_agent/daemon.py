@@ -4385,6 +4385,84 @@ def _static_lane_successful_coverage_ids(
     return covered
 
 
+def _static_lane_dependency_outcome(
+    static_state: Mapping[str, object] | None,
+    *,
+    lane_name: str,
+    entity_id: int,
+    parents_by_child: Mapping[int, Iterable[int]] | None,
+) -> tuple[set[int], set[int]]:
+    """Classify stronger-lane ancestors as failed or not yet terminal.
+
+    A failed stronger closure is not successful native coverage, but allowing
+    a weaker lane to issue another native leaf command would silently rebuild
+    the same parent beyond its inclusive retry budget.  The weaker item is
+    therefore terminalized as a dependency error once the stronger owner is
+    red.  While the stronger owner is still pending/running, admission waits
+    for that owner's bounded outcome.
+    """
+
+    if str(lane_name) != _SEGMENT_PRIORITY_LANE:
+        return set(), set()
+    lanes = static_state.get("lanes") if isinstance(static_state, Mapping) else {}
+    stronger = lanes.get(_SEGMENT_SUPER_PRIORITY_LANE) if isinstance(lanes, Mapping) else None
+    if not isinstance(stronger, Mapping):
+        return set(), set()
+    ancestor_ids = dependency_segment_closure({int(entity_id)}, dict(parents_by_child or {}))
+    stronger_items = set(_normalize_segment_ids(stronger.get("items")))
+    related = ancestor_ids & stronger_items
+    if not related:
+        return set(), set()
+    done = set(_normalize_segment_ids(stronger.get("done")))
+    errors = set(_normalize_segment_ids(stronger.get("errors")))
+    return related & errors, related - done - errors
+
+
+def _static_lane_mark_dependency_failed(
+    store: "TaskStore",
+    *,
+    root: str,
+    lane: str,
+    entity_ids: Iterable[int],
+    note: str,
+) -> None:
+    """Terminalize weaker static members blocked by a red stronger owner."""
+
+    normalized = _normalize_segment_ids(entity_ids)
+    for entity_id in normalized:
+        _static_lane_terminal(
+            store,
+            root=root,
+            lane=lane,
+            entity_id=int(entity_id),
+            success=False,
+            note=note,
+            now_ts=time.time(),
+        )
+    cycle_state = store.get_runtime_sync(_segment_cycle_key(root)) or {}
+    if not isinstance(cycle_state, Mapping):
+        return
+    cycle_id = str(cycle_state.get("cycle_id") or "").strip()
+    ordinary_ids = set(
+        _normalize_segment_ids(
+            [*(cycle_state.get("items") or []), *(cycle_state.get("follow_up") or [])]
+        )
+    )
+    for entity_id in normalized:
+        if int(entity_id) not in ordinary_ids:
+            continue
+        _segment_cycle_terminal(
+            store,
+            root=root,
+            entity_id=int(entity_id),
+            success=False,
+            note=note,
+            now_ts=time.time(),
+            expected_cycle_id=cycle_id,
+        )
+        _mark_segment_finished(root, int(entity_id), now_ts=time.time())
+
+
 def _static_lane_terminal(
     store: "TaskStore",
     *,
@@ -16436,6 +16514,33 @@ def run_loop(
                             # The topological owner admits the complete
                             # closure; child entries remain durable lane
                             # members but never spawn a second worker.
+                            continue
+                        failed_stronger_ids, pending_stronger_ids = _static_lane_dependency_outcome(
+                            static_state,
+                            lane_name=lane_name,
+                            entity_id=int(segment_id),
+                            parents_by_child=static_parents,
+                        )
+                        if failed_stronger_ids:
+                            _static_lane_mark_dependency_failed(
+                                store,
+                                root=root,
+                                lane=lane_name,
+                                entity_ids=static_chain_ids,
+                                note="static_dependency_failed",
+                            )
+                            logging.warning(
+                                "[%s] static segment=%s terminalized after stronger dependency failure ids=%s",
+                                root,
+                                segment_id,
+                                ",".join(str(value) for value in sorted(failed_stronger_ids)),
+                            )
+                            continue
+                        if pending_stronger_ids:
+                            # Stronger static ownership is still unresolved;
+                            # wait for its bounded success/error transition
+                            # instead of starting a native command that would
+                            # rebuild the same parent in the weaker lane.
                             continue
                         static_native_command_ids: list[int] | None = None
                         static_native_excludes: dict[int, list[int]] = {}

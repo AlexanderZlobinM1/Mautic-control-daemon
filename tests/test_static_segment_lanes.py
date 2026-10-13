@@ -13,6 +13,8 @@ from mcd_agent.daemon import (
     _segment_native_chain_command_plan,
     _segment_priority_effective_setting,
     _segment_super_priority_effective_setting,
+    _static_lane_dependency_outcome,
+    _static_lane_mark_dependency_failed,
     _static_lane_successful_coverage_ids,
     _static_lane_runtime_evidence,
 )
@@ -205,6 +207,59 @@ class StaticSegmentLaneTests(unittest.TestCase):
         self.assertEqual(covered, set())
         self.assertEqual(command_ids, [59])
         self.assertEqual(excludes, {59: []})
+        store.close()
+
+    def test_failed_super_parent_red_marks_priority_terminal_without_native_retry(self) -> None:
+        store = daemon.TaskStore(":memory:")
+        root = "/var/www/m7/cross-lane-failure"
+        static_state, _added, _started = reconcile_state(
+            None,
+            plans={SUPER_PRIORITY: [57, 58], PRIORITY: [59]},
+            now_ts=100.0,
+        )
+        static_state["lanes"][SUPER_PRIORITY]["errors"] = [57, 58]
+        store.put_runtime_sync(daemon._static_lane_state_key(root), static_state)
+
+        failed, pending = _static_lane_dependency_outcome(
+            static_state,
+            lane_name=PRIORITY,
+            entity_id=59,
+            parents_by_child={59: {57}},
+        )
+        self.assertEqual(failed, {57})
+        self.assertEqual(pending, set())
+        self.assertEqual(
+            _static_lane_successful_coverage_ids(
+                store,
+                root=root,
+                static_state=static_state,
+                lane_name=PRIORITY,
+            ),
+            set(),
+        )
+
+        _static_lane_mark_dependency_failed(
+            store,
+            root=root,
+            lane=PRIORITY,
+            entity_ids=[59],
+            note="static_dependency_failed",
+        )
+        terminal = store.get_runtime_sync(daemon._static_lane_state_key(root))
+        self.assertIn(59, terminal["lanes"][PRIORITY]["errors"])
+        self.assertNotIn(59, terminal["lanes"][PRIORITY]["done"])
+        self.assertEqual(terminal["lanes"][PRIORITY]["attempts"], {})
+
+        static_state["lanes"][SUPER_PRIORITY]["errors"] = []
+        static_state["lanes"][SUPER_PRIORITY]["claimed"] = [57]
+        static_state["lanes"][SUPER_PRIORITY]["running"] = [57]
+        _failed, pending = _static_lane_dependency_outcome(
+            static_state,
+            lane_name=PRIORITY,
+            entity_id=59,
+            parents_by_child={59: {57}},
+        )
+        self.assertEqual(pending, {57})
         store.close()
 
     def test_static_success_reconciles_preexisting_frozen_ordinary_parent(self) -> None:
