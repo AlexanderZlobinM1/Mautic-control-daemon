@@ -725,6 +725,34 @@ class StaticSegmentLaneTests(unittest.TestCase):
         )
         self.assertTrue(priority_claimed)
 
+    def test_completed_super_cycle_rolls_over_while_priority_waits(self) -> None:
+        plans = {
+            SUPER_PRIORITY: [57, 58],
+            PRIORITY: [100],
+        }
+        state, _added, _started = reconcile_state(None, plans=plans, now_ts=100.0)
+        state = mark_terminal(state, lane=SUPER_PRIORITY, entity_id=57, success=True, now_ts=101.0)
+        state = mark_terminal(state, lane=SUPER_PRIORITY, entity_id=58, success=True, now_ts=102.0)
+        state, claimed = claim_item(
+            state,
+            lane=PRIORITY,
+            entity_id=100,
+            blocked_ids=set(),
+            globally_running_ids=set(),
+            now_ts=103.0,
+        )
+        self.assertTrue(claimed)
+        state = mark_running(state, lane=PRIORITY, entity_id=100, now_ts=104.0)
+
+        rolled, added, started = reconcile_state(state, plans=plans, now_ts=105.0)
+
+        self.assertTrue(started)
+        self.assertEqual(added[SUPER_PRIORITY], [57, 58])
+        self.assertEqual(pending_items(rolled, SUPER_PRIORITY), [57, 58])
+        self.assertEqual(added[PRIORITY], [])
+        self.assertEqual(rolled["lanes"][PRIORITY]["claimed"], [100])
+        self.assertEqual(rolled["lanes"][PRIORITY]["running"], [100])
+
     def test_manual_dependency_overlap_is_blocked_across_static_lanes(self) -> None:
         lane, reason = _manual_static_lane_for_ids(
             {

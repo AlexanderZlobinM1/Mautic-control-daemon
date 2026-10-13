@@ -1,3 +1,10 @@
+## 1.5.165 - 2026-10-13
+
+- Reconcile persisted priority and super-priority lanes independently. A
+  completed super-priority cycle now rolls into its next dedicated tick even
+  while the weaker priority lane is waiting on shared closure ownership;
+  claims, overlap locks, and per-lane durable state remain preserved.
+
 ## 1.5.164 - 2026-10-13
 
 - Keep native Mautic 7 coverage cycle-local for static priority lanes. A

@@ -239,8 +239,19 @@ def reconcile_state(
 
     source = raw if isinstance(raw, Mapping) else {}
     old_lanes = source.get("lanes") if isinstance(source.get("lanes"), Mapping) else {}
-    complete = bool(old_lanes) and _all_complete({"lanes": old_lanes})
-    started_new = not old_lanes or complete
+    # Each static lane owns its own cadence.  A completed super-priority
+    # cycle must be able to roll over while the weaker priority lane is still
+    # waiting on shared closure ownership (and vice versa).  Coupling the
+    # rollover to an all-lanes-complete check turns a budget wait in one lane
+    # into a stop-the-world barrier for the other lane.
+    started_new_by_lane = {
+        lane_name: not old_lanes or _lane_complete(old_lanes.get(lane_name, {}))
+        for lane_name in LANES
+    }
+    started_new = not old_lanes or any(
+        started_new_by_lane[lane_name] and normalize_ids(plans.get(lane_name, []))
+        for lane_name in LANES
+    )
     added: dict[str, list[int]] = {lane: [] for lane in LANES}
     lanes: dict[str, dict[str, object]] = {}
     active_meta = _normalize_active_meta(source.get("active_meta"))
@@ -248,7 +259,7 @@ def reconcile_state(
     grace = max(1, int(orphan_grace_sec or ORPHAN_GRACE_SEC))
     for lane_name in LANES:
         planned = normalize_ids(plans.get(lane_name, []))
-        if started_new:
+        if started_new_by_lane[lane_name]:
             lanes[lane_name] = _empty_lane(planned)
             active_meta[lane_name] = {}
             added[lane_name] = list(planned)

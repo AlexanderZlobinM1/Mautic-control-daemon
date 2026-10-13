@@ -4,7 +4,7 @@
 фактическую схему после исправления admission и должен обновляться вместе с
 кодом, тестами и runtime receipt. Документ не является разрешением на
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.164 (follow-up после immutable
+Актуальная редакция этого канона — MCD 1.5.165 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам
@@ -159,6 +159,12 @@ reconciles a terminal snapshot into its next independent tick, that local
 coverage is intentionally discarded, so configured super-priority segments
 continue to execute by their own ring cadence instead of running only once per
 ordinary cycle.
+
+Static-lane reconciliation is lane-local as well: a completed super-priority
+snapshot rolls into its next cycle without waiting for the weaker priority
+lane to finish, and a priority lane may do the same independently. A claim or
+closure that is still active is preserved in its own lane; independent
+cadence never removes overlap, ownership, or durable execution-lock guards.
 
 ### Канонический runtime envelope
 
