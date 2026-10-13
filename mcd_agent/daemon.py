@@ -4527,19 +4527,32 @@ def _segment_successful_coverage_ids(
     """Return successful native coverage inherited by the current lane.
 
     Ownership is ordered: super-priority is stronger than priority, and both
-    static lanes are stronger than the ordinary segment ring.  Native
-    coverage is deliberately combined with only durable successful lane
-    receipts; a pending/running/error higher lane must never be presented as
-    proof that a parent was rebuilt.
+    static lanes are stronger than the ordinary segment ring.  The ordinary
+    ring may use its current ordinary-cycle native receipt, while a static
+    lane must not inherit that receipt: static lanes intentionally start a
+    fresh independent cycle on every tick.  Reusing an ordinary-cycle
+    ``native_coverage`` receipt there would turn every later super-priority
+    tick into a no-op after the first successful run.  Static lanes therefore
+    use only successful receipts from the current static cycle (their own
+    lane and stronger static lanes); the ordinary ring still receives the
+    cross-lane native coverage below.
     """
 
-    covered = _segment_native_covered_ids(store, root)
+    lane_text = str(lane_name)
+    covered = _segment_native_covered_ids(store, root) if lane_text == "ordinary" else set()
     if not isinstance(static_state, Mapping):
         return covered
     lanes = static_state.get("lanes")
     if not isinstance(lanes, Mapping):
         return covered
-    lane_text = str(lane_name)
+    if lane_text in {_SEGMENT_SUPER_PRIORITY_LANE, _SEGMENT_PRIORITY_LANE}:
+        current = lanes.get(lane_text)
+        if isinstance(current, Mapping):
+            # ``done`` belongs to the current static-lane cycle.  It is the
+            # local receipt needed to exclude a shared parent for a sibling
+            # leaf in the same cycle, but it is discarded when reconcile_state
+            # starts the next independent tick.
+            covered.update(_normalize_segment_ids(current.get("done")))
     stronger_names: tuple[str, ...]
     if lane_text == _SEGMENT_PRIORITY_LANE:
         stronger_names = (_SEGMENT_SUPER_PRIORITY_LANE,)

@@ -300,6 +300,72 @@ class StaticSegmentLaneTests(unittest.TestCase):
         self.assertEqual(excludes, {59: []})
         store.close()
 
+    def test_new_super_cycle_does_not_reuse_previous_ordinary_native_coverage(self) -> None:
+        store = daemon.TaskStore(":memory:")
+        root = "/var/www/m7/super-cycle"
+        cycle, _added, _started = daemon._segment_cycle_sync(
+            store,
+            root=root,
+            planned_ids=[57, 58, 59],
+            never_built_ids=[],
+            running_ids=[],
+            excluded_ids=[],
+            now_ts=100.0,
+        )
+        store.put_runtime_sync(
+            daemon._segment_native_coverage_key(root),
+            {
+                "schema": daemon._SEGMENT_NATIVE_COVERAGE_SCHEMA,
+                "root": root,
+                "cycle_id": cycle["cycle_id"],
+                "covered_ids": [57, 58, 59],
+                "receipts": {"58": {"success": True}},
+            },
+        )
+        static_state, _added, _started = reconcile_state(
+            None,
+            plans={SUPER_PRIORITY: [57, 58, 59], PRIORITY: []},
+            now_ts=100.0,
+        )
+
+        # The previous ordinary cycle's receipt must not suppress a fresh
+        # super cycle. Its own current-cycle done list is still empty.
+        covered = _static_lane_successful_coverage_ids(
+            store,
+            root=root,
+            static_state=static_state,
+            lane_name=SUPER_PRIORITY,
+        )
+        self.assertEqual(covered, set())
+        command_ids, excludes = _segment_native_chain_command_plan(
+            [57, 58, 59],
+            {58: {57}, 59: {57}},
+            {57: {58, 59}},
+            already_covered_ids=covered,
+        )
+        self.assertEqual(command_ids, [58, 59])
+        self.assertEqual(excludes, {58: [], 59: [57]})
+
+        # Once the first leaf succeeds, its current static-cycle receipt is
+        # enough to keep the shared parent out of the sibling command.
+        static_state["lanes"][SUPER_PRIORITY]["done"] = [57, 58]
+        covered = _static_lane_successful_coverage_ids(
+            store,
+            root=root,
+            static_state=static_state,
+            lane_name=SUPER_PRIORITY,
+        )
+        self.assertEqual(covered, {57, 58})
+        command_ids, excludes = _segment_native_chain_command_plan(
+            [57, 59],
+            {59: {57}},
+            {57: {59}},
+            already_covered_ids=covered,
+        )
+        self.assertEqual(command_ids, [59])
+        self.assertEqual(excludes, {59: [57]})
+        store.close()
+
     def test_failed_super_parent_red_marks_priority_terminal_without_native_retry(self) -> None:
         store = daemon.TaskStore(":memory:")
         root = "/var/www/m7/cross-lane-failure"

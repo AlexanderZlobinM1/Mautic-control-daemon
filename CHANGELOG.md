@@ -1,3 +1,10 @@
+## 1.5.164 - 2026-10-13
+
+- Keep native Mautic 7 coverage cycle-local for static priority lanes. A
+  successful super-priority tick still suppresses a shared parent for sibling
+  leaves in that tick, but never turns the next independent super tick into a
+  no-op through the ordinary cycle's coverage receipt.
+
 ## 1.5.163 - 2026-10-13
 
 - Preserve each root's verified dependency graph across terminal ordinary-cycle

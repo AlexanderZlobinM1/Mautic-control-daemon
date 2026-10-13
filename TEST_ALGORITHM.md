@@ -231,6 +231,7 @@ barrier остаются обязательными.
 | manual N+1 override — per-instance exception без host-wide overflow и с сохранением locks | `_submit_if_slot_uncoordinated`, manual admission path | `tests/test_segment_admission.py` cap-4→5→4→3 и per-instance `11+3→14→...→10→11` receipts |
 | M6 closure занимает один worker/PID, M7 covered roots не параллелятся | `dependency_execution_chains`, `_segment_chain_command_args`, `_segment_chain_runtime_*`, static closure lock | `tests/test_segment_chain_runtime.py` actual TaskStore/PID receipt + fresh M6/M7 sandbox evidence |
 | M7 native parent coverage дедуплицируется через capability-backed `--exclude` | `_segment_native_coverage_*`, `_segment_native_exclude_capability`, `_append_segment_native_excludes` | read-only `help ... --format=json` receipt + actual parent-count/PID receipt |
+| dedicated super-priority ticks не подавляются native coverage предыдущего ordinary cycle | `_segment_successful_coverage_ids`, `_static_lane_successful_coverage_ids`, `static_segment_lanes.py` | `test_new_super_cycle_does_not_reuse_previous_ordinary_native_coverage` + natural Farm02 static-lane marker series |
 | filter hints не подменяют Mautic rc; unsafe topology terminalizes explicitly | `segment_filter_safety.py`, `logical_issues.py`, `_terminalize_segment_data_errors` | `test_topology_data_errors_finish_root_and_allow_next_cycle` + filter-hint regression |
 
 ## Acceptance gate

@@ -4,7 +4,7 @@
 фактическую схему после исправления admission и должен обновляться вместе с
 кодом, тестами и runtime receipt. Документ не является разрешением на
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.162 (follow-up после immutable
+Актуальная редакция этого канона — MCD 1.5.164 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам
@@ -150,6 +150,15 @@ shared regular accounting.
 super-priority может продолжаться параллельно; active super-priority не
 уменьшает ordinary capacity, а dependency overlap и execution lock остаются
 обязательными.
+
+Native coverage receipt scoped to an ordinary cycle is never used to suppress
+a fresh static cycle. Within one static cycle, successful `done` receipts of
+the current lane and its stronger static lane are sufficient to exclude a
+shared Mautic 7 parent from a sibling leaf command. When the static lane
+reconciles a terminal snapshot into its next independent tick, that local
+coverage is intentionally discarded, so configured super-priority segments
+continue to execute by their own ring cadence instead of running only once per
+ordinary cycle.
 
 ### Канонический runtime envelope
 
