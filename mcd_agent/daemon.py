@@ -16167,6 +16167,88 @@ def run_loop(
             )
             return instance_slots is None or instance_slots > 0
 
+        def _refill_priority_root_ready(root: str) -> bool:
+            """Allow a terminal hand-off only for currently executable work."""
+
+            root_value = str(root or "").strip()
+            if not root_value:
+                return False
+            inst = next(
+                (
+                    candidate
+                    for candidate in installs
+                    if str(getattr(candidate, "root", "") or "").strip() == root_value
+                ),
+                None,
+            )
+            if inst is None or not getattr(inst, "db", None):
+                return False
+            state = store.get_runtime_sync(_segment_cycle_key(root_value)) or {}
+            if not isinstance(state, Mapping) or str(state.get("status") or "").strip().lower() != "active":
+                return False
+            context = store.get_runtime_sync(_segment_dispatch_context_key(root_value)) or {}
+            if not isinstance(context, Mapping) or context.get("schema") != "mcd-segment-dispatch-context-v1":
+                return False
+            now_root = time.time()
+            try:
+                if float(context.get("db_pause_until") or 0.0) > now_root:
+                    return False
+            except (TypeError, ValueError):
+                return False
+            if any(
+                bool(context.get(key, False))
+                for key in ("scheduler_pause", "backup_pause", "dispatch_pause")
+            ) or not bool(context.get("cluster_cron_allowed", True)):
+                return False
+            static_ids = set(_normalize_segment_ids(context.get("static_configured_ids")))
+            static_ids.update(_normalize_segment_ids(context.get("static_owned_ids")))
+            static_ids |= _segment_priority_effective_setting(config, inst)
+            static_ids |= _segment_super_priority_effective_setting(config, inst)
+            static_state = store.get_runtime_sync(_static_lane_state_key(root_value)) or {}
+            lanes = static_state.get("lanes") if isinstance(static_state, Mapping) else {}
+            if isinstance(lanes, Mapping):
+                for lane_payload in lanes.values():
+                    if isinstance(lane_payload, Mapping):
+                        static_ids.update(_normalize_segment_ids(lane_payload.get("items")))
+            pending_order = _segment_cycle_pending_order(
+                state,
+                excluded_ids=set(_normalize_segment_ids(context.get("sql_managed_ids"))) | static_ids,
+            )
+            if not pending_order:
+                return False
+            if _segment_dispatch_context_needs_dependency_refresh(
+                context,
+                state,
+                config=config,
+                mautic_major=int(context.get("mautic_major") or getattr(inst, "mautic_major", 0) or 0),
+                now_ts=now_root,
+            ):
+                return False
+            throttled_active = bool(context.get("throttled_active", False))
+            priority_pending = bool(context.get("priority_pending", False))
+            segment_slot_limit = max(0, int(context.get("segment_slot_limit") or 0))
+            if segment_slot_limit <= 0:
+                return False
+            _total_limit, launch_budget = _segment_pending_dispatch_limits(
+                config,
+                throttled_active,
+                running,
+                root_value,
+                segment_slot_limit=segment_slot_limit,
+                priority_pending=priority_pending,
+                store=store,
+                now_ts=now_root,
+                sql_db_running_count=_segment_sql_worker_count(root_value),
+            )
+            return launch_budget > 0
+
+        def _peek_ready_refill_priority_root() -> str:
+            priority_root = _peek_refill_priority_root()
+            if priority_root and not _refill_priority_root_ready(priority_root):
+                _consume_refill_priority_root(priority_root)
+                return ""
+            return priority_root
+
         _scheduler_set_refill_priority_notifier(_note_refill_priority)
 
         def _relation_map(raw: object) -> dict[int, set[int]]:
@@ -16332,7 +16414,7 @@ def run_loop(
                     if base_installs:
                         start = int(refill_cursor or 0) % len(base_installs)
                         ordered_installs = base_installs[start:] + base_installs[:start]
-                        priority_root = _peek_refill_priority_root()
+                        priority_root = _peek_ready_refill_priority_root()
                         if priority_root:
                             priority_inst = next(
                                 (
@@ -16357,7 +16439,7 @@ def run_loop(
                         root = str(getattr(inst, "root", "") or "").strip()
                         if not root or not getattr(inst, "db", None):
                             continue
-                        priority_root = _peek_refill_priority_root()
+                        priority_root = _peek_ready_refill_priority_root()
                         if (
                             priority_root
                             and priority_root != root
@@ -16653,7 +16735,7 @@ def run_loop(
                         )
                         if launch_budget <= 0:
                             continue
-                        priority_was_root = _peek_refill_priority_root() == root
+                        priority_was_root = _peek_ready_refill_priority_root() == root
                         capacity_before = _refill_root_has_capacity(root)
                         launched_count = _fill_from_ring(
                             ring=deque(pending_order),

@@ -1,3 +1,10 @@
+## 1.5.162 - 2026-10-13
+
+- Make terminal refill hand-offs eligibility-aware: a terminal or paused root
+  with no executable ordinary pending work cannot hold the shared rotation;
+  current cycle/context/launch-budget checks release the notification so other
+  roots continue immediately.
+
 ## 1.5.161 - 2026-10-13
 
 - Keep an unavailable root-local static dependency graph fail-closed at the
