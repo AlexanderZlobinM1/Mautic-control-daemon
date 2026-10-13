@@ -46,6 +46,18 @@ class CampaignDueSqlTests(unittest.TestCase):
             _import_pending_count_sql({"import_pending_count": previous}),
             _DEFAULT_SQL_IMPORT_PENDING_COUNT,
         )
+        self.assertIn("date_ended IS NULL", _DEFAULT_SQL_IMPORT_PENDING_COUNT)
+
+    def test_import_pending_sql_without_terminal_guard_is_migrated(self) -> None:
+        previous = (
+            "SELECT COUNT(*) AS cnt FROM {prefix}imports "
+            "WHERE is_published = 1 AND status IN (1,7)"
+        )
+
+        self.assertEqual(
+            _import_pending_count_sql({"import_pending_count": previous}),
+            _DEFAULT_SQL_IMPORT_PENDING_COUNT,
+        )
 
     def test_legacy_import_pending_sql_with_inclusive_final_line_is_migrated(self) -> None:
         previous = (

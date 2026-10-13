@@ -75,6 +75,11 @@ _CLUSTER_FILE_RSYNC_EXCLUDES = (
 )
 
 _BACKUP_TAR_RUNTIME_EXCLUDES = (
+    # File-list entries are collected from live application trees.  A
+    # transient file (for example a rotating *.bak) can disappear between
+    # list creation and tar opening; GNU tar must skip that race rather than
+    # fail an otherwise complete backup.
+    "--ignore-failed-read",
     "--exclude=.mcd",
     "--exclude=.mcd/*",
     "--exclude=./.mcd",

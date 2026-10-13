@@ -2951,6 +2951,29 @@ class CampaignRingDispatchTests(unittest.TestCase):
         self.assertEqual(recovered, 0)
         db.recover_orphaned_imports.assert_called_once()
 
+    def test_import_pending_preserves_configured_queue_when_status_crosscheck_is_empty(self) -> None:
+        root = "/var/www/s/public_html"
+        db = Mock()
+        db.fetch_count.side_effect = [3, 0]
+        config = SimpleNamespace(sql_import_pending_count="configured import query")
+
+        with patch.object(daemon_mod.time, "time", return_value=1780000000.0):
+            observed = daemon_mod._fetch_import_pending_count(db, config, root, {})
+
+        self.assertEqual(observed, 3)
+        self.assertEqual(db.fetch_count.call_count, 2)
+        self.assertIn(root, daemon_mod._IMPORT_PENDING_OVERRIDE_WARN_TS)
+
+    def test_import_pending_prefers_live_status_crosscheck_when_available(self) -> None:
+        db = Mock()
+        db.fetch_count.side_effect = [1, 2]
+        config = SimpleNamespace(sql_import_pending_count="configured import query")
+
+        self.assertEqual(
+            daemon_mod._fetch_import_pending_count(db, config, "/var/www/s/public_html", {}),
+            2,
+        )
+
     def test_orphaned_import_recovery_requeues_when_cli_worker_is_absent(self) -> None:
         db = SimpleNamespace(recover_orphaned_imports=Mock(return_value=2))
 

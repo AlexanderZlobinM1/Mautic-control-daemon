@@ -1,3 +1,15 @@
+## 1.5.171 - 2026-10-13
+
+- Preserve a positive configured import queue when the read-only status
+  cross-check is temporarily empty; terminal `date_ended` rows are excluded
+  from the default and migrated legacy pending-count SQL.
+- Keep import monitor lifecycle and explicit target-segment follow-ups intact
+  across queued, running, completed, and terminal states.
+- Treat a disappearing live file-list entry as a recoverable backup archive
+  race instead of failing the otherwise complete archive.
+- Keep the existing runtime-only bootstrap/recovery path for legacy agents;
+  ordinary Mautic/PHP work remains non-blocking for MCD updates.
+
 ## 1.5.170 - 2026-10-13
 
 - Make ordinary Mautic 7 closures explicitly rebuild internal parents and

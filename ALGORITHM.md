@@ -4,7 +4,7 @@
 фактическую схему после исправления admission и должен обновляться вместе с
 кодом, тестами и runtime receipt. Документ не является разрешением на
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.170 (follow-up после immutable
+Актуальная редакция этого канона — MCD 1.5.171 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам
@@ -558,7 +558,9 @@ budgets при этом не сливаются.
 cancelled и completed imports остаются видимыми в lane `done`, но их target
 segments не попадают в `active_import_target_ids` и не блокируют ordinary
 segment или import follow-up. SQL-подсчёт pending imports также требует
-`date_ended IS NULL`.
+`date_ended IS NULL`; если профильный configured count положителен, временно
+пустой status cross-check не имеет права обнулить durable pending/follow-up
+состояние — он остаётся диагностическим сигналом до следующего monitor pass.
 
 Только импорт со статусом `queued` или `running` без terminal date может
 зарезервировать явно указанные в `defaults.list` segment targets. Это сохраняет

@@ -4,6 +4,7 @@ import tarfile
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 
 from mcd_agent.backup import _archive_files, _archive_instance_files
 from mcd_agent.models import MauticInstall
@@ -28,6 +29,35 @@ def _contains_mcd_runtime(names: list[str]) -> bool:
 
 
 class BackupArchiveExcludesMcdRuntimeTest(unittest.TestCase):
+    def test_file_list_race_does_not_fail_backup_archive(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "instance"
+            root.mkdir()
+            (root / "index.php").write_text("ok\n", encoding="utf-8")
+            transient = root / "rotating.bak"
+            transient.write_text("temporary\n", encoding="utf-8")
+            out = Path(td) / "backup"
+            out.mkdir()
+            cfg = SimpleNamespace(
+                backup_archive_enabled=True,
+                backup_archive_paths=[str(root)],
+                backup_archive_name="files.tar.gz",
+                backup_dump_timeout_sec=30,
+            )
+
+            original_run = __import__("mcd_agent.backup", fromlist=["_run"])._run
+
+            def delete_before_tar(command: list[str], **kwargs: object):
+                transient.unlink(missing_ok=True)
+                return original_run(command, **kwargs)
+
+            with patch("mcd_agent.backup._run", side_effect=delete_before_tar):
+                _archive_files(cfg, out)
+
+            names = _archive_member_names(out / "files.tar.gz")
+            self.assertTrue(any(name.endswith("/index.php") for name in names), names)
+            self.assertFalse(any(name.endswith("/rotating.bak") for name in names), names)
+
     def test_host_file_archive_excludes_mcd_runtime_dir(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td) / "var" / "www" / "site" / "public_html"

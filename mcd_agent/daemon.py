@@ -13110,11 +13110,19 @@ def _fetch_import_pending_count(
         if now_ts - last_warn >= 300.0:
             _IMPORT_PENDING_OVERRIDE_WARN_TS[str(root)] = now_ts
             logging.warning(
-                "[%s] import pending override returned %s but status query returned 0; treating import queue as empty",
+                "[%s] import pending status query returned 0 while configured queue returned %s; preserving configured queue state",
                 root,
                 configured_count,
             )
-        return 0
+        # The configured query is the profile-bound queue contract.  The
+        # status query is a safety cross-check, not permission to erase a
+        # durable pending/follow-up signal.  A zero here used to clear the
+        # active import cache and could turn the next segment plan into a
+        # false ordinary full scan.  Known legacy queries are normalized to
+        # the terminal-aware default in config.py; for intentional/custom
+        # queries preserve their positive signal until the next monitor pass
+        # can classify the individual row.
+        return max(0, int(configured_count))
     return max(0, int(status_count or configured_count or 0))
 
 
