@@ -27,9 +27,9 @@ input for the bridge only; the active supervisor imports the installed wheel.
 from __future__ import annotations
 
 import argparse
-import base64
 from contextlib import contextmanager
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -44,11 +44,6 @@ from datetime import datetime, timezone
 from typing import Any, Iterator
 
 try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python 3.10 bridge hosts
-    import tomli as tomllib  # type: ignore[no-redef]
-
-try:
     import fcntl
 except ImportError:  # pragma: no cover - the bridge is POSIX-only
     fcntl = None  # type: ignore[assignment]
@@ -57,8 +52,6 @@ except ImportError:  # pragma: no cover - the bridge is POSIX-only
 MANIFEST_NAME = "mcd-runtime-manifest.json"
 MANIFEST_SCHEMA = "mcd-runtime-package-v1"
 RECEIPT_SCHEMA = "mcd-runtime-bootstrap-receipt-v1"
-PROFILE_AUTHORITY_SCHEMA = "mcd-profile-authority-v1"
-PROFILE_SELECTION_FILE = "hardware-profile-selection.json"
 STATE_NAME = "mcd-self-update.json"
 SERVICE_DROPIN_NAME = "99-mcd-runtime-package.conf"
 FORBIDDEN_TOP_LEVEL = {
@@ -432,91 +425,21 @@ def _backup_lock_probe(install_dir: Path, config: Path) -> dict[str, Any]:
     return {"enabled": bool(payload.get("enabled")), "active": False}
 
 
-def _resolve_mutable_config_path_read_only(config: Path) -> Path:
-    """Resolve the writable split-config include without importing the legacy agent."""
-
-    if not config.is_file():
-        return config
-    try:
-        text = config.read_text(encoding="utf-8")
-        if "MCD_CONFIG_ENTRYPOINT v1" not in text:
-            return config
-        raw = tomllib.loads(text)
-    except Exception:
-        return config
-    include = raw.get("include", {}) if isinstance(raw, dict) else {}
-    files_raw = include.get("files", []) if isinstance(include, dict) else []
-    files = files_raw if isinstance(files_raw, list) else [files_raw]
-    resolved: list[Path] = []
-    for item in files:
-        value = str(item or "").strip()
-        if not value:
-            continue
-        candidate = Path(value)
-        if not candidate.is_absolute():
-            candidate = (config.parent / candidate).resolve()
-        if candidate != config:
-            resolved.append(candidate)
-    for candidate in reversed(resolved):
-        if candidate.exists():
-            return candidate
-    return resolved[-1] if resolved else config
-
-
-def _config_files_read_only(config: Path) -> list[dict[str, Any]]:
-    """Describe the entrypoint and recursive include graph without mutation."""
-
-    files: list[dict[str, Any]] = []
-    seen: set[Path] = set()
-
-    def visit(path: Path) -> None:
-        resolved = path.resolve()
-        if resolved in seen:
-            return
-        seen.add(resolved)
-        files.append({"path": str(resolved), "exists": resolved.is_file()})
-        if not resolved.is_file():
-            return
-        try:
-            text = resolved.read_text(encoding="utf-8")
-            if "MCD_CONFIG_ENTRYPOINT v1" not in text:
-                return
-            raw = tomllib.loads(text)
-        except Exception:
-            return
-        include = raw.get("include", {}) if isinstance(raw, dict) else {}
-        files_raw = include.get("files", []) if isinstance(include, dict) else []
-        values = files_raw if isinstance(files_raw, list) else [files_raw]
-        for item in values:
-            value = str(item or "").strip()
-            if not value:
-                continue
-            child = Path(value)
-            if not child.is_absolute():
-                child = resolved.parent / child
-            visit(child)
-
-    visit(config)
-    return files
-
-
 def _capture_profile_authority(install_dir: Path, config: Path) -> dict[str, Any]:
-    """Capture exact pre-bridge profile-selection bytes without legacy imports."""
+    """Capture through the co-transported, stdlib-only authority sidecar."""
 
-    selection_path = install_dir / "var" / PROFILE_SELECTION_FILE
-    selection_exists = selection_path.is_file()
-    selection_bytes = selection_path.read_bytes() if selection_exists else b""
-    return {
-        "schema": PROFILE_AUTHORITY_SCHEMA,
-        "capture_phase": "pre_runtime_install",
-        "config_path": str(config),
-        "config_mutable_path": str(_resolve_mutable_config_path_read_only(config)),
-        "config_files": _config_files_read_only(config),
-        "selection_path": str(selection_path),
-        "selection_exists": selection_exists,
-        "selection_sha256": _sha256(selection_path) if selection_exists else "",
-        "selection_bytes_base64": base64.b64encode(selection_bytes).decode("ascii"),
-    }
+    probe_path = Path(__file__).with_name("mcd_profile_authority_probe.py")
+    if not probe_path.is_file():
+        raise BridgeError(f"profile-authority probe sidecar is missing: {probe_path}")
+    spec = importlib.util.spec_from_file_location("mcd_profile_authority_probe_bridge", probe_path)
+    if spec is None or spec.loader is None:
+        raise BridgeError(f"profile-authority probe sidecar cannot load: {probe_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    try:
+        return module.capture(install_dir=install_dir, config=config)
+    except Exception as exc:  # noqa: BLE001 - convert probe failures to bridge fail-closed errors
+        raise BridgeError(f"profile-authority probe failed: {exc}") from exc
 
 
 def _pause_path(install_dir: Path) -> Path:

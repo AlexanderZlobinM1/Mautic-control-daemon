@@ -34,7 +34,7 @@ def test_bootstrap_capture_reports_exact_split_selection_bytes(tmp_path):
 
     result = bridge._capture_profile_authority(install, entrypoint)
 
-    assert result["schema"] == "mcd-profile-authority-v1"
+    assert result["schema"] == "mcd-profile-authority-probe-v1"
     assert result["capture_phase"] == "pre_runtime_install"
     assert result["config_mutable_path"] == str(local)
     assert result["config_files"] == [
@@ -85,7 +85,7 @@ def test_bootstrap_capture_cli_is_read_only_and_legacy_compatible(tmp_path):
 
     assert result.returncode == 0
     payload = __import__("json").loads(result.stdout)
-    assert payload["schema"] == "mcd-profile-authority-v1"
+    assert payload["schema"] == "mcd-profile-authority-probe-v1"
     assert payload["capture_phase"] == "pre_runtime_install"
     assert payload["selection_exists"] is False
 

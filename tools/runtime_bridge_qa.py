@@ -201,7 +201,7 @@ def main(argv: list[str] | None = None) -> int:
         receipt = bridge.bridge(args_ns)
 
         authority = receipt["before"]["profile_authority"]
-        if authority["schema"] != "mcd-profile-authority-v1":
+        if authority["schema"] != "mcd-profile-authority-probe-v1":
             raise RuntimeError("bridge receipt is missing the profile-authority schema")
         if authority["capture_phase"] != "pre_runtime_install":
             raise RuntimeError("profile authority was not captured before runtime installation")
@@ -238,6 +238,17 @@ def main(argv: list[str] | None = None) -> int:
         failure_install = failure_root / "install"
         (failure_install / "var").mkdir(parents=True)
         (failure_install / "etc").mkdir(parents=True)
+        (failure_install / "etc" / "mcd.toml").write_text(
+            '# MCD_CONFIG_ENTRYPOINT v1\n[include]\nfiles = ["mcd.local.toml"]\n',
+            encoding="utf-8",
+        )
+        (failure_install / "etc" / "mcd.local.toml").write_text(
+            '[profile]\nname = "farm-hiload"\n[hardware]\nprofile = "farm-hiload"\n',
+            encoding="utf-8",
+        )
+        (failure_install / "var" / "hardware-profile-selection.json").write_bytes(
+            b'{"mode":"manual","profile":"farm-hiload"}\n'
+        )
         _write_legacy_source(failure_install, version="1.5.133")
         _run([args.python, "-m", "venv", str(failure_install / "venv")])
         failure_cfg = _cfg(failure_root)

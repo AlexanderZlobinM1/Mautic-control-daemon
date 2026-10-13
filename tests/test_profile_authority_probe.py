@@ -6,6 +6,8 @@ from pathlib import Path
 import subprocess
 import sys
 
+import pytest
+
 
 def _probe_module():
     path = Path(__file__).resolve().parents[1] / "tools" / "mcd_profile_authority_probe.py"
@@ -73,4 +75,32 @@ def test_probe_cli_invocation_is_read_only(tmp_path):
     assert payload["read_only"] is True
     assert payload["selection_exists"] is True
     assert not list(install.rglob("*.tmp"))
+
+
+def test_probe_fails_closed_for_missing_declared_include(tmp_path):
+    probe = _probe_module()
+    install = tmp_path / "mcd"
+    entrypoint = install / "etc" / "mcd.toml"
+    entrypoint.parent.mkdir(parents=True)
+    entrypoint.write_text(
+        '# MCD_CONFIG_ENTRYPOINT v1\n[include]\nfiles = ["missing.toml"]\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(probe.ProbeError, match="missing"):
+        probe.capture(install_dir=install, config=entrypoint)
+
+
+def test_probe_fails_closed_for_malformed_declared_include(tmp_path):
+    probe = _probe_module()
+    install = tmp_path / "mcd"
+    entrypoint = install / "etc" / "mcd.toml"
+    entrypoint.parent.mkdir(parents=True)
+    entrypoint.write_text(
+        '# MCD_CONFIG_ENTRYPOINT v1\n[include]\nfiles = ["broken.toml"\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(probe.ProbeError, match="include.files"):
+        probe.capture(install_dir=install, config=entrypoint)
 
