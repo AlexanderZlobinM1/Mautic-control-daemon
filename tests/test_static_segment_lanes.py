@@ -18,6 +18,7 @@ from mcd_agent.daemon import (
     _segment_static_closure_lock_key,
     _segment_chain_command_args,
     _segment_native_chain_command_plan,
+    _segment_native_projection_disjoint,
     _static_dispatch_dependency_snapshot,
     _segment_static_dependency_outcome,
     _segment_priority_effective_setting,
@@ -174,6 +175,39 @@ class StaticSegmentLaneTests(unittest.TestCase):
         )
         self.assertEqual(command_ids, [58, 59])
         self.assertEqual(excludes, {58: [], 59: [57]})
+
+    def test_mautic7_fresh_super_tick_rebuilds_internal_parent_explicitly(self) -> None:
+        command_ids, excludes = _segment_native_chain_command_plan(
+            [57, 58, 59],
+            {58: {57}, 59: {57}},
+            {57: {58, 59}},
+            rebuild_internal_parents=True,
+        )
+        self.assertEqual(command_ids, [57, 58, 59])
+        self.assertEqual(excludes, {57: [], 58: [57], 59: [57]})
+
+    def test_m7_overlap_requires_disjoint_native_projection(self) -> None:
+        self.assertTrue(
+            _segment_native_projection_disjoint(
+                {19},
+                [22],
+                {22: [19, 20, 21]},
+            )
+        )
+        self.assertFalse(
+            _segment_native_projection_disjoint(
+                {19},
+                [19, 22],
+                {22: [19, 20, 21]},
+            )
+        )
+        self.assertFalse(
+            _segment_native_projection_disjoint(
+                {20},
+                [22],
+                {22: [19]},
+            )
+        )
 
     def test_explicit_empty_native_projection_never_falls_back_to_durable_ids(self) -> None:
         args = _segment_chain_command_args(
@@ -349,9 +383,10 @@ class StaticSegmentLaneTests(unittest.TestCase):
             {58: {57}, 59: {57}},
             {57: {58, 59}},
             already_covered_ids=covered,
+            rebuild_internal_parents=True,
         )
-        self.assertEqual(command_ids, [58, 59])
-        self.assertEqual(excludes, {58: [], 59: [57]})
+        self.assertEqual(command_ids, [57, 58, 59])
+        self.assertEqual(excludes, {57: [], 58: [57], 59: [57]})
 
         # Once the first leaf succeeds, its current static-cycle receipt is
         # enough to keep the shared parent out of the sibling command.
@@ -368,6 +403,7 @@ class StaticSegmentLaneTests(unittest.TestCase):
             {59: {57}},
             {57: {59}},
             already_covered_ids=covered,
+            rebuild_internal_parents=True,
         )
         self.assertEqual(command_ids, [59])
         self.assertEqual(excludes, {59: [57]})
@@ -964,9 +1000,10 @@ class StaticSegmentLaneTests(unittest.TestCase):
                             parents,
                             children,
                             already_covered_ids=set(),
+                            rebuild_internal_parents=True,
                         )
-                        self.assertEqual(command_ids, [58])
-                        self.assertEqual(excludes, {58: []})
+                        self.assertEqual(command_ids, [57, 58])
+                        self.assertEqual(excludes, {57: [], 58: [57]})
                     else:
                         command_ids, excludes = [57, 58], {}
 

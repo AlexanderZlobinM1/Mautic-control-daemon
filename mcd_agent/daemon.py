@@ -3392,6 +3392,7 @@ def _segment_native_chain_command_plan(
     children_by_parent: Mapping[int, Iterable[int]],
     *,
     already_covered_ids: Iterable[int] | None = None,
+    rebuild_internal_parents: bool = False,
 ) -> tuple[list[int], dict[int, list[int]]]:
     """Project one Mautic 7 closure onto native roots and exclusions.
 
@@ -3399,7 +3400,12 @@ def _segment_native_chain_command_plan(
     but native traversal needs two sequential leaf-root commands.  The first
     command covers the shared parent; the second receives a repeatable
     ``--exclude=21`` so the parent is not rebuilt again.  Durable claims still
-    include every member of the closure.
+    include every member of the closure.  A fresh super-priority tick may set
+    ``rebuild_internal_parents``: Mautic's native ``-i <leaf>`` command reads
+    a lead-list dependency but does not refresh the dependency's own
+    ``last_built_date``.  In that mode each internal ancestor is an explicit
+    first command, and later leaves exclude only ancestors already rebuilt in
+    this same native projection.
     """
 
     ordered: list[int] = []
@@ -3436,7 +3442,17 @@ def _segment_native_chain_command_plan(
             continue
         if sid > 0:
             covered.add(sid)
-    command_roots = [sid for sid in roots if sid not in covered]
+    if rebuild_internal_parents:
+        # Preserve the dependency-first order used by the existing expansion
+        # helper, but project it back onto this claimed component.  This is
+        # deliberately a per-tick projection: callers must not pass durable
+        # coverage from an earlier super cycle as ``already_covered_ids``.
+        expanded = dependency_expanded_segment_plan(roots, dict(parents_by_child or {}))
+        command_order = [sid for sid in expanded if sid in component]
+        command_order.extend(sid for sid in ordered if sid not in command_order)
+    else:
+        command_order = roots
+    command_roots = [sid for sid in command_order if sid not in covered]
     excludes: dict[int, list[int]] = {}
     for sid in command_roots:
         ancestors = dependency_segment_closure({int(sid)}, dict(parents_by_child or {}))
@@ -3444,6 +3460,41 @@ def _segment_native_chain_command_plan(
         covered.update(ancestors)
         covered.add(int(sid))
     return command_roots, excludes
+
+
+def _segment_native_projection_disjoint(
+    active_ids: Iterable[object],
+    command_ids: Iterable[object],
+    excludes_by_entity: Mapping[int, Iterable[object]] | None,
+) -> bool:
+    """Prove an allowed M7 overlap has disjoint native rebuild projections.
+
+    Static durable closures may overlap while a fresh super tick rebuilds a
+    parent and a weaker leaf uses the already verified ``--exclude`` list.
+    The flock may be narrowed only when every active overlap is excluded from
+    the weaker native commands and no active ID is itself a command root.
+    """
+
+    active = {
+        int(value)
+        for value in active_ids
+        if str(value).strip().lstrip("-").isdigit() and int(value) > 0
+    }
+    commands = {
+        int(value)
+        for value in command_ids
+        if str(value).strip().lstrip("-").isdigit() and int(value) > 0
+    }
+    if not active or active & commands:
+        return False
+    excluded: set[int] = set()
+    for values in (excludes_by_entity or {}).values():
+        excluded.update(
+            int(value)
+            for value in values
+            if str(value).strip().lstrip("-").isdigit() and int(value) > 0
+        )
+    return active <= excluded
 
 
 def _segment_cycle_sync(
@@ -17385,6 +17436,9 @@ def run_loop(
                                 static_parents,
                                 static_children,
                                 already_covered_ids=static_already_covered_ids,
+                                rebuild_internal_parents=(
+                                    lane_name == _SEGMENT_SUPER_PRIORITY_LANE
+                                ),
                             )
                             if any(static_native_excludes.values()) and not _segment_native_exclude_capability(
                                 store,
@@ -17470,9 +17524,31 @@ def run_loop(
                             active_overlap = candidate_related & active_ids
                             allow_covered_m7_overlap = bool(
                                 active_overlap
-                                and active_overlap <= set(static_already_covered_ids)
-                                and static_native_command_ids
+                                and _segment_native_projection_disjoint(
+                                    active_overlap,
+                                    static_native_command_ids or (),
+                                    static_native_excludes,
+                                )
                             )
+                            if allow_covered_m7_overlap:
+                                logging.info(
+                                    "[%s] static native projection overlap allowed lane=%s "
+                                    "active=%s commands=%s excludes=%s",
+                                    root,
+                                    lane_name,
+                                    ",".join(str(value) for value in sorted(active_overlap)),
+                                    ",".join(str(value) for value in static_native_command_ids or ()),
+                                    ",".join(
+                                        str(value)
+                                        for value in sorted(
+                                            {
+                                                int(item)
+                                                for values in static_native_excludes.values()
+                                                for item in values
+                                            }
+                                        )
+                                    ),
+                                )
                         if closure_conflict and not allow_covered_m7_overlap:
                             continue
                         if priority_executor.active_count(root, {task_type}) >= max_parallel:

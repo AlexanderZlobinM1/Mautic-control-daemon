@@ -4,7 +4,7 @@
 фактическую схему после исправления admission и должен обновляться вместе с
 кодом, тестами и runtime receipt. Документ не является разрешением на
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.165 (follow-up после immutable
+Актуальная редакция этого канона — MCD 1.5.166 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам
@@ -13,6 +13,13 @@ chunk. Recurring super-priority admission сохраняет резерв для
 ordinary cycle. Active dedicated super-priority work не вычитается из ordinary
 shared capacity: постоянный super-ring не может голодать обычный tail; обычная
 priority остаётся частью shared regular accounting.
+
+Каждый новый Mautic 7 super-priority tick обязан нативно перестроить каждый
+внутренний parent отдельной первой командой; terminal leaves получают
+`--exclude` только для parent-ов, уже перестроенных в этом же native
+projection. Исторический `successful_coverage` разрешает безопасный handoff
+priority только через доказанно непересекающийся native projection и никогда
+не подавляет parent свежего super-tick.
 
 При materialization instance rows bare modern empty `segments: []` не очищает
 непустой legacy whitelist: IDs переносятся в canonical priority lane. Очистка

@@ -1,3 +1,14 @@
+## 1.5.166 - 2026-10-13
+
+- Make every fresh Mautic 7 super-priority tick rebuild its internal parents
+  with explicit native commands before terminal leaves; `--exclude` is now
+  limited to parents already rebuilt in that same projection. Historical
+  successful coverage cannot suppress a fresh super parent.
+- Allow a weaker Mautic 7 leaf to overlap a running stronger closure only when
+  its native command IDs and explicit `--exclude` projection prove that no
+  active native rebuild ID is shared; the durable closure lock remains strict
+  otherwise.
+
 ## 1.5.165 - 2026-10-13
 
 - Reconcile persisted priority and super-priority lanes independently. A
