@@ -4,7 +4,7 @@
 фактическую схему после исправления admission и должен обновляться вместе с
 кодом, тестами и runtime receipt. Документ не является разрешением на
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.155 (follow-up после immutable
+Актуальная редакция этого канона — MCD 1.5.156 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам
@@ -398,17 +398,30 @@ config на его profile baseline и только после этого при
 Статические queues строятся отдельно: общие dependencies двух линий принадлежат
 линии с более высоким precedence и выполняются ровно один раз. Например,
 `super-priority 58` и `priority 59` с общим parent 57 дают единый plan `57,
-58` в super и `59` в priority на Mautic ≤6. Для Mautic 7 правило строгое:
-MCD планирует и запускает только опубликованные terminal/root IDs, а каждый
-root запускается не более одного раза в своей lane. Общий parent 57 не
-создаётся отдельной MCD task и не дублируется между sibling commands; его
-покрытие допускается только внутри native Mautic closure. Source/CLI и
-TaskStore receipt обязаны фиксировать deduplicated root plan и union closure,
-без неоднозначного ручного подтверждения алгоритма. Пересекающиеся native
-closures (например sibling `58`/`59` через parent `57`) получают одну
-execution ownership/slot на всю closure и выполняются последовательными
-native commands с deduplicated parent coverage; независимые closures сохраняют
-параллелизм.
+58` в super и `59` в priority на Mautic ≤6. Для Mautic 7 persisted static
+ownership также содержит полный ancestor closure: при `super=[58,59]` parent
+57 исключается из ordinary/priority, но command plan остаётся `[58,59]` как
+native leaf roots. Parent 57 не создаётся отдельным MCD process/TaskStore
+worker; его terminal coverage фиксируется только фактическим результатом
+super closure. Если parent был уже frozen/pending в ordinary cycle до
+обновления графа, static terminal callback reconciles эту durable assignment
+по фактическому success/error receipt — без synthetic-done и без вечного
+pending исключённого ID. Source/CLI и TaskStore receipt обязаны фиксировать
+deduplicated root plan, union ownership closure и native command roots.
+Пересекающиеся native closures (например sibling `58`/`59` через parent `57`)
+получают одну execution ownership/slot на всю closure и выполняются
+последовательными native commands с deduplicated parent coverage; независимые
+closures сохраняют параллелизм.
+
+Static closure attempts используют ту же effective inclusive
+`segment_retry_count` policy профиля: `3` означает максимум три реальных
+Mautic starts для текущей closure assignment. `flock` rc=75 не является
+Mautic start и не расходует попытку; он только освобождает claim. Ненулевой
+Mautic result до exhaustion освобождает claim для следующего запуска, а
+переход в `errors`/красный terminal receipt происходит только на последней
+попытке. Успешный closure callback закрывает только те IDs, которые были
+фактически assigned в захваченном ordinary cycle generation; static-only
+members и новый cycle старым callback не переписываются.
 
 ### Reconcile persisted static claims after restart/update
 

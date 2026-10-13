@@ -168,10 +168,12 @@ from mcd_agent.static_segment_lanes import (
     SCHEMA as _STATIC_SEGMENT_LANES_SCHEMA,
     SUPER_PRIORITY as _SEGMENT_SUPER_PRIORITY_LANE,
     build_lane_plans as _build_static_segment_lane_plans,
+    attempt_count as _static_lane_attempt_count,
     claim_item as _static_lane_claim_item,
     mark_running as _static_lane_mark_running,
     mark_terminal as _static_lane_mark_terminal,
     pending_items as _static_lane_pending_items,
+    record_attempt as _static_lane_record_attempt,
     reconcile_state as _static_lane_reconcile_state,
     release_claim as _static_lane_release_claim,
     state_key as _static_lane_state_key,
@@ -3662,6 +3664,7 @@ def _scheduler_persisted_pending_roots(
             excluded = set(_normalize_segment_ids(context.get("blocked_ids")))
             excluded.update(_normalize_segment_ids(context.get("sql_managed_ids")))
             excluded.update(_normalize_segment_ids(context.get("static_configured_ids")))
+            excluded.update(_normalize_segment_ids(context.get("static_owned_ids")))
             pending_ids.difference_update(excluded)
         if pending_ids:
             pending_roots.add(root)
@@ -3716,11 +3719,31 @@ def _segment_cycle_claim(
         return claimed
 
 
-def _segment_cycle_release(store: "TaskStore", *, root: str, entity_id: int, now_ts: float) -> None:
+def _segment_cycle_release(
+    store: "TaskStore",
+    *,
+    root: str,
+    entity_id: int,
+    now_ts: float,
+    expected_cycle_id: str | None = None,
+) -> None:
     key = _segment_cycle_key(root)
     with _SEGMENT_CYCLE_LOCK:
+        raw_state = store.get_runtime_sync(key)
+        if not isinstance(raw_state, Mapping):
+            return
+        current_cycle_id = str(raw_state.get("cycle_id") or "").strip()
+        if expected_cycle_id and current_cycle_id != str(expected_cycle_id).strip():
+            return
+        members = set(
+            _normalize_segment_ids(
+                [*(raw_state.get("items") or []), *(raw_state.get("follow_up") or [])]
+            )
+        )
+        if int(entity_id) not in members:
+            return
         state = _segment_cycle_release_claim(
-            store.get_runtime_sync(key),
+            raw_state,
             entity_id=int(entity_id),
             now_ts=now_ts,
         )
@@ -3748,11 +3771,25 @@ def _segment_cycle_terminal(
     success: bool,
     note: str | None,
     now_ts: float,
+    expected_cycle_id: str | None = None,
 ) -> None:
     key = _segment_cycle_key(root)
     with _SEGMENT_CYCLE_LOCK:
+        raw_state = store.get_runtime_sync(key)
+        if not isinstance(raw_state, Mapping):
+            return
+        current_cycle_id = str(raw_state.get("cycle_id") or "").strip()
+        if expected_cycle_id and current_cycle_id != str(expected_cycle_id).strip():
+            return
+        members = set(
+            _normalize_segment_ids(
+                [*(raw_state.get("items") or []), *(raw_state.get("follow_up") or [])]
+            )
+        )
+        if int(entity_id) not in members:
+            return
         state = _segment_cycle_mark_terminal(
-            store.get_runtime_sync(key),
+            raw_state,
             entity_id=int(entity_id),
             success=bool(success),
             note=note,
@@ -4356,6 +4393,7 @@ def _make_static_segment_callbacks(
     command_str: str,
     timeout_sec: int,
     segment_dispatch_wakeup: threading.Event,
+    max_attempts: int,
 ) -> tuple[Callable[[int], None], Callable[[int | None], None]]:
     """Bind one static lane's complete lifecycle to its creation context.
 
@@ -4375,6 +4413,20 @@ def _make_static_segment_callbacks(
     callback_started_at = float(started_at)
     callback_command = str(command_str)
     callback_timeout = int(timeout_sec)
+    callback_max_attempts = max(1, int(max_attempts or 1))
+    callback_cycle_id = ""
+    callback_ordinary_ids: frozenset[int] = frozenset()
+    try:
+        cycle_state = store.get_runtime_sync(_segment_cycle_key(callback_root))
+    except Exception:
+        cycle_state = None
+    if isinstance(cycle_state, Mapping):
+        callback_cycle_id = str(cycle_state.get("cycle_id") or "").strip()
+        callback_ordinary_ids = frozenset(
+            _normalize_segment_ids(
+                [*(cycle_state.get("items") or []), *(cycle_state.get("follow_up") or [])]
+            )
+        )
 
     def marker_task(
         pid: int,
@@ -4417,36 +4469,103 @@ def _make_static_segment_callbacks(
         )
 
     def on_complete(rc: int | None) -> None:
-        note = None if rc == 0 else (
-            "task_lock_busy" if rc == _TASK_LOCK_BUSY_RC else "static_segment_error"
-        )
+        lock_busy = rc == _TASK_LOCK_BUSY_RC
+        success = rc == 0
+        note = None if success else ("task_lock_busy" if lock_busy else "static_segment_error")
+        retryable_failure = not success and not lock_busy
         terminal_at = time.time()
+        attempts = 0
+        if not lock_busy:
+            # The executor's rc=75 is the flock wrapper's pre-start result and
+            # must not consume a Mautic attempt. Every other completed command
+            # result is one real start under the existing inclusive profile
+            # retry policy.
+            with _SEGMENT_STATIC_LANE_LOCK:
+                static_state = store.get_runtime_sync(_static_lane_state_key(callback_root)) or {}
+                for chain_id in callback_chain_ids:
+                    static_state = _static_lane_record_attempt(
+                        static_state,
+                        lane=callback_lane,
+                        entity_id=int(chain_id),
+                        now_ts=terminal_at,
+                    )
+                store.put_runtime_sync(_static_lane_state_key(callback_root), static_state)
+                attempts = max(
+                    (
+                        _static_lane_attempt_count(
+                            static_state,
+                            lane=callback_lane,
+                            entity_id=int(chain_id),
+                        )
+                        for chain_id in callback_chain_ids
+                    ),
+                    default=0,
+                )
+        retry_pending = retryable_failure and attempts < callback_max_attempts
+        if retry_pending:
+            note = "static_segment_error_retry"
         for chain_id in callback_chain_ids:
             _segment_runtime_marker_write(
                 store,
                 marker_task(0, entity_id=int(chain_id)),
-                status="terminal",
+                status="released" if lock_busy or retry_pending else "terminal",
                 now_ts=terminal_at,
                 note=note,
                 pid=0,
                 command_str=callback_command,
             )
-            _static_lane_terminal(
-                store,
-                root=callback_root,
-                lane=callback_lane,
-                entity_id=int(chain_id),
-                success=bool(rc == 0),
-                note=note,
-                now_ts=terminal_at,
-            )
-            _mark_segment_finished(callback_root, int(chain_id), now_ts=terminal_at)
+            if lock_busy or retry_pending:
+                # flock returned before the Mautic command started, or the
+                # existing inclusive profile attempt budget still permits a
+                # retry. Release the durable claim so the same static ring can
+                # retry; neither outcome is a terminal ordinary error.
+                _static_lane_release(
+                    store,
+                    root=callback_root,
+                    lane=callback_lane,
+                    entity_id=int(chain_id),
+                    now_ts=terminal_at,
+                )
+                if int(chain_id) in callback_ordinary_ids:
+                    _segment_cycle_release(
+                        store,
+                        root=callback_root,
+                        entity_id=int(chain_id),
+                        now_ts=terminal_at,
+                        expected_cycle_id=callback_cycle_id,
+                    )
+            else:
+                _static_lane_terminal(
+                    store,
+                    root=callback_root,
+                    lane=callback_lane,
+                    entity_id=int(chain_id),
+                    success=success,
+                    note=note,
+                    now_ts=terminal_at,
+                )
+                # A static closure can own a parent that was already admitted
+                # in the frozen ordinary cycle before the ownership graph was
+                # refreshed. Reconcile that durable assignment from the
+                # actual success/error receipt; never synthetic-done it during
+                # planning and never leave the excluded parent pending.
+                if int(chain_id) in callback_ordinary_ids:
+                    _segment_cycle_terminal(
+                        store,
+                        root=callback_root,
+                        entity_id=int(chain_id),
+                        success=success,
+                        note=note,
+                        now_ts=terminal_at,
+                        expected_cycle_id=callback_cycle_id,
+                    )
+                _mark_segment_finished(callback_root, int(chain_id), now_ts=terminal_at)
         _segment_chain_runtime_write(
             store,
             root=callback_root,
             owner_id=callback_owner_id,
             entity_ids=callback_chain_ids,
-            status="terminal",
+            status="released" if lock_busy or retry_pending else "terminal",
             now_ts=terminal_at,
             task=marker_task(0, command_override=callback_command),
         )
@@ -14977,6 +15096,16 @@ def run_loop(
             segment_dependencies_by_root[root] = dependency_children
             segment_parents_by_root[root] = dependency_parents
             static_excluded = set(static_configured)
+            persisted_static_state = store.get_runtime_sync(_static_lane_state_key(root)) or {}
+            persisted_static_lanes = (
+                persisted_static_state.get("lanes")
+                if isinstance(persisted_static_state, Mapping)
+                else {}
+            )
+            if isinstance(persisted_static_lanes, Mapping):
+                for lane_payload in persisted_static_lanes.values():
+                    if isinstance(lane_payload, Mapping):
+                        static_excluded.update(_normalize_segment_ids(lane_payload.get("items")))
             static_plans = _build_static_segment_lane_plans(
                 super_priority_ids=_segment_super_priority_effective_setting(config, inst),
                 priority_ids=_segment_priority_effective_setting(config, inst),
@@ -15128,6 +15257,7 @@ def run_loop(
                 "blocked_ids": sorted(blocked_ids),
                 "sql_managed_ids": sorted(sql_ids),
                 "static_configured_ids": sorted(static_configured),
+                "static_owned_ids": sorted(static_excluded),
                 "static_active_ids": sorted(static_active),
                 "active_import_target_ids": sorted(import_targets),
                 "parents_by_child": {str(k): sorted(v) for k, v in dependency_parents.items()},
@@ -15176,6 +15306,8 @@ def run_loop(
                     "sql_managed_ids": sorted(sql_ids)[:100],
                     "static_configured_count": len(static_configured),
                     "static_configured_ids": sorted(static_configured)[:100],
+                    "static_owned_count": len(static_excluded),
+                    "static_owned_ids": sorted(static_excluded)[:100],
                     "static_active_count": len(static_active),
                     "db_pause_until": float(db_dispatch_pause_until.get(root, 0.0) or 0.0),
                     "db_pause_reason": str(db_dispatch_pause_reasons.get(root, "") or ""),
@@ -15607,8 +15739,22 @@ def run_loop(
                         blocked_ids = set(_normalize_segment_ids(context.get("blocked_ids")))
                         sql_ids = set(_normalize_segment_ids(context.get("sql_managed_ids")))
                         static_ids = set(_normalize_segment_ids(context.get("static_configured_ids")))
+                        # ``static_configured_ids`` is the operator-facing
+                        # seed list.  Persisted Mautic 7 ownership also
+                        # contains inherited parents, so a restart/refill
+                        # must exclude the durable closure rather than only
+                        # the configured leaves.  Read both the context and
+                        # the lane state; either survives a supervisor
+                        # restart and neither changes profile/config/data.
+                        static_ids.update(_normalize_segment_ids(context.get("static_owned_ids")))
                         static_ids |= _segment_priority_effective_setting(config, inst)
                         static_ids |= _segment_super_priority_effective_setting(config, inst)
+                        static_state = store.get_runtime_sync(_static_lane_state_key(root)) or {}
+                        static_lanes = static_state.get("lanes") if isinstance(static_state, Mapping) else {}
+                        if isinstance(static_lanes, Mapping):
+                            for lane_payload in static_lanes.values():
+                                if isinstance(lane_payload, Mapping):
+                                    static_ids.update(_normalize_segment_ids(lane_payload.get("items")))
                         excluded_ids = sql_ids | static_ids
                         pending_order = (
                             _segment_cycle_pending_order(state, excluded_ids=excluded_ids)
@@ -15736,7 +15882,6 @@ def run_loop(
                         parents_by_child = _relation_map(context.get("parents_by_child"))
                         children_by_parent = _relation_map(context.get("children_by_parent"))
                         static_active_ids = set(_normalize_segment_ids(context.get("static_active_ids")))
-                        static_state = store.get_runtime_sync(_static_lane_state_key(root)) or {}
                         lanes = static_state.get("lanes") if isinstance(static_state, Mapping) else {}
                         if isinstance(lanes, Mapping):
                             for lane_payload in lanes.values():
@@ -16403,6 +16548,10 @@ def run_loop(
                             command_str=static_command_str,
                             timeout_sec=static_timeout_sec,
                             segment_dispatch_wakeup=segment_dispatch_wakeup,
+                            max_attempts=max(
+                                1,
+                                int(getattr(cfg, "segment_retry_count", 2) or 0),
+                            ),
                         )
 
                         started = priority_executor.launch(
@@ -18149,6 +18298,16 @@ def run_loop(
                     dep_rows: list[dict[str, object]] = []
                     source_snapshot: Mapping[object, object] | None = None
                     static_excluded_ids = set(segment_static_ids_for_inst)
+                    persisted_static_state = store.get_runtime_sync(_static_lane_state_key(root)) or {}
+                    persisted_static_lanes = (
+                        persisted_static_state.get("lanes")
+                        if isinstance(persisted_static_state, Mapping)
+                        else {}
+                    )
+                    if isinstance(persisted_static_lanes, Mapping):
+                        for lane_payload in persisted_static_lanes.values():
+                            if isinstance(lane_payload, Mapping):
+                                static_excluded_ids.update(_normalize_segment_ids(lane_payload.get("items")))
                     previous_cycle_payload = store.get_runtime_sync(_segment_cycle_key(root)) or {}
                     if not isinstance(previous_cycle_payload, Mapping):
                         previous_cycle_payload = {}
@@ -19580,12 +19739,26 @@ def run_loop(
                     root,
                     ",".join(str(sid) for sid in reconciled_orphan_ids),
                 )
+            static_lane_payload = store.get_runtime_sync(_static_lane_state_key(root)) or {}
+            static_lane_active_ids: set[int] = set()
+            static_lane_owned_ids: set[int] = set(segment_static_ids_for_inst)
+            static_lanes_payload = static_lane_payload.get("lanes") if isinstance(static_lane_payload, dict) else {}
+            if isinstance(static_lanes_payload, dict):
+                for lane_payload in static_lanes_payload.values():
+                    if not isinstance(lane_payload, dict):
+                        continue
+                    static_lane_owned_ids.update(_normalize_segment_ids(lane_payload.get("items")))
+                    static_lane_active_ids.update(
+                        int(value)
+                        for value in [*(lane_payload.get("claimed") or []), *(lane_payload.get("running") or [])]
+                        if str(value).strip().isdigit() and int(value) > 0
+                    )
             segment_cycle_payload, terminalized_data_errors = _terminalize_segment_data_errors(
                 store,
                 root=root,
                 state=segment_cycle_payload,
                 terminal_notes=segment_logical_data_error_notes.get(root, {}),
-                excluded_ids=sql_managed_segment_ids | set(segment_static_ids_for_inst),
+                excluded_ids=sql_managed_segment_ids | static_lane_owned_ids,
                 now_ts=time.time(),
             )
             if terminalized_data_errors:
@@ -19602,22 +19775,10 @@ def run_loop(
             )
             persisted_pending_cycle_order = _segment_cycle_pending_order(
                 segment_cycle_payload,
-                excluded_ids=sql_managed_segment_ids | set(segment_static_ids_for_inst),
+                excluded_ids=sql_managed_segment_ids | static_lane_owned_ids,
             )
             persisted_pending_cycle_ids = set(persisted_pending_cycle_order)
             eligible_pending_cycle_ids = _segment_cycle_pending_ids(segment_cycle_payload)
-            static_lane_payload = store.get_runtime_sync(_static_lane_state_key(root)) or {}
-            static_lane_active_ids: set[int] = set()
-            static_lanes_payload = static_lane_payload.get("lanes") if isinstance(static_lane_payload, dict) else {}
-            if isinstance(static_lanes_payload, dict):
-                for lane_payload in static_lanes_payload.values():
-                    if not isinstance(lane_payload, dict):
-                        continue
-                    static_lane_active_ids.update(
-                        int(value)
-                        for value in [*(lane_payload.get("claimed") or []), *(lane_payload.get("running") or [])]
-                        if str(value).strip().isdigit() and int(value) > 0
-                    )
             segment_cycle_ids = set(
                 _normalize_segment_ids(
                     [
@@ -19803,7 +19964,7 @@ def run_loop(
                 if cluster_cron_allowed and config.segment_mode != "classic_loop":
                     durable_pending_order = _segment_cycle_pending_order(
                         segment_cycle_payload,
-                        excluded_ids=sql_managed_segment_ids | set(segment_static_ids_for_inst),
+                        excluded_ids=sql_managed_segment_ids | static_lane_owned_ids,
                     )
                     segment_queued_ids = _unique_positive_ids(
                         _monitor_visible_queued_ids(
@@ -20030,6 +20191,7 @@ def run_loop(
                     "blocked_ids": sorted(int(value) for value in segment_blocked_ids if int(value) > 0),
                     "sql_managed_ids": sorted(int(value) for value in sql_managed_segment_ids if int(value) > 0),
                     "static_configured_ids": sorted(int(value) for value in segment_static_ids_for_inst if int(value) > 0),
+                    "static_owned_ids": sorted(int(value) for value in static_lane_owned_ids if int(value) > 0),
                     "static_active_ids": sorted(int(value) for value in static_lane_active_ids if int(value) > 0),
                     "active_import_target_ids": sorted(int(value) for value in active_import_target_ids if int(value) > 0),
                     "parents_by_child": parents,
@@ -20103,6 +20265,8 @@ def run_loop(
                     "sql_managed_ids": sorted(sql_managed_segment_ids)[:100],
                     "static_configured_count": len(segment_static_ids_for_inst),
                     "static_configured_ids": sorted(segment_static_ids_for_inst)[:100],
+                    "static_owned_count": len(static_lane_owned_ids),
+                    "static_owned_ids": sorted(static_lane_owned_ids)[:100],
                     "static_active_count": len(static_lane_active_ids),
                     "running_segment": _running_count(running, root, "segment"),
                     "running_import": _running_count(running, root, "import"),
@@ -20136,7 +20300,7 @@ def run_loop(
                         len(persisted_pending_cycle_ids),
                         len(blocked_pending_ids),
                         len(sql_managed_segment_ids),
-                        len(segment_static_ids_for_inst),
+                        len(static_lane_owned_ids),
                         bool(db_pause_until > now),
                         total_limit,
                         launch_budget,

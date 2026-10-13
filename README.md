@@ -8,14 +8,16 @@ MCD (MauticControlDaemon) is a host-level service that can run in two modes:
 
 ## Current capabilities
 
-- Mautic 7 dependency planning preserves every published due customer-visible
-  segment as explicit work. A terminal lead-list dependency may serialize the
-  chain but never counts the referenced segment as rebuilt or removes it from
-  the scheduler plan; a connected overlapping closure uses one TaskStore/PID
-  and sequential native leaf-root commands, while a read-only native help
-  capability check enables repeatable `--exclude=<covered-parent>` options so
-  successful parent rebuilds are counted once. Independent closures retain
-  independent workers.
+- Mautic 7 dependency planning preserves every ordinary published due
+  customer-visible segment as explicit work. Static priority/super-priority
+  lanes own their full dependency closure for exclusion and durable claims,
+  while native execution still uses only leaf-root commands in one worker;
+  inherited parents never leak back into ordinary or run as a second process.
+  A terminal lead-list dependency may serialize the chain but never counts the
+  referenced segment as rebuilt until the actual closure receipt succeeds; a
+  read-only native help capability check enables repeatable
+  `--exclude=<covered-parent>` options so successful parent rebuilds are
+  counted once. Independent closures retain independent workers.
 - Mautic 6 and older dependency closures are admitted as one topological
   chain worker: the whole deduplicated fork/diamond shares one TaskStore
   running row/PID, while independent closures retain independent workers.

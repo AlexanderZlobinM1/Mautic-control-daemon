@@ -10,6 +10,7 @@ from mcd_agent.daemon import (
     _manual_static_lane_for_ids,
     _segment_static_closure_conflict,
     _segment_static_closure_lock_key,
+    _segment_native_chain_command_plan,
     _segment_priority_effective_setting,
     _segment_super_priority_effective_setting,
     _static_lane_runtime_evidence,
@@ -45,6 +46,7 @@ class StaticSegmentLaneTests(unittest.TestCase):
             command_str="A-command",
             timeout_sec=60,
             segment_dispatch_wakeup=wakeup,
+            max_attempts=3,
         )
         start_b, _complete_b = daemon._make_static_segment_callbacks(
             store=store,
@@ -57,6 +59,7 @@ class StaticSegmentLaneTests(unittest.TestCase):
             command_str="B-command",
             timeout_sec=60,
             segment_dispatch_wakeup=wakeup,
+            max_attempts=3,
         )
 
         with patch.object(daemon, "_pid_start_time", return_value=None):
@@ -123,7 +126,7 @@ class StaticSegmentLaneTests(unittest.TestCase):
         self.assertEqual(plans[PRIORITY], [59])
         self.assertEqual(sum(item == 57 for lane in plans.values() for item in lane), 1)
 
-    def test_mautic7_sibling_terminals_do_not_schedule_internal_parent(self) -> None:
+    def test_mautic7_sibling_terminals_own_internal_parent_without_scheduling_it_alone(self) -> None:
         plans = build_lane_plans(
             super_priority_ids=[58, 59],
             priority_ids=[],
@@ -131,8 +134,240 @@ class StaticSegmentLaneTests(unittest.TestCase):
             children_by_parent={57: {58, 59}},
             mautic_major=7,
         )
-        self.assertEqual(plans[SUPER_PRIORITY], [58, 59])
-        self.assertNotIn(57, plans[SUPER_PRIORITY])
+        self.assertEqual(plans[SUPER_PRIORITY], [57, 58, 59])
+        self.assertNotIn(57, plans[PRIORITY])
+
+    def test_mautic7_shared_parent_is_owned_by_super_over_priority(self) -> None:
+        plans = build_lane_plans(
+            super_priority_ids=[58],
+            priority_ids=[59],
+            parents_by_child={58: {57}, 59: {57}},
+            children_by_parent={57: {58, 59}},
+            mautic_major=7,
+        )
+        self.assertEqual(plans[SUPER_PRIORITY], [57, 58])
+        self.assertEqual(plans[PRIORITY], [59])
+        self.assertEqual(sum(item == 57 for lane in plans.values() for item in lane), 1)
+
+    def test_mautic7_full_ownership_keeps_native_commands_on_leaf_roots(self) -> None:
+        command_ids, excludes = _segment_native_chain_command_plan(
+            [57, 58, 59],
+            {58: {57}, 59: {57}},
+            {57: {58, 59}},
+        )
+        self.assertEqual(command_ids, [58, 59])
+        self.assertEqual(excludes, {58: [], 59: [57]})
+
+    def test_static_success_reconciles_preexisting_frozen_ordinary_parent(self) -> None:
+        store = daemon.TaskStore(":memory:")
+        root = "/var/www/m7/public_html"
+        cycle, _added, _started = daemon._segment_cycle_sync(
+            store,
+            root=root,
+            planned_ids=[57],
+            never_built_ids=[],
+            running_ids=[],
+            excluded_ids=[],
+            now_ts=100.0,
+        )
+        self.assertIn(57, daemon._segment_cycle_pending_order(cycle))
+        _on_start, on_complete = daemon._make_static_segment_callbacks(
+            store=store,
+            root=root,
+            task_type="segment_super_priority",
+            lane_name=SUPER_PRIORITY,
+            segment_id=58,
+            chain_ids=(58, 59, 57),
+            started_at=100.0,
+            command_str="native-super-closure",
+            timeout_sec=60,
+            segment_dispatch_wakeup=threading.Event(),
+            max_attempts=3,
+        )
+        on_complete(0)
+        reconciled = store.get_runtime_sync(daemon._segment_cycle_key(root))
+        self.assertIn(57, reconciled["done"])
+        self.assertNotIn(58, reconciled["done"])
+        self.assertNotIn(59, reconciled["done"])
+        self.assertNotIn(57, daemon._segment_cycle_pending_order(reconciled, excluded_ids=[57]))
+        store.close()
+
+    def test_static_callback_does_not_reconcile_a_new_ordinary_cycle(self) -> None:
+        store = daemon.TaskStore(":memory:")
+        root = "/var/www/m7/public_html"
+        first_cycle, _added, _started = daemon._segment_cycle_sync(
+            store,
+            root=root,
+            planned_ids=[57, 100],
+            never_built_ids=[],
+            running_ids=[],
+            excluded_ids=[],
+            now_ts=100.0,
+        )
+        _on_start, on_complete = daemon._make_static_segment_callbacks(
+            store=store,
+            root=root,
+            task_type="segment_super_priority",
+            lane_name=SUPER_PRIORITY,
+            segment_id=58,
+            chain_ids=(58, 59, 57),
+            started_at=100.0,
+            command_str="native-super-closure",
+            timeout_sec=60,
+            segment_dispatch_wakeup=threading.Event(),
+            max_attempts=3,
+        )
+        old_cycle = dict(first_cycle)
+        old_cycle.update({"status": "terminal", "done": [57, 100], "claimed": [], "running": []})
+        store.put_runtime_sync(daemon._segment_cycle_key(root), old_cycle)
+        new_cycle, _added, started_new = daemon._segment_cycle_sync(
+            store,
+            root=root,
+            planned_ids=[57, 100],
+            never_built_ids=[],
+            running_ids=[],
+            excluded_ids=[],
+            now_ts=101.0,
+        )
+        self.assertTrue(started_new)
+        self.assertNotEqual(new_cycle["cycle_id"], first_cycle["cycle_id"])
+        on_complete(0)
+        current = store.get_runtime_sync(daemon._segment_cycle_key(root))
+        self.assertEqual(current["cycle_id"], new_cycle["cycle_id"])
+        self.assertNotIn(57, current.get("done", []))
+        self.assertNotIn(58, current.get("done", []))
+        self.assertNotIn(59, current.get("done", []))
+        store.close()
+
+    def test_static_lock_busy_releases_frozen_parent_without_terminalizing_it(self) -> None:
+        store = daemon.TaskStore(":memory:")
+        root = "/var/www/m7/public_html"
+        cycle, _added, _started = daemon._segment_cycle_sync(
+            store,
+            root=root,
+            planned_ids=[57],
+            never_built_ids=[],
+            running_ids=[],
+            excluded_ids=[],
+            now_ts=100.0,
+        )
+        _on_start, on_complete = daemon._make_static_segment_callbacks(
+            store=store,
+            root=root,
+            task_type="segment_super_priority",
+            lane_name=SUPER_PRIORITY,
+            segment_id=58,
+            chain_ids=(58, 59, 57),
+            started_at=100.0,
+            command_str="native-super-closure",
+            timeout_sec=60,
+            segment_dispatch_wakeup=threading.Event(),
+            max_attempts=3,
+        )
+        on_complete(daemon._TASK_LOCK_BUSY_RC)
+        released = store.get_runtime_sync(daemon._segment_cycle_key(root))
+        self.assertIn(57, daemon._segment_cycle_pending_order(released))
+        self.assertNotIn(57, released.get("done", []))
+        self.assertNotIn(57, released.get("errors", []))
+        chain = store.get_runtime_sync(daemon._segment_chain_runtime_key(root, 58))
+        self.assertEqual(chain.get("status"), "released")
+        store.close()
+
+    def test_static_failure_retries_then_success_closes_frozen_parent(self) -> None:
+        store = daemon.TaskStore(":memory:")
+        root = "/var/www/m7/public_html"
+        _cycle, _added, _started = daemon._segment_cycle_sync(
+            store,
+            root=root,
+            planned_ids=[57],
+            never_built_ids=[],
+            running_ids=[],
+            excluded_ids=[],
+            now_ts=100.0,
+        )
+        static_state, _added, _started = reconcile_state(
+            None,
+            plans={SUPER_PRIORITY: [57, 58, 59], PRIORITY: []},
+            now_ts=100.0,
+        )
+        store.put_runtime_sync(daemon._static_lane_state_key(root), static_state)
+        _on_start, on_complete = daemon._make_static_segment_callbacks(
+            store=store,
+            root=root,
+            task_type="segment_super_priority",
+            lane_name=SUPER_PRIORITY,
+            segment_id=58,
+            chain_ids=(58, 59, 57),
+            started_at=100.0,
+            command_str="native-super-closure",
+            timeout_sec=60,
+            segment_dispatch_wakeup=threading.Event(),
+            max_attempts=3,
+        )
+        on_complete(1)
+        retry_one = store.get_runtime_sync(daemon._segment_cycle_key(root))
+        self.assertIn(57, daemon._segment_cycle_pending_order(retry_one))
+        self.assertNotIn(57, retry_one.get("errors", []))
+        self.assertEqual(
+            store.get_runtime_sync(daemon._static_lane_state_key(root))["lanes"][SUPER_PRIORITY]["attempts"]["57"],
+            1,
+        )
+        on_complete(1)
+        retry_two = store.get_runtime_sync(daemon._segment_cycle_key(root))
+        self.assertIn(57, daemon._segment_cycle_pending_order(retry_two))
+        on_complete(0)
+        succeeded = store.get_runtime_sync(daemon._segment_cycle_key(root))
+        self.assertIn(57, succeeded.get("done", []))
+        self.assertNotIn(57, succeeded.get("errors", []))
+        store.close()
+
+    def test_static_failure_exhaustion_is_red_and_next_static_cycle_is_fresh(self) -> None:
+        store = daemon.TaskStore(":memory:")
+        root = "/var/www/m7/public_html"
+        daemon._segment_cycle_sync(
+            store,
+            root=root,
+            planned_ids=[57],
+            never_built_ids=[],
+            running_ids=[],
+            excluded_ids=[],
+            now_ts=100.0,
+        )
+        static_state, _added, _started = reconcile_state(
+            None,
+            plans={SUPER_PRIORITY: [57, 58, 59], PRIORITY: []},
+            now_ts=100.0,
+        )
+        store.put_runtime_sync(daemon._static_lane_state_key(root), static_state)
+        _on_start, on_complete = daemon._make_static_segment_callbacks(
+            store=store,
+            root=root,
+            task_type="segment_super_priority",
+            lane_name=SUPER_PRIORITY,
+            segment_id=58,
+            chain_ids=(58, 59, 57),
+            started_at=100.0,
+            command_str="native-super-closure",
+            timeout_sec=60,
+            segment_dispatch_wakeup=threading.Event(),
+            max_attempts=3,
+        )
+        on_complete(1)
+        on_complete(1)
+        on_complete(1)
+        failed_cycle = store.get_runtime_sync(daemon._segment_cycle_key(root))
+        self.assertIn(57, failed_cycle.get("errors", []))
+        self.assertNotIn(57, failed_cycle.get("done", []))
+        failed_static = store.get_runtime_sync(daemon._static_lane_state_key(root))
+        self.assertIn(57, failed_static["lanes"][SUPER_PRIORITY]["errors"])
+        next_static, _added, started_new = reconcile_state(
+            failed_static,
+            plans={SUPER_PRIORITY: [57, 58, 59], PRIORITY: []},
+            now_ts=102.0,
+        )
+        self.assertTrue(started_new)
+        self.assertEqual(pending_items(next_static, SUPER_PRIORITY), [57, 58, 59])
+        store.close()
 
     def test_mautic7_sibling_terminals_share_native_closure_execution_lock(self) -> None:
         parents = {58: {57}, 59: {57}}
@@ -327,7 +562,7 @@ class StaticSegmentLaneTests(unittest.TestCase):
     def test_m6_m7_closure_plans_remain_deduplicated_after_orphan_release(self) -> None:
         for major, expected_super, expected_priority in (
             (6, [57, 58], [59]),
-            (7, [58, 59], []),
+            (7, [57, 58, 59], []),
         ):
             with self.subTest(mautic_major=major):
                 plans = build_lane_plans(

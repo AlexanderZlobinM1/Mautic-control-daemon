@@ -73,6 +73,13 @@ refresh holds only that root; it must never treat the graph as independent and
 must never reset the cycle, cursor, claims, running rows, follow-ups, retries,
 or terminal receipts. Other ready roots continue to use their profile slots.
 
+The context keeps `static_configured_ids` (the operator's seed list) separate
+from `static_owned_ids` (the persisted full dependency closure). Refill and
+ordinary admission exclude the owned set, including inherited Mautic 7 parents,
+even when a restart occurs between planner passes. The static lane state is a
+second durable source for that owned set; neither a missing context field nor a
+stale display guard may turn an inherited parent into ordinary work.
+
 All slow DB/help/capability reads complete before the refresh's final merge.
 Under the existing `TaskStore` serialization lock, the daemon rereads the
 current cycle/context, compares the captured generation, and merges only

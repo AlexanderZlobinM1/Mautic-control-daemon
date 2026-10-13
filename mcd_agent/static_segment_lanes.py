@@ -62,6 +62,7 @@ def _empty_lane(items: Iterable[object] | None = None) -> dict[str, object]:
         "done": [],
         "errors": [],
         "error_notes": {},
+        "attempts": {},
     }
 
 
@@ -133,6 +134,17 @@ def _normalize_lane(raw: object, planned: Iterable[object] | None = None) -> dic
     ]
     claimed = normalize_ids([*claimed, *running])
     notes = source.get("error_notes")
+    raw_attempts = source.get("attempts")
+    attempts: dict[str, int] = {}
+    if isinstance(raw_attempts, Mapping):
+        for raw_sid, raw_count in raw_attempts.items():
+            try:
+                sid = int(raw_sid)
+                count = max(0, int(raw_count))
+            except (TypeError, ValueError):
+                continue
+            if sid in item_set and count > 0:
+                attempts[str(sid)] = count
     return {
         "items": items,
         "claimed": claimed,
@@ -140,6 +152,7 @@ def _normalize_lane(raw: object, planned: Iterable[object] | None = None) -> dic
         "done": done,
         "errors": errors,
         "error_notes": dict(notes) if isinstance(notes, Mapping) else {},
+        "attempts": attempts,
     }
 
 
@@ -167,9 +180,11 @@ def build_lane_plans(
 
     Priority is the legacy whitelist lane. Super-priority owns any shared
     dependency closure first. For Mautic <=6 the plan is topological and
-    explicit. For Mautic 7 only native terminal roots are retained; internal
-    parents are covered by Mautic's native terminal semantics and are never
-    separately scheduled by MCD.
+    explicit. For Mautic 7 the persisted lane owns the complete dependency
+    closure so ordinary/other static lanes cannot admit an inherited parent.
+    Native terminal roots are selected later when the closure is turned into
+    a command plan; internal parents remain durable ownership members but are
+    never separately scheduled by MCD.
     """
 
     super_ids = normalize_ids(super_priority_ids)
@@ -179,13 +194,19 @@ def build_lane_plans(
     children = {int(key): set(normalize_ids(value)) for key, value in (children_by_parent or {}).items()}
 
     if int(mautic_major or 0) >= 7:
-        super_plan, _ = mautic7_terminal_segment_plan(super_ids, children)
-        priority_plan, _ = mautic7_terminal_segment_plan(priority_ids_normalized, children)
-        super_plan = normalize_ids(super_plan)
+        super_roots, _ = mautic7_terminal_segment_plan(super_ids, children)
+        priority_roots, _ = mautic7_terminal_segment_plan(priority_ids_normalized, children)
+        # Mautic 7 executes native terminal roots, but static ownership still
+        # follows the full ancestor closure. Keeping these as two concepts
+        # prevents an inherited parent (for example 57 -> 59) from leaking
+        # back into the ordinary ring while preserving one native worker per
+        # closure.
+        super_plan = normalize_ids(dependency_expanded_segment_plan(super_roots, parents))
+        priority_plan = normalize_ids(dependency_expanded_segment_plan(priority_roots, parents))
         super_set = set(super_plan)
         return {
             SUPER_PRIORITY: super_plan,
-            PRIORITY: [sid for sid in normalize_ids(priority_plan) if sid not in super_set],
+            PRIORITY: [sid for sid in priority_plan if sid not in super_set],
         }
 
     seeds = [*super_ids, *priority_ids_normalized]
@@ -381,6 +402,45 @@ def release_claim(raw: Mapping[str, Any] | None, *, lane: str, entity_id: int, n
     state["status"] = "terminal" if all(_lane_complete(item) for item in lanes.values()) else "active"
     state["updated_at"] = float(now_ts)
     return state
+
+
+def record_attempt(
+    raw: Mapping[str, Any] | None,
+    *,
+    lane: str,
+    entity_id: int,
+    now_ts: float,
+) -> dict[str, object]:
+    """Record one real Mautic start without changing claim/terminal state."""
+
+    state = dict(raw or {})
+    lanes_raw = state.get("lanes") if isinstance(state.get("lanes"), Mapping) else {}
+    lanes = {name: _normalize_lane(lanes_raw.get(name), []) for name in LANES}
+    current = lanes.get(lane)
+    if current is None:
+        return state
+    sid = int(entity_id)
+    if sid not in set(normalize_ids(current.get("items"))):
+        return state
+    attempts = dict(current.get("attempts") or {})
+    attempts[str(sid)] = max(0, int(attempts.get(str(sid), 0) or 0)) + 1
+    current["attempts"] = attempts
+    lanes[lane] = current
+    state["lanes"] = lanes
+    state["status"] = "active"
+    state["updated_at"] = float(now_ts)
+    return state
+
+
+def attempt_count(raw: Mapping[str, Any] | None, *, lane: str, entity_id: int) -> int:
+    source = raw if isinstance(raw, Mapping) else {}
+    lanes = source.get("lanes") if isinstance(source.get("lanes"), Mapping) else {}
+    lane_payload = lanes.get(lane) if isinstance(lanes, Mapping) else {}
+    attempts = lane_payload.get("attempts") if isinstance(lane_payload, Mapping) else {}
+    try:
+        return max(0, int((attempts or {}).get(str(int(entity_id)), 0) or 0))
+    except (AttributeError, TypeError, ValueError):
+        return 0
 
 
 def mark_terminal(

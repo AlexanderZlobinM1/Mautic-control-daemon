@@ -1,3 +1,21 @@
+## 1.5.156 - 2026-10-13
+
+- Persist the complete Mautic 7 static dependency ownership closure in the
+  lane/context state while retaining native leaf-root commands. Inherited
+  parents can no longer leak into ordinary work after a planner refresh or
+  restart, and a frozen ordinary parent is reconciled only by the actual
+  static closure receipt.
+- Apply the existing inclusive `segment_retry_count` policy to static closure
+  assignments: flock lock-busy is released without consuming an attempt,
+  pre-exhaustion Mautic failures release the claim for retry, and only the
+  exhausted attempt becomes terminal error. Generation and membership guards
+  prevent an old callback from mutating a newer ordinary cycle.
+- Record the mandatory update invariant in the runtime context and evidence:
+  ordinary Mautic/PHP operations never block MCD self-update, while
+  TaskStore/runtime_sync queues, claims, running/follow-up/retry state and
+  monitor projections survive restart, update and reinstall without duplicate
+  spawn. Only explicit MCD-owned critical barriers may defer an update.
+
 ## 1.5.155 - 2026-10-13
 
 - Add explicit dependency-snapshot verification provenance. A legacy empty
