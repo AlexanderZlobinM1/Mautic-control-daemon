@@ -6990,6 +6990,7 @@ def _scheduler_important_root_dispatchable(
     running: dict[str, "RunningTask"],
     root: str,
     *,
+    store: "TaskStore" | None = None,
     priority_executor: object | None = None,
 ) -> bool:
     """Return whether an important root can take a real segment admission now.
@@ -7018,7 +7019,125 @@ def _scheduler_important_root_dispatchable(
         task_type="segment",
         priority_executor=priority_executor,
     )
-    return instance_slots is None or instance_slots > 0
+    if instance_slots is not None and instance_slots <= 0:
+        return False
+
+    # Capacity alone is not enough to make an important root a global
+    # barrier.  A durable Mautic 7 cycle may expose important IDs whose native
+    # dependency component is currently owned by a different leaf root.  If
+    # none of the important IDs can be the actual chain owner, another root's
+    # ready remaining work must use the free shared slot instead.
+    if store is not None:
+        launchability = _scheduler_important_root_has_launchable_work(
+            store,
+            root,
+            running=running,
+        )
+        if launchability is not None:
+            return launchability
+    return True
+
+
+def _scheduler_important_root_has_launchable_work(
+    store: "TaskStore",
+    root: str,
+    *,
+    running: dict[str, "RunningTask"],
+) -> bool | None:
+    """Check durable important work without turning planning into a barrier.
+
+    ``None`` means the durable cycle/context is unavailable and preserves the
+    historical capacity-only fallback for legacy callers.  A present cycle is
+    authoritative: an important root is dispatchable only when at least one
+    pending important item is the owner of an executable chain and is not
+    blocked by an active task or static ownership.
+    """
+
+    try:
+        cycle = store.get_runtime_sync(_segment_cycle_key(str(root)))
+    except Exception:
+        return None
+    if not isinstance(cycle, Mapping):
+        return None
+    if str(cycle.get("status") or "active").strip().lower() != "active":
+        return False
+
+    pending_ids = _segment_cycle_pending_ids(cycle)
+    important_ids = set(_normalize_segment_ids(cycle.get("important_items"))) & pending_ids
+    if not important_ids:
+        return False
+
+    try:
+        context, _major, parents_by_child, children_by_parent = _segment_dispatch_context_parts(
+            store,
+            str(root),
+        )
+    except Exception:
+        return None
+    if context.get("schema") != "mcd-segment-dispatch-context-v1":
+        return None
+
+    blocked_ids = set(_normalize_segment_ids(context.get("blocked_ids")))
+    static_ids = set(_normalize_segment_ids(context.get("static_configured_ids")))
+    static_ids.update(_normalize_segment_ids(context.get("static_owned_ids")))
+    static_ids.update(_normalize_segment_ids(context.get("static_active_ids")))
+    try:
+        static_state = store.get_runtime_sync(_static_lane_state_key(str(root))) or {}
+    except Exception:
+        static_state = {}
+    lanes = static_state.get("lanes") if isinstance(static_state, Mapping) else {}
+    if isinstance(lanes, Mapping):
+        for lane_payload in lanes.values():
+            if isinstance(lane_payload, Mapping):
+                static_ids.update(_normalize_segment_ids(lane_payload.get("items")))
+                static_ids.update(_normalize_segment_ids(lane_payload.get("claimed")))
+                static_ids.update(_normalize_segment_ids(lane_payload.get("running")))
+
+    pending_order = _segment_cycle_pending_order(cycle)
+    for candidate in pending_order:
+        if candidate not in important_ids or candidate in blocked_ids or candidate in static_ids:
+            continue
+        chain = _segment_chain_from_dispatch_context(
+            store,
+            str(root),
+            pending_order,
+            int(candidate),
+        )
+        if not chain or int(chain[0]) != int(candidate):
+            continue
+        # Do not let a native leaf from the remaining tier become an implicit
+        # important launch merely because it shares a dependency component.
+        if any(
+            int(member) in pending_ids and int(member) not in important_ids
+            for member in chain
+        ):
+            continue
+        candidate_related: set[int] = set()
+        for member in chain:
+            candidate_related.update(
+                segment_related_ids(
+                    int(member),
+                    parents_by_child,
+                    children_by_parent,
+                )
+            )
+        if not candidate_related:
+            candidate_related = {int(member) for member in chain}
+        conflict = False
+        for task in running.values():
+            if (
+                str(getattr(task, "root", "") or "") != str(root)
+                or str(getattr(task, "task_type", "") or "").strip().lower()
+                not in {"segment", "segment_sql"}
+                or getattr(task, "entity_id", None) is None
+            ):
+                continue
+            if int(getattr(task, "entity_id")) in candidate_related:
+                conflict = True
+                break
+        if not conflict:
+            return True
+    return False
 
 
 def _scheduler_segment_entity_allowed(
@@ -7049,6 +7168,7 @@ def _scheduler_segment_entity_allowed(
                 config,
                 running,
                 pending_root,
+                store=store,
                 priority_executor=priority_executor,
             )
         }

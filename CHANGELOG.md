@@ -1,3 +1,13 @@
+## 1.5.169 - 2026-10-13
+
+- Make ordinary remaining-tier admission inspect durable important work for a
+  real native chain owner before treating it as a shared barrier. A Mautic 7
+  important parent that cannot be launched locally no longer strands free
+  ordinary host capacity or other roots.
+- Keep the dedicated super-priority recurring tick and its static round-robin
+  independent from ordinary refill, completion, and fair-turn state.
+- Add regression coverage for the live Mautic 7 capacity-only underfill shape.
+
 ## 1.5.168 - 2026-10-13
 
 - Keep the ordinary fair-turn handoff local to the ordinary lane: a root whose

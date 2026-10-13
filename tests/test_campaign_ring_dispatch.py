@@ -526,6 +526,87 @@ class CampaignRingDispatchTests(unittest.TestCase):
         self.assertEqual(launched, 0)
         submit.assert_not_called()
 
+    def test_remaining_root_ignores_capacity_only_important_root_with_no_launchable_owner(self) -> None:
+        important_root = "/var/www/mcd713php83_sandbox/public_html"
+        remaining_root = "/var/www/b2bss/public_html"
+        important_cycle_key = daemon_mod._segment_cycle_key(important_root)
+        remaining_cycle_key = daemon_mod._segment_cycle_key(remaining_root)
+        important_context_key = daemon_mod._segment_dispatch_context_key(important_root)
+
+        class Store:
+            def __init__(self) -> None:
+                self.payloads = {
+                    important_cycle_key: {
+                        "schema": "mcd-segment-cycle-v1",
+                        "status": "active",
+                        "items": [19, 21, 3, 4, 5, 6, 7, 20, 22],
+                        "important_items": [19, 21],
+                        "remaining_items": [3, 4, 5, 6, 7, 20, 22],
+                        "claimed": [],
+                        "running": [],
+                        "done": [3, 4, 5],
+                        "errors": [],
+                    },
+                    important_context_key: {
+                        "schema": "mcd-segment-dispatch-context-v1",
+                        "mautic_major": 7,
+                        "parents_by_child": {"20": [19], "21": [19], "22": [21]},
+                        "children_by_parent": {"19": [20, 21], "21": [22]},
+                        "blocked_ids": [],
+                        "static_configured_ids": [],
+                        "static_owned_ids": [],
+                        "static_active_ids": [],
+                    },
+                    remaining_cycle_key: {
+                        "schema": "mcd-segment-cycle-v1",
+                        "status": "active",
+                        "items": [200],
+                        "important_items": [],
+                        "remaining_items": [200],
+                        "claimed": [],
+                        "running": [],
+                        "done": [],
+                        "errors": [],
+                    },
+                }
+
+            def get_runtime_sync(self, key: str) -> dict[str, object] | None:
+                return self.payloads.get(key)
+
+            def put_runtime_sync(self, key: str, payload: dict[str, object]) -> None:
+                self.payloads[key] = payload
+
+        cfg = SimpleNamespace(
+            command_timeout_sec=30,
+            scheduler_host_max_parallel=12,
+            scheduler_instance_max_parallel=6,
+            scheduler_elastic_slots_enabled=True,
+            scheduler_emergency_reserved_slots=1,
+        )
+        store = Store()
+        daemon_mod._set_scheduler_important_pending_roots({important_root})
+
+        # The important IDs are pending, but their Mautic 7 component has
+        # native leaf owners 20/22.  Capacity-only gating must not turn this
+        # unresolved root into a global barrier for b2bss's ready work.
+        self.assertFalse(
+            daemon_mod._scheduler_important_root_dispatchable(
+                cfg,
+                {},
+                important_root,
+                store=store,
+            )
+        )
+        self.assertTrue(
+            daemon_mod._scheduler_segment_entity_allowed(
+                store,
+                remaining_root,
+                200,
+                config=cfg,
+                running={},
+            )
+        )
+
     def test_selected_profile_fanout_is_not_clamped_without_explicit_host_cap(self) -> None:
         root = "/var/www/site"
         cfg = SimpleNamespace(
