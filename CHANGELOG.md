@@ -1,3 +1,12 @@
+## 1.5.173 - 2026-10-13
+
+- Make generic Mautic patch execution fail closed before simulation for every
+  mixed, partial, opposite-group, unknown, or both-signature source state;
+  shared identity gates remain supported.
+- Add regression coverage for exact ZIP/Composer gate selection, immutable
+  rollback, and checksum-gated drift protection without including the
+  unfinished ImportModel patch.
+
 ## 1.5.172 - 2026-10-13
 
 - Make the supported legacy-source runtime bridge recoverable when an old
