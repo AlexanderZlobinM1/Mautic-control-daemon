@@ -1897,6 +1897,15 @@ def _build_parser() -> argparse.ArgumentParser:
     verification_capability = sub.add_parser("mautic-target-patch-verification-capability", help="Read-only collector capability")
     verification_capability.add_argument("--json", action="store_true")
 
+    image_compatibility = sub.add_parser("image-compatibility", help="Read-only fresh host compatibility probe for MCC images")
+    image_compatibility.add_argument("--request-json", required=True, help="Strict request JSON file, or - for stdin")
+    image_compatibility.add_argument("--json", action="store_true")
+    image_compatibility_capability = sub.add_parser(
+        "image-compatibility-capability",
+        help="Advertise the read-only MCC image compatibility contract",
+    )
+    image_compatibility_capability.add_argument("--json", action="store_true")
+
     up = sub.add_parser("mautic-upgrade", help="Check/apply Mautic version upgrade")
     up.add_argument("--config", default=default_cfg)
     up.add_argument("--root")
@@ -3247,6 +3256,56 @@ def main() -> int:
     if args.cmd == "mautic-target-patch-verification-capability":
         from mcd_agent.mautic_target_verification_capability import capability
         print(json.dumps(capability(), sort_keys=True, separators=(",", ":"), allow_nan=False))
+        return 0
+
+    if args.cmd == "image-compatibility-capability":
+        from mcd_agent.image_compatibility import capability
+        print(json.dumps(capability(), sort_keys=True, separators=(",", ":"), allow_nan=False))
+        return 0
+
+    if args.cmd == "image-compatibility":
+        from mcd_agent.image_compatibility import (
+            ERROR_SCHEMA,
+            MAX_REQUEST_BYTES,
+            ImageCompatibilityError,
+            load_request_bytes,
+            load_request_file,
+            probe,
+        )
+        try:
+            if args.request_json == "-":
+                accepted = load_request_bytes(sys.stdin.buffer.read(MAX_REQUEST_BYTES + 1))
+            else:
+                accepted = load_request_file(args.request_json)
+            payload = probe(accepted)
+        except ImageCompatibilityError as exc:
+            payload = {
+                "schema": ERROR_SCHEMA,
+                "status": "error",
+                "compatible": False,
+                "code": str(exc),
+            }
+            print(json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False))
+            return 2
+        except Exception:
+            payload = {
+                "schema": ERROR_SCHEMA,
+                "status": "error",
+                "compatible": False,
+                "code": "fresh_probe_failed",
+            }
+            print(json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False))
+            return 2
+        if bool(args.json):
+            print(json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False))
+        else:
+            print(
+                "status={status} compatible={compatible} candidates={candidates}".format(
+                    status=payload.get("status", "unknown"),
+                    compatible=str(bool(payload.get("compatible"))).lower(),
+                    candidates=len(payload.get("candidates", [])),
+                )
+            )
         return 0
 
     if args.cmd == "mautic-upgrade":

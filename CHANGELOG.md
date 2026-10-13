@@ -1,3 +1,16 @@
+## 1.5.159 - 2026-10-13
+
+- Restore the exact read-only MCC image-compatibility capability contract in
+  the CLI and normal state push. The host advertises the v1 command, request
+  and response schemas, contract SHA, `fresh_probe=true`, and
+  `read_only=true` at both top level and inside the preserved
+  `mautic_install_readiness` envelope with a fresh capability observation.
+- Keep the mandatory update boundary explicit: ordinary Mautic/PHP commands
+  never block MCD self-update, while TaskStore/runtime-sync queues, claims,
+  running/follow-up/retry work and monitor projections survive restart,
+  update, reinstall and adoption without duplicate spawn. Only explicit
+  MCD-owned critical barriers may defer an update.
+
 ## 1.5.158 - 2026-10-13
 
 - Fixed the third-line ownership boundary: ordinary Mautic 7 work now waits

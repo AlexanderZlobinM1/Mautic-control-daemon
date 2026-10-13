@@ -153,6 +153,19 @@ def stable_change_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _advertise_image_compatibility(payload: dict[str, Any]) -> dict[str, Any]:
+    """Advertise through both host state and its preserved readiness envelope."""
+    from mcd_agent.image_compatibility import capability
+
+    advertised = capability()
+    payload["image_compatibility_capability"] = advertised
+    readiness = payload.get("mautic_install_readiness")
+    readiness_payload = dict(readiness) if isinstance(readiness, dict) else {}
+    readiness_payload["image_compatibility_capability"] = advertised
+    payload["mautic_install_readiness"] = readiness_payload
+    return advertised
+
+
 def _runtime_overrides_for_state_push(cfg: AgentConfig) -> dict[str, Any]:
     """Include managed form policy outcomes in the normal observed snapshot."""
     runtime = dict(local_runtime_overrides(cfg))
@@ -2263,6 +2276,7 @@ class MCCStatePusher:
             "instance_sizes": collect_instance_sizes(installs),
             "sent_at_utc": datetime.fromtimestamp(now_ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
+        _advertise_image_compatibility(payload)
         payload.update(agent_version_payload())
         if include_signals:
             payload["signals"] = self._signals_payload()
