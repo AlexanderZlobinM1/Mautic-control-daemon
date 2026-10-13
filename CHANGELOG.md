@@ -1,3 +1,14 @@
+## 1.5.163 - 2026-10-13
+
+- Preserve each root's verified dependency graph across terminal ordinary-cycle
+  rollover for independent static/super-priority ticks, and keep dependency
+  read provenance root-local so a failed or skipped root cannot publish another
+  root's graph. This prevents Mautic 7 static closures from repeating a parent
+  without its native `--exclude` guard.
+- Keep dedicated super-priority dispatch outside shared host/instance budget;
+  verify paused-root isolation, fair neighbor refill, graph-fault handling,
+  and duplicate-free static dispatch in the release acceptance suite.
+
 ## 1.5.162 - 2026-10-13
 
 - Make terminal refill hand-offs eligibility-aware: a terminal or paused root
