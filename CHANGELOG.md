@@ -1,3 +1,14 @@
+## 1.5.158 - 2026-10-13
+
+- Fixed the third-line ownership boundary: ordinary Mautic 7 work now waits
+  for overlapping static ownership, reuses successful super/priority parent
+  coverage with `--exclude=<parent>`, and terminalizes an ordinary dependent
+  item after a bounded higher-lane error instead of rebuilding the parent or
+  spinning forever. Independent ordinary work remains dispatchable.
+- Static successful closures now publish native coverage receipts for later
+  ordinary and weaker-lane admission; runtime and regression coverage include
+  the three-line pending/success/error matrix.
+
 ## 1.5.157 - 2026-10-13
 
 - Fixed: Mautic 7 static priority closures now receive durable successful

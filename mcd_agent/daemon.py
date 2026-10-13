@@ -4375,14 +4375,87 @@ def _static_lane_successful_coverage_ids(
     lets the weaker lane retry the parent after a failed stronger closure.
     """
 
+    return _segment_successful_coverage_ids(
+        store,
+        root=root,
+        static_state=static_state,
+        lane_name=lane_name,
+    )
+
+
+def _segment_successful_coverage_ids(
+    store: "TaskStore",
+    *,
+    root: str,
+    static_state: Mapping[str, object] | None,
+    lane_name: str,
+) -> set[int]:
+    """Return successful native coverage inherited by the current lane.
+
+    Ownership is ordered: super-priority is stronger than priority, and both
+    static lanes are stronger than the ordinary segment ring.  Native
+    coverage is deliberately combined with only durable successful lane
+    receipts; a pending/running/error higher lane must never be presented as
+    proof that a parent was rebuilt.
+    """
+
     covered = _segment_native_covered_ids(store, root)
-    if str(lane_name) != _SEGMENT_PRIORITY_LANE:
+    if not isinstance(static_state, Mapping):
         return covered
-    lanes = static_state.get("lanes") if isinstance(static_state, Mapping) else {}
-    stronger = lanes.get(_SEGMENT_SUPER_PRIORITY_LANE) if isinstance(lanes, Mapping) else None
-    if isinstance(stronger, Mapping):
-        covered.update(_normalize_segment_ids(stronger.get("done")))
+    lanes = static_state.get("lanes")
+    if not isinstance(lanes, Mapping):
+        return covered
+    lane_text = str(lane_name)
+    stronger_names: tuple[str, ...]
+    if lane_text == _SEGMENT_PRIORITY_LANE:
+        stronger_names = (_SEGMENT_SUPER_PRIORITY_LANE,)
+    elif lane_text == "ordinary":
+        stronger_names = (_SEGMENT_SUPER_PRIORITY_LANE, _SEGMENT_PRIORITY_LANE)
+    else:
+        stronger_names = ()
+    for stronger_name in stronger_names:
+        stronger = lanes.get(stronger_name)
+        if isinstance(stronger, Mapping):
+            covered.update(_normalize_segment_ids(stronger.get("done")))
     return covered
+
+
+def _segment_static_dependency_outcome(
+    static_state: Mapping[str, object] | None,
+    *,
+    lane_name: str,
+    entity_id: int,
+    parents_by_child: Mapping[int, Iterable[int]] | None,
+) -> tuple[set[int], set[int]]:
+    """Classify stronger static ancestors for priority or ordinary work."""
+
+    lane_text = str(lane_name)
+    if lane_text == _SEGMENT_PRIORITY_LANE:
+        stronger_names = (_SEGMENT_SUPER_PRIORITY_LANE,)
+    elif lane_text == "ordinary":
+        stronger_names = (_SEGMENT_SUPER_PRIORITY_LANE, _SEGMENT_PRIORITY_LANE)
+    else:
+        return set(), set()
+    lanes = static_state.get("lanes") if isinstance(static_state, Mapping) else {}
+    if not isinstance(lanes, Mapping):
+        return set(), set()
+    ancestor_ids = dependency_segment_closure({int(entity_id)}, dict(parents_by_child or {}))
+    failed: set[int] = set()
+    pending: set[int] = set()
+    for stronger_name in stronger_names:
+        stronger = lanes.get(stronger_name)
+        if not isinstance(stronger, Mapping):
+            continue
+        stronger_items = set(_normalize_segment_ids(stronger.get("items")))
+        related = ancestor_ids & stronger_items
+        if not related:
+            continue
+        done = set(_normalize_segment_ids(stronger.get("done")))
+        errors = set(_normalize_segment_ids(stronger.get("errors")))
+        failed.update(related & errors)
+        pending.update(related - done - errors)
+    pending.difference_update(failed)
+    return failed, pending
 
 
 def _static_lane_dependency_outcome(
@@ -4402,20 +4475,12 @@ def _static_lane_dependency_outcome(
     for that owner's bounded outcome.
     """
 
-    if str(lane_name) != _SEGMENT_PRIORITY_LANE:
-        return set(), set()
-    lanes = static_state.get("lanes") if isinstance(static_state, Mapping) else {}
-    stronger = lanes.get(_SEGMENT_SUPER_PRIORITY_LANE) if isinstance(lanes, Mapping) else None
-    if not isinstance(stronger, Mapping):
-        return set(), set()
-    ancestor_ids = dependency_segment_closure({int(entity_id)}, dict(parents_by_child or {}))
-    stronger_items = set(_normalize_segment_ids(stronger.get("items")))
-    related = ancestor_ids & stronger_items
-    if not related:
-        return set(), set()
-    done = set(_normalize_segment_ids(stronger.get("done")))
-    errors = set(_normalize_segment_ids(stronger.get("errors")))
-    return related & errors, related - done - errors
+    return _segment_static_dependency_outcome(
+        static_state,
+        lane_name=lane_name,
+        entity_id=entity_id,
+        parents_by_child=parents_by_child,
+    )
 
 
 def _static_lane_mark_dependency_failed(
@@ -4665,6 +4730,18 @@ def _make_static_segment_callbacks(
                         expected_cycle_id=callback_cycle_id,
                     )
                 _mark_segment_finished(callback_root, int(chain_id), now_ts=terminal_at)
+        if success:
+            # Static Mautic 7 closures are also native traversal receipts.
+            # Persist the successful owner coverage so a later ordinary or
+            # weaker static root can reuse the same parent with --exclude
+            # instead of rebuilding it.  The helper is a no-op for Mautic 6.
+            _segment_native_coverage_record(
+                store,
+                root=callback_root,
+                entity_id=callback_owner_id,
+                success=True,
+                now_ts=terminal_at,
+            )
         _segment_chain_runtime_write(
             store,
             root=callback_root,
@@ -9073,7 +9150,6 @@ def _fill_from_ring(
             except Exception:
                 dispatch_context, dispatch_major, parents_by_child, children_by_parent = {}, 0, {}, {}
             if int(dispatch_major or 0) >= 7:
-                covered_ids = _segment_native_covered_ids(store, root)
                 try:
                     cycle_payload = store.get_runtime_sync(_segment_cycle_key(str(root)))
                 except Exception:
@@ -9083,6 +9159,55 @@ def _fill_from_ring(
                     | set(_normalize_segment_ids(cycle_payload.get("follow_up")))
                     if isinstance(cycle_payload, Mapping)
                     else set()
+                )
+                static_state = store.get_runtime_sync(_static_lane_state_key(str(root))) or {}
+                static_failed_ids, static_pending_ids = _segment_static_dependency_outcome(
+                    static_state if isinstance(static_state, Mapping) else {},
+                    lane_name="ordinary",
+                    entity_id=int(eid),
+                    parents_by_child=parents_by_child,
+                )
+                if static_failed_ids:
+                    # A bounded higher-lane error is terminal evidence for a
+                    # weaker ordinary item.  Do not let the ordinary ring
+                    # retry a parent beyond the higher lane's budget or spin
+                    # forever waiting for an outcome that is already red.
+                    if int(eid) in cycle_items:
+                        _segment_cycle_terminal(
+                            store,
+                            root=root,
+                            entity_id=int(eid),
+                            success=False,
+                            note="static_dependency_failed",
+                            now_ts=time.time(),
+                        )
+                        _mark_segment_finished(root, int(eid), now_ts=time.time())
+                    remove_failed = (
+                        bool(remove_on_launch(eid))
+                        if callable(remove_on_launch)
+                        else bool(remove_on_launch)
+                    )
+                    _advance_ring_after_launch(ring, eid, remove_on_launch=remove_failed)
+                    if remove_failed:
+                        _remove_ring_entities(ring, {int(eid)})
+                    logging.warning(
+                        "[%s] ordinary Mautic 7 segment=%s terminalized after static dependency failure ids=%s",
+                        root,
+                        eid,
+                        ",".join(str(value) for value in sorted(static_failed_ids)),
+                    )
+                    continue
+                if static_pending_ids:
+                    # Stronger static ownership is still unresolved.  Rotate
+                    # only this ordinary item; independent ordinary work in
+                    # the same fair ring remains eligible.
+                    ring.rotate(-1)
+                    continue
+                covered_ids = _segment_successful_coverage_ids(
+                    store,
+                    root=root,
+                    static_state=static_state if isinstance(static_state, Mapping) else {},
+                    lane_name="ordinary",
                 )
                 if int(eid) in covered_ids and int(eid) in cycle_items:
                     _segment_cycle_terminal(

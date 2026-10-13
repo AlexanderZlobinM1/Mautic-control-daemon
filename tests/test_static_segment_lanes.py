@@ -11,8 +11,10 @@ from mcd_agent.daemon import (
     _segment_static_closure_conflict,
     _segment_static_closure_lock_key,
     _segment_native_chain_command_plan,
+    _segment_static_dependency_outcome,
     _segment_priority_effective_setting,
     _segment_super_priority_effective_setting,
+    _segment_successful_coverage_ids,
     _static_lane_dependency_outcome,
     _static_lane_mark_dependency_failed,
     _static_lane_successful_coverage_ids,
@@ -260,6 +262,62 @@ class StaticSegmentLaneTests(unittest.TestCase):
             parents_by_child={59: {57}},
         )
         self.assertEqual(pending, {57})
+        store.close()
+
+    def test_ordinary_lane_inherits_only_successful_static_coverage_and_bounded_outcome(self) -> None:
+        store = daemon.TaskStore(":memory:")
+        root = "/var/www/m7/three-lanes"
+        static_state, _added, _started = reconcile_state(
+            None,
+            plans={SUPER_PRIORITY: [57], PRIORITY: [58]},
+            now_ts=100.0,
+        )
+        static_state["lanes"][SUPER_PRIORITY]["done"] = [57]
+        static_state["lanes"][PRIORITY]["done"] = [58]
+        store.put_runtime_sync(daemon._static_lane_state_key(root), static_state)
+        parents = {69: {57, 58}}
+        self.assertEqual(
+            _segment_successful_coverage_ids(
+                store,
+                root=root,
+                static_state=static_state,
+                lane_name="ordinary",
+            ),
+            {57, 58},
+        )
+        failed, pending = _segment_static_dependency_outcome(
+            static_state,
+            lane_name="ordinary",
+            entity_id=69,
+            parents_by_child=parents,
+        )
+        self.assertEqual(failed, set())
+        self.assertEqual(pending, set())
+
+        static_state["lanes"][SUPER_PRIORITY]["done"] = []
+        static_state["lanes"][SUPER_PRIORITY]["claimed"] = [57]
+        static_state["lanes"][SUPER_PRIORITY]["running"] = [57]
+        store.put_runtime_sync(daemon._static_lane_state_key(root), static_state)
+        failed, pending = _segment_static_dependency_outcome(
+            static_state,
+            lane_name="ordinary",
+            entity_id=69,
+            parents_by_child=parents,
+        )
+        self.assertEqual(failed, set())
+        self.assertEqual(pending, {57})
+
+        static_state["lanes"][SUPER_PRIORITY]["claimed"] = []
+        static_state["lanes"][SUPER_PRIORITY]["running"] = []
+        static_state["lanes"][SUPER_PRIORITY]["errors"] = [57]
+        failed, pending = _segment_static_dependency_outcome(
+            static_state,
+            lane_name="ordinary",
+            entity_id=69,
+            parents_by_child=parents,
+        )
+        self.assertEqual(failed, {57})
+        self.assertEqual(pending, set())
         store.close()
 
     def test_static_success_reconciles_preexisting_frozen_ordinary_parent(self) -> None:

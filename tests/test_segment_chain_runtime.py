@@ -21,6 +21,7 @@ from mcd_agent.daemon import (
     _segment_terminal_and_wake,
 )
 from mcd_agent.segment_admission import sync_cycle
+from mcd_agent.static_segment_lanes import PRIORITY, SUPER_PRIORITY, reconcile_state
 
 
 class SegmentChainRuntimeTests(unittest.TestCase):
@@ -44,6 +45,102 @@ class SegmentChainRuntimeTests(unittest.TestCase):
             campaign_rebuild_priority_parallel=1,
             campaign_rebuild_regular_parallel=0,
         )
+
+    def _run_ordinary_static_overlap(
+        self,
+        *,
+        static_state: dict[str, object],
+        candidate_ids: list[int],
+        parents: dict[str, list[int]],
+        children: dict[str, list[int]],
+    ) -> tuple[int, list[list[str]], dict[str, object], deque[int]]:
+        with tempfile.TemporaryDirectory(prefix="mcd-ordinary-static-") as temp_dir:
+            root = str(Path(temp_dir) / "root")
+            Path(root).mkdir()
+            store = TaskStore(str(Path(temp_dir) / "state.db"))
+            now = time.time()
+            cycle, _added, _started = sync_cycle(
+                None,
+                planned_ids=candidate_ids,
+                never_built=candidate_ids,
+                running_ids=[],
+                now_ts=now,
+                important_ids=candidate_ids,
+                remaining_ids=[],
+            )
+            store.put_runtime_sync(_segment_cycle_key(root), cycle)
+            store.put_runtime_sync(
+                _segment_dispatch_context_key(root),
+                {
+                    "schema": "mcd-segment-dispatch-context-v1",
+                    "root": root,
+                    "mautic_major": 7,
+                    "updated_at": now,
+                    "parents_by_child": parents,
+                    "children_by_parent": children,
+                    "native_segment_exclude_supported": True,
+                },
+            )
+            store.put_runtime_sync(daemon._static_lane_state_key(root), static_state)
+            running: dict[str, daemon.RunningTask] = {}
+            popens: dict[str, object] = {}
+            claimed: set[int] = set()
+            captured: list[list[str]] = []
+
+            def claim(sid: int) -> bool:
+                ok = _segment_cycle_claim(
+                    store,
+                    root=root,
+                    entity_id=int(sid),
+                    eligible_ids=set(candidate_ids),
+                    blocked_ids=set(),
+                    running_ids=claimed,
+                    now_ts=time.time(),
+                )
+                if ok:
+                    claimed.add(int(sid))
+                return ok
+
+            def fake_submit(**kwargs: object) -> bool:
+                captured.append(list(kwargs["args"]))
+                return True
+
+            with patch.object(daemon, "_submit_if_slot", side_effect=fake_submit):
+                ring = deque(candidate_ids)
+                launched = _fill_from_ring(
+                    ring=ring,
+                    ring_limit=1,
+                    total_limit=1,
+                    root=root,
+                    task_type="segment",
+                    running=running,
+                    ring_entities=set(candidate_ids),
+                    config=self._config(),
+                    store=store,
+                    popens=popens,
+                    build_args=lambda sid: [
+                        "/usr/local/bin/php",
+                        "/var/www/html/bin/console",
+                        "mautic:segments:update",
+                        "-i",
+                        str(int(sid)),
+                        "--no-interaction",
+                    ],
+                    admission_claim=claim,
+                    admission_running=lambda sid: _segment_cycle_running(
+                        store,
+                        root=root,
+                        entity_id=int(sid),
+                        now_ts=time.time(),
+                    ),
+                    admission_release=lambda sid: None,
+                    remove_on_launch=True,
+                    bypass_baseline_admission=True,
+                    max_launches=1,
+                )
+            ordinary_state = store.get_runtime_sync(_segment_cycle_key(root)) or {}
+            store.close()
+            return launched, captured, ordinary_state, ring
 
     def _run_fixture(
         self,
@@ -340,6 +437,56 @@ class SegmentChainRuntimeTests(unittest.TestCase):
         payload = next(iter(store.payloads.values()))
         self.assertTrue(payload["read_only"])
         self.assertTrue(payload["supported"])
+
+    def test_m7_ordinary_lane_respects_static_pending_done_error_and_independence(self) -> None:
+        pending_static, _added, _started = reconcile_state(
+            None,
+            plans={SUPER_PRIORITY: [57], PRIORITY: []},
+            now_ts=100.0,
+        )
+        pending_static["lanes"][SUPER_PRIORITY]["claimed"] = [57]
+        pending_static["lanes"][SUPER_PRIORITY]["running"] = [57]
+        launched, captured, _ordinary, ring = self._run_ordinary_static_overlap(
+            static_state=pending_static,
+            candidate_ids=[69, 70],
+            parents={"69": [57]},
+            children={"57": [69]},
+        )
+        self.assertEqual(launched, 1)
+        self.assertEqual(captured[0][captured[0].index("-i") + 1], "70")
+        self.assertEqual(list(ring), [69])
+
+        done_static, _added, _started = reconcile_state(
+            None,
+            plans={SUPER_PRIORITY: [57], PRIORITY: []},
+            now_ts=100.0,
+        )
+        done_static["lanes"][SUPER_PRIORITY]["done"] = [57]
+        launched, captured, _ordinary, _ring = self._run_ordinary_static_overlap(
+            static_state=done_static,
+            candidate_ids=[69],
+            parents={"69": [57]},
+            children={"57": [69]},
+        )
+        self.assertEqual(launched, 1)
+        self.assertIn("--exclude=57", captured[0])
+
+        failed_static, _added, _started = reconcile_state(
+            None,
+            plans={SUPER_PRIORITY: [57], PRIORITY: []},
+            now_ts=100.0,
+        )
+        failed_static["lanes"][SUPER_PRIORITY]["errors"] = [57]
+        launched, captured, ordinary, ring = self._run_ordinary_static_overlap(
+            static_state=failed_static,
+            candidate_ids=[69],
+            parents={"69": [57]},
+            children={"57": [69]},
+        )
+        self.assertEqual(launched, 0)
+        self.assertEqual(captured, [])
+        self.assertEqual(ordinary["errors"], [69])
+        self.assertEqual(list(ring), [])
 
 
 if __name__ == "__main__":

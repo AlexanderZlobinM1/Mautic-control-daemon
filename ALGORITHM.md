@@ -4,7 +4,7 @@
 фактическую схему после исправления admission и должен обновляться вместе с
 кодом, тестами и runtime receipt. Документ не является разрешением на
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.157 (follow-up после immutable
+Актуальная редакция этого канона — MCD 1.5.158 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам
@@ -420,6 +420,13 @@ deduplicated root plan, union ownership closure и native command roots.
 получают одну execution ownership/slot на всю closure и выполняются
 последовательными native commands с deduplicated parent coverage; независимые
 closures сохраняют параллелизм.
+Это же правило действует для третьей линии: ordinary является слабее обеих
+static lanes. Ordinary item, зависящий от pending/running higher owner, ждёт
+только эту зависимость, а независимый ordinary item продолжает dispatch.
+Successful `super-priority`/`priority` receipts входят в ordinary native
+coverage и передаются как `--exclude=<parent>`; bounded higher error
+terminalizes пересекающийся ordinary item с `static_dependency_failed`, не
+создавая четвёртый parent start и не оставляя current cycle pending.
 
 Static closure attempts используют ту же effective inclusive
 `segment_retry_count` policy профиля: `3` означает максимум три реальных
