@@ -1299,9 +1299,11 @@ class SegmentLivenessTests(unittest.TestCase):
         """The real refill thread must use the common fair submit boundary.
 
         The hot root continuously completes short workers while the main
-        planner is held inside that root's dispatch gate. A cold persisted
-        cycle is initially held behind a full shared cap, then must claim the
-        first eligible free slot before the 300-second profile watchdog.
+        planner is held inside that root's dispatch gate. A blocked persisted
+        root has pending work but its authoritative import-target guard makes
+        that item locally unlaunchable; it must yield the ordinary fair turn
+        and let the cold persisted root claim the first eligible free slot
+        before the 300-second profile watchdog.
         """
 
         class StopMainLoop(BaseException):
@@ -1436,9 +1438,11 @@ class SegmentLivenessTests(unittest.TestCase):
 
             class BlockingTaskStore(TaskStore):
                 def get_runtime_sync(self, key: str) -> dict[str, object] | None:
+                    if key in {cycle_key(blocked_root), cycle_key(cold_root)}:
+                        debug_events.append(f"read:{key}")
                     if (
                         threading.current_thread().name == "mcd-ordinary-persisted-refill"
-                        and key == cycle_key(cold_root)
+                        and key in {cycle_key(blocked_root), cycle_key(cold_root)}
                         and not planner_started.is_set()
                     ):
                         planner_started.wait(timeout=3.0)
@@ -1565,6 +1569,9 @@ class SegmentLivenessTests(unittest.TestCase):
                 cursor: int | None = None,
             ) -> None:
                 real_set_distribution_roots(ready_roots, worker_slots=worker_slots, cursor=cursor)
+                debug_events.append(
+                    "setroots:" + ",".join(daemon._SCHEDULER_DISTRIBUTION_READY_ROOTS)
+                )
                 # Recreate the preceding successful ordinary admission. The
                 # next refill pass must therefore encounter blocked_root as
                 # the only unserved root before cold_root can claim a slot.
@@ -1669,6 +1676,21 @@ class SegmentLivenessTests(unittest.TestCase):
             self.assertIn(f"skip:{blocked_root}:segment", debug_events)
             self.assertNotIn(blocked_root, {root for root, _entity in spawned})
             self.assertIn(cold_root, {root for root, _entity in spawned})
+            roots_event = next(
+                index
+                for index, event in enumerate(debug_events)
+                if event.startswith("setroots:")
+                and blocked_root in event
+                and cold_root in event
+            )
+            skip_event = debug_events.index(f"skip:{blocked_root}:segment")
+            cold_spawn_event = next(
+                index
+                for index, event in enumerate(debug_events)
+                if event == f"spawn:{cold_root}:2000"
+            )
+            self.assertGreater(skip_event, roots_event)
+            self.assertGreater(cold_spawn_event, skip_event)
             self.assertGreaterEqual(
                 len([root for root, _entity in spawned if root == hot_root]),
                 1,
