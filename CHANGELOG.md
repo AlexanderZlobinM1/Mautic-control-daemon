@@ -8,6 +8,8 @@
   its native command IDs and explicit `--exclude` projection prove that no
   active native rebuild ID is shared; the durable closure lock remains strict
   otherwise.
+- Synchronize the patch-resolution contract's minimum agent version with the
+  1.5.166 release so the immutable source/package gate remains valid.
 
 ## 1.5.165 - 2026-10-13
 
