@@ -104,6 +104,7 @@ from mcd_agent.source_operation import source_operation_lease
 from mcd_agent.inventory import InstanceInventory, ensure_seeded
 from mcd_agent.install_type import detect_install_type
 from mcd_agent.hardware_profile import (
+    profile_selection_path,
     read_memory_kib,
     read_profile_selection,
     reconcile_hardware_profile,
@@ -2167,6 +2168,7 @@ def _build_parser() -> argparse.ArgumentParser:
         ],
     )
     profile.add_argument("--yes", action="store_true")
+    profile.add_argument("--json", action="store_true")
 
     tcheck = sub.add_parser("time-check", help="Timezone diagnostics for OS/PHP/MySQL/Mautic")
     tcheck.add_argument("--config", default=default_cfg)
@@ -4689,18 +4691,36 @@ def main() -> int:
                 pause_flag_path=cfg.scheduler_pause_flag_path,
                 config_path=args.config,
             )
-            for line in res.lines:
-                print(line)
+            selection_path = profile_selection_path("/opt/mcd")
             selection = read_profile_selection("/opt/mcd")
             cpus = max(1, int(os.cpu_count() or 1))
             memory_kib = read_memory_kib()
-            print(f"selection_mode={selection.get('mode', 'auto')}")
-            print(
-                "hardware_recommendation="
-                + recommended_profile(cpu_count=cpus, memory_kib=memory_kib)
-            )
-            print(f"hardware_cpu_count={cpus}")
-            print(f"hardware_memory_kib={memory_kib}")
+            status_payload = {
+                "schema": "mcd-profile-status-v1",
+                "status": "ok" if res.ok else "error",
+                "profile": str((cfg.profile_name or "")).strip().lower(),
+                "hardware_profile": str(selection.get("profile") or ""),
+                "config_path": str(args.config),
+                "config_mutable_path": str(_resolve_mutable_config_path(args.config)),
+                "selection_path": str(selection_path),
+                "selection_exists": selection_path.exists(),
+                "selection": selection,
+                "selection_mode": str(selection.get("mode") or "auto"),
+                "hardware_recommendation": recommended_profile(cpu_count=cpus, memory_kib=memory_kib),
+                "hardware_cpu_count": cpus,
+                "hardware_memory_kib": memory_kib,
+            }
+            if args.json:
+                print(json.dumps(status_payload, ensure_ascii=True, indent=2))
+            else:
+                for line in res.lines:
+                    print(line)
+                print(f"selection_path={selection_path}")
+                print(f"selection_exists={str(selection_path.exists()).lower()}")
+                print(f"selection_mode={status_payload['selection_mode']}")
+                print(f"hardware_recommendation={status_payload['hardware_recommendation']}")
+                print(f"hardware_cpu_count={cpus}")
+                print(f"hardware_memory_kib={memory_kib}")
             return 0
         if args.op == "auto":
             previous_selection = read_profile_selection("/opt/mcd")

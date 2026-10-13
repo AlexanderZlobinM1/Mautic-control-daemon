@@ -6,6 +6,7 @@ from pathlib import Path
 
 from mcd_agent.hardware_profile import (
     capture_profile_authority,
+    profile_selection_path,
     read_profile_selection,
     recommended_farm_profile,
     recommended_profile,
@@ -18,6 +19,12 @@ from mcd_agent.hardware_profile import _read_hardware_profile_name
 
 
 class HardwareProfileTests(unittest.TestCase):
+    def test_profile_selection_path_is_published(self) -> None:
+        self.assertEqual(
+            profile_selection_path("/srv/mcd"),
+            Path("/srv/mcd/var/hardware-profile-selection.json"),
+        )
+
     def test_recommendation_uses_conservative_cpu_and_memory_class(self) -> None:
         gib = 1024 * 1024
         self.assertEqual(recommended_profile(cpu_count=1, memory_kib=64 * gib), "tiny")

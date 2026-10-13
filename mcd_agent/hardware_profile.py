@@ -71,6 +71,12 @@ def _state_path(install_dir: str) -> Path:
     return Path(install_dir) / "var" / PROFILE_SELECTION_FILE
 
 
+def profile_selection_path(install_dir: str = "/opt/mcd") -> Path:
+    """Return the published path of the persisted hardware selection state."""
+
+    return _state_path(install_dir)
+
+
 def _read_hardware_profile_name(config_path: str) -> str:
     p = _resolve_mutable_config_path(config_path)
     if not p.exists():
@@ -256,7 +262,7 @@ def capture_profile_authority(config_path: str, install_dir: str = "/opt/mcd") -
     for match in _PROFILE_AUTHORITY_SECTION_RE.finditer(text):
         sections[str(match.group("name"))] = match.group(0)
 
-    selection_path = _state_path(install_dir)
+    selection_path = profile_selection_path(install_dir)
     selection_exists = selection_path.exists()
     selection_bytes = selection_path.read_bytes() if selection_exists else b""
     return {
