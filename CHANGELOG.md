@@ -1,3 +1,10 @@
+## 1.5.157 - 2026-10-13
+
+- Fixed: Mautic 7 static priority closures now receive durable successful
+  coverage from the stronger super-priority lane and pass repeated
+  `--exclude=<covered-parent>` options, so a shared dependency is rebuilt once
+  across lanes while failed stronger work remains retryable.
+
 ## 1.5.156 - 2026-10-13
 
 - Persist the complete Mautic 7 static dependency ownership closure in the

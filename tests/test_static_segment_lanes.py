@@ -13,6 +13,7 @@ from mcd_agent.daemon import (
     _segment_native_chain_command_plan,
     _segment_priority_effective_setting,
     _segment_super_priority_effective_setting,
+    _static_lane_successful_coverage_ids,
     _static_lane_runtime_evidence,
 )
 from mcd_agent.static_segment_lanes import (
@@ -157,6 +158,54 @@ class StaticSegmentLaneTests(unittest.TestCase):
         )
         self.assertEqual(command_ids, [58, 59])
         self.assertEqual(excludes, {58: [], 59: [57]})
+
+    def test_mautic7_priority_reuses_successful_super_parent_without_rebuild(self) -> None:
+        store = daemon.TaskStore(":memory:")
+        root = "/var/www/m7/cross-lane"
+        static_state, _added, _started = reconcile_state(
+            None,
+            plans={SUPER_PRIORITY: [57, 58], PRIORITY: [59]},
+            now_ts=100.0,
+        )
+        static_state["lanes"][SUPER_PRIORITY]["done"] = [57, 58]
+        store.put_runtime_sync(daemon._static_lane_state_key(root), static_state)
+
+        covered = _static_lane_successful_coverage_ids(
+            store,
+            root=root,
+            static_state=static_state,
+            lane_name=PRIORITY,
+        )
+        command_ids, excludes = _segment_native_chain_command_plan(
+            [59],
+            {58: {57}, 59: {57}},
+            {57: {58, 59}},
+            already_covered_ids=covered,
+        )
+        self.assertEqual(covered, {57, 58})
+        self.assertEqual(command_ids, [59])
+        self.assertEqual(excludes, {59: [57]})
+
+        # An unsuccessful stronger lane is not durable native coverage: the
+        # weaker lane must be able to retry the shared parent.
+        static_state["lanes"][SUPER_PRIORITY]["done"] = []
+        static_state["lanes"][SUPER_PRIORITY]["errors"] = [57, 58]
+        covered = _static_lane_successful_coverage_ids(
+            store,
+            root=root,
+            static_state=static_state,
+            lane_name=PRIORITY,
+        )
+        command_ids, excludes = _segment_native_chain_command_plan(
+            [59],
+            {59: {57}},
+            {57: {59}},
+            already_covered_ids=covered,
+        )
+        self.assertEqual(covered, set())
+        self.assertEqual(command_ids, [59])
+        self.assertEqual(excludes, {59: []})
+        store.close()
 
     def test_static_success_reconciles_preexisting_frozen_ordinary_parent(self) -> None:
         store = daemon.TaskStore(":memory:")

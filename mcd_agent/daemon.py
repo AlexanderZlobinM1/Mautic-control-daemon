@@ -4358,6 +4358,33 @@ def _static_lane_release(store: "TaskStore", *, root: str, lane: str, entity_id:
         store.put_runtime_sync(key, state)
 
 
+def _static_lane_successful_coverage_ids(
+    store: "TaskStore",
+    *,
+    root: str,
+    static_state: Mapping[str, object] | None,
+    lane_name: str,
+) -> set[int]:
+    """Return Mautic 7 IDs already rebuilt by stronger static ownership.
+
+    Static lanes are reconciled independently, so removing an inherited
+    parent from the weaker lane's durable ``items`` is not enough: the native
+    command planner must also know that the stronger lane already rebuilt the
+    parent.  Successful lane receipts are the only safe source here.  A
+    claimed/running/error item is deliberately not treated as covered, which
+    lets the weaker lane retry the parent after a failed stronger closure.
+    """
+
+    covered = _segment_native_covered_ids(store, root)
+    if str(lane_name) != _SEGMENT_PRIORITY_LANE:
+        return covered
+    lanes = static_state.get("lanes") if isinstance(static_state, Mapping) else {}
+    stronger = lanes.get(_SEGMENT_SUPER_PRIORITY_LANE) if isinstance(lanes, Mapping) else None
+    if isinstance(stronger, Mapping):
+        covered.update(_normalize_segment_ids(stronger.get("done")))
+    return covered
+
+
 def _static_lane_terminal(
     store: "TaskStore",
     *,
@@ -16414,6 +16441,12 @@ def run_loop(
                         static_native_excludes: dict[int, list[int]] = {}
                         static_major = int(getattr(inst, "mautic_major", 0) or 0)
                         if static_major >= 7:
+                            static_already_covered_ids = _static_lane_successful_coverage_ids(
+                                store,
+                                root=root,
+                                static_state=static_state,
+                                lane_name=lane_name,
+                            )
                             (
                                 static_native_command_ids,
                                 static_native_excludes,
@@ -16421,6 +16454,7 @@ def run_loop(
                                 static_chain_ids,
                                 static_parents,
                                 static_children,
+                                already_covered_ids=static_already_covered_ids,
                             )
                             if any(static_native_excludes.values()) and not _segment_native_exclude_capability(
                                 store,
