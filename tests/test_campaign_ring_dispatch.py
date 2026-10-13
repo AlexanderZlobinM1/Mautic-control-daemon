@@ -314,6 +314,23 @@ class CampaignRingDispatchTests(unittest.TestCase):
         self.assertTrue(daemon_mod._scheduler_shared_admission_allowed(roots[1], "segment"))
         _set_scheduler_distribution_roots([], worker_slots=1)
 
+    def test_distribution_skip_completes_unlaunchable_ordinary_root_turn(self) -> None:
+        roots = ["/var/www/hot", "/var/www/blocked"]
+        _set_scheduler_distribution_roots(roots, worker_slots=2, cursor=0)
+        daemon_mod._mark_scheduler_shared_admission(roots[0], "segment")
+
+        self.assertFalse(daemon_mod._scheduler_shared_admission_allowed(roots[0], "segment"))
+        daemon_mod._mark_scheduler_shared_admission_skip(roots[1], "segment")
+        self.assertTrue(daemon_mod._scheduler_shared_admission_allowed(roots[0], "segment"))
+
+        # Static super-priority ticks are independent of the ordinary round.
+        daemon_mod._set_scheduler_distribution_roots(roots, worker_slots=2, cursor=0)
+        daemon_mod._mark_scheduler_shared_admission(roots[0], "segment")
+        daemon_mod._mark_scheduler_shared_admission_skip(roots[1], "segment_super_priority")
+        self.assertFalse(daemon_mod._scheduler_shared_admission_allowed(roots[0], "segment"))
+        self.assertTrue(daemon_mod._scheduler_shared_admission_allowed(roots[1], "segment_super_priority"))
+        _set_scheduler_distribution_roots([], worker_slots=1)
+
     def test_distribution_gate_keeps_served_roots_when_input_order_rotates(self) -> None:
         roots = ["/var/www/a", "/var/www/b", "/var/www/c"]
         _set_scheduler_distribution_roots(roots, worker_slots=3, cursor=0)

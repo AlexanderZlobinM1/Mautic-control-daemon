@@ -1,3 +1,13 @@
+## 1.5.167 - 2026-10-13
+
+- Keep super-priority ticks on their own recurring static round-robin lane;
+  ordinary completion/refill state cannot pause or reset that dedicated cycle.
+- Prevent a locally blocked persisted ordinary root from holding the shared
+  fair round when capacity is free: dependency/claim/closure no-launch turns
+  now yield once, while full-capacity turns retain their retry priority.
+- Add regression coverage proving the ordinary skip-turn never admits the
+  super-priority lane into the shared fairness gate.
+
 ## 1.5.166 - 2026-10-13
 
 - Make every fresh Mautic 7 super-priority tick rebuild its internal parents

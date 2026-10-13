@@ -4,7 +4,7 @@
 фактическую схему после исправления admission и должен обновляться вместе с
 кодом, тестами и runtime receipt. Документ не является разрешением на
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.166 (follow-up после immutable
+Актуальная редакция этого канона — MCD 1.5.167 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам
@@ -13,6 +13,16 @@ chunk. Recurring super-priority admission сохраняет резерв для
 ordinary cycle. Active dedicated super-priority work не вычитается из ordinary
 shared capacity: постоянный super-ring не может голодать обычный tail; обычная
 priority остаётся частью shared regular accounting.
+
+Super-priority ticks are a dedicated recurring lane: each tick advances its
+own static round-robin cycle and is not gated by completion, refill, or fair
+turn state of the ordinary lane. Ordinary shared round-robin has the opposite
+rule for a locally blocked persisted root: when the shared/instance capacity
+snapshot is free but dependency, claim, or closure guards leave no launchable
+item, that root completes its ordinary fair turn without a launch; the next
+ready root may use the slot. A full-capacity observation is not a skip and
+preserves the root-local retry priority. Neither rule bypasses admission,
+dependency, claim, closure, or update barriers.
 
 Каждый новый Mautic 7 super-priority tick обязан нативно перестроить каждый
 внутренний parent отдельной первой командой; terminal leaves получают

@@ -6909,6 +6909,30 @@ def _mark_scheduler_shared_admission(root: str, task_type: str) -> None:
             _SCHEDULER_DISTRIBUTION_SERVED_ROOTS.add(str(root))
 
 
+def _mark_scheduler_shared_admission_skip(root: str, task_type: str) -> None:
+    """Complete an ordinary root's fair turn when local guards found no launch.
+
+    A persisted ordinary cycle can remain ready while every item in its local
+    ring is temporarily held by dependency, claim, or closure guards.  When
+    capacity is free, that root must still yield this round so another ready
+    root can use the slot.  This is deliberately separate from the submit
+    boundary: a failed submit remains an unserved turn, and the super-priority
+    lane never participates in this shared ordinary gate.
+    """
+
+    normalized = str(task_type or "").strip().lower()
+    if normalized in _SCHEDULER_SUPER_PRIORITY_TASK_TYPES:
+        return
+    normalized_root = str(root)
+    with _SCHEDULER_DISTRIBUTION_LOCK:
+        ready = set(_SCHEDULER_DISTRIBUTION_READY_ROOTS)
+        if normalized_root not in ready:
+            return
+        unserved = ready - _SCHEDULER_DISTRIBUTION_SERVED_ROOTS
+        if normalized_root in unserved:
+            _SCHEDULER_DISTRIBUTION_SERVED_ROOTS.add(normalized_root)
+
+
 def _set_scheduler_important_pending_roots(roots: Iterable[object]) -> None:
     global _SCHEDULER_IMPORTANT_PENDING_ROOTS
     with _SCHEDULER_DISTRIBUTION_LOCK:
@@ -16933,6 +16957,12 @@ def run_loop(
                             # root-local retry once the worker is released,
                             # even if the monitor callback races this pass.
                             _note_refill_priority(root)
+                        else:
+                            # Local dependency/claim/closure guards left the
+                            # root with no launchable item while capacity was
+                            # free. Complete its ordinary fair turn so it
+                            # cannot hold every free slot in this round.
+                            _mark_scheduler_shared_admission_skip(root, "segment")
                         refreshed = store.get_runtime_sync(_segment_cycle_key(root)) or state
                         refreshed_state = refreshed if isinstance(refreshed, Mapping) else state
                         refreshed_pending = _segment_cycle_pending_order(
@@ -21686,6 +21716,12 @@ def run_loop(
                         max_launches=pending_launch_budget,
                     )
                     segment_launched_this_tick += pending_launched_this_tick
+                    if pending_launched_this_tick <= 0:
+                        # The persisted root had a free shared budget but no
+                        # locally launchable item. Let the next ready root
+                        # take this ordinary fair turn; capacity exhaustion is
+                        # excluded by the positive launch budget above.
+                        _mark_scheduler_shared_admission_skip(root, "segment")
                 if not pending_cycle_ring:
                     pending_guard_reason = "no_projected_pending"
                 elif pending_launch_budget <= 0:
