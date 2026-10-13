@@ -124,15 +124,29 @@ def _gate(root: Path, gate: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
 def _record_state(root: Path, record: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
     rows: list[dict[str, Any]] = []
     groups: dict[str, list[bool]] = {"vulnerable": [], "fixed": []}
+    gate_signatures: dict[str, set[str]] = {}
+    for item in record["gate"]:
+        signature = json.dumps({key: value for key, value in item.items() if key != "group"}, sort_keys=True)
+        gate_signatures.setdefault(signature, set()).add(item["group"])
+    vulnerable_match = False
+    fixed_match = False
     for item in record["gate"]:
         matched, row = _gate(root, item)
         rows.append(row)
         groups[item["group"]].append(matched)
+        signature = json.dumps({key: value for key, value in item.items() if key != "group"}, sort_keys=True)
+        if matched and gate_signatures[signature] == {"vulnerable"}:
+            vulnerable_match = True
+        if matched and gate_signatures[signature] == {"fixed"}:
+            fixed_match = True
     vulnerable = bool(groups["vulnerable"]) and all(groups["vulnerable"])
     fixed = bool(groups["fixed"]) and all(groups["fixed"])
-    if vulnerable and not fixed:
+    # A complete group is eligible only when no gate in the opposite group
+    # matches.  Otherwise a partially mixed source could be mistaken for an
+    # already-fixed or candidate state, depending on which group is complete.
+    if vulnerable and not fixed_match:
         return "candidate", rows
-    if fixed and not vulnerable:
+    if fixed and not vulnerable_match:
         return "already", rows
     return "ambiguous", rows
 

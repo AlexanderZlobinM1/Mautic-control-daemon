@@ -24,6 +24,24 @@ def _payload(plan, content: bytes) -> None:
 
 
 class MauticPatchPlanV3Tests(unittest.TestCase):
+    def test_mixed_gate_groups_are_ambiguous_even_when_one_group_is_complete(self):
+        path = self.root / "docroot/app/mixed.txt"
+        path.write_bytes(b"vulnerable-a\nvulnerable-b\nfixed-a\n")
+        record = {
+            "gate": [
+                {"group": "vulnerable", "kind": "exact_count", "path": "docroot/app/mixed.txt", "needle": "vulnerable-a", "expected_count": 1},
+                {"group": "vulnerable", "kind": "exact_count", "path": "docroot/app/mixed.txt", "needle": "vulnerable-b", "expected_count": 1},
+                {"group": "fixed", "kind": "exact_count", "path": "docroot/app/mixed.txt", "needle": "fixed-a", "expected_count": 1},
+                {"group": "fixed", "kind": "exact_count", "path": "docroot/app/mixed.txt", "needle": "fixed-b", "expected_count": 1},
+            ],
+        }
+        state, _rows = executor._record_state(self.root, record)
+        self.assertEqual(state, "ambiguous")
+
+        path.write_bytes(b"fixed-a\nfixed-b\nvulnerable-a\n")
+        state, _rows = executor._record_state(self.root, record)
+        self.assertEqual(state, "ambiguous")
+
     def test_unexecuted_phase_source_gates_do_not_prevent_applied_phase_restore(self):
         plan = _plan()
         plan.update(trigger="upgrade_lifecycle", phase="dependency_update_preflight", source_version="7.1.3", target_version="7.2.1")
