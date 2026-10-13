@@ -2588,6 +2588,7 @@ def _select_segment_dependency_snapshot(
     snapshot_read_ok: bool,
     snapshot_updated_at: float,
     snapshot_segment_count: int,
+    preserve_verified_previous: bool = False,
 ) -> tuple[dict[int, set[int]], dict[int, set[int]], bool, float, int, str]:
     """Select one complete, root-local dependency snapshot for persistence.
 
@@ -2597,7 +2598,10 @@ def _select_segment_dependency_snapshot(
     must not overwrite the previous valid graph while copying the previous
     snapshot's authority metadata.  A genuinely successful read is allowed
     to return an empty graph for an independent root; only the no-read path
-    reuses a same-cycle persisted snapshot.
+    reuses a same-cycle persisted snapshot. Static lanes are an explicit
+    exception: their ticks are independent of the ordinary cycle generation,
+    so a verified graph must survive a terminal/mismatched ordinary cycle when
+    no fresh definition read is available.
     """
 
     def _normalize(raw: Mapping[int, Iterable[int]] | None) -> dict[int, set[int]]:
@@ -2635,11 +2639,6 @@ def _select_segment_dependency_snapshot(
 
     context = current_context if isinstance(current_context, Mapping) else {}
     cycle = current_cycle if isinstance(current_cycle, Mapping) else {}
-    cycle_id = str(cycle.get("cycle_id") or "").strip()
-    context_cycle_id = str(context.get("cycle_id") or "").strip()
-    cycle_status = str(cycle.get("status") or "").strip().lower()
-    if not cycle_id or cycle_id != context_cycle_id or cycle_status != "active":
-        return parents, children, False, 0.0, 0, "read_required"
 
     def _context_relations(key: str) -> dict[int, set[int]]:
         raw = context.get(key)
@@ -2655,6 +2654,36 @@ def _select_segment_dependency_snapshot(
 
     previous_parents = _context_relations("parents_by_child")
     previous_children = _context_relations("children_by_parent")
+    cycle_id = str(cycle.get("cycle_id") or "").strip()
+    context_cycle_id = str(context.get("cycle_id") or "").strip()
+    cycle_status = str(cycle.get("status") or "").strip().lower()
+    if not cycle_id or cycle_id != context_cycle_id or cycle_status != "active":
+        if (
+            preserve_verified_previous
+            and (previous_parents or previous_children)
+            and _segment_dependency_context_verified(context)
+            and _segment_dependency_maps_consistent(previous_parents, previous_children)
+        ):
+            try:
+                previous_updated_at = float(context.get("dependency_snapshot_updated_at") or 0.0)
+            except (TypeError, ValueError):
+                previous_updated_at = 0.0
+            try:
+                previous_segment_count = max(
+                    0,
+                    int(context.get("dependency_snapshot_segment_count") or 0),
+                )
+            except (TypeError, ValueError):
+                previous_segment_count = 0
+            return (
+                previous_parents,
+                previous_children,
+                True,
+                previous_updated_at,
+                previous_segment_count,
+                "preserved_previous",
+            )
+        return parents, children, False, 0.0, 0, "read_required"
     if not previous_parents and not previous_children:
         # A pre-provenance daemon could persist an authoritative empty graph
         # while copying the timestamp/count from a live snapshot.  Such a
@@ -15297,6 +15326,7 @@ def run_loop(
     segment_sql_auto_signatures: dict[str, tuple[int, ...]] = {}
     segment_dependencies_by_root: dict[str, dict[int, set[int]]] = {}
     segment_parents_by_root: dict[str, dict[int, set[int]]] = {}
+    dependency_snapshot_state_by_root: dict[str, tuple[bool, float, int]] = {}
     segment_failure_blocked_sets: dict[str, set[int]] = {}
     segment_logical_issue_blocked_sets: dict[str, set[int]] = {}
     segment_logical_data_error_notes: dict[str, dict[int, str]] = {}
@@ -15827,6 +15857,8 @@ def run_loop(
                 "children_by_parent": {str(k): sorted(v) for k, v in dependency_children.items()},
                 "dependency_snapshot_authoritative": True,
                 "dependency_snapshot_source": "mautic_published_segment_filters",
+                "dependency_snapshot_mode": "live_read",
+                "dependency_snapshot_verified": True,
                 "dependency_snapshot_updated_at": float(time.time()),
                 "dependency_snapshot_segment_count": len(
                     {int(row.get("id") or 0) for row in dep_rows if int(row.get("id") or 0) > 0}
@@ -18952,6 +18984,16 @@ def run_loop(
                 if not inst.db:
                     continue
                 root = inst.root
+                # Dependency-read provenance is root-local.  Do not let a
+                # successful graph read from the previous root leak into a
+                # paused/skipped root's context publication: that can turn a
+                # missing read into an apparently fresh empty graph and make
+                # an independent static tick repeat a shared parent without
+                # its native --exclude guard.
+                dependency_snapshot_read_ok = False
+                dependency_snapshot_updated_at = 0.0
+                dependency_snapshot_segment_count = 0
+                dependency_snapshot_state_by_root[root] = (False, 0.0, 0)
                 segment_priority_for_inst = _segment_priority_effective_setting(config, inst)
                 segment_super_priority_for_inst = _segment_super_priority_effective_setting(config, inst)
                 segment_static_ids_for_inst = (
@@ -19239,6 +19281,11 @@ def run_loop(
                         dependency_snapshot_read_ok = True
                         dependency_snapshot_updated_at = float(time.time())
                         dependency_snapshot_segment_count = len(published_segment_ids)
+                        dependency_snapshot_state_by_root[root] = (
+                            True,
+                            dependency_snapshot_updated_at,
+                            dependency_snapshot_segment_count,
+                        )
                         source_snapshot = _ordinary_segment_source_baseline(dep_rows)
                         never_built_segment_ids = _never_built_segment_ids(dep_rows)
                         dependency_children, dependency_parents = segment_dependency_maps(dep_rows)
@@ -19343,6 +19390,11 @@ def run_loop(
                                     important_closure.add(int(parent))
                                     frontier.append(int(parent))
                     except Exception as e:
+                        # A graph read is not a valid snapshot until all
+                        # dependent planning transforms complete.  If any
+                        # transform fails, keep the root fail-closed and let
+                        # a verified static context survive the tick.
+                        dependency_snapshot_state_by_root[root] = (False, 0.0, 0)
                         dependency_children = segment_dependencies_by_root.get(root, {})
                         dependency_parents = segment_parents_by_root.get(root, {})
                         important_ids = set(_normalize_segment_ids(standard_segment_ids))
@@ -21058,6 +21110,11 @@ def run_loop(
 
                 previous_context = store.get_runtime_sync(_segment_dispatch_context_key(root)) or {}
                 (
+                    root_snapshot_read_ok,
+                    root_snapshot_updated_at,
+                    root_snapshot_segment_count,
+                ) = dependency_snapshot_state_by_root.get(root, (False, 0.0, 0))
+                (
                     dependency_parents,
                     dependency_children,
                     dependency_snapshot_authoritative,
@@ -21069,9 +21126,14 @@ def run_loop(
                     current_cycle=segment_cycle_payload,
                     candidate_parents=segment_parents_by_root.get(root, {}),
                     candidate_children=segment_dependencies_by_root.get(root, {}),
-                    snapshot_read_ok=bool(dependency_snapshot_read_ok),
-                    snapshot_updated_at=float(dependency_snapshot_updated_at or 0.0),
-                    snapshot_segment_count=int(dependency_snapshot_segment_count or 0),
+                    snapshot_read_ok=bool(root_snapshot_read_ok),
+                    snapshot_updated_at=float(root_snapshot_updated_at or 0.0),
+                    snapshot_segment_count=int(root_snapshot_segment_count or 0),
+                    preserve_verified_previous=bool(
+                        segment_static_ids_for_inst
+                        or static_lane_owned_ids
+                        or static_lane_active_ids
+                    ),
                 )
                 parents = {
                     str(int(child)): sorted(int(parent) for parent in parent_ids if int(parent) > 0)
@@ -21100,7 +21162,7 @@ def run_loop(
                     "dependency_snapshot_source": "mautic_published_segment_filters",
                     "dependency_snapshot_mode": dependency_snapshot_mode,
                     "dependency_snapshot_verified": bool(
-                        dependency_snapshot_read_ok
+                        root_snapshot_read_ok
                         or (
                             dependency_snapshot_mode == "preserved_previous"
                             and isinstance(previous_context, Mapping)

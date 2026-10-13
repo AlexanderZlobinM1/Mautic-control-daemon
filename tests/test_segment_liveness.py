@@ -1748,6 +1748,41 @@ class SegmentLivenessTests(unittest.TestCase):
         self.assertEqual(segment_count, 150)
         self.assertEqual(mode, "preserved_previous")
 
+    def test_static_lane_preserves_verified_graph_across_terminal_ordinary_cycle(self) -> None:
+        """An independent static tick must not lose its parent graph at cycle rollover."""
+
+        context = {
+            "schema": "mcd-segment-dispatch-context-v1",
+            "cycle_id": "cycle-static-old",
+            "parents_by_child": {59: [57]},
+            "children_by_parent": {57: [59]},
+            "dependency_snapshot_authoritative": True,
+            "dependency_snapshot_verified": True,
+            "dependency_snapshot_updated_at": 123.0,
+            "dependency_snapshot_segment_count": 2,
+        }
+        selected = daemon._select_segment_dependency_snapshot(
+            current_context=context,
+            current_cycle={
+                "schema": "mcd-segment-cycle-v1",
+                "cycle_id": "cycle-ordinary-new",
+                "status": "terminal",
+            },
+            candidate_parents={},
+            candidate_children={},
+            snapshot_read_ok=False,
+            snapshot_updated_at=0.0,
+            snapshot_segment_count=0,
+            preserve_verified_previous=True,
+        )
+        parents, children, authoritative, updated_at, segment_count, mode = selected
+        self.assertEqual(parents, {59: {57}})
+        self.assertEqual(children, {57: {59}})
+        self.assertTrue(authoritative)
+        self.assertEqual(updated_at, 123.0)
+        self.assertEqual(segment_count, 2)
+        self.assertEqual(mode, "preserved_previous")
+
     def test_successful_empty_dependency_snapshot_is_allowed_for_independent_root(self) -> None:
         """A genuinely successful empty definition parse remains authoritative."""
 
