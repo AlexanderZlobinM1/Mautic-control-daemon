@@ -15431,6 +15431,8 @@ def run_loop(
     *,
     _test_stop_event: threading.Event | None = None,
 ) -> None:
+    """Run the daemon."""
+
     global _ACTIVE_PRIORITY_EXECUTOR, _SEGMENT_DISPATCH_WAKEUP, _ORDINARY_REFILL_WAKEUP
     logging.info("MCD loop started")
     # Per-root context metadata is reset before each root pass below.  Keep a
@@ -16769,6 +16771,8 @@ def run_loop(
                     for inst in ordered_installs:
                         root = str(getattr(inst, "root", "") or "").strip()
                         if not root or not getattr(inst, "db", None):
+                            if root:
+                                _mark_scheduler_shared_admission_skip(root, "segment")
                             continue
                         priority_root = _peek_ready_refill_priority_root()
                         if (
@@ -16791,10 +16795,12 @@ def run_loop(
                         # longer consume a real worker slot.
                         state = store.get_runtime_sync(_segment_cycle_key(root)) or {}
                         if not isinstance(state, Mapping):
+                            _mark_scheduler_shared_admission_skip(root, "segment")
                             continue
                         active_cycle = str(state.get("status") or "").strip().lower() == "active"
                         import_pending = max(0, int(import_pending_cache.get(root, 0) or 0))
                         if not active_cycle and import_pending <= 0:
+                            _mark_scheduler_shared_admission_skip(root, "segment")
                             continue
                         context = store.get_runtime_sync(_segment_dispatch_context_key(root)) or {}
                         if not isinstance(context, Mapping) or context.get("schema") != "mcd-segment-dispatch-context-v1":
@@ -16809,14 +16815,17 @@ def run_loop(
                             context_updated = 0.0
                         now_root = time.time()
                         if context_updated <= 0.0 and not active_cycle:
+                            _mark_scheduler_shared_admission_skip(root, "segment")
                             continue
                         db_pause_until = max(
                             float(context.get("db_pause_until") or 0.0),
                             float(db_dispatch_pause_until.get(root, 0.0) or 0.0),
                         )
                         if db_pause_until > now_root:
+                            _mark_scheduler_shared_admission_skip(root, "segment")
                             continue
                         if not bool(context.get("cluster_cron_allowed", True)):
+                            _mark_scheduler_shared_admission_skip(root, "segment")
                             continue
 
                         blocked_ids = set(_normalize_segment_ids(context.get("blocked_ids")))
@@ -16852,6 +16861,7 @@ def run_loop(
                             now_ts=now_root,
                         ):
                             if now_root < float(dependency_refresh_retry_at.get(root, 0.0) or 0.0):
+                                _mark_scheduler_shared_admission_skip(root, "segment")
                                 continue
                             if root not in dependency_refresh_futures:
                                 static_policy_state = store.get_runtime_sync(_static_lane_state_key(root)) or {}
@@ -16936,11 +16946,13 @@ def run_loop(
                                     ),
                                     recovery_policy=recovery_policy,
                                 )
+                            _mark_scheduler_shared_admission_skip(root, "segment")
                             continue
                         throttled_raw = context.get("throttled_active")
                         priority_raw = context.get("priority_pending")
                         slot_raw = context.get("segment_slot_limit")
                         if throttled_raw is None or priority_raw is None or slot_raw is None:
+                            _mark_scheduler_shared_admission_skip(root, "segment")
                             continue
                         throttled_active = bool(throttled_raw)
                         priority_pending = bool(priority_raw)
@@ -21004,11 +21016,13 @@ def run_loop(
         ):
             if not inst.db:
                 logging.warning("[%s] skip install without db config", inst.root)
+                _mark_scheduler_shared_admission_skip(str(getattr(inst, "root", "") or ""), "segment")
                 continue
 
             root = inst.root
             with _SCHEDULER_RUNTIME_LOCK:
                 if root in lifecycle_monitor_busy_roots:
+                    _mark_scheduler_shared_admission_skip(root, "segment")
                     continue
             segment_priority_for_inst = _segment_priority_effective_setting(config, inst)
             segment_super_priority_for_inst = _segment_super_priority_effective_setting(config, inst)
@@ -21675,6 +21689,7 @@ def run_loop(
             if db_pause_until > now:
                 _record_segment_pending_guard("db_pause")
                 _publish_monitor_cycle()
+                _mark_scheduler_shared_admission_skip(root, "segment")
                 continue
             if db_pause_until > 0:
                 logging.info(

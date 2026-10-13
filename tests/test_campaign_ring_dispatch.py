@@ -357,6 +357,40 @@ class CampaignRingDispatchTests(unittest.TestCase):
         self.assertTrue(daemon_mod._scheduler_shared_admission_allowed(roots[1], "segment"))
         _set_scheduler_distribution_roots([], worker_slots=1)
 
+    def test_distribution_round_reopens_free_capacity_after_full_root_scan(self) -> None:
+        roots = ["/var/www/slow", "/var/www/ready"]
+        _set_scheduler_distribution_roots(roots, worker_slots=2, cursor=0)
+
+        # The ready root has already taken its first fair turn. The slow root
+        # was not dispatchable in this pass, so its unserved receipt must not
+        # strand the second shared worker in the next pass.
+        _mark = daemon_mod._mark_scheduler_shared_admission
+        _mark(roots[1], "segment")
+        self.assertFalse(daemon_mod._scheduler_shared_admission_allowed(roots[1], "segment"))
+        daemon_mod._mark_scheduler_shared_admission_skip(roots[0], "segment")
+        self.assertTrue(daemon_mod._scheduler_shared_admission_allowed(roots[1], "segment"))
+        _set_scheduler_distribution_roots([], worker_slots=1)
+
+    def test_interleaved_main_and_refill_scans_do_not_clear_each_other(self) -> None:
+        roots = ["/var/www/a", "/var/www/b", "/var/www/c"]
+        _set_scheduler_distribution_roots(roots, worker_slots=3, cursor=0)
+
+        daemon_mod._mark_scheduler_shared_admission(roots[0], "segment")
+
+        def refill_scan() -> None:
+            daemon_mod._mark_scheduler_shared_admission(roots[1], "segment")
+            daemon_mod._mark_scheduler_shared_admission_skip(roots[2], "segment")
+
+        refill_thread = threading.Thread(target=refill_scan)
+        refill_thread.start()
+        refill_thread.join()
+
+        # Main and refill share one durable served-root receipt. Once every
+        # eligible root has a claim/skip receipt, the next ordinary turn can
+        # reopen without a process-wide active-scan counter.
+        self.assertTrue(daemon_mod._scheduler_shared_admission_allowed(roots[0], "segment"))
+        _set_scheduler_distribution_roots([], worker_slots=1)
+
     def test_distribution_skip_completes_unlaunchable_ordinary_root_turn(self) -> None:
         roots = ["/var/www/hot", "/var/www/blocked"]
         _set_scheduler_distribution_roots(roots, worker_slots=2, cursor=0)
