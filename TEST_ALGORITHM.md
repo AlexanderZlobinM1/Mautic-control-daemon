@@ -232,7 +232,7 @@ barrier остаются обязательными.
 | M6 closure занимает один worker/PID, M7 covered roots не параллелятся | `dependency_execution_chains`, `_segment_chain_command_args`, `_segment_chain_runtime_*`, static closure lock | `tests/test_segment_chain_runtime.py` actual TaskStore/PID receipt + fresh M6/M7 sandbox evidence |
 | M7 native parent coverage дедуплицируется через capability-backed `--exclude` | `_segment_native_coverage_*`, `_segment_native_exclude_capability`, `_append_segment_native_excludes` | read-only `help ... --format=json` receipt + actual parent-count/PID receipt |
 | dedicated super-priority ticks не подавляются native coverage предыдущего ordinary cycle | `_segment_successful_coverage_ids`, `_static_lane_successful_coverage_ids`, `static_segment_lanes.py` | `test_new_super_cycle_does_not_reuse_previous_ordinary_native_coverage` + natural Farm02 static-lane marker series |
-| завершившийся super-priority cycle не ждёт завершения priority lane для следующего тика | `static_segment_lanes.reconcile_state` | `test_completed_super_cycle_rolls_over_while_priority_waits` + recurring M6/M7 sandbox with live shared-budget wait |
+| завершившийся super-priority cycle не ждёт завершения priority lane для следующего тика | `static_segment_lanes.reconcile_state` | `test_recurring_m6_m7_super_cycle_state_model_preserves_ordinary_cycle` (unit state model only) + private recurring M6/M7 Docker/full-run receipt with live shared-budget wait |
 | filter hints не подменяют Mautic rc; unsafe topology terminalizes explicitly | `segment_filter_safety.py`, `logical_issues.py`, `_terminalize_segment_data_errors` | `test_topology_data_errors_finish_root_and_allow_next_cycle` + filter-hint regression |
 
 ## Acceptance gate

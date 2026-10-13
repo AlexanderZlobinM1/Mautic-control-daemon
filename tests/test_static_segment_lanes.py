@@ -760,16 +760,17 @@ class StaticSegmentLaneTests(unittest.TestCase):
         self.assertEqual(rolled["lanes"][PRIORITY]["claimed"], [100])
         self.assertEqual(rolled["lanes"][PRIORITY]["running"], [100])
 
-    def test_recurring_m6_m7_super_cycles_use_real_pids_and_preserve_ordinary_cycle(self) -> None:
-        """Disposable native gate for recurring static-lane ownership.
+    def test_recurring_m6_m7_super_cycle_state_model_preserves_ordinary_cycle(self) -> None:
+        """Unit state/plan model for recurring static-lane ownership.
 
-        This deliberately uses real child processes and a durable TaskStore
-        fixture.  It does not invoke a production host or a manual Mautic
-        command; the child is only the operator sandbox's native worker.
+        This deliberately uses a durable TaskStore fixture, but it does not
+        execute Mautic, PHP, Docker, or the production ``run_loop``.  The
+        private owner-labelled Docker harness is the only source of native
+        acceptance evidence.
         """
 
         receipt: dict[str, object] = {
-            "schema": "mcd-recurring-static-sandbox-v1",
+            "schema": "mcd-recurring-static-lane-model-v1",
             "source_version": __version__,
             "rounds": [],
             "cross_lane": [],
@@ -1051,7 +1052,7 @@ class StaticSegmentLaneTests(unittest.TestCase):
             len({(item["mautic_major"], item["round"]) for item in rounds}),
             6,
         )
-        if target := os.environ.get("MCD_RECURRING_STATIC_SANDBOX_RECEIPT"):
+        if target := os.environ.get("MCD_RECURRING_STATIC_LANE_MODEL_RECEIPT"):
             Path(target).write_text(json.dumps(receipt, sort_keys=True, indent=2) + "\n", encoding="utf-8")
 
     def test_manual_dependency_overlap_is_blocked_across_static_lanes(self) -> None:
