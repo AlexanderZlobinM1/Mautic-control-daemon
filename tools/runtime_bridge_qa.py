@@ -14,6 +14,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -21,6 +22,7 @@ import tarfile
 import tempfile
 import time
 from types import SimpleNamespace
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -68,6 +70,22 @@ def _archive_version(path: Path) -> str:
     return version
 
 
+def _archive_metadata(path: Path) -> dict[str, str]:
+    with tarfile.open(path, "r:gz") as archive:
+        member = archive.extractfile("mcd-runtime-manifest.json")
+        if member is None:
+            raise RuntimeError("runtime archive manifest is unreadable")
+        raw = member.read()
+    payload = json.loads(raw.decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise RuntimeError("runtime archive manifest is not an object")
+    return {
+        "version": str(payload.get("version") or "").strip(),
+        "source_commit": str(payload.get("source_commit") or "").strip(),
+        "manifest_sha256": hashlib.sha256(raw).hexdigest(),
+    }
+
+
 def _cfg(root: Path) -> SimpleNamespace:
     return SimpleNamespace(
         state_db_path=str(root / "install" / "var" / "state.db"),
@@ -81,16 +99,13 @@ def _cfg(root: Path) -> SimpleNamespace:
     )
 
 
-def _write_legacy_source(install: Path) -> None:
+def _write_legacy_source(install: Path, *, version: str = "1.5.131") -> None:
     source = install / "src"
     package = source / "mcd_agent"
     package.mkdir(parents=True)
-    (source / "pyproject.toml").write_text(
-        "[build-system]\nrequires=['setuptools>=61']\nbuild-backend='setuptools.build_meta'\n"
-        "[project]\nname='mcd-agent'\nversion='1.5.127'\n",
-        encoding="utf-8",
-    )
-    (package / "__init__.py").write_text('__version__ = "1.5.127"\n', encoding="utf-8")
+    # This is the exact old-agent failure layout: the runtime-only archive
+    # cannot satisfy the legacy updater's pyproject-based source install.
+    (package / "__init__.py").write_text(f'__version__ = "{version}"\n', encoding="utf-8")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -109,6 +124,12 @@ def main(argv: list[str] | None = None) -> int:
     if expected_sha256 and archive_sha256 != expected_sha256:
         raise RuntimeError(f"runtime archive SHA mismatch: expected {expected_sha256}, got {archive_sha256}")
     expected_target = str(args.expected_target or "").strip() or _archive_version(archive)
+    archive_metadata = _archive_metadata(archive)
+    with tarfile.open(archive, "r:*") as archive_handle:
+        archive_names = archive_handle.getnames()
+    archive_has_no_pyproject = not any(Path(name).name == "pyproject.toml" for name in archive_names)
+    if not archive_has_no_pyproject:
+        raise RuntimeError("runtime-only archive unexpectedly contains pyproject.toml")
 
     bridge = _load_bridge()
     worker: subprocess.Popen[str] | None = None
@@ -182,14 +203,165 @@ def main(argv: list[str] | None = None) -> int:
         if rows and not any(int(row.get("pid") or 0) == worker.pid for row in rows if isinstance(row, dict)):
             raise RuntimeError("running TaskStore row was not preserved")
 
+        old_source_path = Path(str(receipt["before"]["source_path"]))
+        legacy_source_without_pyproject = not (old_source_path / "pyproject.toml").exists()
+        if not legacy_source_without_pyproject:
+            raise RuntimeError("success bridge QA did not use the no-pyproject legacy layout")
+
+        # Inject a post-switch failure after the package/source mutation and
+        # verify the exact rollback contract for a legacy 1.5.133 layout.
+        failure_root = root / "failure"
+        failure_install = failure_root / "install"
+        (failure_install / "var").mkdir(parents=True)
+        (failure_install / "etc").mkdir(parents=True)
+        _write_legacy_source(failure_install, version="1.5.133")
+        _run([args.python, "-m", "venv", str(failure_install / "venv")])
+        failure_cfg = _cfg(failure_root)
+        failure_state = {
+            "last_status": "deferred_backup_lock",
+            "last_target": expected_target,
+            "operator_note": "preserve-me",
+        }
+        failure_state_path = failure_install / "var" / "mcd-self-update.json"
+        failure_state_path.write_text(json.dumps(failure_state, sort_keys=True) + "\n", encoding="utf-8")
+        failure_queue = {
+            "ordinary:/var/www/legacy-133": {
+                "queue": [201, 202],
+                "follow_up": [203],
+                "claims": [201],
+                "running": [201],
+                "retry": {"202": 2},
+                "monitor": {"cycle": "legacy-133", "status": "running"},
+            }
+        }
+        failure_store = TaskStore(failure_cfg.state_db_path, failure_cfg)
+        for key, payload in failure_queue.items():
+            failure_store.put_runtime_sync(key, payload)
+        failure_worker = subprocess.Popen([args.python, "-c", "import time; time.sleep(180)"])
+        failure_task = RunningTask(
+            row_id=0,
+            root="/var/www/legacy-133",
+            task_key="/var/www/legacy-133|segment|201",
+            task_type="segment",
+            entity_id=201,
+            command_str="python -c import time; time.sleep(180)",
+            timeout_sec=3600,
+            attempts=1,
+            started_at=time.time(),
+            pid=failure_worker.pid,
+            manual_request_id=None,
+        )
+        failure_task.row_id = failure_store.add_running(failure_task)
+        failure_store.close()
+        failure_args = SimpleNamespace(**vars(args_ns))
+        failure_args.install_dir = str(failure_install)
+        failure_args.config = str(failure_install / "etc" / "mcd.toml")
+        failure_error = ""
+        try:
+            with patch.object(bridge, "_install_runtime_probe", side_effect=RuntimeError("qa injected post-switch failure")):
+                bridge.bridge(failure_args)
+        except Exception as exc:  # noqa: BLE001 - the injected failure is the proof
+            failure_error = str(exc)
+        finally:
+            failure_worker_alive = failure_worker.poll() is None
+            failure_worker.terminate()
+            failure_worker.wait(timeout=10)
+        if "qa injected post-switch failure" not in failure_error:
+            raise RuntimeError(f"failure rollback probe did not return injected error: {failure_error}")
+        failure_reopened = TaskStore(failure_cfg.state_db_path, failure_cfg)
+        failure_preserved = all(
+            failure_reopened.get_runtime_sync(key) == payload for key, payload in failure_queue.items()
+        )
+        failure_rows = failure_reopened.running_rows()
+        failure_reopened.close()
+        failure_source = failure_install / "src"
+        failure_site = bridge._site_dir(bridge._venv_python(failure_install))
+        failure_agent_entries = sorted(
+            entry.name for entry in failure_site.iterdir() if bridge._is_agent_runtime_entry(entry)
+        )
+        failure_pause = failure_install / "var" / "scheduler.pause"
+        failure_updates = failure_install / "var" / "updates"
+        failure_rollback = {
+            "source_restored": (failure_source / "mcd_agent" / "__init__.py").is_file()
+            and not (failure_source / "pyproject.toml").exists()
+            and not (failure_source / "mcd-runtime-manifest.json").exists(),
+            "owned_pause_removed": not failure_pause.exists(),
+            "state_restored": failure_state_path.read_text(encoding="utf-8")
+            == json.dumps(failure_state, sort_keys=True) + "\n",
+            "queue_state_preserved": failure_preserved,
+            "worker_pid_preserved": failure_worker_alive
+            and any(
+                int(row.get("pid") or 0) == failure_worker.pid
+                for row in failure_rows
+                if isinstance(row, dict)
+            ),
+            "managed_venv_entries_restored": failure_agent_entries == [],
+            "temporary_snapshots_cleaned": not any(
+                path.name.startswith("legacy-runtime-") for path in failure_updates.iterdir()
+            ),
+            "error": failure_error,
+            "source_path": str(failure_source),
+            "state_path": str(failure_state_path),
+            "pause_path": str(failure_pause),
+        }
+        if not all(
+            bool(failure_rollback[key])
+            for key in (
+                "source_restored",
+                "owned_pause_removed",
+                "state_restored",
+                "queue_state_preserved",
+                "worker_pid_preserved",
+                "managed_venv_entries_restored",
+                "temporary_snapshots_cleaned",
+            )
+        ):
+            raise RuntimeError(f"legacy rollback contract failed: {failure_rollback}")
+
+        regression_env = dict(os.environ)
+        regression_env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+        regression = subprocess.run(
+            [
+                args.python,
+                "-m",
+                "unittest",
+                "discover",
+                "-s",
+                str(Path(__file__).resolve().parents[1] / "tests"),
+                "-p",
+                "test_mode_cron_wrappers.py",
+            ],
+            cwd=Path(__file__).resolve().parents[1],
+            env=regression_env,
+            capture_output=True,
+            text=True,
+        )
+        if regression.returncode != 0:
+            detail = (regression.stderr or regression.stdout or "cron/version regression failed").strip()
+            raise RuntimeError(f"cron/version regression failed: {detail}")
+
         result = {
             "schema": "mcd-runtime-bridge-qa-v1",
             "status": "PASS",
             "archive_sha256": archive_sha256,
+            "source_commit": archive_metadata["source_commit"],
+            "version": archive_metadata["version"],
+            "manifest_sha256": archive_metadata["manifest_sha256"],
+            "required_checks": {
+                "cron_version_regression": "passed",
+                "cron_version_regression_test": "tests/test_mode_cron_wrappers.py",
+            },
             "bridge_receipt": receipt,
             "taskstore_preserved": preserved,
             "worker_pid_preserved": worker.poll() is None,
             "runtime_manifest_present": True,
+            "legacy_layout": {
+                "versions": ["1.5.131", "1.5.133"],
+                "source_without_pyproject": legacy_source_without_pyproject,
+                "runtime_archive_without_pyproject": archive_has_no_pyproject,
+                "normal_apply_target": expected_target,
+            },
+            "failure_rollback": failure_rollback,
         }
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(result, ensure_ascii=True, indent=2) + "\n", encoding="utf-8")

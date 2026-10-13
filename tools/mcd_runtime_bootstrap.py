@@ -17,7 +17,8 @@ The bridge is deliberately fail-closed:
 * ``/opt/mcd/src`` is switched atomically and remains as bounded rollback
   material until the supervisor is healthy;
 * the supervisor uses ``WorkingDirectory=/opt/mcd`` and ``KillMode=process``;
-* failure restores the old source, package, and running service.
+* failure restores the old source, managed-venv package and running service,
+  even when the legacy source has no ``pyproject.toml``.
 
 It is not part of the runtime archive.  The source tree is the transport
 input for the bridge only; the active supervisor imports the installed wheel.
@@ -261,6 +262,80 @@ def _remove_agent_shadow_hooks(site_dir: Path, source_dir: Path) -> list[str]:
             candidate.unlink(missing_ok=True)
         removed.append(candidate.name)
     return removed
+
+
+def _is_agent_runtime_entry(path: Path) -> bool:
+    """Return whether a managed-venv entry belongs to the MCD package."""
+    name = path.name.lower()
+    if name == "mcd_agent":
+        return True
+    if name in {"mcd_agent.egg-link", "mcd-agent.egg-link"}:
+        return True
+    if name.startswith("__editable__") and "mcd_agent" in name:
+        return True
+    if (name.startswith("mcd_agent-") or name.startswith("mcd-agent-")) and name.endswith(
+        (".dist-info", ".egg-info")
+    ):
+        return True
+    if path.suffix == ".pth" and path.is_file():
+        try:
+            content = path.read_text(encoding="utf-8")
+        except OSError:
+            return False
+        return "mcd_agent" in content or "mcd-agent" in content
+    return False
+
+
+def _copy_runtime_entry(source: Path, destination: Path) -> None:
+    if source.is_symlink():
+        destination.symlink_to(os.readlink(source))
+    elif source.is_dir():
+        shutil.copytree(source, destination, symlinks=True)
+    else:
+        shutil.copy2(source, destination)
+
+
+def _remove_runtime_entry(path: Path) -> None:
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    else:
+        path.unlink(missing_ok=True)
+
+
+def _snapshot_legacy_runtime_package(install_dir: Path) -> Path:
+    """Snapshot old MCD venv entries before installing the successor.
+
+    Old source-tree installations can be valid with no ``pyproject.toml`` in
+    ``src`` (the supervisor may import that tree through its service
+    environment). A pip reinstall cannot reconstruct such a package during
+    rollback, so retain the exact managed-venv entries instead.
+    """
+    site_dir = _site_dir(_venv_python(install_dir))
+    snapshot = install_dir / "var" / "updates" / f"legacy-runtime-{os.getpid()}-{time.time_ns()}"
+    snapshot.mkdir(parents=True, exist_ok=False)
+    (snapshot / "site-dir").write_text(str(site_dir.resolve()) + "\n", encoding="utf-8")
+    for entry in sorted(site_dir.iterdir(), key=lambda item: item.name):
+        if _is_agent_runtime_entry(entry):
+            _copy_runtime_entry(entry, snapshot / entry.name)
+    return snapshot
+
+
+def _restore_legacy_runtime_package(install_dir: Path, snapshot: Path) -> None:
+    """Restore pre-bridge MCD venv entries without source packaging."""
+    site_dir_file = snapshot / "site-dir"
+    site_dir = (
+        Path(site_dir_file.read_text(encoding="utf-8").strip())
+        if site_dir_file.is_file()
+        else _site_dir(_venv_python(install_dir))
+    )
+    if not site_dir.is_dir():
+        raise BridgeError(f"managed venv site-packages missing during rollback: {site_dir}")
+    for entry in sorted(site_dir.iterdir(), key=lambda item: item.name):
+        if _is_agent_runtime_entry(entry):
+            _remove_runtime_entry(entry)
+    for entry in sorted(snapshot.iterdir(), key=lambda item: item.name):
+        if entry.name != "site-dir":
+            _copy_runtime_entry(entry, site_dir / entry.name)
 
 
 def _install_runtime(install_dir: Path, stage: Path, manifest: dict[str, Any]) -> dict[str, str]:
@@ -516,15 +591,16 @@ def bridge(args: argparse.Namespace) -> dict[str, Any]:
     old_src = updates_dir / f"src.prev-bridge-{int(time.time())}"
     state_path = install_dir / "var" / STATE_NAME
     before_state = _state_read(state_path)
+    before_state_bytes = state_path.read_bytes() if state_path.is_file() else None
     before_state_sha = _sha256(state_path) if state_path.is_file() else ""
     before_scheduler = _scheduler_status(install_dir, config)
     systemd_path: Path | None = None
     previous_dropin: bytes | None = None
     switched = False
-    package_installed = False
     old_source_moved = False
     manifest: dict[str, Any] = {}
     target = ""
+    legacy_runtime_snapshot: Path | None = None
 
     with _exclusive_lock(install_dir / "var" / "mcd-self-update.lock"):
         if not args.sandbox:
@@ -547,9 +623,8 @@ def bridge(args: argparse.Namespace) -> dict[str, Any]:
                 # Install and import the successor before moving the active
                 # source directory.  The legacy daemon remains runnable until
                 # every package/staging check succeeds.
+                legacy_runtime_snapshot = _snapshot_legacy_runtime_package(install_dir)
                 package_result = _install_runtime(install_dir, stage, manifest)
-                package_installed = True
-                pre_switch_import = dict(package_result)
 
                 if old_src.exists():
                     raise BridgeError(f"rollback source path already exists: {old_src}")
@@ -628,39 +703,26 @@ def bridge(args: argparse.Namespace) -> dict[str, Any]:
                     _restore_dropin(systemd_path, previous_dropin)
                     if not args.no_systemd:
                         _systemd_reload(args.systemctl)
-                if package_installed:
+                if legacy_runtime_snapshot is not None:
                     try:
-                        _restore_legacy_package(install_dir, src_dir)
+                        _restore_legacy_runtime_package(install_dir, legacy_runtime_snapshot)
                     except Exception:
                         # Preserve the original error. The source rollback is
-                        # still recorded by the caller's traceback/error path.
+                        # still recorded by the caller's traceback/error path;
+                        # the managed venv snapshot is best-effort cleanup.
                         pass
+                if before_state_bytes is None:
+                    state_path.unlink(missing_ok=True)
+                else:
+                    temporary = state_path.with_name(f".{state_path.name}.rollback-{os.getpid()}.tmp")
+                    temporary.write_bytes(before_state_bytes)
+                    os.replace(temporary, state_path)
                 raise
             finally:
                 if stage.exists():
                     shutil.rmtree(stage, ignore_errors=True)
-
-
-def _restore_legacy_package(install_dir: Path, source_dir: Path) -> None:
-    pyproject = source_dir / "pyproject.toml"
-    if not pyproject.is_file():
-        raise BridgeError(f"cannot restore legacy package; pyproject missing: {pyproject}")
-    python = _venv_python(install_dir)
-    _run(
-        [
-            str(python),
-            "-m",
-            "pip",
-            "install",
-            "--disable-pip-version-check",
-            "--no-input",
-            "--no-cache-dir",
-            "--no-deps",
-            "--force-reinstall",
-            str(source_dir),
-        ],
-        cwd=Path("/"),
-    )
+                if legacy_runtime_snapshot is not None and legacy_runtime_snapshot.exists():
+                    shutil.rmtree(legacy_runtime_snapshot, ignore_errors=True)
 
 
 def _install_runtime_probe(install_dir: Path, target: str) -> dict[str, str]:

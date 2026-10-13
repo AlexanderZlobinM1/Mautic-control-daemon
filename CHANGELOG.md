@@ -1,3 +1,13 @@
+## 1.5.172 - 2026-10-13
+
+- Make the supported legacy-source runtime bridge recoverable when an old
+  1.5.131/133 source tree has no `pyproject.toml`: managed-venv package,
+  source, update state, owned pause, and durable worker state are restored
+  from an exact pre-switch snapshot on failure.
+- Add a source-bound bridge QA receipt for the no-`pyproject` legacy apply and
+  rollback path; preserve the detached runtime archive contract and keep the
+  cron/version regression proof external to the production runtime payload.
+
 ## 1.5.171 - 2026-10-13
 
 - Preserve a positive configured import queue when the read-only status
