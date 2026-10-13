@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
+import tempfile
 import threading
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from mcd_agent import daemon
+from mcd_agent import __version__, daemon
 from mcd_agent.daemon import (
     _manual_static_lane_for_ids,
     _segment_static_closure_conflict,
@@ -22,6 +28,7 @@ from mcd_agent.daemon import (
     _static_lane_successful_coverage_ids,
     _static_lane_runtime_evidence,
 )
+from mcd_agent.segment_admission import sync_cycle
 from mcd_agent.static_segment_lanes import (
     ORPHAN_GRACE_SEC,
     PRIORITY,
@@ -752,6 +759,300 @@ class StaticSegmentLaneTests(unittest.TestCase):
         self.assertEqual(added[PRIORITY], [])
         self.assertEqual(rolled["lanes"][PRIORITY]["claimed"], [100])
         self.assertEqual(rolled["lanes"][PRIORITY]["running"], [100])
+
+    def test_recurring_m6_m7_super_cycles_use_real_pids_and_preserve_ordinary_cycle(self) -> None:
+        """Disposable native gate for recurring static-lane ownership.
+
+        This deliberately uses real child processes and a durable TaskStore
+        fixture.  It does not invoke a production host or a manual Mautic
+        command; the child is only the operator sandbox's native worker.
+        """
+
+        receipt: dict[str, object] = {
+            "schema": "mcd-recurring-static-sandbox-v1",
+            "source_version": __version__,
+            "rounds": [],
+            "cross_lane": [],
+        }
+        parents = {58: {57}, 59: {57}}
+        children = {57: {58, 59}}
+        for major in (6, 7):
+            with self.subTest(mautic_major=major), tempfile.TemporaryDirectory(
+                prefix=f"mcd-static-recurring-m{major}-"
+            ) as temp_dir:
+                root = str(Path(temp_dir) / "public_html")
+                state_path = str(Path(temp_dir) / "state.db")
+                store = daemon.TaskStore(state_path)
+                ordinary_state, _added, _started = sync_cycle(
+                    None,
+                    planned_ids=[900],
+                    never_built=[],
+                    running_ids=[],
+                    now_ts=100.0,
+                )
+                ordinary_cycle_id = str(ordinary_state["cycle_id"])
+                store.put_runtime_sync(daemon._segment_cycle_key(root), ordinary_state)
+                store.put_runtime_sync(
+                    daemon._segment_native_coverage_key(root),
+                    {
+                        "schema": daemon._SEGMENT_NATIVE_COVERAGE_SCHEMA,
+                        "root": root,
+                        "cycle_id": ordinary_cycle_id,
+                        "covered_ids": [57, 58, 59],
+                        "receipts": {"58": {"success": True}, "59": {"success": True}},
+                    },
+                )
+                plans = build_lane_plans(
+                    super_priority_ids=[58],
+                    priority_ids=[59, 60],
+                    parents_by_child=parents,
+                    children_by_parent=children,
+                    mautic_major=major,
+                )
+                static_state, _added, _started = reconcile_state(
+                    None,
+                    plans=plans,
+                    now_ts=100.0,
+                )
+                # 60 is a disjoint lower-priority item held as if it were
+                # waiting on a full shared slot; the cross-lane leaf 59 stays
+                # pending behind the stronger M7/M6 closure.
+                static_state, claimed = claim_item(
+                    static_state,
+                    lane=PRIORITY,
+                    entity_id=60,
+                    blocked_ids=set(),
+                    globally_running_ids=set(),
+                    now_ts=100.1,
+                )
+                self.assertTrue(claimed)
+                static_state = mark_running(
+                    static_state,
+                    lane=PRIORITY,
+                    entity_id=60,
+                    now_ts=100.2,
+                )
+                store.put_runtime_sync(daemon._static_lane_state_key(root), static_state)
+
+                config = SimpleNamespace(
+                    scheduler_host_max_parallel=1,
+                    scheduler_instance_max_parallel=1,
+                    scheduler_elastic_slots_enabled=True,
+                    scheduler_emergency_reserved_slots=0,
+                    segment_mode="farm",
+                    segment_priority_parallel_idle=1,
+                    segment_regular_parallel_idle=1,
+                )
+                ordinary_running = {
+                    "ordinary": SimpleNamespace(
+                        root=root,
+                        task_type="segment",
+                        entity_id=900,
+                    )
+                }
+                self.assertEqual(
+                    daemon._scheduler_host_slots_available(
+                        config,
+                        ordinary_running,
+                        "segment_priority",
+                        root=root,
+                    ),
+                    0,
+                )
+                self.assertIsNone(
+                    daemon._scheduler_host_slots_available(
+                        config,
+                        ordinary_running,
+                        "segment_super_priority",
+                        root=root,
+                    )
+                )
+
+                for round_no in range(1, 4):
+                    static_state, added, _started = reconcile_state(
+                        static_state,
+                        plans=plans,
+                        now_ts=100.0 + round_no,
+                    )
+                    if round_no > 1:
+                        self.assertEqual(added[SUPER_PRIORITY], plans[SUPER_PRIORITY])
+                        self.assertEqual(added[PRIORITY], [])
+                    self.assertEqual(
+                        _static_lane_successful_coverage_ids(
+                            store,
+                            root=root,
+                            static_state=static_state,
+                            lane_name=SUPER_PRIORITY,
+                        ),
+                        set(),
+                    )
+                    pending_failed, pending_stronger = _static_lane_dependency_outcome(
+                        static_state,
+                        lane_name=PRIORITY,
+                        entity_id=59,
+                        parents_by_child=parents,
+                    )
+                    self.assertEqual(pending_failed, set())
+                    self.assertIn(57, pending_stronger)
+
+                    active_ids: set[int] = set()
+                    for entity_id in plans[SUPER_PRIORITY]:
+                        static_state, claimed = claim_item(
+                            static_state,
+                            lane=SUPER_PRIORITY,
+                            entity_id=entity_id,
+                            blocked_ids=set(),
+                            globally_running_ids=active_ids,
+                            now_ts=100.0 + round_no + 0.1,
+                        )
+                        self.assertTrue(claimed)
+                        static_state = mark_running(
+                            static_state,
+                            lane=SUPER_PRIORITY,
+                            entity_id=entity_id,
+                            now_ts=100.0 + round_no + 0.2,
+                        )
+                        active_ids.add(entity_id)
+
+                    if major == 7:
+                        command_ids, excludes = _segment_native_chain_command_plan(
+                            plans[SUPER_PRIORITY],
+                            parents,
+                            children,
+                            already_covered_ids=set(),
+                        )
+                        self.assertEqual(command_ids, [58])
+                        self.assertEqual(excludes, {58: []})
+                    else:
+                        command_ids, excludes = [57, 58], {}
+
+                    process = subprocess.Popen(
+                        [sys.executable, "-c", "import sys; sys.exit(0)"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    returncode = process.wait(timeout=5.0)
+                    self.assertGreater(process.pid, 0)
+                    self.assertEqual(returncode, 0)
+                    for entity_id in plans[SUPER_PRIORITY]:
+                        static_state = mark_terminal(
+                            static_state,
+                            lane=SUPER_PRIORITY,
+                            entity_id=entity_id,
+                            success=True,
+                            now_ts=100.0 + round_no + 0.3,
+                        )
+                    store.put_runtime_sync(daemon._static_lane_state_key(root), static_state)
+                    self.assertEqual(
+                        store.get_runtime_sync(daemon._segment_cycle_key(root))["cycle_id"],
+                        ordinary_cycle_id,
+                    )
+                    receipt["rounds"].append(
+                        {
+                            "mautic_major": major,
+                            "round": round_no,
+                            "ordinary_cycle_id": ordinary_cycle_id,
+                            "super_items": list(plans[SUPER_PRIORITY]),
+                            "native_command_ids": command_ids,
+                            "native_excludes": excludes,
+                            "parent_id": 57,
+                            "pid": process.pid,
+                            "returncode": returncode,
+                            "super_done": list(
+                                static_state["lanes"][SUPER_PRIORITY]["done"]
+                            ),
+                        }
+                    )
+
+                static_state = mark_terminal(
+                    static_state,
+                    lane=PRIORITY,
+                    entity_id=60,
+                    success=True,
+                    now_ts=200.0,
+                )
+                failed, pending = _static_lane_dependency_outcome(
+                    static_state,
+                    lane_name=PRIORITY,
+                    entity_id=59,
+                    parents_by_child=parents,
+                )
+                self.assertEqual(failed, set())
+                self.assertEqual(pending, set())
+                covered = _static_lane_successful_coverage_ids(
+                    store,
+                    root=root,
+                    static_state=static_state,
+                    lane_name=PRIORITY,
+                )
+                self.assertEqual(covered & {57, 58}, {57, 58})
+                if major == 7:
+                    leaf_commands, leaf_excludes = _segment_native_chain_command_plan(
+                        [59],
+                        parents,
+                        children,
+                        already_covered_ids=covered,
+                    )
+                    self.assertEqual(leaf_commands, [59])
+                    self.assertEqual(leaf_excludes, {59: [57]})
+                else:
+                    leaf_commands, leaf_excludes = [57, 59], {}
+                static_state, claimed = claim_item(
+                    static_state,
+                    lane=PRIORITY,
+                    entity_id=59,
+                    blocked_ids=set(),
+                    globally_running_ids=set(),
+                    now_ts=201.0,
+                )
+                self.assertTrue(claimed)
+                static_state = mark_running(
+                    static_state,
+                    lane=PRIORITY,
+                    entity_id=59,
+                    now_ts=202.0,
+                )
+                process = subprocess.Popen(
+                    [sys.executable, "-c", "import sys; sys.exit(0)"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                returncode = process.wait(timeout=5.0)
+                self.assertEqual(returncode, 0)
+                static_state = mark_terminal(
+                    static_state,
+                    lane=PRIORITY,
+                    entity_id=59,
+                    success=True,
+                    now_ts=203.0,
+                )
+                receipt["cross_lane"].append(
+                    {
+                        "mautic_major": major,
+                        "leaf_id": 59,
+                        "native_command_ids": leaf_commands,
+                        "native_excludes": leaf_excludes,
+                        "parent_rebuilt_again": False,
+                        "pid": process.pid,
+                        "returncode": returncode,
+                        "ordinary_cycle_id": ordinary_cycle_id,
+                    }
+                )
+                self.assertEqual(
+                    store.get_runtime_sync(daemon._segment_cycle_key(root))["cycle_id"],
+                    ordinary_cycle_id,
+                )
+                store.close()
+
+        rounds = receipt["rounds"]
+        self.assertEqual(len(rounds), 6)
+        self.assertTrue(all(int(item["pid"]) > 0 and item["returncode"] == 0 for item in rounds))
+        self.assertEqual(
+            len({(item["mautic_major"], item["round"]) for item in rounds}),
+            6,
+        )
+        if target := os.environ.get("MCD_RECURRING_STATIC_SANDBOX_RECEIPT"):
+            Path(target).write_text(json.dumps(receipt, sort_keys=True, indent=2) + "\n", encoding="utf-8")
 
     def test_manual_dependency_overlap_is_blocked_across_static_lanes(self) -> None:
         lane, reason = _manual_static_lane_for_ids(
