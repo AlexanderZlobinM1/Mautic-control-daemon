@@ -2967,13 +2967,15 @@ def _segment_native_coverage_record(
     entity_id: int,
     success: bool,
     now_ts: float,
+    executed_ids: Iterable[int] | None = None,
 ) -> None:
-    """Persist successful M7 native traversal coverage for current cycle.
+    """Persist successful M7 native execution coverage for current cycle.
 
-    Mautic 7's ``-i`` command traverses the requested root's parents.  The
-    durable coverage receipt lets a later overlapping root pass only those
-    already-successful parents via repeated ``--exclude=<id>`` options; a
-    failed or timed-out root never contributes coverage.
+    ``executed_ids`` is the authoritative command projection. Ordinary M7
+    workers explicitly run internal parents and leaf roots once in
+    topological order, so successful coverage records only IDs that were
+    actually started. Callers omitting it retain the legacy native-root
+    closure behavior for compatibility with older static receipts.
     """
 
     if not success or not hasattr(store, "put_runtime_sync"):
@@ -2993,7 +2995,16 @@ def _segment_native_coverage_record(
     cycle_id = str(cycle.get("cycle_id") or "")
     if not cycle_id:
         return
-    covered = dependency_segment_closure({int(entity_id)}, parents_by_child) | {int(entity_id)}
+    if executed_ids is None:
+        covered = dependency_segment_closure({int(entity_id)}, parents_by_child) | {int(entity_id)}
+    else:
+        covered = {
+            int(raw_id)
+            for raw_id in executed_ids
+            if str(raw_id).strip().lstrip("-").isdigit() and int(raw_id) > 0
+        }
+        if not covered:
+            covered = {int(entity_id)}
     with _SEGMENT_CYCLE_LOCK:
         payload = _segment_native_coverage_load(store, root)
         if (
@@ -4323,6 +4334,7 @@ def _segment_terminal_and_wake(
                         chain_ids,
                         parents_by_child,
                         children_by_parent,
+                        rebuild_internal_parents=True,
                     )
             except Exception:
                 native_roots = [int(task.entity_id)]
@@ -4333,6 +4345,7 @@ def _segment_terminal_and_wake(
                     entity_id=int(native_root),
                     success=True,
                     now_ts=terminal_at,
+                    executed_ids=chain_ids,
                 )
         if len(chain_ids) > 1:
             _segment_chain_runtime_write(
@@ -4831,6 +4844,7 @@ def _make_static_segment_callbacks(
     timeout_sec: int,
     segment_dispatch_wakeup: threading.Event,
     max_attempts: int,
+    native_command_ids: tuple[int, ...] = (),
 ) -> tuple[Callable[[int], None], Callable[[int | None], None]]:
     """Bind one static lane's complete lifecycle to its creation context.
 
@@ -4847,6 +4861,7 @@ def _make_static_segment_callbacks(
     callback_lane = str(lane_name)
     callback_owner_id = int(segment_id)
     callback_chain_ids = tuple(int(value) for value in chain_ids)
+    callback_native_command_ids = tuple(int(value) for value in native_command_ids)
     callback_started_at = float(started_at)
     callback_command = str(command_str)
     callback_timeout = int(timeout_sec)
@@ -5008,6 +5023,7 @@ def _make_static_segment_callbacks(
                 entity_id=callback_owner_id,
                 success=True,
                 now_ts=terminal_at,
+                executed_ids=callback_native_command_ids,
             )
         _segment_chain_runtime_write(
             store,
@@ -9813,6 +9829,7 @@ def _fill_from_ring(
                     parents_by_child,
                     children_by_parent,
                     already_covered_ids=covered_ids,
+                    rebuild_internal_parents=True,
                 )
                 native_exclude_ids = sorted(
                     {
@@ -17836,6 +17853,7 @@ def run_loop(
                             lane_name=lane_name,
                             segment_id=int(segment_id),
                             chain_ids=tuple(static_chain_ids),
+                            native_command_ids=tuple(static_native_command_ids or ()),
                             started_at=static_started_at,
                             command_str=static_command_str,
                             timeout_sec=static_timeout_sec,

@@ -252,7 +252,6 @@ class SegmentChainRuntimeTests(unittest.TestCase):
                 if major >= 7:
                     probe_id = int(native_exclude_probe_id)
                     script = (
-                        f'if [ "$0" != "--exclude={probe_id}" ] && [ "$1" != "{probe_id}" ]; then printf \'%s\\n\' {probe_id} >> {output_path}; fi; '
                         f"printf '%s\\n' {int(sid)} >> {output_path}; sleep 0.05; "
                         f"true # mautic:segments:update -i {int(sid)}"
                     )
@@ -294,7 +293,14 @@ class SegmentChainRuntimeTests(unittest.TestCase):
                     len(candidate_ids),
                 )
             else:
-                self.assertEqual(task.command_str.count("mautic:segments:update -i"), 2)
+                # Mautic 7 does not refresh parent last_built_date from a
+                # native leaf-only command. Ordinary closures therefore run
+                # each internal parent and native leaf exactly once, with
+                # excludes deduplicating the parent traversal.
+                self.assertEqual(
+                    task.command_str.count("mautic:segments:update -i"),
+                    len(candidate_ids),
+                )
 
             deadline = time.monotonic() + 10.0
             task_pids = [int(task.pid)]
@@ -403,6 +409,45 @@ class SegmentChainRuntimeTests(unittest.TestCase):
         self.assertEqual(receipt["execution_order"].count(19), 1)
         self.assertEqual(receipt["native_covered_ids"], [19, 20, 21, 22])
         self.assertIn("--exclude=19", receipt["task_command"])
+
+    def test_m7_native_coverage_is_limited_to_explicit_command_projection(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mcd-native-coverage-") as temp_dir:
+            root = str(Path(temp_dir) / "root")
+            Path(root).mkdir()
+            store = TaskStore(str(Path(temp_dir) / "state.db"))
+            now = time.time()
+            cycle, _added, _started = sync_cycle(
+                None,
+                planned_ids=[19, 20, 21, 22],
+                never_built=[19, 20, 21, 22],
+                running_ids=[],
+                now_ts=now,
+                important_ids=[19, 21],
+                remaining_ids=[20, 22],
+            )
+            store.put_runtime_sync(_segment_cycle_key(root), cycle)
+            store.put_runtime_sync(
+                _segment_dispatch_context_key(root),
+                {
+                    "schema": "mcd-segment-dispatch-context-v1",
+                    "root": root,
+                    "mautic_major": 7,
+                    "updated_at": now,
+                    "parents_by_child": {"20": [19], "21": [19], "22": [20, 21]},
+                    "children_by_parent": {"19": [20, 21], "20": [22], "21": [22]},
+                    "native_segment_exclude_supported": True,
+                },
+            )
+            daemon._segment_native_coverage_record(
+                store,
+                root=root,
+                entity_id=22,
+                success=True,
+                now_ts=now,
+                executed_ids=[22],
+            )
+            self.assertEqual(daemon._segment_native_covered_ids(store, root), {22})
+            store.close()
 
     def test_m7_native_exclude_capability_probe_is_read_only_and_array_aware(self) -> None:
         class Store:

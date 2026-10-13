@@ -4,7 +4,7 @@
 фактическую схему после исправления admission и должен обновляться вместе с
 кодом, тестами и runtime receipt. Документ не является разрешением на
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.169 (follow-up после immutable
+Актуальная редакция этого канона — MCD 1.5.170 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам
@@ -273,13 +273,14 @@ config на его profile baseline и только после этого при
    отдельные процессы на каждый `-i`; независимые connected closures получают
    отдельные workers. Если parent уже terminal/running в предыдущей admission,
    child остаётся отдельным pending item и запускается после dependency guard.
-   На Mautic 7 MCD оставляет native traversal semantics: connected overlapping
-   roots получают одну durable closure ownership с одним TaskStore running
-   row/PID до terminal всех IDs, а несколько native leaf-root commands идут
-   последовательно внутри этого worker. Внутренние parents не запускаются
-   отдельными MCD elements: первый native root покрывает свою parent closure,
-   следующий получает повторяемый `--exclude=<already-covered-parent>` (не
-   CSV). Independent connected closures получают отдельные workers. Capability
+   На Mautic 7 MCD даёт connected overlapping roots одну durable closure
+   ownership с одним TaskStore running row/PID до terminal всех IDs, но не
+   считает leaf-only native cascade доказательством rebuild родителей:
+   ordinary projection запускает каждый internal parent и native leaf ровно
+   один раз в topological order, а последующие команды получают повторяемый
+   `--exclude=<already-executed-parent>` (не CSV). Independent connected
+   closures получают отдельные workers; successful coverage содержит только
+   реально запущенные command IDs. Capability
    `mautic:segments:update --format=json --no-interaction` читается read-only и
    должна подтвердить `--exclude` с `is_multiple=true`. Уже покрытый root
    закрывается terminal receipt без нового процесса, а failed/timeout root не
@@ -466,7 +467,8 @@ closures сохраняют параллелизм.
 static lanes. Ordinary item, зависящий от pending/running higher owner, ждёт
 только эту зависимость, а независимый ordinary item продолжает dispatch.
 Successful `super-priority`/`priority` receipts входят в ordinary native
-coverage и передаются как `--exclude=<parent>`; bounded higher error
+coverage только своими фактически запущенными command IDs и передаются как
+`--exclude=<parent>`; bounded higher error
 terminalizes пересекающийся ordinary item с `static_dependency_failed`, не
 создавая четвёртый parent start и не оставляя current cycle pending.
 

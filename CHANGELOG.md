@@ -1,3 +1,13 @@
+## 1.5.170 - 2026-10-13
+
+- Make ordinary Mautic 7 closures explicitly rebuild internal parents and
+  leaves once in topological order; native leaf-only execution is not treated
+  as parent coverage when `last_built_date` proves otherwise.
+- Record native coverage from the actual command projection and keep
+  `--exclude` only for parents already executed in the same closure.
+- Add regression coverage for truthful ordinary native execution and retain
+  the independent super-priority round-robin lane.
+
 ## 1.5.169 - 2026-10-13
 
 - Make ordinary remaining-tier admission inspect durable important work for a
