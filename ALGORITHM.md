@@ -4,7 +4,7 @@
 фактическую схему после исправления admission и должен обновляться вместе с
 кодом, тестами и runtime receipt. Документ не является разрешением на
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.160 (follow-up после immutable
+Актуальная редакция этого канона — MCD 1.5.161 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам
@@ -396,12 +396,22 @@ config на его profile baseline и только после этого при
    `_iter_instances_with_root_dispatch_gate`; canonical lifecycle monitor и
    persisted refill запускаются root-local slices через отдельные executors,
    а `_SCHEDULER_RUNTIME_LOCK`/`_SchedulerRuntimeRegistry` сериализуют только
-   claim-to-spawn и общий running registry, не planning/DB работу. Refill
-   уступает короткому root-local проходу lifecycle monitor только пока тот
-   действительно владеет live running snapshot; пустой snapshot не может
-   превратиться в starvation gate. Terminal callback немедленно будит refill,
-   поэтому slow probe одного root не может удерживать
-   terminal/adoption/refill другого.
+   claim-to-spawn и общий running registry, не planning/DB работу. Refill не
+   превращает `main_dispatch_busy_roots` или `lifecycle_monitor_busy_roots` в
+   root-wide запрет исполнения: он продолжает admitted queue через общий
+   claim/submit boundary. Capacity перед claim сверяется с live TaskStore
+   rows и PID/process identity; live durable row учитывается даже после
+   restart без in-memory registry, а dead/stale row не занимает реальный
+   slot. Это read-only reconciliation и не освобождает claim самовольно —
+   terminal transition остаётся обязанностью canonical monitor. Terminal
+   callback немедленно будит refill и ставит только освободивший root в
+   одноразовый fair hand-off; rotating cursor отдаёт следующий slot другому
+   root после этого хода, поэтому повторные terminal events одного root не
+   создают hot-root loop/starvation. Slow probe одного root не может
+   удерживать terminal/adoption/refill другого. Если static dependency graph
+   конкретного root недоступен, сохраняются его static queues/claims, но
+   static admission этого root получает `0` launch; ordinary work этого root
+   и независимые roots продолжают dispatch.
 
 Статические queues строятся отдельно: общие dependencies двух линий принадлежат
 линии с более высоким precedence и выполняются ровно один раз. Например,
@@ -730,6 +740,7 @@ cycle без ручного `segments:update`, profile/capacity/data changes. Ad
 |---|---|---|
 | две статические линии и исключение из ordinary | `mcd_agent/static_segment_lanes.py`, `daemon.py` | `tests/test_static_segment_lanes.py` |
 | static claim liveness, orphan grace и restart adoption | `mcd_agent/static_segment_lanes.py`, `daemon.py` | `tests/test_static_segment_lanes.py`, `tests/test_segment_liveness.py` |
+| unavailable static graph fails closed only for static admission, preserving durable static state and ordinary/independent roots | `mcd_agent/daemon.py` caller projection `static_pending` | `tests/test_dispatcher_production_sandbox.py` full production dispatcher receipt |
 | ordinary категории, FIFO и mid-cycle admission | `mcd_agent/segment_admission.py`, `daemon.py` | `tests/test_segment_admission.py` |
 | dedupe и сохранение порядка ring | `mcd_agent/ring_utils.py`, `daemon.py` | `tests/test_segment_ring_reconcile.py` |
 | dependency closure и terminal plan | `mcd_agent/segment_dependencies.py`, `daemon.py` | `tests/test_segment_dependencies.py` |
@@ -737,7 +748,7 @@ cycle без ручного `segments:update`, profile/capacity/data changes. Ad
 | host/instance slots и rotation | `mcd_agent/daemon.py` | `tests/test_campaign_ring_dispatch.py` |
 | normal hard caps, manual per-instance N+1 и dedicated super budget не смешиваются | `mcd_agent/daemon.py:_scheduler_host_slots_available`, `_scheduler_instance_slots_available`, `_submit_if_slot_uncoordinated` | `tests/test_campaign_ring_dispatch.py` hard-cap/3+ root rows; `tests/test_segment_admission.py` cap-4 и `11+3→14→...→10→11` receipts |
 | важный root с заполненной capacity не ставит global remaining barrier | `mcd_agent/daemon.py:_scheduler_segment_entity_allowed`, `_scheduler_important_root_dispatchable` | `test_remaining_root_uses_free_host_slot_when_important_root_is_instance_full` |
-| root-local continuous monitor/refill and shared claim lifecycle | `mcd_agent/daemon.py:_iter_instances_with_root_dispatch_gate`, `_SchedulerRuntimeRegistry`, `_lifecycle_monitor_scheduler`, `_ordinary_persisted_refill_worker` | `tests/test_segment_liveness.py` root-gate/registry/monitor rows; fresh M6/M7 root-local cycle receipt |
+| root-local continuous monitor/refill, live durable occupancy, terminal hand-off/rotation and shared claim lifecycle | `mcd_agent/daemon.py:_iter_instances_with_root_dispatch_gate`, `_SchedulerRuntimeRegistry`, `_scheduler_store_running_rows`, `_scheduler_live_task_capacity_keys`, `_scheduler_notify_refill_priority`, `_lifecycle_monitor_scheduler`, `_ordinary_persisted_refill_worker` | `tests/test_segment_liveness.py`; `tests/test_dispatcher_production_sandbox.py` full `run_loop` path with unavailable static graph and dead TaskStore rows |
 | host/instance lazy effective policy, mixed roots, toggle/restart/UID sync | `mcd_agent/config.py`, `mcd_agent/runtime_overrides.py`, `mcd_agent/daemon.py` ordinary planners/dispatch context | `tests/test_segment_liveness.py`, `tests/test_runtime_override_direction.py` mixed sandbox gate |
 | lazy empty plan versus full-mode observed-ID fallback | `mcd_agent/daemon.py` ordinary snapshot planners | `tests/test_segment_liveness.py` lazy snapshot row; fresh M6/M7 full/lazy planning receipt |
 | profile total-start budget (value `3` means exactly three starts) and bounded orphan expiry | `mcd_agent/config.py`, `mcd_agent/daemon.py` | `tests/test_segment_admission.py` |

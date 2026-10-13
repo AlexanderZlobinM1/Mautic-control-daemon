@@ -14,6 +14,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable, Iterable
+from contextlib import nullcontext
 from concurrent.futures import Future, ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass, replace
@@ -245,27 +246,32 @@ _SEGMENT_DISPATCH_CONTEXT_PREFIX = "segment_dispatch_context:"
 # planning query.  This lets the independent root workers use the exact same
 # lifecycle while a slow planner is in progress.
 _SCHEDULER_RUNTIME_LOCK = threading.RLock()
+_SCHEDULER_REFILL_PRIORITY_NOTIFIER_LOCK = threading.Lock()
+_SCHEDULER_REFILL_PRIORITY_NOTIFIER: Callable[[str], None] | None = None
 
 
-def _scheduler_root_lifecycle_gate_active(
-    store: "TaskStore",
-    running: Mapping[str, "RunningTask"],
-    lifecycle_monitor_busy_roots: set[str],
-    root: str,
-) -> bool:
-    """Keep refill behind a root monitor while any authoritative task exists."""
+def _scheduler_set_refill_priority_notifier(notifier: Callable[[str], None] | None) -> None:
+    global _SCHEDULER_REFILL_PRIORITY_NOTIFIER
+    with _SCHEDULER_REFILL_PRIORITY_NOTIFIER_LOCK:
+        _SCHEDULER_REFILL_PRIORITY_NOTIFIER = notifier
 
-    root_value = str(root or "").strip()
-    if root_value not in lifecycle_monitor_busy_roots:
-        return False
-    if any(str(task.root or "").strip() == root_value for task in running.values()):
-        return True
+
+def _scheduler_clear_refill_priority_notifier(notifier: Callable[[str], None]) -> None:
+    global _SCHEDULER_REFILL_PRIORITY_NOTIFIER
+    with _SCHEDULER_REFILL_PRIORITY_NOTIFIER_LOCK:
+        if _SCHEDULER_REFILL_PRIORITY_NOTIFIER is notifier:
+            _SCHEDULER_REFILL_PRIORITY_NOTIFIER = None
+
+
+def _scheduler_notify_refill_priority(root: str) -> None:
+    with _SCHEDULER_REFILL_PRIORITY_NOTIFIER_LOCK:
+        notifier = _SCHEDULER_REFILL_PRIORITY_NOTIFIER
+    if notifier is None:
+        return
     try:
-        return bool(store.running_rows_for_root(root_value))
+        notifier(str(root or "").strip())
     except Exception:
-        # A failed authoritative check is fail-closed while the lifecycle
-        # monitor owns the root; a false negative could duplicate a closure.
-        return True
+        logging.debug("scheduler refill priority notification failed", exc_info=True)
 
 
 def _scheduler_runtime_serialized(method: Callable[..., Any]) -> Callable[..., Any]:
@@ -3891,6 +3897,7 @@ def _segment_cycle_terminal(
         )
         store.put_runtime_sync(key, state)
     _refresh_scheduler_important_root(store, root)
+    _scheduler_notify_refill_priority(root)
 
 
 def _terminalize_segment_data_errors(
@@ -6961,6 +6968,83 @@ def _scheduler_capacity_key(root: str, task_type: str, entity_id: object) -> str
     return f"{root}|{kind}|{entity}"
 
 
+def _scheduler_store_running_rows(
+    store: object | None,
+    *,
+    root: str | None = None,
+) -> list[Mapping[str, object]]:
+    """Read durable running rows for capacity reconciliation.
+
+    The lifecycle monitor owns terminal transitions, but a slow monitor must
+    not make a dead PID consume a scheduler slot.  This read-only snapshot is
+    intentionally used only for admission accounting; claim/finish ownership
+    remains in ``TaskStore`` and the canonical monitor.
+    """
+
+    if store is None:
+        return []
+    try:
+        if root is None:
+            rows = store.running_rows()
+        else:
+            rows = store.running_rows_for_root(str(root))
+    except Exception:
+        return []
+    if not isinstance(rows, (list, tuple)):
+        return []
+    return [row for row in rows if isinstance(row, Mapping)]
+
+
+def _scheduler_store_row_live(row: Mapping[str, object]) -> bool:
+    try:
+        pid = int(row.get("pid") or 0)
+    except (TypeError, ValueError):
+        pid = 0
+    return pid > 0 and _is_pid_alive(pid)
+
+
+def _scheduler_live_task_capacity_keys(
+    running: Mapping[str, "RunningTask"],
+    *,
+    root: str,
+    task_types: set[str],
+    store: object | None = None,
+) -> set[str]:
+    """Return live logical workers for one root/lane, including adopted rows."""
+
+    normalized_types = {str(value or "").strip().lower() for value in task_types}
+    rows = _scheduler_store_running_rows(store, root=root)
+    rows_by_key = {
+        str(row.get("task_key") or ""): row
+        for row in rows
+        if str(row.get("task_key") or "").strip()
+    }
+    keys: set[str] = set()
+    for task_key, task in running.items():
+        task_root = str(getattr(task, "root", "") or "").strip()
+        task_type = str(getattr(task, "task_type", "") or "").strip().lower()
+        if task_root != str(root) or task_type not in normalized_types:
+            continue
+        row = rows_by_key.get(str(task_key))
+        if row is not None and not _scheduler_store_row_live(row):
+            continue
+        keys.add(_scheduler_capacity_key(task_root, task_type, getattr(task, "entity_id", task_key)))
+    for row in rows:
+        task_root = str(row.get("root") or "").strip()
+        task_type = str(row.get("task_type") or "").strip().lower()
+        if task_root != str(root) or task_type not in normalized_types:
+            continue
+        if not _scheduler_store_row_live(row):
+            continue
+        task_key = str(row.get("task_key") or "")
+        if task_key in running:
+            # The in-memory entry was already included above when its durable
+            # PID is live; do not count the same logical worker twice.
+            continue
+        keys.add(_scheduler_capacity_key(task_root, task_type, row.get("entity_id")))
+    return keys
+
+
 def _scheduler_priority_active_items(
     priority_executor: object | None = None,
 ) -> list[tuple[str, str, str]]:
@@ -6983,11 +7067,18 @@ def _scheduler_actual_work_items(
     running: dict[str, "RunningTask"],
     *,
     priority_executor: object | None = None,
+    store: object | None = None,
 ) -> dict[str, tuple[str, str]]:
     """Build a deduplicated logical-worker view for capacity decisions."""
 
     items: dict[str, tuple[str, str]] = {}
     known_types = _SCHEDULER_SHARED_WORK_TASK_TYPES
+    persisted_rows = _scheduler_store_running_rows(store)
+    persisted_by_key = {
+        str(row.get("task_key") or ""): row
+        for row in persisted_rows
+        if str(row.get("task_key") or "").strip()
+    }
     dedicated_super_keys: set[str] = set()
     for key, task in list(running.items()):
         task_type = str(getattr(task, "task_type", "") or "").strip().lower()
@@ -7011,12 +7102,26 @@ def _scheduler_actual_work_items(
                 )
         except Exception:
             pass
+    for row in persisted_rows:
+        task_type = str(row.get("task_type") or "").strip().lower()
+        if task_type in _SCHEDULER_SUPER_PRIORITY_TASK_TYPES:
+            root = str(row.get("root") or "").strip()
+            if root:
+                dedicated_super_keys.add(
+                    _scheduler_capacity_key(root, task_type, row.get("entity_id"))
+                )
     for key, task in list(running.items()):
         task_type = str(getattr(task, "task_type", "") or "").strip().lower()
         if task_type not in known_types:
             continue
         root = str(getattr(task, "root", "") or "").strip()
         if not root:
+            continue
+        persisted_row = persisted_by_key.get(str(key))
+        if persisted_row is not None and not _scheduler_store_row_live(persisted_row):
+            # The monitor still owns the terminal receipt, but the PID no
+            # longer occupies a real worker slot.  Counting this stale row
+            # here is the live Farm02 underfill failure mode.
             continue
         entity_id = getattr(task, "entity_id", key)
         capacity_key = _scheduler_capacity_key(root, task_type, entity_id)
@@ -7040,6 +7145,18 @@ def _scheduler_actual_work_items(
         entity_token = str(key).rsplit("|", 1)[-1]
         entity_id: object = None if entity_token == "-" else entity_token
         capacity_key = _scheduler_capacity_key(root, task_type, entity_id)
+        if capacity_key in dedicated_super_keys:
+            continue
+        items.setdefault(capacity_key, (root, task_type))
+
+    for row in persisted_rows:
+        task_type = str(row.get("task_type") or "").strip().lower()
+        if task_type not in known_types or not _scheduler_store_row_live(row):
+            continue
+        root = str(row.get("root") or "").strip()
+        if not root or str(row.get("task_key") or "") in running:
+            continue
+        capacity_key = _scheduler_capacity_key(root, task_type, row.get("entity_id"))
         if capacity_key in dedicated_super_keys:
             continue
         items.setdefault(capacity_key, (root, task_type))
@@ -7083,12 +7200,14 @@ def _scheduler_actual_work_count(
     root: str | None = None,
     lane: str | None = None,
     priority_executor: object | None = None,
+    store: object | None = None,
 ) -> int:
     return sum(
         1
         for item_root, task_type in _scheduler_actual_work_items(
             running,
             priority_executor=priority_executor,
+            store=store,
         ).values()
         if (root is None or item_root == root)
         and (lane is None or _scheduler_task_lane(task_type) == lane)
@@ -7100,11 +7219,13 @@ def _scheduler_host_running_count(
     task_type: str | None = None,
     *,
     priority_executor: object | None = None,
+    store: object | None = None,
 ) -> int:
     return _scheduler_actual_work_count(
         running,
         lane=_scheduler_task_lane(task_type),
         priority_executor=priority_executor,
+        store=store,
     )
 
 
@@ -7114,12 +7235,14 @@ def _scheduler_root_lane_running_count(
     lane: str,
     *,
     priority_executor: object | None = None,
+    store: object | None = None,
 ) -> int:
     return sum(
         1
         for item_root, task_type in _scheduler_actual_work_items(
             running,
             priority_executor=priority_executor,
+            store=store,
         ).values()
         if item_root == root and _scheduler_baseline_lane(task_type) == lane
     )
@@ -7148,6 +7271,7 @@ def _scheduler_host_slots_available(
     *,
     root: str = "",
     priority_executor: object | None = None,
+    store: object | None = None,
 ) -> int | None:
     normalized = str(task_type or "").strip().lower()
     if normalized in _SCHEDULER_RESERVED_SAFETY_TASK_TYPES or normalized.startswith("job:plugin_operation"):
@@ -7169,6 +7293,7 @@ def _scheduler_host_slots_available(
             root,
             baseline_lane,
             priority_executor=priority_executor,
+            store=store,
         ) <= 0
     ):
         # Without an explicit host safety cap every instance still owns one
@@ -7192,6 +7317,7 @@ def _scheduler_host_slots_available(
         running_total = _scheduler_actual_work_count(
             running,
             priority_executor=priority_executor,
+            store=store,
         )
         # Baselines are only outside the shared pool when the operator has not
         # configured a host-wide safety cap.  With an explicit cap, counting
@@ -7212,6 +7338,7 @@ def _scheduler_host_slots_available(
             running,
             task_type,
             priority_executor=priority_executor,
+            store=store,
         )
     else:
         shared_lane_running = max(
@@ -7220,6 +7347,7 @@ def _scheduler_host_slots_available(
                 running,
                 task_type,
                 priority_executor=priority_executor,
+                store=store,
             ) - _scheduler_baseline_running_count(running, lane),
         )
     return max(0, limit - shared_lane_running)
@@ -7276,6 +7404,7 @@ def _scheduler_instance_slots_available(
     root: str,
     task_type: str,
     priority_executor: object | None = None,
+    store: object | None = None,
 ) -> int | None:
     normalized = str(task_type or "").strip().lower()
     if normalized in _SCHEDULER_SUPER_PRIORITY_TASK_TYPES:
@@ -7292,6 +7421,7 @@ def _scheduler_instance_slots_available(
             root,
             lane,
             priority_executor=priority_executor,
+            store=store,
         ) <= 0
     ):
         # The implicit per-root baseline remains available only when the
@@ -7306,6 +7436,7 @@ def _scheduler_instance_slots_available(
         running,
         root=root,
         priority_executor=priority_executor,
+        store=store,
     )
     return max(0, limit - running_total)
 
@@ -12116,6 +12247,7 @@ class _PriorityTaskExecutor:
         log_label: str = "priority",
         execution_lock_key: str | None = None,
         running: dict[str, RunningTask] | None = None,
+        store: object | None = None,
     ) -> bool:
         # Fast-fail while the persisted update barrier is already active. The
         # final check in _run() remains mandatory because the barrier may be
@@ -12163,6 +12295,7 @@ class _PriorityTaskExecutor:
                         task_type,
                         root=root,
                         priority_executor=self,
+                        store=store,
                     )
                     instance_slots = _scheduler_instance_slots_available(
                         config,
@@ -12170,6 +12303,7 @@ class _PriorityTaskExecutor:
                         root=root,
                         task_type=task_type,
                         priority_executor=self,
+                        store=store,
                     )
                 admitted = (
                     key not in self._active
@@ -12407,6 +12541,7 @@ def _dispatch_due_campaign_triggers(
     priority_executor: _PriorityTaskExecutor,
     on_success: Callable[[int], None],
     realtime: CampaignWhitelistRealtimeSetting | None = None,
+    store: object | None = None,
 ) -> list[int]:
     launched: list[int] = []
     trigger_interval = max(
@@ -12439,6 +12574,7 @@ def _dispatch_due_campaign_triggers(
             task_type="campaign_trigger",
             entity_id=campaign_id,
             running=running,
+            store=store,
             args=render_mautic_command(
                 php_bin=config.php_bin,
                 run_as_user=config.mautic_run_as_user,
@@ -12468,6 +12604,7 @@ def _dispatch_due_campaign_rebuilds(
     running: dict[str, RunningTask],
     priority_executor: _PriorityTaskExecutor,
     on_success: Callable[[int], None],
+    store: object | None = None,
 ) -> list[int]:
     """Admit due rebuilds outside the segment/plugin scheduler lanes."""
     launched: list[int] = []
@@ -12487,6 +12624,7 @@ def _dispatch_due_campaign_rebuilds(
             task_type="campaign_rebuild",
             entity_id=campaign_id,
             running=running,
+            store=store,
             args=render_mautic_command(
                 php_bin=config.php_bin,
                 run_as_user=config.mautic_run_as_user,
@@ -13130,6 +13268,30 @@ def _segment_shared_slots_used(
     now_ts: float | None = None,
     sql_db_running_count: int | None = None,
 ) -> int:
+    live_segment_count = (
+        len(
+            _scheduler_live_task_capacity_keys(
+                running,
+                root=root,
+                task_types={"segment"},
+                store=store,
+            )
+        )
+        if store is not None
+        else _running_count(running, root, "segment")
+    )
+    live_import_count = (
+        len(
+            _scheduler_live_task_capacity_keys(
+                running,
+                root=root,
+                task_types={"import"},
+                store=store,
+            )
+        )
+        if store is not None
+        else _running_count(running, root, "import")
+    )
     sql_running_count = max(
         _segment_sql_worker_count(root),
         _segment_sql_running_state_count(store=store, root=root, config=config, now_ts=now_ts),
@@ -13140,9 +13302,9 @@ def _segment_shared_slots_used(
     # active super-priority item can make a configured regular slot appear
     # unavailable and strand a durable ordinary cursor.
     return (
-        _running_count(running, root, "segment")
+        live_segment_count
         + sql_running_count
-        + _running_count(running, root, "import")
+        + live_import_count
     )
 
 
@@ -13450,6 +13612,7 @@ def _dispatch_recurring_priority_segments(
             task_type="segment_recurring_priority",
             entity_id=segment_id,
             running=running,
+            store=store,
             args=render_mautic_command(
                 php_bin=config.php_bin,
                 run_as_user=config.mautic_run_as_user,
@@ -13730,7 +13893,13 @@ def _submit_if_slot_uncoordinated(
         and not _scheduler_baseline_launch_due(str(baseline_lane))
     ):
         return False
-    host_slots = _scheduler_host_slots_available(config, running, task_type, root=root)
+    host_slots = _scheduler_host_slots_available(
+        config,
+        running,
+        task_type,
+        root=root,
+        store=store,
+    )
     if not manual_override and host_slots is not None and host_slots <= 0:
         return False
     if not manual_override:
@@ -13739,6 +13908,7 @@ def _submit_if_slot_uncoordinated(
             running,
             root=root,
             task_type=task_type,
+            store=store,
         )
         if instance_slots is not None and instance_slots <= 0:
             return False
@@ -15939,6 +16109,65 @@ def run_loop(
         dependency_refresh_futures: dict[str, Future[dict[str, object]]] = {}
         dependency_refresh_executors: dict[str, ThreadPoolExecutor] = {}
         dependency_refresh_retry_at: dict[str, float] = {}
+        refill_priority_lock = threading.Lock()
+        refill_priority_roots: deque[str] = deque()
+        refill_cursor = 0
+        last_refill_served_root = ""
+        refill_hold_root = ""
+
+        def _note_refill_priority(root: str) -> None:
+            nonlocal refill_hold_root
+            root_value = str(root or "").strip()
+            if not root_value:
+                return
+            if root_value == last_refill_served_root and root_value == refill_hold_root:
+                # The root-local refill turn that was granted after a prior
+                # terminal wake has now completed. Release the one-shot hold
+                # so the rotating cursor can hand the next slot to another
+                # root; repeated completions cannot form a hot-root loop.
+                refill_hold_root = ""
+            with refill_priority_lock:
+                if root_value not in refill_priority_roots:
+                    refill_priority_roots.append(root_value)
+
+        def _peek_refill_priority_root() -> str:
+            with refill_priority_lock:
+                while refill_priority_roots:
+                    root_value = str(refill_priority_roots[0] or "").strip()
+                    if not root_value or root_value == last_refill_served_root:
+                        refill_priority_roots.popleft()
+                        continue
+                    return root_value
+            return ""
+
+        def _consume_refill_priority_root(root: str) -> None:
+            root_value = str(root or "").strip()
+            if not root_value:
+                return
+            with refill_priority_lock:
+                while root_value in refill_priority_roots:
+                    refill_priority_roots.remove(root_value)
+
+        def _refill_root_has_capacity(root: str) -> bool:
+            host_slots = _scheduler_host_slots_available(
+                config,
+                running,
+                "segment",
+                root=root,
+                store=store,
+            )
+            if host_slots is not None and host_slots <= 0:
+                return False
+            instance_slots = _scheduler_instance_slots_available(
+                config,
+                running,
+                root=root,
+                task_type="segment",
+                store=store,
+            )
+            return instance_slots is None or instance_slots > 0
+
+        _scheduler_set_refill_priority_notifier(_note_refill_priority)
 
         def _relation_map(raw: object) -> dict[int, set[int]]:
             if not isinstance(raw, Mapping):
@@ -15971,6 +16200,7 @@ def run_loop(
             cycle_ids: set[int],
             static_active_ids: set[int],
             active_import_target_ids: set[int],
+            durable_running_ids: set[int] | None = None,
         ) -> bool:
             if int(entity_id) in active_import_target_ids:
                 return True
@@ -16000,6 +16230,17 @@ def run_loop(
                 except Exception:
                     running_related = {int(task.entity_id)}
                 if candidate_related & running_related:
+                    return True
+            for durable_sid in durable_running_ids or set():
+                try:
+                    durable_related = segment_related_ids(
+                        int(durable_sid),
+                        parents_by_child,
+                        children_by_parent,
+                    )
+                except Exception:
+                    durable_related = {int(durable_sid)}
+                if candidate_related & durable_related:
                     return True
             priority_types = {
                 "segment",
@@ -16063,7 +16304,13 @@ def run_loop(
                                 float(getattr(config, "segment_full_scan_interval_sec", 0) or 0),
                             )
                         dependency_refresh_retry_at[refresh_root] = time.time() + retry_interval
-                with _SCHEDULER_RUNTIME_LOCK:
+                # Root-local reads and dependency work must not hold the
+                # shared registry lock. The canonical submit/claim boundary
+                # acquires _SCHEDULER_RUNTIME_LOCK itself; keeping this outer
+                # scope lock-free lets the main dispatcher and lifecycle
+                # monitor publish a busy/terminal transition while refill is
+                # reading a slow root-local TaskStore snapshot.
+                with nullcontext():
                     if not cluster_route_allows(config, "cron"):
                         continue
                     cluster_import_allowed = cluster_route_allows(config, "import")
@@ -16080,25 +16327,55 @@ def run_loop(
                         backup_paused = False
                     if scheduler_paused or backup_paused:
                         continue
-                    for inst in list(installs):
+                    base_installs = list(installs)
+                    ordered_installs = list(base_installs)
+                    if base_installs:
+                        start = int(refill_cursor or 0) % len(base_installs)
+                        ordered_installs = base_installs[start:] + base_installs[:start]
+                        priority_root = _peek_refill_priority_root()
+                        if priority_root:
+                            priority_inst = next(
+                                (
+                                    inst
+                                    for inst in base_installs
+                                    if str(getattr(inst, "root", "") or "").strip() == priority_root
+                                ),
+                                None,
+                            )
+                            if priority_inst is None:
+                                _consume_refill_priority_root(priority_root)
+                            else:
+                                ordered_installs = [
+                                    priority_inst,
+                                    *[
+                                        inst
+                                        for inst in ordered_installs
+                                        if str(getattr(inst, "root", "") or "").strip() != priority_root
+                                    ],
+                                ]
+                    for inst in ordered_installs:
                         root = str(getattr(inst, "root", "") or "").strip()
                         if not root or not getattr(inst, "db", None):
                             continue
-                        # Planning ownership is not an execution barrier. An
-                        # admitted persisted item must be refillable while the
-                        # main dispatcher is inside this root's slow Mautic/
-                        # DB work. A lifecycle slice only retains this gate
-                        # while it owns a live shared task snapshot; with no
-                        # live task there is no transition to protect, and a
-                        # stuck monitor must not starve an already-admitted
-                        # durable item.
-                        if _scheduler_root_lifecycle_gate_active(
-                            store,
-                            running,
-                            lifecycle_monitor_busy_roots,
-                            root,
+                        priority_root = _peek_refill_priority_root()
+                        if (
+                            priority_root
+                            and priority_root != root
+                            and _refill_root_has_capacity(priority_root)
                         ):
+                            # A root that just released a worker gets one
+                            # root-local turn before the next root consumes
+                            # the freed shared slot. This is a fair hand-off,
+                            # not a host-wide barrier: if that root still has
+                            # no capacity, other roots remain eligible.
                             continue
+                        # Planning and lifecycle monitoring are not execution
+                        # barriers. An admitted persisted item must remain
+                        # refillable while either root-local worker is busy.
+                        # Exact durable claims prevent duplicate closure
+                        # starts; live TaskStore PID rows are folded into
+                        # capacity accounting below, while dead rows no
+                        # longer consume a real worker slot.
                         state = store.get_runtime_sync(_segment_cycle_key(root)) or {}
                         if not isinstance(state, Mapping):
                             continue
@@ -16285,6 +16562,15 @@ def run_loop(
                         active_import_target_ids = set(
                             _normalize_segment_ids(context.get("active_import_target_ids"))
                         )
+                        durable_running_ids = {
+                            int(row.get("entity_id") or 0)
+                            for row in _scheduler_store_running_rows(store, root=root)
+                            if str(row.get("task_type") or "").strip().lower()
+                            in {"segment", "segment_sql"}
+                            and str(row.get("entity_id") or "").strip().isdigit()
+                            and int(row.get("entity_id") or 0) > 0
+                            and _scheduler_store_row_live(row)
+                        }
                         for targets in _import_monitor_target_segment_ids(
                             import_monitor_cache.get(root),
                             lanes={"queued", "running"},
@@ -16342,6 +16628,7 @@ def run_loop(
                                 cycle_ids=cycle_ids,
                                 static_active_ids=static_active_ids,
                                 active_import_target_ids=active_import_target_ids,
+                                durable_running_ids=durable_running_ids,
                             )
 
                         def _on_launch(sid: int, *, root: str = root) -> None:
@@ -16366,7 +16653,9 @@ def run_loop(
                         )
                         if launch_budget <= 0:
                             continue
-                        _fill_from_ring(
+                        priority_was_root = _peek_refill_priority_root() == root
+                        capacity_before = _refill_root_has_capacity(root)
+                        launched_count = _fill_from_ring(
                             ring=deque(pending_order),
                             ring_limit=total_limit,
                             total_limit=total_limit,
@@ -16396,6 +16685,31 @@ def run_loop(
                             remove_on_launch=True,
                             max_launches=launch_budget,
                         )
+                        if launched_count > 0:
+                            _consume_refill_priority_root(root)
+                            last_refill_served_root = root
+                            if priority_was_root:
+                                refill_hold_root = root
+                            try:
+                                served_index = next(
+                                    index
+                                    for index, candidate in enumerate(base_installs)
+                                    if str(getattr(candidate, "root", "") or "").strip() == root
+                                )
+                            except StopIteration:
+                                served_index = 0
+                            if base_installs:
+                                refill_cursor = (served_index + 1) % len(base_installs)
+                        elif priority_was_root and capacity_before:
+                            # Do not let a dependency/claim guard turn a
+                            # terminal wake into a permanent root priority.
+                            _consume_refill_priority_root(root)
+                        elif not capacity_before:
+                            # The root was ready but the shared/instance cap
+                            # was full. Remember that it gets the first
+                            # root-local retry once the worker is released,
+                            # even if the monitor callback races this pass.
+                            _note_refill_priority(root)
                         refreshed = store.get_runtime_sync(_segment_cycle_key(root)) or state
                         refreshed_state = refreshed if isinstance(refreshed, Mapping) else state
                         refreshed_pending = _segment_cycle_pending_order(
@@ -16420,6 +16734,7 @@ def run_loop(
             else:
                 ordinary_refill_wakeup.wait(timeout=max(0.2, min(1.0, float(config.dispatch_interval_sec or 1))))
             ordinary_refill_wakeup.clear()
+        _scheduler_clear_refill_priority_notifier(_note_refill_priority)
 
     recurring_segment_priority_loop = _RecurringSegmentPriorityLoop(priority_executor)
     priority_trigger_last_checked: dict[str, float] = {}
@@ -16504,6 +16819,7 @@ def run_loop(
                             due_ids=pending_due_ids,
                             running=running,
                             priority_executor=priority_executor,
+                            store=store,
                             on_success=lambda campaign_id, root=root, db_cfg=inst.db: _priority_trigger_completed(
                                 root,
                                 campaign_id,
@@ -16683,6 +16999,7 @@ def run_loop(
                         task_type="campaign_native_fallback",
                         entity_id=0,
                         running=running,
+                        store=store,
                         args=_campaign_native_fallback_args(cfg, root),
                         interval_sec=fallback_interval,
                         max_parallel=1,
@@ -16806,10 +17123,24 @@ def run_loop(
                     ids.update(_segment_sql_worker_ids(root))
                     return ids
 
-                static_pending = {
-                    lane_name: _static_lane_pending_items(static_state, lane_name)
-                    for lane_name in (_SEGMENT_SUPER_PRIORITY_LANE, _SEGMENT_PRIORITY_LANE)
-                }
+                # A static lane may keep durable claims while its root-local
+                # dependency graph is unavailable.  Preserve that state, but
+                # do not let the pending projection reach the launch loop with
+                # empty maps: on Mautic 7 that would turn one native closure
+                # into an independent command and on Mautic <=6 would admit a
+                # non-topological chain.  Ordinary dispatch below remains
+                # available for this root; only static admission is deferred.
+                static_pending = (
+                    {
+                        lane_name: _static_lane_pending_items(static_state, lane_name)
+                        for lane_name in (_SEGMENT_SUPER_PRIORITY_LANE, _SEGMENT_PRIORITY_LANE)
+                    }
+                    if static_graph_ready
+                    else {
+                        _SEGMENT_SUPER_PRIORITY_LANE: [],
+                        _SEGMENT_PRIORITY_LANE: [],
+                    }
+                )
                 static_host_limit = _scheduler_host_lane_limit(cfg, "segment")
                 for lane_name, task_type, interval_sec, max_parallel in (
                     (
@@ -17042,6 +17373,7 @@ def run_loop(
                             task_type=task_type,
                             entity_id=int(segment_id),
                             running=running,
+                            store=store,
                             args=static_args,
                             interval_sec=interval_sec,
                             max_parallel=max_parallel,
@@ -17085,6 +17417,7 @@ def run_loop(
                         task_type="segment",
                         entity_id=int(segment_id),
                         running=running,
+                        store=store,
                         args=render_mautic_command(
                             php_bin=cfg.php_bin,
                             run_as_user=cfg.mautic_run_as_user,
@@ -17115,6 +17448,7 @@ def run_loop(
                         task_type="campaign_rebuild",
                         entity_id=campaign_id,
                         running=running,
+                        store=store,
                         args=render_mautic_command(
                             php_bin=cfg.php_bin,
                             run_as_user=cfg.mautic_run_as_user,
@@ -17186,6 +17520,7 @@ def run_loop(
                             task_type="campaign_trigger",
                             entity_id=campaign_id,
                             running=running,
+                            store=store,
                             args=render_mautic_command(
                                 php_bin=cfg.php_bin,
                                 run_as_user=cfg.mautic_run_as_user,
@@ -17296,6 +17631,7 @@ def run_loop(
                     due_ids=planned_ids,
                     running=running,
                     priority_executor=priority_executor,
+                    store=store,
                     on_success=lambda campaign_id, root=root: _mark_campaign_rebuild_finished(root, campaign_id),
                 )
                 pusher.set_campaign_scheduler_liveness_runtime(

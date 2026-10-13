@@ -1,3 +1,18 @@
+## 1.5.161 - 2026-10-13
+
+- Keep an unavailable root-local static dependency graph fail-closed at the
+  production dispatcher caller: durable static claims and queue order remain
+  untouched, static launch count is zero for that root, while ordinary work
+  and independent roots continue through the normal dispatch path.
+- Reconcile scheduler capacity with live durable TaskStore workers, including
+  adopted rows missing from the in-memory registry; dead/stale PID rows no
+  longer consume ordinary host or instance slots. Remove the root-wide refill
+  lifecycle gate, add a root-local terminal hand-off/rotating cursor, and keep
+  claim/submit/terminal ownership durable and shared.
+- Add full `run_loop` sandbox coverage for unavailable static graphs,
+  independent ordinary roots, and dead persisted rows under a real ordinary
+  budget.
+
 ## 1.5.160 - 2026-10-13
 
 - Make the update invariant executable and release-gating: ordinary Mautic/PHP

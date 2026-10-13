@@ -1582,6 +1582,7 @@ class SegmentLivenessTests(unittest.TestCase):
                 patch.object(daemon, "retire_zabbix_mautic_version_userparameter", return_value={"status": "ok"}),
                 patch.object(daemon, "_monitor_running"),
                 patch.object(daemon, "_reconcile_running_state", return_value={}),
+                patch.object(daemon, "_is_pid_alive", return_value=True),
                 patch.object(daemon, "_sync_external_running_tasks", side_effect=sync_external),
                 patch.object(daemon, "_iter_instances_with_root_dispatch_gate", side_effect=blocking_dispatch_gate),
                 patch.object(
@@ -1637,47 +1638,6 @@ class SegmentLivenessTests(unittest.TestCase):
             self.assertEqual(cold_state["running"], [2000])
             self.assertEqual(_segment_cycle_pending_order(cold_state), list(range(2001, 2040)))
             check_store.close()
-
-    def test_lifecycle_gate_waits_for_taskstore_terminal_before_refill(self) -> None:
-        """An empty in-memory registry cannot race a monitor-owned TaskStore row."""
-
-        root = "/var/www/monitor-race/public_html"
-        store = TaskStore(":memory:")
-        task = RunningTask(
-            row_id=0,
-            root=root,
-            task_key=f"{root}|segment|153",
-            task_type="segment",
-            entity_id=153,
-            command_str="php segments:update 153",
-            timeout_sec=3600,
-            attempts=1,
-            started_at=time.time(),
-            pid=73001,
-        )
-        task.row_id = store.add_running(task)
-        busy_roots = {root}
-        self.assertTrue(
-            daemon._scheduler_root_lifecycle_gate_active(
-                store,
-                {},
-                busy_roots,
-                root,
-            )
-        )
-        # The monitor's terminal transition is the point at which refill may
-        # observe an empty authoritative TaskStore root and try the next
-        # durable item; before that point it must not submit another closure.
-        store.finish(task.row_id, state="done", rc=0, note="fixture_terminal")
-        self.assertFalse(
-            daemon._scheduler_root_lifecycle_gate_active(
-                store,
-                {},
-                busy_roots,
-                root,
-            )
-        )
-        store.close()
 
     def test_dependency_refresh_merges_newer_policy_without_overwriting_it(self) -> None:
         """A slow root-local read cannot restore an older pause/capacity snapshot."""
@@ -3030,7 +2990,9 @@ class SegmentLivenessTests(unittest.TestCase):
             daemon,
             "_task_locked_args",
             side_effect=lambda _key, args, **_kwargs: args,
-        ), patch.object(daemon, "_SEGMENT_DISPATCH_WAKEUP", None):
+        ), patch.object(daemon, "_SEGMENT_DISPATCH_WAKEUP", None), patch.object(
+            daemon, "_is_pid_alive", return_value=True
+        ):
             launched = _fill_from_ring(
                 ring=deque(pending_ids),
                 ring_limit=total_limit,
@@ -3412,7 +3374,7 @@ class SegmentLivenessTests(unittest.TestCase):
                 daemon, "_task_locked_args", side_effect=lambda _key, args, **_kwargs: args
             ), patch.object(daemon, "_scheduler_baseline_launch_due", return_value=False), patch.object(
                 daemon, "_SEGMENT_DISPATCH_WAKEUP", None
-            ):
+            ), patch.object(daemon, "_is_pid_alive", return_value=True):
                 launched = [
                     self._launch_persisted_item(
                         store=store,
@@ -3429,12 +3391,13 @@ class SegmentLivenessTests(unittest.TestCase):
             self.assertEqual(len(running), 1)
             # The explicit host cap is hard: the next roots wait while the
             # first real worker occupies the remaining effective slot.
-            running.pop(_task_key(roots[0], "segment", 1))
+            first_task = running.pop(_task_key(roots[0], "segment", 1))
+            store.finish(first_task.row_id, state="done", rc=0, note="fixture_terminal")
             with patch.object(daemon, "_spawn_command", side_effect=lambda **_kwargs: SimpleNamespace(pid=next(pids))), patch.object(
                 daemon, "_task_locked_args", side_effect=lambda _key, args, **_kwargs: args
             ), patch.object(daemon, "_scheduler_baseline_launch_due", return_value=False), patch.object(
                 daemon, "_SEGMENT_DISPATCH_WAKEUP", None
-            ):
+            ), patch.object(daemon, "_is_pid_alive", return_value=True):
                 self.assertEqual(
                     self._launch_persisted_item(
                         store=store,
@@ -3446,12 +3409,13 @@ class SegmentLivenessTests(unittest.TestCase):
                     ),
                     1,
                 )
-            running.pop(_task_key(roots[1], "segment", 2))
+            second_task = running.pop(_task_key(roots[1], "segment", 2))
+            store.finish(second_task.row_id, state="done", rc=0, note="fixture_terminal")
             with patch.object(daemon, "_spawn_command", side_effect=lambda **_kwargs: SimpleNamespace(pid=next(pids))), patch.object(
                 daemon, "_task_locked_args", side_effect=lambda _key, args, **_kwargs: args
             ), patch.object(daemon, "_scheduler_baseline_launch_due", return_value=False), patch.object(
                 daemon, "_SEGMENT_DISPATCH_WAKEUP", None
-            ):
+            ), patch.object(daemon, "_is_pid_alive", return_value=True):
                 self.assertEqual(
                     self._launch_persisted_item(
                         store=store,
