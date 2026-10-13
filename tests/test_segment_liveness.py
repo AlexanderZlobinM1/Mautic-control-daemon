@@ -1309,6 +1309,7 @@ class SegmentLivenessTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as td:
             hot_root = "/var/www/hot-root/public_html"
+            blocked_root = "/var/www/blocked-root/public_html"
             cold_root = "/var/www/cold-root/public_html"
             state_path = Path(td) / "state.db"
             config_path = Path(td) / "mcd.toml"
@@ -1329,7 +1330,12 @@ class SegmentLivenessTests(unittest.TestCase):
             )
             config = load_config(str(config_path), allow_recover_from_mcc=False)
 
-            def seed_cycle(root: str, ids: list[int], running_ids: list[int] | None = None) -> None:
+            def seed_cycle(
+                root: str,
+                ids: list[int],
+                running_ids: list[int] | None = None,
+                active_import_target_ids: list[int] | None = None,
+            ) -> None:
                 state, _added, _started = sync_cycle(
                     None,
                     planned_ids=ids,
@@ -1353,7 +1359,6 @@ class SegmentLivenessTests(unittest.TestCase):
                         "sql_managed_ids": [],
                         "static_configured_ids": [],
                         "static_active_ids": [],
-                        "active_import_target_ids": [],
                         "parents_by_child": {},
                         "children_by_parent": {},
                         "dependency_snapshot_authoritative": True,
@@ -1365,6 +1370,7 @@ class SegmentLivenessTests(unittest.TestCase):
                         "db_pause_until": 0.0,
                         "cluster_cron_allowed": True,
                         "cluster_import_allowed": False,
+                        "active_import_target_ids": active_import_target_ids or [],
                         "throttled_active": False,
                         "priority_pending": False,
                         "segment_slot_limit": 1,
@@ -1373,6 +1379,10 @@ class SegmentLivenessTests(unittest.TestCase):
 
             store = TaskStore(str(state_path), config)
             seed_cycle(hot_root, list(range(1000, 1040)), running_ids=[1000])
+            # Keep this root in the durable fairness set, but make its only
+            # ordinary item locally unlaunchable through the authoritative
+            # import-target guard. It must yield once capacity is free.
+            seed_cycle(blocked_root, [3000], active_import_target_ids=[3000])
             seed_cycle(cold_root, list(range(2000, 2040)))
             store.close()
 
@@ -1388,6 +1398,14 @@ class SegmentLivenessTests(unittest.TestCase):
                     db=object(),
                     instance_uid="hot-root",
                     name="hot-root",
+                    mautic_major=6,
+                    mautic_timezone="UTC",
+                ),
+                SimpleNamespace(
+                    root=blocked_root,
+                    db=object(),
+                    instance_uid="blocked-root",
+                    name="blocked-root",
                     mautic_major=6,
                     mautic_timezone="UTC",
                 ),
@@ -1532,6 +1550,27 @@ class SegmentLivenessTests(unittest.TestCase):
                     completion_thread.start()
                 return {"observed": 0, "adopted": 0, "updated": 0, "released": 0}
 
+            real_shared_admission_skip = daemon._mark_scheduler_shared_admission_skip
+
+            def record_shared_admission_skip(root: str, task_type: str) -> None:
+                debug_events.append(f"skip:{root}:{task_type}")
+                real_shared_admission_skip(root, task_type)
+
+            real_set_distribution_roots = daemon._set_scheduler_distribution_roots
+
+            def seed_prior_ordinary_turn(
+                ready_roots: object,
+                *,
+                worker_slots: int,
+                cursor: int | None = None,
+            ) -> None:
+                real_set_distribution_roots(ready_roots, worker_slots=worker_slots, cursor=cursor)
+                # Recreate the preceding successful ordinary admission. The
+                # next refill pass must therefore encounter blocked_root as
+                # the only unserved root before cold_root can claim a slot.
+                if hot_root in daemon._SCHEDULER_DISTRIBUTION_READY_ROOTS:
+                    daemon._mark_scheduler_shared_admission(hot_root, "segment")
+
             def blocking_dispatch_gate(
                 dispatch_installs: list[object],
                 *,
@@ -1584,6 +1623,16 @@ class SegmentLivenessTests(unittest.TestCase):
                 patch.object(daemon, "_reconcile_running_state", return_value={}),
                 patch.object(daemon, "_is_pid_alive", return_value=True),
                 patch.object(daemon, "_sync_external_running_tasks", side_effect=sync_external),
+                patch.object(
+                    daemon,
+                    "_mark_scheduler_shared_admission_skip",
+                    side_effect=record_shared_admission_skip,
+                ),
+                patch.object(
+                    daemon,
+                    "_set_scheduler_distribution_roots",
+                    side_effect=seed_prior_ordinary_turn,
+                ),
                 patch.object(daemon, "_iter_instances_with_root_dispatch_gate", side_effect=blocking_dispatch_gate),
                 patch.object(
                     daemon,
@@ -1617,6 +1666,8 @@ class SegmentLivenessTests(unittest.TestCase):
 
             self.assertTrue(planner_started.is_set())
             self.assertTrue(cold_launch_seen.is_set())
+            self.assertIn(f"skip:{blocked_root}:segment", debug_events)
+            self.assertNotIn(blocked_root, {root for root, _entity in spawned})
             self.assertIn(cold_root, {root for root, _entity in spawned})
             self.assertGreaterEqual(
                 len([root for root, _entity in spawned if root == hot_root]),
