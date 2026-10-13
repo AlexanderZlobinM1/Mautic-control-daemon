@@ -3472,7 +3472,9 @@ def _segment_native_projection_disjoint(
     Static durable closures may overlap while a fresh super tick rebuilds a
     parent and a weaker leaf uses the already verified ``--exclude`` list.
     The flock may be narrowed only when every active overlap is excluded from
-    the weaker native commands and no active ID is itself a command root.
+    every weaker native command and no active ID is itself a command root.  A
+    union of excludes is insufficient: two commands may each omit a different
+    active ID, leaving a real overlap in one command's native projection.
     """
 
     active = {
@@ -3485,16 +3487,18 @@ def _segment_native_projection_disjoint(
         for value in command_ids
         if str(value).strip().lstrip("-").isdigit() and int(value) > 0
     }
-    if not active or active & commands:
+    if not active or not commands or active & commands:
         return False
-    excluded: set[int] = set()
-    for values in (excludes_by_entity or {}).values():
-        excluded.update(
+    excludes = excludes_by_entity or {}
+    for command_id in commands:
+        command_excludes = {
             int(value)
-            for value in values
+            for value in excludes.get(command_id, ())
             if str(value).strip().lstrip("-").isdigit() and int(value) > 0
-        )
-    return active <= excluded
+        }
+        if not active <= command_excludes:
+            return False
+    return True
 
 
 def _segment_cycle_sync(

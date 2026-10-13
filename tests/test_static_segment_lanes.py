@@ -208,6 +208,13 @@ class StaticSegmentLaneTests(unittest.TestCase):
                 {22: [19]},
             )
         )
+        self.assertFalse(
+            _segment_native_projection_disjoint(
+                {19, 20},
+                [21, 22],
+                {21: [19], 22: [20]},
+            )
+        )
 
     def test_explicit_empty_native_projection_never_falls_back_to_durable_ids(self) -> None:
         args = _segment_chain_command_args(
