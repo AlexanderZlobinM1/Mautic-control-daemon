@@ -3,6 +3,9 @@
 - Keep unfinished Mautic import positions pending when Mautic records
   `date_ended` after a partial batch; only the imported line position and
   launchable status decide the configured queue count.
+- Persist a per-root upgrade cutoff in `runtime_sync` so historical partial
+  rows are not newly replayed while post-upgrade partial batches remain
+  launchable; terminal monitor evidence stays separate from admission.
 - Preserve the configured pending signal when the status cross-check excludes
   that partial row, and add a Mautic-shaped regression proving the next import
   admission remains launchable without a false empty-queue fallback.

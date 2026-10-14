@@ -557,17 +557,27 @@ budgets при этом не сливаются.
 который перекрывает устаревший `queued` или `running` status. Failed, paused,
 cancelled и completed imports остаются видимыми в lane `done`, но их target
 segments не попадают в `active_import_target_ids` и не блокируют ordinary
-segment или import follow-up. SQL-подсчёт pending imports также требует
-`date_ended IS NULL`; если профильный configured count положителен, временно
-пустой status cross-check не имеет права обнулить durable pending/follow-up
-состояние — он остаётся диагностическим сигналом до следующего monitor pass.
+segment или import follow-up. Monitor по-прежнему считает непустой
+`date_ended` terminal evidence, но admission не может использовать этот
+признак как единственный критерий: Mautic выставляет `date_ended` и на
+partial batch с незавершённой позицией. Configured pending SQL требует
+launchable status и `line < line_count`, а строки с `date_ended IS NULL` либо
+с `date_ended >= import_pending_cutoff_utc` допускаются к pending count. Cutoff
+один раз сохраняется per-root в `runtime_sync` под schema
+`mcd-import-pending-baseline-v1`; поэтому старый pre-upgrade partial не
+переигрывается после установки, а новый partial после baseline не теряется.
+Если профильный configured count положителен, временно пустой status
+cross-check не имеет права обнулить durable pending/follow-up состояние — он
+остаётся диагностическим сигналом до следующего monitor pass.
 
-Только импорт со статусом `queued` или `running` без terminal date может
-зарезервировать явно указанные в `defaults.list` segment targets. Это сохраняет
-FIFO среди eligible imports и позволяет исторической строке, например со
-status `1`, освободить свой singleton после появления `date_ended`. Retry и
-recovery остаются в существующем import recovery path и используют независимые
-признаки живого процесса.
+Только импорт со статусом `queued` или `running` с незавершённой position может
+зарезервировать явно указанные в `defaults.list` segment targets. Непустой
+`date_ended` сам по себе не отменяет admission post-baseline partial batch;
+terminal monitor evidence и admission count остаются разными проекциями. Это
+сохраняет FIFO среди eligible imports и позволяет исторической строке,
+например со status `1`, освободить свой singleton после terminal outcome. Retry
+и recovery остаются в существующем import recovery path и используют
+независимые признаки живого процесса.
 
 ### Runtime override ACK truthfulness
 
@@ -788,6 +798,7 @@ cycle без ручного `segments:update`, profile/capacity/data changes. Ad
 | host/instance lazy effective policy, mixed roots, toggle/restart/UID sync | `mcd_agent/config.py`, `mcd_agent/runtime_overrides.py`, `mcd_agent/daemon.py` ordinary planners/dispatch context | `tests/test_segment_liveness.py`, `tests/test_runtime_override_direction.py` mixed sandbox gate |
 | lazy empty plan versus full-mode observed-ID fallback | `mcd_agent/daemon.py` ordinary snapshot planners | `tests/test_segment_liveness.py` lazy snapshot row; fresh M6/M7 full/lazy planning receipt |
 | profile total-start budget (value `3` means exactly three starts) and bounded orphan expiry | `mcd_agent/config.py`, `mcd_agent/daemon.py` | `tests/test_segment_admission.py` |
+| import admission baseline, partial-batch pending и terminal monitor distinction | `mcd_agent/config.py`, `mcd_agent/daemon.py` | `tests/test_campaign_due_sql.py`, `tests/test_campaign_ring_dispatch.py`, `tests/test_import_liveness.py` |
 | monitor queued/running/done/error receipt | `mcd_agent/daemon.py` | `tests/test_scheduler_monitor_cycle.py`, `tests/test_signals_scheduler_history.py` |
 | heavy-plan deferral and durable pending guard | `mcd_agent/daemon.py` | `tests/test_segment_liveness.py`, live M6/M7 acceptance receipt |
 | self-update preserves ordinary application work and all durable queues | `mcd_agent/self_update.py`, `daemon.py`, systemd unit | `tests/test_self_update_version_reporting.py` |
