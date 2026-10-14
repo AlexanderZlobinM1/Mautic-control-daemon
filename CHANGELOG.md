@@ -1,3 +1,9 @@
+## 1.5.184 - 2026-10-14
+
+- Make the disposable bridge QA compare canonical profile-selection paths,
+  including macOS `/var` to `/private/var` resolution, before evaluating the
+  legacy transition result.
+
 ## 1.5.183 - 2026-10-14
 
 - Correct the disposable legacy-1.5.177 bridge QA fixture so the exact

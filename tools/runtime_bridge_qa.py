@@ -147,7 +147,7 @@ def main(argv: list[str] | None = None) -> int:
             '[profile]\nname = "farm-hiload"\n[hardware]\nprofile = "farm-hiload"\n',
             encoding="utf-8",
         )
-        selection_path = install / "var" / "hardware-profile-selection.json"
+        selection_path = (install / "var" / "hardware-profile-selection.json").resolve()
         selection_bytes = b'{"mode":"manual","profile":"farm-hiload"}\n'
         selection_path.write_bytes(selection_bytes)
         _write_legacy_source(install)
