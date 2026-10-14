@@ -1,3 +1,19 @@
+## 1.5.182 - 2026-10-14
+
+- Make the supported legacy source-to-runtime bridge remove only stale
+  `mcd_agent-*.dist-info` metadata before installing the detached runtime
+  wheel, so an old 1.5.172/177/179/181 metadata set cannot override the
+  successor version during the one-time transition.
+- Preserve unrelated distribution metadata and restore the exact legacy
+  package entries on bridge rollback; add regression coverage for the
+  1.5.177-style source tree with no packaging files.
+- Make a replay of the same successful archive hash return a fresh
+  read-only runtime receipt instead of reinstalling after transport timeout;
+  concurrent attempts still stop on the existing update lease.
+- Preserve the dedicated per-tick super-priority round-robin lane; this
+  bridge/import transition does not gate, reorder, or couple it to ordinary
+  scheduling.
+
 ## 1.5.181 - 2026-10-14
 
 - Make runtime artifact generation fail closed unless the checkout `HEAD`,

@@ -100,7 +100,7 @@ def _cfg(root: Path) -> SimpleNamespace:
     )
 
 
-def _write_legacy_source(install: Path, *, version: str = "1.5.131") -> None:
+def _write_legacy_source(install: Path, *, version: str = "1.5.177") -> None:
     source = install / "src"
     package = source / "mcd_agent"
     package.mkdir(parents=True)
@@ -152,6 +152,22 @@ def main(argv: list[str] | None = None) -> int:
         selection_path.write_bytes(selection_bytes)
         _write_legacy_source(install)
         _run([args.python, "-m", "venv", str(install / "venv")])
+        site_dir = bridge._site_dir(bridge._venv_python(install))
+        stale_metadata = [
+            site_dir / f"mcd_agent-{version}.dist-info",
+            site_dir / "mcd_agent-1.5.172.dist-info",
+            site_dir / "mcd_agent-1.5.179.dist-info",
+            site_dir / "mcd_agent-1.5.181.dist-info",
+        ]
+        for path in stale_metadata:
+            path.mkdir()
+            (path / "INSTALLER").write_text("legacy\n", encoding="utf-8")
+        unrelated_metadata = site_dir / "unrelated-7.2.dist-info"
+        unrelated_metadata.mkdir()
+        (unrelated_metadata / "METADATA").write_text("Name: unrelated\nVersion: 7.2\n", encoding="utf-8")
+        unrelated_before = sorted(
+            path.relative_to(site_dir).as_posix() for path in unrelated_metadata.rglob("*")
+        )
 
         cfg = _cfg(root)
         queue_state = {
@@ -199,6 +215,9 @@ def main(argv: list[str] | None = None) -> int:
             sandbox=True,
         )
         receipt = bridge.bridge(args_ns)
+        replay = bridge.bridge(args_ns)
+        if not replay.get("idempotent_replay") or replay.get("readback", {}).get("metadata_version") != expected_target:
+            raise RuntimeError("same archive replay did not return an idempotent fresh readback")
 
         authority = receipt["before"]["profile_authority"]
         if authority["schema"] != "mcd-profile-authority-probe-v1":
@@ -224,6 +243,17 @@ def main(argv: list[str] | None = None) -> int:
             raise RuntimeError("runtime source switch did not install the detached manifest")
         if not (install / "var" / "runtime-bootstrap-receipt.json").is_file():
             raise RuntimeError("bridge receipt is missing")
+        remaining_metadata = sorted(path.name for path in site_dir.glob("mcd_agent-*.dist-info"))
+        expected_metadata = [f"mcd_agent-{expected_target}.dist-info"]
+        if remaining_metadata != expected_metadata:
+            raise RuntimeError(
+                f"stale MCD distribution metadata remained after bridge: {remaining_metadata}; expected {expected_metadata}"
+            )
+        unrelated_after = sorted(
+            path.relative_to(site_dir).as_posix() for path in unrelated_metadata.rglob("*")
+        )
+        if unrelated_after != unrelated_before:
+            raise RuntimeError("unrelated distribution metadata changed during bridge")
         if rows and not any(int(row.get("pid") or 0) == worker.pid for row in rows if isinstance(row, dict)):
             raise RuntimeError("running TaskStore row was not preserved")
 
@@ -249,8 +279,24 @@ def main(argv: list[str] | None = None) -> int:
         (failure_install / "var" / "hardware-profile-selection.json").write_bytes(
             b'{"mode":"manual","profile":"farm-hiload"}\n'
         )
-        _write_legacy_source(failure_install, version="1.5.133")
+        _write_legacy_source(failure_install, version="1.5.177")
         _run([args.python, "-m", "venv", str(failure_install / "venv")])
+        failure_site = bridge._site_dir(bridge._venv_python(failure_install))
+        failure_stale_metadata = [
+            failure_site / "mcd_agent-1.5.172.dist-info",
+            failure_site / "mcd_agent-1.5.177.dist-info",
+            failure_site / "mcd_agent-1.5.179.dist-info",
+            failure_site / "mcd_agent-1.5.181.dist-info",
+        ]
+        for path in failure_stale_metadata:
+            path.mkdir()
+            (path / "INSTALLER").write_text("legacy\n", encoding="utf-8")
+        failure_unrelated = failure_site / "unrelated-7.2.dist-info"
+        failure_unrelated.mkdir()
+        (failure_unrelated / "METADATA").write_text("Name: unrelated\nVersion: 7.2\n", encoding="utf-8")
+        failure_unrelated_before = sorted(
+            path.relative_to(failure_site).as_posix() for path in failure_unrelated.rglob("*")
+        )
         failure_cfg = _cfg(failure_root)
         failure_state = {
             "last_status": "deferred_backup_lock",
@@ -310,9 +356,11 @@ def main(argv: list[str] | None = None) -> int:
         failure_rows = failure_reopened.running_rows()
         failure_reopened.close()
         failure_source = failure_install / "src"
-        failure_site = bridge._site_dir(bridge._venv_python(failure_install))
         failure_agent_entries = sorted(
             entry.name for entry in failure_site.iterdir() if bridge._is_agent_runtime_entry(entry)
+        )
+        failure_unrelated_after = sorted(
+            path.relative_to(failure_site).as_posix() for path in failure_unrelated.rglob("*")
         )
         failure_pause = failure_install / "var" / "scheduler.pause"
         failure_updates = failure_install / "var" / "updates"
@@ -330,7 +378,8 @@ def main(argv: list[str] | None = None) -> int:
                 for row in failure_rows
                 if isinstance(row, dict)
             ),
-            "managed_venv_entries_restored": failure_agent_entries == [],
+            "managed_venv_entries_restored": failure_agent_entries == sorted(path.name for path in failure_stale_metadata),
+            "unrelated_metadata_preserved": failure_unrelated_after == failure_unrelated_before,
             "temporary_snapshots_cleaned": not any(
                 path.name.startswith("legacy-runtime-") for path in failure_updates.iterdir()
             ),
@@ -348,6 +397,7 @@ def main(argv: list[str] | None = None) -> int:
                 "queue_state_preserved",
                 "worker_pid_preserved",
                 "managed_venv_entries_restored",
+                "unrelated_metadata_preserved",
                 "temporary_snapshots_cleaned",
             )
         ):
@@ -391,10 +441,13 @@ def main(argv: list[str] | None = None) -> int:
             "worker_pid_preserved": worker.poll() is None,
             "runtime_manifest_present": True,
             "legacy_layout": {
-                "versions": ["1.5.131", "1.5.133"],
+                "versions": ["1.5.177"],
                 "source_without_pyproject": legacy_source_without_pyproject,
                 "runtime_archive_without_pyproject": archive_has_no_pyproject,
                 "normal_apply_target": expected_target,
+                "stale_metadata_removed": True,
+                "unrelated_metadata_preserved": True,
+                "idempotent_replay_readback": True,
             },
             "failure_rollback": failure_rollback,
         }

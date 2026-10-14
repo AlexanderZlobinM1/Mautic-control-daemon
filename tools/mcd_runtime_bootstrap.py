@@ -265,6 +265,17 @@ def _remove_agent_shadow_hooks(site_dir: Path, source_dir: Path) -> list[str]:
     return removed
 
 
+def _remove_agent_distribution_metadata(site_dir: Path) -> list[str]:
+    """Remove only stale MCD distribution metadata before the bridge install."""
+    removed: list[str] = []
+    for candidate in sorted(site_dir.glob("mcd_agent-*.dist-info")):
+        if not candidate.is_dir():
+            continue
+        shutil.rmtree(candidate)
+        removed.append(candidate.name)
+    return removed
+
+
 def _is_agent_runtime_entry(path: Path) -> bool:
     """Return whether a managed-venv entry belongs to the MCD package."""
     name = path.name.lower()
@@ -358,6 +369,7 @@ def _install_runtime(install_dir: Path, stage: Path, manifest: dict[str, Any]) -
         cwd=Path("/"),
     )
     site_dir = _site_dir(python)
+    removed_metadata = _remove_agent_distribution_metadata(site_dir)
     removed_hooks = _remove_agent_shadow_hooks(site_dir, install_dir / "src")
     _run(
         [
@@ -399,6 +411,7 @@ def _install_runtime(install_dir: Path, stage: Path, manifest: dict[str, Any]) -
         "imported_version": imported_version,
         "imported_path": str(Path(imported_path).resolve()),
         "site_dir": str(site_dir.resolve()),
+        "removed_metadata": json.dumps(removed_metadata, ensure_ascii=True),
         "removed_shadow_hooks": json.dumps(removed_hooks, ensure_ascii=True),
     }
 
@@ -579,6 +592,54 @@ def _write_receipt(install_dir: Path, payload: dict[str, Any]) -> Path:
     return path
 
 
+def _successful_replay(
+    install_dir: Path,
+    archive_sha256: str,
+    expected_target: str,
+) -> dict[str, Any] | None:
+    """Return a fresh readback for an already completed exact candidate.
+
+    MCC transport can replay a command after an SSH timeout.  Once the
+    bridge has written a successful receipt, the same immutable archive must
+    be a read-only acknowledgement rather than a second install.  A missing
+    or inconsistent receipt falls through to the normal fail-closed path.
+    """
+    receipt_path = install_dir / "var" / "runtime-bootstrap-receipt.json"
+    if not receipt_path.is_file():
+        return None
+    try:
+        payload = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict) or payload.get("schema") != RECEIPT_SCHEMA:
+        return None
+    if payload.get("status") != "success":
+        return None
+    if str(payload.get("archive_sha256") or "").lower() != archive_sha256.lower():
+        return None
+    target = str(payload.get("target") or "").strip()
+    if not target or (expected_target and target != expected_target):
+        return None
+    source_manifest = install_dir / "src" / MANIFEST_NAME
+    if not source_manifest.is_file():
+        return None
+    try:
+        manifest = json.loads(source_manifest.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(manifest, dict) or str(manifest.get("version") or "").strip() != target:
+        return None
+    try:
+        readback = _install_runtime_probe(install_dir, target)
+    except Exception:  # noqa: BLE001 - stale/incomplete state must use normal guarded flow
+        return None
+    replay = dict(payload)
+    replay["idempotent_replay"] = True
+    replay["replayed_at"] = datetime.now(timezone.utc).isoformat()
+    replay["readback"] = readback
+    return replay
+
+
 def bridge(args: argparse.Namespace) -> dict[str, Any]:
     install_dir = Path(args.install_dir).resolve()
     archive = Path(args.archive).resolve()
@@ -586,10 +647,15 @@ def bridge(args: argparse.Namespace) -> dict[str, Any]:
     systemd_dir = Path(args.systemd_dir).resolve()
     if not archive.is_file():
         raise BridgeError(f"runtime archive not found: {archive}")
+    actual_archive_sha = _sha256(archive)
     if args.expected_archive_sha256:
-        actual_sha = _sha256(archive)
-        if actual_sha.lower() != args.expected_archive_sha256.lower():
-            raise BridgeError(f"runtime archive SHA mismatch expected={args.expected_archive_sha256} actual={actual_sha}")
+        if actual_archive_sha.lower() != args.expected_archive_sha256.lower():
+            raise BridgeError(
+                f"runtime archive SHA mismatch expected={args.expected_archive_sha256} actual={actual_archive_sha}"
+            )
+    replay = _successful_replay(install_dir, actual_archive_sha, str(args.expected_target or "").strip())
+    if replay is not None:
+        return replay
     src_dir = install_dir / "src"
     if not src_dir.is_dir():
         raise BridgeError(f"legacy source directory not found: {src_dir}")
