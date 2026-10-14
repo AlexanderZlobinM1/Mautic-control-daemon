@@ -1,3 +1,9 @@
+## 1.5.181 - 2026-10-14
+
+- Make runtime artifact generation fail closed unless the checkout `HEAD`,
+  `origin/main`, and embedded source provenance are the same exact commit.
+- Add release regression coverage for rejecting a non-canonical source commit.
+
 ## 1.5.180 - 2026-10-14
 
 - Remove every stale `mcd_agent-*.dist-info` directory before installing the

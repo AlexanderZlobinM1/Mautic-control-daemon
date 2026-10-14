@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -63,6 +64,37 @@ def _source_version(source: Path) -> str:
     if end <= start:
         raise RuntimeError(f"cannot parse __version__ in {init}")
     return text[start:end]
+
+
+def _git_commit(source: Path, ref: str) -> str:
+    proc = subprocess.run(
+        ["git", "rev-parse", "--verify", f"{ref}^{{commit}}"],
+        cwd=str(source),
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "git revision lookup failed").strip()
+        raise RuntimeError(f"cannot resolve canonical source commit {ref}: {detail}")
+    commit = (proc.stdout or "").strip()
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", commit):
+        raise RuntimeError(f"git revision lookup returned invalid commit for {ref}: {commit!r}")
+    return commit.lower()
+
+
+def _canonical_source_commit(source: Path, requested: str) -> str:
+    head = _git_commit(source, "HEAD")
+    canonical = _git_commit(source, "origin/main")
+    if head != canonical:
+        raise RuntimeError(
+            f"source checkout is not canonical origin/main: HEAD={head} origin/main={canonical}"
+        )
+    requested = str(requested or "").strip().lower()
+    if requested and requested != canonical:
+        raise RuntimeError(
+            f"source commit mismatch: requested={requested} canonical_origin_main={canonical}"
+        )
+    return canonical
 
 
 def _copy_runtime_resources(source: Path, stage: Path) -> None:
@@ -157,6 +189,7 @@ def _write_deterministic_archive(stage: Path, destination: Path) -> None:
 
 def build(source: Path, destination: Path, *, source_commit: str = "", source_archive_sha256: str = "") -> Path:
     source = source.resolve()
+    source_commit = _canonical_source_commit(source, source_commit)
     version = _source_version(source)
     manifest_sha256 = ""
     with tempfile.TemporaryDirectory(prefix="mcd-runtime-build-") as tmp:

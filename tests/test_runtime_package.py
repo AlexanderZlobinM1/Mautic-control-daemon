@@ -54,6 +54,11 @@ class RuntimePackageTests(unittest.TestCase):
     def test_builder_emits_runtime_only_archive_with_detached_provenance(self) -> None:
         root = Path(__file__).parents[1]
         builder = root / "tools" / "build-runtime-archive.py"
+        canonical_commit = subprocess.check_output(
+            ["git", "rev-parse", "origin/main"],
+            cwd=root,
+            text=True,
+        ).strip()
         with tempfile.TemporaryDirectory(prefix="mcd-runtime-test-") as tmp:
             archive = Path(tmp) / "mcd-agent-runtime.tar.gz"
             proc = subprocess.run(
@@ -65,7 +70,7 @@ class RuntimePackageTests(unittest.TestCase):
                     "--output",
                     str(archive),
                     "--source-commit",
-                    "test-source-commit",
+                    canonical_commit,
                     "--source-archive-sha256",
                     "a" * 64,
                 ],
@@ -96,7 +101,7 @@ class RuntimePackageTests(unittest.TestCase):
                 )
                 manifest = json.loads(tar.extractfile("mcd-runtime-manifest.json").read())  # type: ignore[union-attr]
                 self.assertEqual(manifest["schema"], "mcd-runtime-package-v1")
-                self.assertEqual(manifest["source_commit"], "test-source-commit")
+                self.assertEqual(manifest["source_commit"], canonical_commit)
                 self.assertNotIn("source_archive_sha256", manifest)
 
                 wheel_data = tar.extractfile(wheel_names[0]).read()  # type: ignore[union-attr]
@@ -110,9 +115,32 @@ class RuntimePackageTests(unittest.TestCase):
 
             receipt = json.loads(Path(str(archive) + ".receipt.json").read_text(encoding="utf-8"))
             self.assertTrue(receipt["runtime_only"])
-            self.assertEqual(receipt["source_commit"], "test-source-commit")
+            self.assertEqual(receipt["source_commit"], canonical_commit)
             self.assertEqual(receipt["source_archive_sha256"], "a" * 64)
             self.assertEqual(len(receipt["archive_sha256"]), 64)
+
+    def test_builder_rejects_noncanonical_source_commit(self) -> None:
+        root = Path(__file__).parents[1]
+        builder = root / "tools" / "build-runtime-archive.py"
+        with tempfile.TemporaryDirectory(prefix="mcd-runtime-provenance-") as tmp:
+            archive = Path(tmp) / "mcd-agent-runtime.tar.gz"
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    str(builder),
+                    "--source",
+                    str(root),
+                    "--output",
+                    str(archive),
+                    "--source-commit",
+                    "0" * 40,
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("source commit mismatch", proc.stderr or proc.stdout)
 
 
 if __name__ == "__main__":
