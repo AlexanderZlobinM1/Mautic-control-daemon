@@ -153,8 +153,9 @@ def main(argv: list[str] | None = None) -> int:
         _write_legacy_source(install)
         _run([args.python, "-m", "venv", str(install / "venv")])
         site_dir = bridge._site_dir(bridge._venv_python(install))
+        legacy_version = "1.5.177"
         stale_metadata = [
-            site_dir / f"mcd_agent-{version}.dist-info",
+            site_dir / f"mcd_agent-{legacy_version}.dist-info",
             site_dir / "mcd_agent-1.5.172.dist-info",
             site_dir / "mcd_agent-1.5.179.dist-info",
             site_dir / "mcd_agent-1.5.181.dist-info",

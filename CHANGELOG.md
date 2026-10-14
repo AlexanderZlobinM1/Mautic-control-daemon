@@ -1,3 +1,9 @@
+## 1.5.183 - 2026-10-14
+
+- Correct the disposable legacy-1.5.177 bridge QA fixture so the exact
+  stale-metadata, unrelated-metadata, rollback, and replay checks run against
+  the intended source version.
+
 ## 1.5.182 - 2026-10-14
 
 - Make the supported legacy source-to-runtime bridge remove only stale
