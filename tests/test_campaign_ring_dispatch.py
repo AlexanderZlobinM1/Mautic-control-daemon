@@ -360,6 +360,29 @@ class CampaignRingDispatchTests(unittest.TestCase):
         self.assertTrue(daemon_mod._scheduler_shared_admission_allowed(roots[1], "segment"))
         _set_scheduler_distribution_roots([], worker_slots=1)
 
+    def test_campaign_and_plugin_admission_bypass_segment_rr_without_consuming_turn(self) -> None:
+        roots = ["/var/www/a", "/var/www/b"]
+        _set_scheduler_distribution_roots(roots, worker_slots=2, cursor=0)
+        daemon_mod._mark_scheduler_shared_admission(roots[0], "segment")
+
+        # Ordinary campaigns and every plugin-operation task use their own
+        # lanes/caps. A served segment root must not starve them, and their
+        # admissions must not consume the segment root's fair-turn receipt.
+        for task_type in (
+            "campaign_trigger",
+            "campaign_rebuild",
+            "campaign_update",
+            "campaign_native_fallback",
+            "job:plugin_operation:woocommerce-sync",
+            "job:plugin_operation_bootstrap:woocommerce-sync",
+        ):
+            self.assertTrue(daemon_mod._scheduler_shared_admission_allowed(roots[0], task_type))
+            daemon_mod._mark_scheduler_shared_admission(roots[0], task_type)
+
+        self.assertFalse(daemon_mod._scheduler_shared_admission_allowed(roots[0], "segment"))
+        self.assertTrue(daemon_mod._scheduler_shared_admission_allowed(roots[1], "segment"))
+        _set_scheduler_distribution_roots([], worker_slots=1)
+
     def test_distribution_round_reopens_free_capacity_after_full_root_scan(self) -> None:
         roots = ["/var/www/slow", "/var/www/ready"]
         _set_scheduler_distribution_roots(roots, worker_slots=2, cursor=0)

@@ -1,3 +1,14 @@
+## 1.5.185 - 2026-10-14
+
+- Preserve the accepted `plugin_operations` catalog across partial, empty, or
+  instance-scoped MCC runtime responses and daemon restart/update; only an
+  explicit full snapshot, field value, or tombstone may replace it.
+- Keep campaign and plugin-operation admission independent of segment shared
+  root round-robin while preserving their existing lane, cap, repeat, and
+  exclusivity guards. Super-priority scheduling remains unchanged.
+- Add focused regressions for restart/catalog recovery and cross-lane
+  admission fairness.
+
 ## 1.5.184 - 2026-10-14
 
 - Make the disposable bridge QA compare canonical profile-selection paths,

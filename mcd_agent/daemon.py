@@ -317,6 +317,74 @@ def _iter_instances_with_root_dispatch_gate(
                 busy_roots.discard(current_root)
 _MCC_RUNTIME_METADATA_KEY = "mcc_runtime_metadata"
 _RUNTIME_METADATA_SCHEMA = "mcd-runtime-sync-metadata-v1"
+_PLUGIN_OPERATIONS_RUNTIME_KEY = "plugin_operations"
+
+
+def _runtime_response_is_authoritative_full_snapshot(response: Mapping[str, Any]) -> bool:
+    """Return whether MCC explicitly says the host runtime map is complete.
+
+    Runtime reads are also used for scoped/partial envelopes.  Treating an
+    omitted key in those responses as a replacement would turn a harmless
+    poll into a destructive catalog clear.  Only an explicit full-snapshot
+    marker (or an explicit field value/tombstone handled below) may replace a
+    missing host catalog.
+    """
+
+    candidates: list[Mapping[str, Any]] = [response]
+    desired = response.get("desired_state")
+    if isinstance(desired, Mapping):
+        candidates.append(desired)
+    snapshot = response.get("runtime_snapshot")
+    if isinstance(snapshot, Mapping):
+        candidates.append(snapshot)
+    for candidate in candidates:
+        for marker in (
+            "runtime_overrides_authoritative",
+            "runtime_overrides_complete",
+            "runtime_snapshot_authoritative",
+            "runtime_snapshot_complete",
+            "authoritative_full_snapshot",
+        ):
+            if candidate.get(marker) is True:
+                return True
+        for mode_key in ("runtime_overrides_mode", "runtime_snapshot_mode", "snapshot_mode"):
+            if str(candidate.get(mode_key, "") or "").strip().lower() == "full":
+                return True
+    return False
+
+
+def _runtime_response_has_explicit_field(response: Mapping[str, Any], key: str) -> bool:
+    """Whether a response carries an explicit host value for ``key``."""
+
+    envelopes: list[object] = [response.get("runtime_overrides")]
+    desired = response.get("desired_state")
+    if isinstance(desired, Mapping):
+        envelopes.append(desired.get("runtime_overrides"))
+    return any(isinstance(envelope, Mapping) and key in envelope for envelope in envelopes)
+
+
+def _runtime_response_has_host_tombstone(response: Mapping[str, Any], key: str) -> bool:
+    """Whether MCC explicitly tombstones a host runtime field."""
+
+    raw_metadata = response.get("runtime_metadata")
+    if raw_metadata is None:
+        raw_metadata = response.get("field_metadata", response.get("runtime_overrides_metadata"))
+    if not isinstance(raw_metadata, Mapping):
+        return False
+    host = raw_metadata.get("host")
+    if isinstance(host, Mapping):
+        stamp = host.get(key)
+        if isinstance(stamp, Mapping) and stamp.get("tombstone") is True:
+            return True
+    tombstones = raw_metadata.get("tombstones")
+    if isinstance(tombstones, list):
+        return any(
+            isinstance(item, Mapping)
+            and str(item.get("scope", "host") or "host").strip().lower() == "host"
+            and str(item.get("key", "") or "").strip() == key
+            for item in tombstones
+        )
+    return False
 
 
 def _is_instance_runtime_map_key(key: object) -> bool:
@@ -581,6 +649,36 @@ def _merge_missing_runtime_values(
             merged[text_key] = next_entries
         elif text_key not in merged:
             merged[text_key] = deepcopy(value)
+    return merged
+
+
+def _merge_missing_plugin_operation_catalog(
+    current_runtime: Mapping[str, Any],
+    response: Mapping[str, Any],
+    fallback_runtimes: Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Keep the last accepted plugin catalog across partial MCC reads.
+
+    The catalog is a host runtime field, while MCC also serves scoped and
+    empty envelopes that legitimately omit it.  A value present in the wire
+    response (including an explicit empty map) wins.  Otherwise recover the
+    last accepted host snapshot unless MCC explicitly declared a complete
+    snapshot or supplied a tombstone.
+    """
+
+    key = _PLUGIN_OPERATIONS_RUNTIME_KEY
+    merged = deepcopy(dict(current_runtime))
+    if (
+        _runtime_response_has_explicit_field(response, key)
+        or _runtime_response_is_authoritative_full_snapshot(response)
+        or _runtime_response_has_host_tombstone(response, key)
+        or key in merged
+    ):
+        return merged
+    for fallback in fallback_runtimes:
+        if isinstance(fallback, Mapping) and key in fallback:
+            merged[key] = deepcopy(fallback[key])
+            break
     return merged
 
 
@@ -1021,6 +1119,23 @@ def _runtime_metadata_from_response(
                         ),
                         field_uid,
                     )
+    if (
+        _runtime_response_is_authoritative_full_snapshot(response)
+        and not _runtime_response_has_explicit_field(response, _PLUGIN_OPERATIONS_RUNTIME_KEY)
+        and not _runtime_response_has_host_tombstone(response, _PLUGIN_OPERATIONS_RUNTIME_KEY)
+    ):
+        _runtime_metadata_set(
+            metadata,
+            "host",
+            _PLUGIN_OPERATIONS_RUNTIME_KEY,
+            _runtime_metadata_stamp(
+                source="mcc",
+                revision=host_revision,
+                updated_at=host_updated_at,
+                event_id=f"mcc:tombstone:host:{_PLUGIN_OPERATIONS_RUNTIME_KEY}:{host_revision}",
+                tombstone=True,
+            ),
+        )
     return metadata
 
 
@@ -1445,6 +1560,9 @@ def _bootstrap_remote_runtime_before_local_baseline(
         overrides_raw if isinstance(overrides_raw, dict) else {},
         response.get("instance_desired_states"),
     )
+    previous_mcc_runtime = store.get_runtime_sync("mcc_runtime")
+    previous_mcc_runtime = previous_mcc_runtime if isinstance(previous_mcc_runtime, dict) else {}
+    accepted_runtime: Mapping[str, Any] = {}
     if _accepted_runtime_response_matches(store, response):
         accepted_raw = store.get_runtime_sync(_LOCAL_RUNTIME_ACCEPTED_KEY)
         accepted_runtime = (
@@ -1453,6 +1571,11 @@ def _bootstrap_remote_runtime_before_local_baseline(
             else {}
         )
         remote_runtime = _merge_missing_runtime_values(remote_runtime, accepted_runtime)
+    remote_runtime = _merge_missing_plugin_operation_catalog(
+        remote_runtime,
+        response,
+        (accepted_runtime, previous_mcc_runtime),
+    )
 
     current_local_runtime = local_runtime_overrides(config)
     local_metadata = _runtime_metadata_for_snapshot(
@@ -2189,6 +2312,7 @@ _BACKUP_STABLE_RUNTIME_KEYS = {
     "backup_cluster_authority_host",
 }
 _PLUGIN_OPERATION_STABLE_RUNTIME_KEYS = {
+    "plugin_operations",
     "plugin_operation_instance_settings",
 }
 _MESSAGE_QUEUE_STABLE_RUNTIME_KEYS = {
@@ -6779,6 +6903,7 @@ _SCHEDULER_PRIORITY_SEGMENT_TASK_TYPES = frozenset(
 _SCHEDULER_PRIORITY_CAMPAIGN_TASK_TYPES = frozenset(
     {"campaign_update", "campaign_rebuild", "campaign_trigger", "campaign_native_fallback"}
 )
+_SCHEDULER_SEGMENT_RR_CAMPAIGN_EXEMPT_TASK_TYPES = _SCHEDULER_PRIORITY_CAMPAIGN_TASK_TYPES
 _SCHEDULER_PRIORITY_WORK_TASK_TYPES = (
     _SCHEDULER_PRIORITY_SEGMENT_TASK_TYPES | _SCHEDULER_PRIORITY_CAMPAIGN_TASK_TYPES
 )
@@ -6952,6 +7077,11 @@ def _scheduler_shared_admission_allowed(root: str, task_type: str) -> bool:
     normalized = str(task_type or "").strip().lower()
     if normalized in _SCHEDULER_SUPER_PRIORITY_TASK_TYPES:
         return True
+    if (
+        normalized in _SCHEDULER_SEGMENT_RR_CAMPAIGN_EXEMPT_TASK_TYPES
+        or normalized.startswith("job:plugin_operation")
+    ):
+        return True
     with _SCHEDULER_DISTRIBUTION_LOCK:
         ready = set(_SCHEDULER_DISTRIBUTION_READY_ROOTS)
         if not ready or str(root) not in ready:
@@ -6970,6 +7100,11 @@ def _scheduler_shared_admission_ready(root: str, task_type: str) -> bool:
     normalized = str(task_type or "").strip().lower()
     if normalized in _SCHEDULER_SUPER_PRIORITY_TASK_TYPES:
         return True
+    if (
+        normalized in _SCHEDULER_SEGMENT_RR_CAMPAIGN_EXEMPT_TASK_TYPES
+        or normalized.startswith("job:plugin_operation")
+    ):
+        return True
     with _SCHEDULER_DISTRIBUTION_LOCK:
         ready = set(_SCHEDULER_DISTRIBUTION_READY_ROOTS)
         if not ready or str(root) not in ready:
@@ -6981,6 +7116,11 @@ def _scheduler_shared_admission_ready(root: str, task_type: str) -> bool:
 def _mark_scheduler_shared_admission(root: str, task_type: str) -> None:
     normalized = str(task_type or "").strip().lower()
     if normalized in _SCHEDULER_SUPER_PRIORITY_TASK_TYPES:
+        return
+    if (
+        normalized in _SCHEDULER_SEGMENT_RR_CAMPAIGN_EXEMPT_TASK_TYPES
+        or normalized.startswith("job:plugin_operation")
+    ):
         return
     with _SCHEDULER_DISTRIBUTION_LOCK:
         if str(root) in _SCHEDULER_DISTRIBUTION_READY_ROOTS:
@@ -7000,6 +7140,11 @@ def _mark_scheduler_shared_admission_skip(root: str, task_type: str) -> None:
 
     normalized = str(task_type or "").strip().lower()
     if normalized in _SCHEDULER_SUPER_PRIORITY_TASK_TYPES:
+        return
+    if (
+        normalized in _SCHEDULER_SEGMENT_RR_CAMPAIGN_EXEMPT_TASK_TYPES
+        or normalized.startswith("job:plugin_operation")
+    ):
         return
     normalized_root = str(root)
     with _SCHEDULER_DISTRIBUTION_LOCK:
@@ -18619,6 +18764,9 @@ def run_loop(
                             ro.get("instance_desired_states"),
                         )
                     )
+                    previous_mcc_runtime = store.get_runtime_sync("mcc_runtime")
+                    previous_mcc_runtime = previous_mcc_runtime if isinstance(previous_mcc_runtime, dict) else {}
+                    accepted_runtime: Mapping[str, Any] = {}
                     instance_states = ro.get("instance_desired_states")
                     if _accepted_runtime_response_matches(store, ro):
                         accepted_raw = store.get_runtime_sync(_LOCAL_RUNTIME_ACCEPTED_KEY)
@@ -18628,6 +18776,11 @@ def run_loop(
                             else {}
                         )
                         remote_runtime = _merge_missing_runtime_values(remote_runtime, accepted_runtime)
+                    remote_runtime = _merge_missing_plugin_operation_catalog(
+                        remote_runtime,
+                        ro,
+                        (accepted_runtime, previous_mcc_runtime),
+                    )
                     current_local_runtime = local_runtime_overrides(config)
                     local_metadata = _runtime_metadata_for_snapshot(
                         store.get_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY),

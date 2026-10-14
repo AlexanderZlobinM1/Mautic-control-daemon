@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import unittest
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -2163,6 +2164,99 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             self.assertEqual(baseline, desired_runtime)
             self.assertIsNone(daemon._read_local_runtime_push_pending(store))
             self.assertEqual(store.get_runtime_sync("mcc_runtime"), desired_runtime)
+
+    def test_plugin_catalog_survives_partial_restart_and_authoritative_empty_clears(self) -> None:
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        class MemoryStore:
+            def __init__(self, values=None):
+                self.values = dict(values or {})
+
+            def get_runtime_sync(self, key):
+                return self.values.get(key)
+
+            def put_runtime_sync(self, key, value):
+                self.values[key] = dict(value)
+
+            def delete_runtime_sync(self, keys):
+                for key in keys:
+                    self.values.pop(key, None)
+                return 1
+
+        catalog = {
+            "calac.sales-snap.com": [
+                {
+                    "operation_key": "woocommercebundle:5-6-7:integrations_sync",
+                    "bundle": "WooCommerceBundle",
+                }
+            ]
+        }
+        base_toml = '[profile]\nname = "farm-hiload"\n\n[runtime]\nplugin_operations = { "calac.sales-snap.com" = [{ operation_key = "woocommercebundle:5-6-7:integrations_sync", bundle = "WooCommerceBundle" }] }\n'
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "mcd.toml"
+            path.write_text(base_toml, encoding="utf-8")
+            cfg = replace(load_config(str(path), allow_recover_from_mcc=False), mcc_url="https://mcc.example", mcc_token="token")
+            previous = {"plugin_operations": catalog}
+
+            # An empty host envelope is a valid partial/scoped poll. The
+            # accepted catalog must remain effective and be re-persisted.
+            partial_store = MemoryStore({"mcc_runtime": previous})
+            with patch(
+                "mcd_agent.daemon.fetch_runtime_overrides",
+                return_value={"status": "ok", "runtime_overrides": {}, "desired_state": {"revision": 4}},
+            ):
+                self.assertEqual(
+                    daemon._bootstrap_remote_runtime_before_local_baseline(cfg, partial_store, []),
+                    "applied",
+                )
+            self.assertEqual(local_runtime_overrides(load_config(str(path), allow_recover_from_mcc=False))["plugin_operations"], catalog)
+
+            # Simulate the mutable file being replaced by an update. A scoped
+            # response omitting the host catalog must recover it from the last
+            # accepted persisted MCC snapshot before the daemon classifies it.
+            path.write_text('[profile]\nname = "farm-hiload"\n', encoding="utf-8")
+            restarted = replace(load_config(str(path), allow_recover_from_mcc=False), mcc_url="https://mcc.example", mcc_token="token")
+            restart_store = MemoryStore({"mcc_runtime": previous})
+            with patch(
+                "mcd_agent.daemon.fetch_runtime_overrides",
+                return_value={
+                    "status": "ok",
+                    "instance_desired_states": {"calac.sales-snap.com": {"revision": 6, "runtime_overrides": {}}},
+                    "desired_state": {"revision": 5},
+                },
+            ):
+                self.assertEqual(
+                    daemon._bootstrap_remote_runtime_before_local_baseline(restarted, restart_store, ["calac.sales-snap.com"]),
+                    "applied",
+                )
+            self.assertEqual(
+                local_runtime_overrides(load_config(str(path), allow_recover_from_mcc=False))["plugin_operations"],
+                catalog,
+            )
+
+            # Only an explicit full-snapshot declaration may clear an omitted
+            # catalog; this is the destructive case by contract.
+            full_store = MemoryStore({"mcc_runtime": previous})
+            full_cfg = replace(load_config(str(path), allow_recover_from_mcc=False), mcc_url="https://mcc.example", mcc_token="token")
+            with patch(
+                "mcd_agent.daemon.fetch_runtime_overrides",
+                return_value={
+                    "status": "ok",
+                    "runtime_overrides": {},
+                    "runtime_overrides_authoritative": True,
+                    "desired_state": {"revision": 7},
+                },
+            ):
+                self.assertEqual(
+                    daemon._bootstrap_remote_runtime_before_local_baseline(full_cfg, full_store, []),
+                    "applied",
+                )
+            self.assertNotIn(
+                "plugin_operations",
+                local_runtime_overrides(load_config(str(path), allow_recover_from_mcc=False)),
+            )
 
     def test_selected_profile_provenance_survives_runtime_sync_rebase(self) -> None:
         from pathlib import Path

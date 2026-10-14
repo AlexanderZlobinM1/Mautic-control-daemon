@@ -23,7 +23,7 @@ def test_page_hits_cleanup_runtime_keys_are_stable() -> None:
 
 def test_catalog_plugin_operation_settings_are_stable_without_catalog_definitions() -> None:
     assert "plugin_operation_instance_settings" in daemon._STABLE_RUNTIME_KEYS
-    assert "plugin_operations" not in daemon._STABLE_RUNTIME_KEYS
+    assert "plugin_operations" in daemon._STABLE_RUNTIME_KEYS
     assert not any(
         name in key
         for key in daemon._STABLE_RUNTIME_KEYS
