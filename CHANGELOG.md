@@ -1,3 +1,14 @@
+## 1.5.175 - 2026-10-14
+
+- Keep partial Mautic imports with unfinished positions in queued/running
+  monitor lanes even when Mautic has already populated `date_ended`; only
+  actual terminal status or completed position emits successful completion.
+- Fail closed when the per-root import admission baseline cannot be persisted
+  and read back; serialize first initialization so concurrent roots use one
+  durable cutoff.
+- Do not force a segment full-scan from pending import pressure alone; only a
+  confirmed successful terminal completion may create that follow-up.
+
 ## 1.5.174 - 2026-10-14
 
 - Keep unfinished Mautic import positions pending when Mautic records
@@ -6,6 +17,8 @@
 - Persist a per-root upgrade cutoff in `runtime_sync` so historical partial
   rows are not newly replayed while post-upgrade partial batches remain
   launchable; terminal monitor evidence stays separate from admission.
+- Do not force a segment full-scan from pending import pressure alone; only a
+  confirmed successful terminal completion may create that follow-up.
 - Preserve the configured pending signal when the status cross-check excludes
   that partial row, and add a Mautic-shaped regression proving the next import
   admission remains launchable without a false empty-queue fallback.

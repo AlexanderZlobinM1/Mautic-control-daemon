@@ -46,6 +46,7 @@ from mcd_agent.daemon import (
     _campaign_trigger_skip_removes_from_ring,
     _campaign_trigger_waits_for_rebuild,
     _classify_import_monitor_row,
+    _import_completion_requires_full_scan,
     _ensure_import_pending_cutoff_utc,
     _dispatch_due_campaign_triggers,
     _dispatch_due_campaign_rebuilds,
@@ -2863,6 +2864,81 @@ class CampaignRingDispatchTests(unittest.TestCase):
                 ("done", "", "success"),
             )
 
+    def test_partial_m6_m7_batch_with_terminal_date_stays_live_until_position_finishes(self) -> None:
+        partial_rows = (
+            {"status": 1, "date_ended": "2026-07-10 09:55:14"},
+            {
+                "status": 7,
+                "date_ended": "2026-07-10 09:55:14",
+                "line_count": 13371,
+                "properties": '{"line":5101,"defaults":{"list":[25]}}',
+            },
+            {
+                "status": "delayed",
+                "date_ended": "2026-07-10 09:55:14",
+                "line_count": 13371,
+                "properties": {"line": 5101, "defaults": {"list": [26]}},
+            },
+        )
+        self.assertEqual(
+            _classify_import_monitor_row(partial_rows[0]),
+            ("done", "", "success"),
+        )
+        self.assertEqual(
+            _classify_import_monitor_row(partial_rows[1]),
+            ("queued", "delayed", "delayed"),
+        )
+        self.assertEqual(
+            _classify_import_monitor_row(partial_rows[2]),
+            ("queued", "delayed", "delayed"),
+        )
+        terminal = {
+            "status": 3,
+            "date_ended": "2026-07-10 10:05:14",
+            "line_count": 13371,
+            "properties": '{"line":13371,"defaults":{"list":[27]}}',
+        }
+        self.assertEqual(
+            _classify_import_monitor_row(terminal),
+            ("done", "", "success"),
+        )
+
+    def test_import_monitor_partial_row_has_no_completed_followup_until_terminal(self) -> None:
+        db = SimpleNamespace(
+            fetch_rows=Mock(
+                return_value=[
+                    {
+                        "id": 15,
+                        "status": 7,
+                        "date_ended": "2026-07-10 09:55:14",
+                        "line_count": 13371,
+                        "properties": '{"line":5101,"defaults":{"list":[25]}}',
+                    },
+                    {
+                        "id": 16,
+                        "status": 3,
+                        "date_ended": "2026-07-10 10:05:14",
+                        "line_count": 13371,
+                        "properties": '{"line":13371,"defaults":{"list":[26]}}',
+                    },
+                ]
+            )
+        )
+        monitor = _fetch_import_monitor_snapshot(
+            db,
+            "/var/www/site",
+            {"now_utc": "2026-07-10 10:10:00"},
+        )
+        self.assertIn("line_count", db.fetch_rows.call_args.args[0])
+        self.assertEqual(monitor["queued"], [15])
+        self.assertEqual(monitor["done"], [16])
+        self.assertEqual(
+            _import_monitor_target_segment_ids(monitor, lanes={"done"}, successful_only=True),
+            {16: [26]},
+        )
+        self.assertFalse(_import_completion_requires_full_scan([]))
+        self.assertTrue(_import_completion_requires_full_scan({16: [26]}))
+
     def test_terminal_date_ended_paused_cancelled_and_failed_do_not_hold_target(self) -> None:
         for status, expected in ((5, ("done", "stopped", "stopped")), (4, ("done", "", "error"))):
             self.assertEqual(
@@ -2958,9 +3034,10 @@ class CampaignRingDispatchTests(unittest.TestCase):
         db = Mock()
         db.fetch_count.side_effect = [3, 0]
         config = SimpleNamespace(sql_import_pending_count="configured import query")
+        sql_ctx = {"import_pending_cutoff_utc": "2026-10-14 04:00:00"}
 
         with patch.object(daemon_mod.time, "time", return_value=1780000000.0):
-            observed = daemon_mod._fetch_import_pending_count(db, config, root, {})
+            observed = daemon_mod._fetch_import_pending_count(db, config, root, sql_ctx)
 
         self.assertEqual(observed, 3)
         self.assertEqual(db.fetch_count.call_count, 2)
@@ -2972,9 +3049,24 @@ class CampaignRingDispatchTests(unittest.TestCase):
         config = SimpleNamespace(sql_import_pending_count="configured import query")
 
         self.assertEqual(
-            daemon_mod._fetch_import_pending_count(db, config, "/var/www/s/public_html", {}),
+            daemon_mod._fetch_import_pending_count(
+                db,
+                config,
+                "/var/www/s/public_html",
+                {"import_pending_cutoff_utc": "2026-10-14 04:00:00"},
+            ),
             2,
         )
+
+    def test_import_pending_fails_closed_without_durable_baseline(self) -> None:
+        db = Mock()
+        config = SimpleNamespace(sql_import_pending_count="configured import query")
+
+        self.assertEqual(
+            daemon_mod._fetch_import_pending_count(db, config, "/var/www/s/public_html", {}),
+            0,
+        )
+        db.fetch_count.assert_not_called()
 
     def test_partial_mautic_batch_with_date_ended_keeps_pending_admission(self) -> None:
         root = "/var/www/s/public_html"
@@ -3035,8 +3127,9 @@ class CampaignRingDispatchTests(unittest.TestCase):
         self.assertEqual(pending, 1)
         self.assertIn("import_pending_cutoff_utc", db.count_queries[0])
         self.assertEqual(db.count_contexts[0]["import_pending_cutoff_utc"], cutoff)
-        self.assertEqual(monitor["done"], [4916, 4917])
-        self.assertEqual(monitor["item_statuses"], {"4916": "success", "4917": "success"})
+        self.assertEqual(monitor["queued"], [4916, 4917])
+        self.assertEqual(monitor["done"], [])
+        self.assertEqual(monitor["item_statuses"], {"4916": "queued", "4917": "queued"})
 
         class RuntimeSync:
             def __init__(self) -> None:
@@ -3086,6 +3179,71 @@ class CampaignRingDispatchTests(unittest.TestCase):
 
         self.assertTrue(launched)
         self.assertEqual(submit.call_args.kwargs["task_type"], "import")
+
+    def test_import_pending_baseline_persistence_failure_fails_closed(self) -> None:
+        class BrokenRuntimeSync:
+            def get_runtime_sync(self, key: str) -> object:
+                del key
+                return None
+
+            def put_runtime_sync(self, key: str, value: object) -> None:
+                del key, value
+                raise OSError("read-only runtime state")
+
+        self.assertIsNone(
+            _ensure_import_pending_cutoff_utc(
+                BrokenRuntimeSync(),
+                "/var/www/s/public_html",
+                datetime(2026, 10, 14, 4, 0, tzinfo=timezone.utc),
+            )
+        )
+
+    def test_import_pending_baseline_readback_mismatch_fails_closed(self) -> None:
+        class MismatchedRuntimeSync:
+            def get_runtime_sync(self, key: str) -> object:
+                del key
+                return {"schema": "wrong", "cutoff_utc": "2026-10-14 04:00:00"}
+
+            def put_runtime_sync(self, key: str, value: object) -> None:
+                del key, value
+
+        self.assertIsNone(
+            _ensure_import_pending_cutoff_utc(
+                MismatchedRuntimeSync(),
+                "/var/www/s/public_html",
+                datetime(2026, 10, 14, 4, 0, tzinfo=timezone.utc),
+            )
+        )
+
+    def test_import_pending_baseline_concurrent_initialization_uses_one_persisted_cutoff(self) -> None:
+        class RuntimeSync:
+            def __init__(self) -> None:
+                self.values: dict[str, object] = {}
+
+            def get_runtime_sync(self, key: str) -> object:
+                return self.values.get(key)
+
+            def put_runtime_sync(self, key: str, value: object) -> None:
+                self.values[key] = value
+
+        runtime = RuntimeSync()
+        results: list[str | None] = []
+
+        def initialize(hour: int) -> None:
+            results.append(
+                _ensure_import_pending_cutoff_utc(
+                    runtime,
+                    "/var/www/s/public_html",
+                    datetime(2026, 10, 14, hour, 0, tzinfo=timezone.utc),
+                )
+            )
+
+        workers = [threading.Thread(target=initialize, args=(hour,)) for hour in (4, 5)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join()
+        self.assertEqual(results, ["2026-10-14 04:00:00", "2026-10-14 04:00:00"])
 
     def test_orphaned_import_recovery_requeues_when_cli_worker_is_absent(self) -> None:
         db = SimpleNamespace(recover_orphaned_imports=Mock(return_value=2))

@@ -1909,6 +1909,7 @@ _IMPORT_SETTLE_UNTIL: dict[str, float] = {}
 _IMPORT_PENDING_OVERRIDE_WARN_TS: dict[str, float] = {}
 _IMPORT_PENDING_BASELINE_PREFIX = "import_pending_baseline:"
 _IMPORT_PENDING_BASELINE_SCHEMA = "mcd-import-pending-baseline-v1"
+_IMPORT_PENDING_BASELINE_LOCK = threading.Lock()
 _SQL_IMPORT_PENDING_STATUS_COUNT = (
     "SELECT COUNT(*) AS cnt FROM {prefix}imports "
     "WHERE is_published = 1 "
@@ -1941,7 +1942,7 @@ _MAILRU_POSTMASTER_LATEST_ROWS = (
 )
 _MAILRU_POSTMASTER_SPAM_STOP_PERCENT = 3.0
 _SQL_IMPORT_MONITOR_ROWS = (
-    "SELECT id, status, date_added, date_started, date_ended, properties "
+    "SELECT id, status, date_added, date_started, date_ended, line_count, properties "
     "FROM {prefix}imports "
     "WHERE is_published = 1 "
     "AND (status IN (1,2,3,4,5,6,7) "
@@ -1966,7 +1967,18 @@ def _import_pending_baseline_key(root: str) -> str:
     return f"{_IMPORT_PENDING_BASELINE_PREFIX}{digest}"
 
 
-def _ensure_import_pending_cutoff_utc(store: object, root: str, now_utc: datetime) -> str:
+def _import_pending_baseline_cutoff(value: object) -> str | None:
+    if not isinstance(value, Mapping):
+        return None
+    if str(value.get("schema") or "").strip() != _IMPORT_PENDING_BASELINE_SCHEMA:
+        return None
+    cutoff = str(value.get("cutoff_utc") or "").strip()
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", cutoff):
+        return None
+    return cutoff
+
+
+def _ensure_import_pending_cutoff_utc(store: object, root: str, now_utc: datetime) -> str | None:
     """Persist one per-root upgrade baseline for partial import admission.
 
     Mautic may set ``date_ended`` after a partial batch while its line position
@@ -1976,28 +1988,37 @@ def _ensure_import_pending_cutoff_utc(store: object, root: str, now_utc: datetim
     """
 
     key = _import_pending_baseline_key(root)
-    try:
-        current = store.get_runtime_sync(key)  # type: ignore[attr-defined]
-    except Exception:
-        current = None
-    if isinstance(current, Mapping):
-        cutoff = str(current.get("cutoff_utc") or "").strip()
-        if re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", cutoff):
-            return cutoff
+    with _IMPORT_PENDING_BASELINE_LOCK:
+        try:
+            current = store.get_runtime_sync(key)  # type: ignore[attr-defined]
+        except Exception:
+            current = None
+        existing_cutoff = _import_pending_baseline_cutoff(current)
+        if existing_cutoff is not None:
+            return existing_cutoff
 
-    cutoff = now_utc.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    payload = {
-        "schema": _IMPORT_PENDING_BASELINE_SCHEMA,
-        "cutoff_utc": cutoff,
-        "created_at": now_utc.astimezone(timezone.utc).isoformat(),
-    }
-    try:
-        store.put_runtime_sync(key, payload)  # type: ignore[attr-defined]
-    except Exception as exc:
-        logging.warning("[%s] import pending baseline persistence failed: %s", root, exc)
-    else:
-        logging.info("[%s] import pending baseline established cutoff_utc=%s", root, cutoff)
-    return cutoff
+        cutoff = now_utc.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        payload = {
+            "schema": _IMPORT_PENDING_BASELINE_SCHEMA,
+            "cutoff_utc": cutoff,
+            "created_at": now_utc.astimezone(timezone.utc).isoformat(),
+        }
+        try:
+            store.put_runtime_sync(key, payload)  # type: ignore[attr-defined]
+        except Exception as exc:
+            logging.warning("[%s] import pending baseline persistence failed: %s", root, exc)
+            return None
+        try:
+            persisted = store.get_runtime_sync(key)  # type: ignore[attr-defined]
+        except Exception as exc:
+            logging.warning("[%s] import pending baseline read-back failed: %s", root, exc)
+            return None
+        persisted_cutoff = _import_pending_baseline_cutoff(persisted)
+        if persisted_cutoff is None:
+            logging.error("[%s] import pending baseline read-back was not canonical; admission stays closed", root)
+            return None
+        logging.info("[%s] import pending baseline established cutoff_utc=%s", root, persisted_cutoff)
+        return persisted_cutoff
 
 
 def _mailru_postmaster_metrics(db: MauticDB, *, now_ts: float) -> dict[str, object]:
@@ -13144,10 +13165,10 @@ def _fetch_import_pending_count(
     sql_ctx: dict[str, str],
 ) -> int:
     query_ctx = dict(sql_ctx or {})
-    query_ctx.setdefault(
-        "import_pending_cutoff_utc",
-        str(query_ctx.get("now_utc") or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")),
-    )
+    cutoff = str(query_ctx.get("import_pending_cutoff_utc") or "").strip()
+    if not cutoff:
+        logging.warning("[%s] import pending baseline is not durable; admission stays closed", root)
+        return 0
     configured_count = db.fetch_count(config.sql_import_pending_count, context=query_ctx)
     status_count = db.fetch_count(_SQL_IMPORT_PENDING_STATUS_COUNT, context=query_ctx)
     if configured_count > 0 and status_count <= 0:
@@ -13200,18 +13221,53 @@ def _has_import_date_value(raw: object) -> bool:
     return not text.startswith("0000-00-00")
 
 
+def _import_position_unfinished(row: Mapping[str, object]) -> bool:
+    """Return whether a row proves that a Mautic batch stopped before its end."""
+    try:
+        line_count = int(row.get("line_count", 0) or 0)
+    except (TypeError, ValueError):
+        return False
+    if line_count <= 0:
+        return False
+    payload = row.get("properties")
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except (TypeError, ValueError):
+            return False
+    if not isinstance(payload, Mapping):
+        return False
+    if "line" not in payload:
+        return False
+    try:
+        line = int(payload.get("line") or 0)
+    except (TypeError, ValueError):
+        return False
+    return line < line_count
+
+
 def _classify_import_monitor_row(row: dict[str, object]) -> tuple[str, str, str]:
-    # date_ended is authoritative terminal evidence across Mautic 4-7. It
-    # wins over stale numeric status values such as status=1.
+    status_raw = str(row.get("status", "") or "").strip().lower()
+    status_raw = status_raw.replace(" ", "_").replace("-", "_")
+    unfinished = _import_position_unfinished(row)
+    # Mautic can set date_ended after a partial batch while leaving a queued or
+    # delayed status and an unfinished line position. Preserve that live
+    # ownership; otherwise the monitor would emit a false success and enqueue
+    # completed-segment follow-up/full-scan work too early.
+    if unfinished and status_raw in {"2", "6", "in_progress", "processing", "running", "manual"}:
+        return "running", "", "processing"
+    if unfinished and status_raw in {"1", "7", "queued", "pending", "delayed"}:
+        variant = "delayed" if status_raw in {"7", "delayed"} else ""
+        return "queued", variant, "delayed" if variant else "queued"
+    # Once the position is complete, or when no unfinished position is
+    # available, date_ended remains terminal evidence across Mautic 4-7 and
+    # wins over stale queued/running status values.
     if _has_import_date_value(row.get("date_ended")):
-        status_raw = str(row.get("status", "") or "").strip().lower()
         if status_raw in {"4", "failed", "error"}:
             return "done", "", "error"
         if status_raw in {"5", "stopped", "cancelled", "canceled", "paused"}:
             return "done", "stopped", "stopped"
         return "done", "", "success"
-    status_raw = str(row.get("status", "") or "").strip().lower()
-    status_raw = status_raw.replace(" ", "_").replace("-", "_")
     if status_raw in {"2", "6", "in_progress", "processing", "running", "manual"}:
         return "running", "", "processing"
     if status_raw in {"7", "delayed"}:
@@ -13277,6 +13333,11 @@ def _import_monitor_target_segment_ids(
             if targets:
                 out[import_id] = targets
     return out
+
+
+def _import_completion_requires_full_scan(completed_segment_followups: object) -> bool:
+    """Only a confirmed terminal completion may force a segment full scan."""
+    return bool(completed_segment_followups)
 
 
 def _fetch_import_monitor_snapshot(
@@ -15937,7 +15998,7 @@ def run_loop(
                 getattr(inst, "mautic_timezone", None),
                 getattr(inst, "mautic_major", None),
             )
-            sql_ctx["import_pending_cutoff_utc"] = _ensure_import_pending_cutoff_utc(
+            import_pending_cutoff_utc = _ensure_import_pending_cutoff_utc(
                 store,
                 root,
                 now_utc,
@@ -15961,7 +16022,12 @@ def run_loop(
                     },
                 )
             if cluster_route_allows(config, "import") and bool(getattr(config, "enable_import_polling", True)):
-                result["import_pending"] = _fetch_import_pending_count(db, config, root, sql_ctx)
+                if import_pending_cutoff_utc is None:
+                    result["import_pending"] = 0
+                    result["import_baseline_durable"] = False
+                else:
+                    sql_ctx["import_pending_cutoff_utc"] = import_pending_cutoff_utc
+                    result["import_pending"] = _fetch_import_pending_count(db, config, root, sql_ctx)
                 result["import_monitor"] = _fetch_import_monitor_snapshot(db, root, sql_ctx)
             return result
 
@@ -19453,11 +19519,13 @@ def run_loop(
                 campaign_whitelist_for_inst = _campaign_whitelist_effective_setting(config, inst)
                 db = MauticDB(inst.db)
                 sql_ctx = campaign_sql_time_context(now_utc, inst.mautic_timezone, inst.mautic_major)
-                sql_ctx["import_pending_cutoff_utc"] = _ensure_import_pending_cutoff_utc(
+                import_pending_cutoff_utc = _ensure_import_pending_cutoff_utc(
                     store,
                     root,
                     now_utc,
                 )
+                if import_pending_cutoff_utc is not None:
+                    sql_ctx["import_pending_cutoff_utc"] = import_pending_cutoff_utc
                 sql_ring_enabled_for_root = bool(
                     config.segment_sql_ring_enabled and config.segment_mode != "classic_loop"
                 )
@@ -19490,20 +19558,23 @@ def run_loop(
                     running=running,
                     pending_cache=import_pending_cache,
                 ):
-                    try:
-                        _recover_orphaned_imports_if_safe(db, root, running, grace_sec=max(60, config.import_poll_interval_sec * 4))
-                        import_pending_cache[root] = _fetch_import_pending_count(db, config, root, sql_ctx)
-                    except Exception as e:
-                        logging.warning("[%s] import query failed: %s", root, e)
-                        if _is_db_dispatch_pause_error(e):
-                            _mark_db_dispatch_pause(
-                                root=root,
-                                reason=f"import planning db error: {e}",
-                                now_ts=now,
-                                pause_until=db_dispatch_pause_until,
-                                pause_reasons=db_dispatch_pause_reasons,
-                            )
+                    if import_pending_cutoff_utc is None:
                         import_pending_cache[root] = 0
+                    else:
+                        try:
+                            _recover_orphaned_imports_if_safe(db, root, running, grace_sec=max(60, config.import_poll_interval_sec * 4))
+                            import_pending_cache[root] = _fetch_import_pending_count(db, config, root, sql_ctx)
+                        except Exception as e:
+                            logging.warning("[%s] import query failed: %s", root, e)
+                            if _is_db_dispatch_pause_error(e):
+                                _mark_db_dispatch_pause(
+                                    root=root,
+                                    reason=f"import planning db error: {e}",
+                                    now_ts=now,
+                                    pause_until=db_dispatch_pause_until,
+                                    pause_reasons=db_dispatch_pause_reasons,
+                                )
+                            import_pending_cache[root] = 0
                     last_import_poll_ts[root] = now
                 if cluster_import_allowed:
                     try:
@@ -19544,7 +19615,7 @@ def run_loop(
                 import_pending_now = max(0, int(import_pending_cache.get(root, 0)))
                 import_force_until = float(segment_force_full_scan_until.get(root, 0.0))
                 import_hold_sec = max(120, int(config.import_poll_interval_sec) * 8)
-                if import_pending_now > 0 or import_completed_segment_followups.get(root):
+                if _import_completion_requires_full_scan(import_completed_segment_followups.get(root)):
                     import_force_until = max(import_force_until, now + float(import_hold_sec))
                     segment_force_full_scan_until[root] = import_force_until
                 force_segment_full_scan = now < import_force_until

@@ -15,6 +15,16 @@ class ImportTerminalMatrixTests(unittest.TestCase):
         terminal_date = "2026-07-10 09:55:14"
         cases = (
             ("m6-stale-queued", {"status": 1, "date_ended": terminal_date}, False),
+            (
+                "m7-partial-delayed",
+                {
+                    "status": 7,
+                    "date_ended": terminal_date,
+                    "line_count": 13371,
+                    "properties": '{"line":5101,"defaults":{"list":[25]}}',
+                },
+                True,
+            ),
             ("m7-stale-delayed", {"status": 7, "date_ended": terminal_date}, False),
             ("m6-paused", {"status": 5, "date_ended": terminal_date}, False),
             ("m7-cancelled", {"status": "cancelled", "date_ended": terminal_date}, False),
@@ -38,7 +48,7 @@ class ImportTerminalMatrixTests(unittest.TestCase):
             observed_ownership = bool(targets.get(186) == [63])
             self.assertEqual(observed_ownership, owns_target, name)
             receipt.append({"case": name, "lane": lane, "variant": variant, "owns_target": observed_ownership})
-        self.assertEqual(sum(int(item["owns_target"]) for item in receipt), 2)
+        self.assertEqual(sum(int(item["owns_target"]) for item in receipt), 3)
 
     def test_fifo_singleton_and_unrelated_segment_progress_on_free_slot(self) -> None:
         monitor = {

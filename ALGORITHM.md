@@ -4,7 +4,7 @@
 фактическую схему после исправления admission и должен обновляться вместе с
 кодом, тестами и runtime receipt. Документ не является разрешением на
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.174 (follow-up после immutable
+Актуальная редакция этого канона — MCD 1.5.175 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам
@@ -569,6 +569,9 @@ launchable status и `line < line_count`, а строки с `date_ended IS NULL
 Если профильный configured count положителен, временно пустой status
 cross-check не имеет права обнулить durable pending/follow-up состояние — он
 остаётся диагностическим сигналом до следующего monitor pass.
+Сам pending count запускает только import worker и не доказывает, что segment
+DB уже изменилась; segment full-scan разрешён только для подтверждённого
+successful terminal completion follow-up.
 
 Только импорт со статусом `queued` или `running` с незавершённой position может
 зарезервировать явно указанные в `defaults.list` segment targets. Непустой
