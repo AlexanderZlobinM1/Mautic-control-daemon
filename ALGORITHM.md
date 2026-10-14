@@ -502,6 +502,90 @@ reorder или повторного выполнения. Следующий dis
 сразу claim/start возвращённый pending item; до expiry claim блокирует
 duplicate.
 
+## 3.1 Кампании: rebuild и trigger
+
+Кампания планируется отдельно для каждого Mautic-root. Для `campaign_trigger`
+и `campaign_rebuild` существуют независимые пары колец
+`campaign_trigger_prio_rings`/`campaign_trigger_reg_rings` и
+`campaign_rebuild_prio_rings`/`campaign_rebuild_reg_rings`. Они
+reconcile-ятся без потери стабильного порядка через
+`_reconcile_campaign_rings`; `campaign_update` является синонимом
+`campaign_rebuild` и не получает отдельный третий проход. В `ring_mode =
+"single"` обе пары сворачиваются в один regular ring.
+
+Разделение на priority и regular строится из weight cache, campaign
+whitelist (`campaign_whitelist` и
+`campaign_whitelist_instance_settings`), `campaign_priority_size` и
+`campaign_latest_priority_count`. Due-trigger IDs принудительно поднимаются
+в начало priority через `_force_due_campaigns_to_priority`; периодический
+audit добавляет опубликованные кампании обратно в trigger plan, чтобы узкий
+due SQL не терял новый контакт. Поэтому rebuild и trigger имеют собственные
+FIFO/round-robin кольца, но для одной campaign их порядок не произволен:
+trigger ждёт running или ещё не завершённый после планирования rebuild, а
+rebuild ждёт active trigger той же campaign. Успешный rebuild оставляет
+`_CAMPAIGN_REBUILD_FINISHED_AT`, после чего соответствующий trigger может
+пройти; завершённый trigger очищает этот маркер.
+
+Профиль задаёт отдельные limits: `campaign_trigger_priority_parallel`,
+`campaign_trigger_regular_parallel`, `campaign_rebuild_priority_parallel`,
+`campaign_rebuild_regular_parallel`, а для синонима update —
+`campaign_update_priority_parallel` и `campaign_update_regular_parallel`.
+Базовая campaign lane использует `campaign_priority_parallel` и
+`campaign_regular_parallel`.
+На каждом tick `_campaign_lane_limits`
+ограничивает priority/regular и общий лимит текущей lane. Если задан
+`campaign_total_parallel`, он дополнительно ограничивает суммарную
+campaign-ёмкость root; иначе effective campaign cap вычисляется как максимум
+из сумм priority/regular для базовой campaign lane, trigger, rebuild и
+update. Rebuild-liveness сканирует due с
+`campaign_rebuild_poll_interval_sec`, ограниченным реализацией диапазоном
+30--300 секунд, и применяет `campaign_rebuild_min_repeat_sec`. Trigger
+использует максимальный из `campaign_trigger_min_repeat_sec` и
+`campaign_trigger_audit_interval_sec`; при активном профиле и наличии trigger
+slots audit policy нормализуется к 60 секундам.
+`campaign_trigger_due_guard_enabled` проверяет фактический DB
+progress/future wake, а `campaign_trigger_progress_watchdog_enabled` с
+`campaign_trigger_progress_watchdog_grace_sec`,
+`campaign_trigger_progress_watchdog_interval_sec` и
+`campaign_trigger_progress_watchdog_stable_checks` ограничивает зависший
+trigger по независимому progress evidence.
+
+Координация с сегментами выполняется через root-local dispatch guard и общий
+submit/admission boundary: `_iter_instances_with_root_dispatch_gate` помечает
+busy только текущий root, `_SCHEDULER_RUNTIME_LOCK` сериализует claim-to-spawn,
+а `_submit_if_slot`/`_PriorityTaskExecutor.launch` повторно проверяют
+`running`, durable TaskStore rows, host/instance slots, repeat guards,
+`scheduler_admission_lock` и update barrier. Для exact campaign task
+`_task_execution_lock_key` использует общий ключ `root|campaign|id`, а
+`_campaign_dispatch_begin/end` не допускает пересечения exact campaign worker
+с native fallback. Priority/liveness campaign task освобождён от ordinary
+segment RR-turn (`_SCHEDULER_SEGMENT_RR_CAMPAIGN_EXEMPT_TASK_TYPES`), но не от
+host/instance/campaign capacity, duplicate и execution locks.
+
+Это не жёсткий безусловный root lock. Guard управляет числом доступных
+«касс» по profile limits, `campaign_total_parallel`,
+`scheduler_host_max_parallel`, `scheduler_instance_max_parallel` и текущей
+live/durable занятости. Зависший или занятый trigger может занять только свою
+разрешённую campaign-ёмкость; он не должен обнулять свободный segment budget
+и не должен останавливать всю root queue. Уже admitted durable segment cycle
+продолжает dispatch при доступном segment slot; новая campaign admission может
+быть отложена, но это не является global stop для безопасных сегментов.
+
+Для segment topology правило узкое: только уже admitted pending items с
+явным unsafe-topology note передаются в `_terminalize_segment_data_errors`;
+они получают terminal note вида `data_error:<code>` (например,
+`data_error:logical_issue`). Это не общий root-stop и не MCD update blocker:
+безопасные eligible items должны продолжить очередь, а
+dependency/data-error terminalization не должна останавливать остальные
+элементы.
+
+**Наблюдение acceptance, отдельное от нормативного алгоритма.** Было
+зафиксировано расхождение: общий guard фактически остановил segments при
+зависшем trigger; затем после запуска одного segment оставшиеся 31 элемента
+получили `data_error`/unsafe-topology, и очередь снова не продолжилась. Это
+evidence дефекта относительно правил выше, а не разрешение исправлять его в
+рамках этой документальной правки.
+
 ## 4. Claim, worker и slots
 
 ### Явные capacity caps и fairness
