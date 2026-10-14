@@ -13246,6 +13246,18 @@ def _import_position_unfinished(row: Mapping[str, object]) -> bool:
     return line < line_count
 
 
+def _import_row_is_historical_partial(row: Mapping[str, object], cutoff_utc: str) -> bool:
+    """Return whether a partial row ended before the durable admission baseline."""
+    cutoff = str(cutoff_utc or "").strip()
+    date_ended = str(row.get("date_ended") or "").strip()
+    return bool(
+        cutoff
+        and _import_position_unfinished(row)
+        and _has_import_date_value(date_ended)
+        and date_ended < cutoff
+    )
+
+
 def _classify_import_monitor_row(row: dict[str, object]) -> tuple[str, str, str]:
     status_raw = str(row.get("status", "") or "").strip().lower()
     status_raw = status_raw.replace(" ", "_").replace("-", "_")
@@ -13345,6 +13357,17 @@ def _fetch_import_monitor_snapshot(
     root: str,
     sql_ctx: dict[str, str],
 ) -> dict[str, object]:
+    cutoff_utc = str(sql_ctx.get("import_pending_cutoff_utc") or "").strip()
+    if not cutoff_utc:
+        logging.warning("[%s] import monitor baseline is not durable; ownership stays closed", root)
+        return {
+            "queued": [],
+            "running": [],
+            "done": [],
+            "item_variants": {},
+            "item_statuses": {},
+            "target_segments_by_import": {},
+        }
     rows = db.fetch_rows(_SQL_IMPORT_MONITOR_ROWS, limit=80, context=sql_ctx)
     queued: list[int] = []
     running: list[int] = []
@@ -13358,6 +13381,8 @@ def _fetch_import_monitor_snapshot(
         except Exception:
             continue
         if import_id <= 0:
+            continue
+        if _import_row_is_historical_partial(row, cutoff_utc):
             continue
         lane, variant, status = _classify_import_monitor_row(row)
         if lane == "running":

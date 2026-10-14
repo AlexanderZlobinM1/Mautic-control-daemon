@@ -2927,7 +2927,10 @@ class CampaignRingDispatchTests(unittest.TestCase):
         monitor = _fetch_import_monitor_snapshot(
             db,
             "/var/www/site",
-            {"now_utc": "2026-07-10 10:10:00"},
+            {
+                "now_utc": "2026-07-10 10:10:00",
+                "import_pending_cutoff_utc": "2026-07-10 09:00:00",
+            },
         )
         self.assertIn("line_count", db.fetch_rows.call_args.args[0])
         self.assertEqual(monitor["queued"], [15])
@@ -3007,7 +3010,14 @@ class CampaignRingDispatchTests(unittest.TestCase):
             )
         )
 
-        snapshot = _fetch_import_monitor_snapshot(db, "/var/www/site", {"now_utc": "2026-09-01 12:00:00"})
+        snapshot = _fetch_import_monitor_snapshot(
+            db,
+            "/var/www/site",
+            {
+                "now_utc": "2026-09-01 12:00:00",
+                "import_pending_cutoff_utc": "2026-09-01 00:00:00",
+            },
+        )
 
         self.assertEqual(snapshot["running"], [15])
         self.assertEqual(snapshot["target_segments_by_import"], {"15": [25]})
@@ -3088,7 +3098,16 @@ class CampaignRingDispatchTests(unittest.TestCase):
             "line_count": 13371,
             "properties": '{"line":5101,"defaults":{"list":[25]}}',
         }
-        rows = [historical_partial_row, new_partial_row]
+        terminal_row = {
+            "id": 4918,
+            "status": 3,
+            "date_added": "2026-10-14 04:20:00",
+            "date_started": "2026-10-14 04:21:00",
+            "date_ended": "2026-10-14 04:22:00",
+            "line_count": 13371,
+            "properties": '{"line":13371,"defaults":{"list":[26]}}',
+        }
+        rows = [historical_partial_row, new_partial_row, terminal_row]
         cutoff = "2026-10-14 04:00:00"
 
         class MauticImportDB:
@@ -3099,13 +3118,18 @@ class CampaignRingDispatchTests(unittest.TestCase):
             def fetch_count(self, query: str, *, context: dict[str, str]) -> int:
                 self.count_queries.append(query)
                 self.count_contexts.append(dict(context))
-                if "import_pending_cutoff_utc" not in query:
-                    return sum(1 for row in rows if row["date_ended"] is None)
-                return sum(
-                    1
+                launchable = {1, 7, "1", "7", "queued", "pending", "delayed"}
+                eligible = [
+                    row
                     for row in rows
-                    if row["date_ended"] is None or str(row["date_ended"]) >= context["import_pending_cutoff_utc"]
-                )
+                    if row["status"] in launchable
+                    and row["date_ended"] is None
+                    or row["status"] in launchable
+                    and str(row["date_ended"]) >= context.get("import_pending_cutoff_utc", "")
+                ]
+                if "import_pending_cutoff_utc" not in query:
+                    return sum(1 for row in eligible if row["date_ended"] is None)
+                return len(eligible)
 
             def fetch_rows(
                 self,
@@ -3122,14 +3146,26 @@ class CampaignRingDispatchTests(unittest.TestCase):
         sql_ctx = {"now_utc": cutoff, "import_pending_cutoff_utc": cutoff}
 
         pending = daemon_mod._fetch_import_pending_count(db, config, root, sql_ctx)
-        monitor = _fetch_import_monitor_snapshot(db, root, {"now_utc": cutoff})
+        monitor = _fetch_import_monitor_snapshot(
+            db,
+            root,
+            {"now_utc": cutoff, "import_pending_cutoff_utc": cutoff},
+        )
 
         self.assertEqual(pending, 1)
         self.assertIn("import_pending_cutoff_utc", db.count_queries[0])
         self.assertEqual(db.count_contexts[0]["import_pending_cutoff_utc"], cutoff)
-        self.assertEqual(monitor["queued"], [4916, 4917])
-        self.assertEqual(monitor["done"], [])
-        self.assertEqual(monitor["item_statuses"], {"4916": "queued", "4917": "queued"})
+        self.assertEqual(monitor["queued"], [4917])
+        self.assertEqual(monitor["done"], [4918])
+        self.assertEqual(monitor["item_statuses"], {"4917": "queued", "4918": "success"})
+        self.assertEqual(
+            _import_monitor_target_segment_ids(monitor, lanes={"queued", "running"}),
+            {4917: [25]},
+        )
+        self.assertEqual(
+            _import_monitor_target_segment_ids(monitor, lanes={"done"}, successful_only=True),
+            {4918: [26]},
+        )
 
         class RuntimeSync:
             def __init__(self) -> None:

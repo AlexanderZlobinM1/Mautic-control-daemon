@@ -1,3 +1,11 @@
+## 1.5.176 - 2026-10-14
+
+- Apply the same durable per-root cutoff to import monitor ownership: an
+  historical pre-baseline partial cannot block its old target segments, while
+  a post-baseline partial remains live until terminal completion.
+- Keep monitor ownership fail-closed when the durable baseline is unavailable;
+  prevent stale historical rows from creating follow-up or full-scan work.
+
 ## 1.5.175 - 2026-10-14
 
 - Keep partial Mautic imports with unfinished positions in queued/running
