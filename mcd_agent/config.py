@@ -426,6 +426,7 @@ _DEFAULT_SQL_IMPORT_PENDING_COUNT = (
     "WHERE is_published = 1 "
     "AND (status IN (1,7) "
     "OR LOWER(CAST(status AS CHAR)) IN ('queued','pending','delayed')) "
+    "AND (date_ended IS NULL OR date_ended >= '{import_pending_cutoff_utc}') "
     "AND (date_started IS NULL "
     "OR CAST(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(properties, '$.line')), '0') AS UNSIGNED) < line_count)"
 )
@@ -1521,6 +1522,13 @@ def _is_legacy_import_pending_count_sql(value: object) -> bool:
         return False
     if "{prefix}imports" not in normalized:
         return False
+    # Pre-cutoff queries can resurrect historical partial rows after the
+    # Mautic partial-batch date_ended correction. Migrate them to the
+    # baseline-aware default instead of accepting an unbounded custom shape.
+    if "date_ended" not in normalized:
+        return True
+    if "date_ended is null" in normalized and "import_pending_cutoff_utc" not in normalized:
+        return True
     if "in_progress" in normalized:
         return True
     if "status in (1,2,7)" in normalized or "status in (1, 2, 7)" in normalized:

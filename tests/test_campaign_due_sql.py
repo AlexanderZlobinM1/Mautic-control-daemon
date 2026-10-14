@@ -33,6 +33,8 @@ class CampaignDueSqlTests(unittest.TestCase):
         self.assertNotIn("status IN (1,2,7)", _DEFAULT_SQL_IMPORT_PENDING_COUNT)
         self.assertNotIn("in_progress", _DEFAULT_SQL_IMPORT_PENDING_COUNT)
         self.assertNotIn("<= line_count", _DEFAULT_SQL_IMPORT_PENDING_COUNT)
+        self.assertIn("date_ended IS NULL OR date_ended >= '{import_pending_cutoff_utc}'", _DEFAULT_SQL_IMPORT_PENDING_COUNT)
+        self.assertIn("import_pending_cutoff_utc", _DEFAULT_SQL_IMPORT_PENDING_COUNT)
 
     def test_legacy_import_pending_sql_with_in_progress_is_migrated(self) -> None:
         previous = (
@@ -47,9 +49,22 @@ class CampaignDueSqlTests(unittest.TestCase):
             _DEFAULT_SQL_IMPORT_PENDING_COUNT,
         )
         # Mautic can set date_ended after a partial batch while line remains
-        # below line_count; unfinished position, not date_ended alone, keeps
-        # the import pending.
-        self.assertNotIn("date_ended IS NULL", _DEFAULT_SQL_IMPORT_PENDING_COUNT)
+        # below line_count; the upgrade baseline keeps historical rows from
+        # becoming newly launchable while admitting new partial batches.
+        self.assertIn("date_ended IS NULL OR date_ended >= '{import_pending_cutoff_utc}'", _DEFAULT_SQL_IMPORT_PENDING_COUNT)
+
+    def test_previous_date_ended_only_shape_is_migrated_to_baseline_query(self) -> None:
+        previous = (
+            "SELECT COUNT(*) AS cnt FROM {prefix}imports "
+            "WHERE is_published = 1 "
+            "AND status IN (1,7) "
+            "AND date_ended IS NULL"
+        )
+
+        self.assertEqual(
+            _import_pending_count_sql({"import_pending_count": previous}),
+            _DEFAULT_SQL_IMPORT_PENDING_COUNT,
+        )
 
     def test_import_pending_sql_with_old_status_shape_is_migrated(self) -> None:
         previous = (

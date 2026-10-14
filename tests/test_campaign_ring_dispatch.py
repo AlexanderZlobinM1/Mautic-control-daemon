@@ -46,6 +46,7 @@ from mcd_agent.daemon import (
     _campaign_trigger_skip_removes_from_ring,
     _campaign_trigger_waits_for_rebuild,
     _classify_import_monitor_row,
+    _ensure_import_pending_cutoff_utc,
     _dispatch_due_campaign_triggers,
     _dispatch_due_campaign_rebuilds,
     _effective_segment_slot_limit,
@@ -2977,24 +2978,42 @@ class CampaignRingDispatchTests(unittest.TestCase):
 
     def test_partial_mautic_batch_with_date_ended_keeps_pending_admission(self) -> None:
         root = "/var/www/s/public_html"
-        partial_row = {
+        historical_partial_row = {
             "id": 4916,
             "status": 1,
             "date_added": "2026-10-14 03:10:00",
             "date_started": "2026-10-14 03:11:00",
-            "date_ended": "2026-10-14 03:12:00",
+            "date_ended": "2026-10-13 23:59:00",
+            "line_count": 13371,
             "properties": '{"line":5101,"defaults":{"list":[25]}}',
         }
+        new_partial_row = {
+            "id": 4917,
+            "status": 1,
+            "date_added": "2026-10-14 04:10:00",
+            "date_started": "2026-10-14 04:11:00",
+            "date_ended": "2026-10-14 04:12:00",
+            "line_count": 13371,
+            "properties": '{"line":5101,"defaults":{"list":[25]}}',
+        }
+        rows = [historical_partial_row, new_partial_row]
+        cutoff = "2026-10-14 04:00:00"
 
         class MauticImportDB:
             def __init__(self) -> None:
-                self.counts = [1, 0]
                 self.count_queries: list[str] = []
+                self.count_contexts: list[dict[str, str]] = []
 
             def fetch_count(self, query: str, *, context: dict[str, str]) -> int:
-                del context
                 self.count_queries.append(query)
-                return self.counts.pop(0)
+                self.count_contexts.append(dict(context))
+                if "import_pending_cutoff_utc" not in query:
+                    return sum(1 for row in rows if row["date_ended"] is None)
+                return sum(
+                    1
+                    for row in rows
+                    if row["date_ended"] is None or str(row["date_ended"]) >= context["import_pending_cutoff_utc"]
+                )
 
             def fetch_rows(
                 self,
@@ -3004,18 +3023,44 @@ class CampaignRingDispatchTests(unittest.TestCase):
                 context: dict[str, str],
             ) -> list[dict[str, object]]:
                 del query, limit, context
-                return [partial_row]
+                return list(rows)
 
         db = MauticImportDB()
         config = SimpleNamespace(sql_import_pending_count=_DEFAULT_SQL_IMPORT_PENDING_COUNT)
+        sql_ctx = {"now_utc": cutoff, "import_pending_cutoff_utc": cutoff}
 
-        pending = daemon_mod._fetch_import_pending_count(db, config, root, {})
-        monitor = _fetch_import_monitor_snapshot(db, root, {})
+        pending = daemon_mod._fetch_import_pending_count(db, config, root, sql_ctx)
+        monitor = _fetch_import_monitor_snapshot(db, root, {"now_utc": cutoff})
 
         self.assertEqual(pending, 1)
-        self.assertNotIn("date_ended IS NULL", db.count_queries[0])
-        self.assertEqual(monitor["done"], [4916])
-        self.assertEqual(monitor["item_statuses"], {"4916": "success"})
+        self.assertIn("import_pending_cutoff_utc", db.count_queries[0])
+        self.assertEqual(db.count_contexts[0]["import_pending_cutoff_utc"], cutoff)
+        self.assertEqual(monitor["done"], [4916, 4917])
+        self.assertEqual(monitor["item_statuses"], {"4916": "success", "4917": "success"})
+
+        class RuntimeSync:
+            def __init__(self) -> None:
+                self.values: dict[str, object] = {}
+
+            def get_runtime_sync(self, key: str) -> object:
+                return self.values.get(key)
+
+            def put_runtime_sync(self, key: str, value: object) -> None:
+                self.values[key] = value
+
+        runtime = RuntimeSync()
+        first_cutoff = _ensure_import_pending_cutoff_utc(
+            runtime,
+            root,
+            datetime(2026, 10, 14, 4, 0, tzinfo=timezone.utc),
+        )
+        second_cutoff = _ensure_import_pending_cutoff_utc(
+            runtime,
+            root,
+            datetime(2026, 10, 14, 5, 0, tzinfo=timezone.utc),
+        )
+        self.assertEqual(first_cutoff, cutoff)
+        self.assertEqual(second_cutoff, cutoff)
 
         with patch.object(daemon_mod, "render_mautic_command", return_value=["fixture", "mautic:import"]), patch.object(
             daemon_mod, "_submit_if_slot", return_value=True

@@ -1907,6 +1907,8 @@ _SEGMENT_FAILURE_WARN_TS: dict[tuple[str, int], float] = {}
 _SEGMENT_PENDING_GUARD_LOG_TS: dict[str, float] = {}
 _IMPORT_SETTLE_UNTIL: dict[str, float] = {}
 _IMPORT_PENDING_OVERRIDE_WARN_TS: dict[str, float] = {}
+_IMPORT_PENDING_BASELINE_PREFIX = "import_pending_baseline:"
+_IMPORT_PENDING_BASELINE_SCHEMA = "mcd-import-pending-baseline-v1"
 _SQL_IMPORT_PENDING_STATUS_COUNT = (
     "SELECT COUNT(*) AS cnt FROM {prefix}imports "
     "WHERE is_published = 1 "
@@ -1957,6 +1959,45 @@ _SQL_IMPORT_MONITOR_ROWS = (
     "COALESCE(date_started, date_added, date_ended) DESC, id DESC "
     "LIMIT 80"
 )
+
+
+def _import_pending_baseline_key(root: str) -> str:
+    digest = hashlib.sha1(str(root or "").encode("utf-8")).hexdigest()
+    return f"{_IMPORT_PENDING_BASELINE_PREFIX}{digest}"
+
+
+def _ensure_import_pending_cutoff_utc(store: object, root: str, now_utc: datetime) -> str:
+    """Persist one per-root upgrade baseline for partial import admission.
+
+    Mautic may set ``date_ended`` after a partial batch while its line position
+    remains unfinished. The baseline keeps pre-upgrade historical partial rows
+    from becoming newly launchable when the configured query learns this
+    semantic, while allowing rows ended after the upgrade to continue.
+    """
+
+    key = _import_pending_baseline_key(root)
+    try:
+        current = store.get_runtime_sync(key)  # type: ignore[attr-defined]
+    except Exception:
+        current = None
+    if isinstance(current, Mapping):
+        cutoff = str(current.get("cutoff_utc") or "").strip()
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", cutoff):
+            return cutoff
+
+    cutoff = now_utc.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    payload = {
+        "schema": _IMPORT_PENDING_BASELINE_SCHEMA,
+        "cutoff_utc": cutoff,
+        "created_at": now_utc.astimezone(timezone.utc).isoformat(),
+    }
+    try:
+        store.put_runtime_sync(key, payload)  # type: ignore[attr-defined]
+    except Exception as exc:
+        logging.warning("[%s] import pending baseline persistence failed: %s", root, exc)
+    else:
+        logging.info("[%s] import pending baseline established cutoff_utc=%s", root, cutoff)
+    return cutoff
 
 
 def _mailru_postmaster_metrics(db: MauticDB, *, now_ts: float) -> dict[str, object]:
@@ -13102,8 +13143,13 @@ def _fetch_import_pending_count(
     root: str,
     sql_ctx: dict[str, str],
 ) -> int:
-    configured_count = db.fetch_count(config.sql_import_pending_count, context=sql_ctx)
-    status_count = db.fetch_count(_SQL_IMPORT_PENDING_STATUS_COUNT, context=sql_ctx)
+    query_ctx = dict(sql_ctx or {})
+    query_ctx.setdefault(
+        "import_pending_cutoff_utc",
+        str(query_ctx.get("now_utc") or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")),
+    )
+    configured_count = db.fetch_count(config.sql_import_pending_count, context=query_ctx)
+    status_count = db.fetch_count(_SQL_IMPORT_PENDING_STATUS_COUNT, context=query_ctx)
     if configured_count > 0 and status_count <= 0:
         now_ts = time.time()
         last_warn = float(_IMPORT_PENDING_OVERRIDE_WARN_TS.get(str(root), 0.0) or 0.0)
@@ -15885,10 +15931,16 @@ def run_loop(
         def _observe_root(inst: object, admitted_at: float | None) -> dict[str, object]:
             root = str(getattr(inst, "root", "") or "").strip()
             db = MauticDB(getattr(inst, "db"))
+            now_utc = datetime.now(timezone.utc)
             sql_ctx = campaign_sql_time_context(
-                datetime.now(timezone.utc),
+                now_utc,
                 getattr(inst, "mautic_timezone", None),
                 getattr(inst, "mautic_major", None),
+            )
+            sql_ctx["import_pending_cutoff_utc"] = _ensure_import_pending_cutoff_utc(
+                store,
+                root,
+                now_utc,
             )
             result: dict[str, object] = {
                 "root": root,
@@ -19401,6 +19453,11 @@ def run_loop(
                 campaign_whitelist_for_inst = _campaign_whitelist_effective_setting(config, inst)
                 db = MauticDB(inst.db)
                 sql_ctx = campaign_sql_time_context(now_utc, inst.mautic_timezone, inst.mautic_major)
+                sql_ctx["import_pending_cutoff_utc"] = _ensure_import_pending_cutoff_utc(
+                    store,
+                    root,
+                    now_utc,
+                )
                 sql_ring_enabled_for_root = bool(
                     config.segment_sql_ring_enabled and config.segment_mode != "classic_loop"
                 )
