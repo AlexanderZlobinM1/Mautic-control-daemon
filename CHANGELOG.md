@@ -1,3 +1,14 @@
+## 1.5.178 - 2026-10-14
+
+- Refresh the persisted import monitor projection for every root with a
+  validated canonical snapshot, including idle roots that have no executable
+  dispatch work; preserve segment and campaign cycles and fail closed for
+  missing or invalid snapshots.
+- Serialize monitor-envelope writes so the idle projection refresh and the
+  independent segment refill cannot reintroduce stale import history.
+- Preserve the dedicated per-tick super-priority round-robin lane and all
+  execution scheduling behavior.
+
 ## 1.5.177 - 2026-10-14
 
 - Carry the fresh canonical Mautic import monitor snapshot through the

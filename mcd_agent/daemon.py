@@ -9357,6 +9357,7 @@ def _clear_campaign_rings(
 
 
 _SCHEDULER_MONITOR_PLAN_PREFIX = "scheduler_monitor_plan:"
+_SCHEDULER_MONITOR_PLAN_LOCK = threading.Lock()
 
 
 def _scheduler_monitor_plan_key(root: str) -> str:
@@ -9531,6 +9532,10 @@ def _import_monitor_cycle_snapshot(import_monitor: dict[str, object] | None) -> 
     return payload
 
 
+def _valid_import_monitor_snapshot(value: object) -> bool:
+    return isinstance(value, Mapping) and {"queued", "running", "done"}.issubset(value.keys())
+
+
 def _monitor_visible_queued_ids(
     *,
     ring: list[int] | deque[int] | tuple[int, ...],
@@ -9633,7 +9638,8 @@ def _publish_scheduler_monitor_cycles(
         "updated_at": float(now_ts),
         "cycles": cycles,
     }
-    store.put_runtime_sync(_scheduler_monitor_plan_key(root), payload)
+    with _SCHEDULER_MONITOR_PLAN_LOCK:
+        store.put_runtime_sync(_scheduler_monitor_plan_key(root), payload)
 
 
 def _merge_persisted_segment_monitor_cycle(
@@ -9655,58 +9661,104 @@ def _merge_persisted_segment_monitor_cycle(
     a transient read failure cannot erase valid ownership evidence.
     """
 
-    existing = store.get_runtime_sync(_scheduler_monitor_plan_key(root))
-    if not isinstance(existing, Mapping):
-        existing = {}
-    payload = dict(existing)
-    cycles_raw = existing.get("cycles")
-    cycles = [dict(item) for item in cycles_raw if isinstance(item, Mapping)] if isinstance(cycles_raw, list) else []
-    pending = _unique_positive_ids(list(pending_ids))
-    done = _unique_positive_ids(list(done_ids))
-    running_ids = sorted(
-        _monitor_running_entity_ids(
-            running,
-            root=root,
-            task_types={"segment", "segment_sql"},
+    with _SCHEDULER_MONITOR_PLAN_LOCK:
+        existing = store.get_runtime_sync(_scheduler_monitor_plan_key(root))
+        if not isinstance(existing, Mapping):
+            existing = {}
+        payload = dict(existing)
+        cycles_raw = existing.get("cycles")
+        cycles = [dict(item) for item in cycles_raw if isinstance(item, Mapping)] if isinstance(cycles_raw, list) else []
+        pending = _unique_positive_ids(list(pending_ids))
+        done = _unique_positive_ids(list(done_ids))
+        running_ids = sorted(
+            _monitor_running_entity_ids(
+                running,
+                root=root,
+                task_types={"segment", "segment_sql"},
+            )
         )
-    )
-    planned = _unique_positive_ids(pending + done + running_ids)
-    segment_cycle = {
-        "task_type": "segment",
-        "queued": [sid for sid in pending if sid not in running_ids and sid not in done][:200],
-        "done": done[:200],
-        "running": running_ids[:200],
-        "total": len(planned),
-        "source": "persisted_refill",
-    }
-    replaced = False
-    for index, cycle in enumerate(cycles):
-        if str(cycle.get("task_type") or "").strip().lower() == "segment":
-            cycles[index] = segment_cycle
-            replaced = True
-            break
-    if not replaced:
-        cycles.insert(0, segment_cycle)
-    if isinstance(import_monitor, Mapping):
-        import_cycle = _import_monitor_cycle_snapshot(dict(import_monitor))
-        if import_cycle is not None:
-            replaced = False
-            for index, cycle in enumerate(cycles):
-                if str(cycle.get("task_type") or "").strip().lower() == "import":
-                    cycles[index] = import_cycle
-                    replaced = True
-                    break
-            if not replaced:
-                cycles.append(import_cycle)
-    payload.update(
-        {
-            "version": int(existing.get("version") or 1),
-            "root": str(root),
-            "updated_at": float(now_ts),
-            "cycles": cycles,
+        planned = _unique_positive_ids(pending + done + running_ids)
+        segment_cycle = {
+            "task_type": "segment",
+            "queued": [sid for sid in pending if sid not in running_ids and sid not in done][:200],
+            "done": done[:200],
+            "running": running_ids[:200],
+            "total": len(planned),
+            "source": "persisted_refill",
         }
-    )
-    store.put_runtime_sync(_scheduler_monitor_plan_key(root), payload)
+        replaced = False
+        for index, cycle in enumerate(cycles):
+            if str(cycle.get("task_type") or "").strip().lower() == "segment":
+                cycles[index] = segment_cycle
+                replaced = True
+                break
+        if not replaced:
+            cycles.insert(0, segment_cycle)
+        if isinstance(import_monitor, Mapping):
+            import_cycle = _import_monitor_cycle_snapshot(dict(import_monitor))
+            if import_cycle is not None:
+                replaced = False
+                for index, cycle in enumerate(cycles):
+                    if str(cycle.get("task_type") or "").strip().lower() == "import":
+                        cycles[index] = import_cycle
+                        replaced = True
+                        break
+                if not replaced:
+                    cycles.append(import_cycle)
+        payload.update(
+            {
+                "version": int(existing.get("version") or 1),
+                "root": str(root),
+                "updated_at": float(now_ts),
+                "cycles": cycles,
+            }
+        )
+        store.put_runtime_sync(_scheduler_monitor_plan_key(root), payload)
+
+
+def _merge_persisted_import_monitor_cycle(
+    *,
+    store: "TaskStore",
+    root: str,
+    import_monitor: Mapping[str, object] | None,
+    now_ts: float,
+) -> None:
+    """Refresh only the canonical import projection for an idle root.
+
+    A root without executable segment work is intentionally absent from the
+    dispatch loop.  Keep its read-only import envelope current without
+    inventing execution state or touching segment/campaign cycles.
+    """
+
+    if not _valid_import_monitor_snapshot(import_monitor):
+        return
+    import_cycle = _import_monitor_cycle_snapshot(dict(import_monitor))
+    if import_cycle is None:
+        return
+    with _SCHEDULER_MONITOR_PLAN_LOCK:
+        existing = store.get_runtime_sync(_scheduler_monitor_plan_key(root))
+        if not isinstance(existing, Mapping):
+            existing = {}
+        payload = dict(existing)
+        cycles_raw = existing.get("cycles")
+        cycles = [dict(item) for item in cycles_raw if isinstance(item, Mapping)] if isinstance(cycles_raw, list) else []
+        replaced = False
+        for index, cycle in enumerate(cycles):
+            if str(cycle.get("task_type") or "").strip().lower() == "import":
+                cycles[index] = import_cycle
+                replaced = True
+                break
+        if not replaced:
+            cycles.append(import_cycle)
+        payload.update(
+            {
+                "version": int(existing.get("version") or 1),
+                "root": str(root),
+                "updated_at": float(now_ts),
+                "cycles": cycles,
+            }
+        )
+        store.put_runtime_sync(_scheduler_monitor_plan_key(root), payload)
 
 
 def _publish_segment_monitor_cycle(
@@ -17325,10 +17377,7 @@ def run_loop(
                             excluded_ids=excluded_ids,
                         )
                         cached_import_monitor = import_monitor_cache.get(root)
-                        if not (
-                            isinstance(cached_import_monitor, Mapping)
-                            and {"queued", "running", "done"}.issubset(cached_import_monitor.keys())
-                        ):
+                        if not _valid_import_monitor_snapshot(cached_import_monitor):
                             cached_import_monitor = None
                         _merge_persisted_segment_monitor_cycle(
                             store=store,
@@ -20602,6 +20651,23 @@ def run_loop(
                 except Exception as e:
                     logging.warning("[%s] db_watchdog collect failed: %s", root, e)
                 last_db_watchdog_ts[root] = now
+
+        # Keep the read-only import projection fresh even for an idle root
+        # that is intentionally absent from dispatch_installs.  This does not
+        # admit or launch work and does not alter any priority lane.
+        for monitor_inst in installs:
+            monitor_root = str(getattr(monitor_inst, "root", "") or "").strip()
+            if not monitor_root:
+                continue
+            cached_import_monitor = import_monitor_cache.get(monitor_root)
+            if not _valid_import_monitor_snapshot(cached_import_monitor):
+                continue
+            _merge_persisted_import_monitor_cycle(
+                store=store,
+                root=monitor_root,
+                import_monitor=cached_import_monitor,
+                now_ts=time.time(),
+            )
 
         if pusher.enabled():
             previous_roots = {str(item.root) for item in installs}

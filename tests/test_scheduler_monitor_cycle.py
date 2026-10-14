@@ -9,6 +9,7 @@ from mcd_agent.daemon import (
     RunningTask,
     TaskStore,
     _monitor_cycle_mark_launched,
+    _merge_persisted_import_monitor_cycle,
     _merge_persisted_segment_monitor_cycle,
     _publish_scheduler_monitor_cycles,
     _publish_segment_monitor_cycle,
@@ -276,6 +277,130 @@ class SchedulerMonitorCycleTests(unittest.TestCase):
             self.assertEqual(cycles["import"]["running"], [])
             self.assertEqual(cycles["import"]["done"], [])
             self.assertEqual(cycles["import"]["total"], 0)
+
+    def test_idle_import_refresh_preserves_unrelated_cycles_and_advances_timestamp(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "state.db"
+            store = TaskStore(str(db_path))
+            root = "/var/www/idle-import-refresh"
+            _publish_scheduler_monitor_cycles(
+                store=store,
+                root=root,
+                cycle_done={(root, "segment"): {101}},
+                running={},
+                now_ts=1000.0,
+                seg_sql_ring=deque([102]),
+                seg_resume_ring=deque(),
+                seg_prio_ring=deque(),
+                seg_reg_ring=deque(),
+                campaign_trigger_prio_ring=deque([501]),
+                campaign_trigger_reg_ring=deque(),
+                campaign_rebuild_prio_ring=deque(),
+                campaign_rebuild_reg_ring=deque(),
+                import_monitor={"queued": [], "running": [], "done": [4916]},
+            )
+            before = self._read_payload(db_path, root)
+            before_cycles = {
+                cycle["task_type"]: cycle
+                for cycle in before["cycles"]
+                if cycle["task_type"] != "import"
+            }
+
+            _merge_persisted_import_monitor_cycle(
+                store=store,
+                root=root,
+                import_monitor={"queued": [], "running": [], "done": []},
+                now_ts=1001.0,
+            )
+
+            after = self._read_payload(db_path, root)
+            cycles = {cycle["task_type"]: cycle for cycle in after["cycles"]}
+            self.assertEqual(after["updated_at"], 1001.0)
+            self.assertEqual(
+                {key: cycles[key] for key in before_cycles},
+                before_cycles,
+            )
+            self.assertEqual(cycles["import"]["done"], [])
+
+    def test_idle_import_refresh_ignores_missing_or_invalid_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "state.db"
+            store = TaskStore(str(db_path))
+            root = "/var/www/idle-import-invalid"
+            _publish_scheduler_monitor_cycles(
+                store=store,
+                root=root,
+                cycle_done={},
+                running={},
+                now_ts=1000.0,
+                seg_sql_ring=deque(),
+                seg_resume_ring=deque(),
+                seg_prio_ring=deque(),
+                seg_reg_ring=deque(),
+                campaign_trigger_prio_ring=deque(),
+                campaign_trigger_reg_ring=deque(),
+                campaign_rebuild_prio_ring=deque(),
+                campaign_rebuild_reg_ring=deque(),
+                import_monitor={"queued": [], "running": [], "done": [4916]},
+            )
+            before = self._read_payload(db_path, root)
+
+            _merge_persisted_import_monitor_cycle(
+                store=store,
+                root=root,
+                import_monitor=None,
+                now_ts=1001.0,
+            )
+            _merge_persisted_import_monitor_cycle(
+                store=store,
+                root=root,
+                import_monitor={"queued": []},
+                now_ts=1002.0,
+            )
+
+            self.assertEqual(self._read_payload(db_path, root), before)
+
+    def test_idle_import_refreshes_multiple_roots_independently(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "state.db"
+            store = TaskStore(str(db_path))
+            roots = ("/var/www/root-a", "/var/www/root-b")
+            for root in roots:
+                _publish_scheduler_monitor_cycles(
+                    store=store,
+                    root=root,
+                    cycle_done={},
+                    running={},
+                    now_ts=1000.0,
+                    seg_sql_ring=deque(),
+                    seg_resume_ring=deque(),
+                    seg_prio_ring=deque(),
+                    seg_reg_ring=deque(),
+                    campaign_trigger_prio_ring=deque(),
+                    campaign_trigger_reg_ring=deque(),
+                    campaign_rebuild_prio_ring=deque(),
+                    campaign_rebuild_reg_ring=deque(),
+                    import_monitor={"queued": [], "running": [], "done": [4916]},
+                )
+
+            _merge_persisted_import_monitor_cycle(
+                store=store,
+                root=roots[0],
+                import_monitor={"queued": [], "running": [], "done": []},
+                now_ts=1001.0,
+            )
+            _merge_persisted_import_monitor_cycle(
+                store=store,
+                root=roots[1],
+                import_monitor={"queued": [4917], "running": [], "done": []},
+                now_ts=1002.0,
+            )
+
+            first = {cycle["task_type"]: cycle for cycle in self._read_payload(db_path, roots[0])["cycles"]}
+            second = {cycle["task_type"]: cycle for cycle in self._read_payload(db_path, roots[1])["cycles"]}
+            self.assertEqual(first["import"]["done"], [])
+            self.assertEqual(second["import"]["queued"], [4917])
+            self.assertEqual(second["import"]["done"], [])
 
     def test_campaign_cycles_publish_queued_running_and_done_items(self) -> None:
         with tempfile.TemporaryDirectory() as td:
