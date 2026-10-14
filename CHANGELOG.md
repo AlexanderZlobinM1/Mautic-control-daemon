@@ -1,3 +1,13 @@
+## 1.5.177 - 2026-10-14
+
+- Carry the fresh canonical Mautic import monitor snapshot through the
+  independent persisted segment refill update, so a stale historical import
+  cannot be reintroduced into the scheduler monitor envelope after a fresh
+  baseline-aware read.
+- Preserve the dedicated per-tick super-priority round-robin lane; this fix
+  does not gate or reorder super-priority execution through ordinary-cycle
+  state.
+
 ## 1.5.176 - 2026-10-14
 
 - Apply the same durable per-root cutoff to import monitor ownership: an

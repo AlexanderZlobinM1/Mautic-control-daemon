@@ -180,6 +180,103 @@ class SchedulerMonitorCycleTests(unittest.TestCase):
             self.assertEqual(cycles["import"]["queued"], [701])
             self.assertEqual(cycles["import"]["done"], [700])
 
+    def test_persisted_refill_replaces_import_cycle_with_fresh_canonical_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "state.db"
+            store = TaskStore(str(db_path))
+            root = "/var/www/import-refresh"
+            _publish_scheduler_monitor_cycles(
+                store=store,
+                root=root,
+                cycle_done={(root, "segment"): set()},
+                running={},
+                now_ts=1000.0,
+                seg_sql_ring=deque(),
+                seg_resume_ring=deque(),
+                seg_prio_ring=deque(),
+                seg_reg_ring=deque(),
+                campaign_trigger_prio_ring=deque(),
+                campaign_trigger_reg_ring=deque(),
+                campaign_rebuild_prio_ring=deque(),
+                campaign_rebuild_reg_ring=deque(),
+                import_monitor={
+                    "queued": [],
+                    "running": [],
+                    "done": [4916],
+                    "item_statuses": {"4916": "success"},
+                },
+            )
+
+            _merge_persisted_segment_monitor_cycle(
+                store=store,
+                root=root,
+                pending_ids=[101],
+                done_ids=[],
+                running={},
+                now_ts=1001.0,
+                import_monitor={
+                    "queued": [4917],
+                    "running": [],
+                    "done": [],
+                    "item_statuses": {"4917": "queued"},
+                },
+            )
+
+            payload = self._read_payload(db_path, root)
+            cycles = {cycle["task_type"]: cycle for cycle in payload["cycles"]}
+            self.assertEqual(cycles["import"]["queued"], [4917])
+            self.assertEqual(cycles["import"]["done"], [])
+            self.assertEqual(cycles["import"]["item_statuses"], {"4917": "queued"})
+
+    def test_persisted_refill_replaces_import_cycle_with_fresh_empty_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "state.db"
+            store = TaskStore(str(db_path))
+            root = "/var/www/import-empty-refresh"
+            _publish_scheduler_monitor_cycles(
+                store=store,
+                root=root,
+                cycle_done={(root, "segment"): set()},
+                running={},
+                now_ts=1000.0,
+                seg_sql_ring=deque(),
+                seg_resume_ring=deque(),
+                seg_prio_ring=deque(),
+                seg_reg_ring=deque(),
+                campaign_trigger_prio_ring=deque(),
+                campaign_trigger_reg_ring=deque(),
+                campaign_rebuild_prio_ring=deque(),
+                campaign_rebuild_reg_ring=deque(),
+                import_monitor={
+                    "queued": [],
+                    "running": [],
+                    "done": [4916],
+                    "item_statuses": {"4916": "success"},
+                },
+            )
+
+            _merge_persisted_segment_monitor_cycle(
+                store=store,
+                root=root,
+                pending_ids=[],
+                done_ids=[],
+                running={},
+                now_ts=1001.0,
+                import_monitor={
+                    "queued": [],
+                    "running": [],
+                    "done": [],
+                    "item_statuses": {},
+                },
+            )
+
+            payload = self._read_payload(db_path, root)
+            cycles = {cycle["task_type"]: cycle for cycle in payload["cycles"]}
+            self.assertEqual(cycles["import"]["queued"], [])
+            self.assertEqual(cycles["import"]["running"], [])
+            self.assertEqual(cycles["import"]["done"], [])
+            self.assertEqual(cycles["import"]["total"], 0)
+
     def test_campaign_cycles_publish_queued_running_and_done_items(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             db_path = Path(td) / "state.db"

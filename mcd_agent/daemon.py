@@ -9644,13 +9644,15 @@ def _merge_persisted_segment_monitor_cycle(
     done_ids: list[int] | tuple[int, ...] | deque[int],
     running: dict[str, "RunningTask"],
     now_ts: float,
+    import_monitor: dict[str, object] | None = None,
 ) -> None:
     """Refresh only the durable ordinary segment cycle in monitor state.
 
     The independent refill worker must not invent empty campaign rings or
-    replace an import snapshot owned by the canonical planner.  Merge the one
-    segment cycle into the last monitor envelope and preserve every unrelated
-    cycle verbatim.
+    replace a missing import snapshot with an empty guess.  When the canonical
+    planner has a fresh import snapshot, carry that snapshot forward together
+    with the segment cycle.  Otherwise preserve the last known import cycle so
+    a transient read failure cannot erase valid ownership evidence.
     """
 
     existing = store.get_runtime_sync(_scheduler_monitor_plan_key(root))
@@ -9685,6 +9687,17 @@ def _merge_persisted_segment_monitor_cycle(
             break
     if not replaced:
         cycles.insert(0, segment_cycle)
+    if isinstance(import_monitor, Mapping):
+        import_cycle = _import_monitor_cycle_snapshot(dict(import_monitor))
+        if import_cycle is not None:
+            replaced = False
+            for index, cycle in enumerate(cycles):
+                if str(cycle.get("task_type") or "").strip().lower() == "import":
+                    cycles[index] = import_cycle
+                    replaced = True
+                    break
+            if not replaced:
+                cycles.append(import_cycle)
     payload.update(
         {
             "version": int(existing.get("version") or 1),
@@ -17311,6 +17324,12 @@ def run_loop(
                             refreshed_state,
                             excluded_ids=excluded_ids,
                         )
+                        cached_import_monitor = import_monitor_cache.get(root)
+                        if not (
+                            isinstance(cached_import_monitor, Mapping)
+                            and {"queued", "running", "done"}.issubset(cached_import_monitor.keys())
+                        ):
+                            cached_import_monitor = None
                         _merge_persisted_segment_monitor_cycle(
                             store=store,
                             root=root,
@@ -17318,6 +17337,7 @@ def run_loop(
                             done_ids=_normalize_segment_ids(refreshed_state.get("done")),
                             running=running,
                             now_ts=time.time(),
+                            import_monitor=cached_import_monitor,
                         )
             except Exception as exc:
                 now_error = time.time()
