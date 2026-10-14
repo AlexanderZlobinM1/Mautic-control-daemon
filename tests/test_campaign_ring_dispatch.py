@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from mcd_agent import daemon as daemon_mod
+from mcd_agent.config import _DEFAULT_SQL_IMPORT_PENDING_COUNT
 from mcd_agent.daemon import (
     CampaignWhitelistRealtimeSetting,
     CampaignTriggerProgressSnapshot,
@@ -2973,6 +2974,73 @@ class CampaignRingDispatchTests(unittest.TestCase):
             daemon_mod._fetch_import_pending_count(db, config, "/var/www/s/public_html", {}),
             2,
         )
+
+    def test_partial_mautic_batch_with_date_ended_keeps_pending_admission(self) -> None:
+        root = "/var/www/s/public_html"
+        partial_row = {
+            "id": 4916,
+            "status": 1,
+            "date_added": "2026-10-14 03:10:00",
+            "date_started": "2026-10-14 03:11:00",
+            "date_ended": "2026-10-14 03:12:00",
+            "properties": '{"line":5101,"defaults":{"list":[25]}}',
+        }
+
+        class MauticImportDB:
+            def __init__(self) -> None:
+                self.counts = [1, 0]
+                self.count_queries: list[str] = []
+
+            def fetch_count(self, query: str, *, context: dict[str, str]) -> int:
+                del context
+                self.count_queries.append(query)
+                return self.counts.pop(0)
+
+            def fetch_rows(
+                self,
+                query: str,
+                *,
+                limit: int,
+                context: dict[str, str],
+            ) -> list[dict[str, object]]:
+                del query, limit, context
+                return [partial_row]
+
+        db = MauticImportDB()
+        config = SimpleNamespace(sql_import_pending_count=_DEFAULT_SQL_IMPORT_PENDING_COUNT)
+
+        pending = daemon_mod._fetch_import_pending_count(db, config, root, {})
+        monitor = _fetch_import_monitor_snapshot(db, root, {})
+
+        self.assertEqual(pending, 1)
+        self.assertNotIn("date_ended IS NULL", db.count_queries[0])
+        self.assertEqual(monitor["done"], [4916])
+        self.assertEqual(monitor["item_statuses"], {"4916": "success"})
+
+        with patch.object(daemon_mod, "render_mautic_command", return_value=["fixture", "mautic:import"]), patch.object(
+            daemon_mod, "_submit_if_slot", return_value=True
+        ) as submit:
+            launched = daemon_mod._submit_import_if_segment_slot(
+                config=SimpleNamespace(
+                    enable_import_polling=True,
+                    php_bin="php",
+                    mautic_run_as_user="www-data",
+                    cmd_import_template="bin/console mautic:import --limit={import_limit}",
+                    import_limit=100,
+                    command_timeout_sec=60,
+                ),
+                store=SimpleNamespace(),
+                running={},
+                popens={},
+                root=root,
+                cluster_import_allowed=True,
+                import_pending_count=pending,
+                segment_slot_limit=1,
+                now_ts=100.0,
+            )
+
+        self.assertTrue(launched)
+        self.assertEqual(submit.call_args.kwargs["task_type"], "import")
 
     def test_orphaned_import_recovery_requeues_when_cli_worker_is_absent(self) -> None:
         db = SimpleNamespace(recover_orphaned_imports=Mock(return_value=2))

@@ -1,3 +1,12 @@
+## 1.5.174 - 2026-10-14
+
+- Keep unfinished Mautic import positions pending when Mautic records
+  `date_ended` after a partial batch; only the imported line position and
+  launchable status decide the configured queue count.
+- Preserve the configured pending signal when the status cross-check excludes
+  that partial row, and add a Mautic-shaped regression proving the next import
+  admission remains launchable without a false empty-queue fallback.
+
 ## 1.5.173 - 2026-10-13
 
 - Make generic Mautic patch execution fail closed before simulation for every

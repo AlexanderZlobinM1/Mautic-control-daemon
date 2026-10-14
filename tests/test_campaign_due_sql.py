@@ -46,12 +46,15 @@ class CampaignDueSqlTests(unittest.TestCase):
             _import_pending_count_sql({"import_pending_count": previous}),
             _DEFAULT_SQL_IMPORT_PENDING_COUNT,
         )
-        self.assertIn("date_ended IS NULL", _DEFAULT_SQL_IMPORT_PENDING_COUNT)
+        # Mautic can set date_ended after a partial batch while line remains
+        # below line_count; unfinished position, not date_ended alone, keeps
+        # the import pending.
+        self.assertNotIn("date_ended IS NULL", _DEFAULT_SQL_IMPORT_PENDING_COUNT)
 
-    def test_import_pending_sql_without_terminal_guard_is_migrated(self) -> None:
+    def test_import_pending_sql_with_old_status_shape_is_migrated(self) -> None:
         previous = (
             "SELECT COUNT(*) AS cnt FROM {prefix}imports "
-            "WHERE is_published = 1 AND status IN (1,7)"
+            "WHERE is_published = 1 AND status IN (1,2,7)"
         )
 
         self.assertEqual(
