@@ -322,6 +322,26 @@ class SchedulerMonitorCycleTests(unittest.TestCase):
             )
             self.assertEqual(cycles["import"]["done"], [])
 
+            unchanged = self._read_payload(db_path, root)
+            _merge_persisted_import_monitor_cycle(
+                store=store,
+                root=root,
+                import_monitor={"queued": [], "running": [], "done": []},
+                now_ts=1002.0,
+            )
+            self.assertEqual(self._read_payload(db_path, root), unchanged)
+
+            _merge_persisted_import_monitor_cycle(
+                store=store,
+                root=root,
+                import_monitor={"queued": [4917], "running": [], "done": []},
+                now_ts=1003.0,
+            )
+            changed = self._read_payload(db_path, root)
+            changed_cycles = {cycle["task_type"]: cycle for cycle in changed["cycles"]}
+            self.assertEqual(changed["updated_at"], 1003.0)
+            self.assertEqual(changed_cycles["import"]["queued"], [4917])
+
     def test_idle_import_refresh_ignores_missing_or_invalid_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             db_path = Path(td) / "state.db"

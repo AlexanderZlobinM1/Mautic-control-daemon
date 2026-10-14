@@ -1,3 +1,9 @@
+## 1.5.179 - 2026-10-14
+
+- Make the idle-root import projection refresh a true no-op when the
+  canonical snapshot is unchanged, avoiding needless runtime-sync writes
+  while retaining immediate stale-to-fresh and changed-snapshot updates.
+
 ## 1.5.178 - 2026-10-14
 
 - Refresh the persisted import monitor projection for every root with a

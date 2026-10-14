@@ -9745,6 +9745,8 @@ def _merge_persisted_import_monitor_cycle(
         replaced = False
         for index, cycle in enumerate(cycles):
             if str(cycle.get("task_type") or "").strip().lower() == "import":
+                if _import_monitor_cycle_snapshot(cycle) == import_cycle:
+                    return
                 cycles[index] = import_cycle
                 replaced = True
                 break
