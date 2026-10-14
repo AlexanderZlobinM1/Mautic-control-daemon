@@ -1,3 +1,11 @@
+## 1.5.180 - 2026-10-14
+
+- Remove every stale `mcd_agent-*.dist-info` directory before installing the
+  detached runtime wheel, so importable code and `importlib.metadata` cannot
+  report different MCD versions after a normal self-update.
+- Preserve unrelated distribution metadata and verify exact package/imported
+  version identity after installation.
+
 ## 1.5.179 - 2026-10-14
 
 - Make the idle-root import projection refresh a true no-op when the

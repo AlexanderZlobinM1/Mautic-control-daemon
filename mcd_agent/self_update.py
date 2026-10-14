@@ -462,6 +462,17 @@ def _isolated_venv_env() -> dict[str, str]:
     return env
 
 
+def _remove_agent_distribution_metadata(site_dir: Path) -> list[str]:
+    """Remove every stale MCD distribution metadata directory before install."""
+    removed: list[str] = []
+    for dist_info in sorted(site_dir.glob("mcd_agent-*.dist-info")):
+        if not dist_info.is_dir():
+            continue
+        shutil.rmtree(dist_info)
+        removed.append(dist_info.name)
+    return removed
+
+
 def _remove_agent_editable_artifacts(site_dir: Path, source_dir: Path) -> list[str]:
     """Remove stale editable-install hooks that can shadow site-packages."""
     source_roots = {
@@ -581,7 +592,10 @@ def _install_agent_package_from_runtime_wheel(install_dir: Path, source_dir: Pat
     site_dir = Path((site_proc.stdout or "").strip())
     if not site_dir.is_dir():
         raise RuntimeError(f"venv site-packages directory not found: {site_dir}")
+    removed_metadata = _remove_agent_distribution_metadata(site_dir)
     removed_hooks = _remove_agent_editable_artifacts(site_dir, source_dir)
+    if removed_metadata:
+        logging.info("MCD self-update: removed stale package metadata: %s", removed_metadata)
     if removed_hooks:
         logging.info("MCD self-update: removed stale editable package hooks: %s", removed_hooks)
     proc = subprocess.run(
@@ -677,10 +691,10 @@ def _install_agent_package_for_source(install_dir: Path, source_dir: Path) -> No
     site_dir = Path((site_proc.stdout or "").strip())
     if not site_dir.is_dir():
         raise RuntimeError(f"venv site-packages directory not found: {site_dir}")
-    for dist_info in site_dir.glob("mcd_agent-*.dist-info"):
-        if dist_info.is_dir():
-            shutil.rmtree(dist_info)
+    removed_metadata = _remove_agent_distribution_metadata(site_dir)
     removed_hooks = _remove_agent_editable_artifacts(site_dir, source_dir)
+    if removed_metadata:
+        logging.info("MCD self-update: removed stale package metadata: %s", removed_metadata)
     if removed_hooks:
         logging.info("MCD self-update: removed stale editable package hooks: %s", removed_hooks)
     cmd = [

@@ -7,8 +7,27 @@ import sys
 from tempfile import TemporaryDirectory
 import unittest
 
+from mcd_agent.self_update import _remove_agent_distribution_metadata
+
 
 class UpdateBootstrapTests(unittest.TestCase):
+    def test_runtime_wheel_install_removes_stale_distribution_metadata(self) -> None:
+        with TemporaryDirectory() as tmp:
+            site_dir = Path(tmp)
+            old = site_dir / "mcd_agent-1.5.172.dist-info"
+            current = site_dir / "mcd_agent-1.5.180.dist-info"
+            unrelated = site_dir / "other-package-1.0.dist-info"
+            old.mkdir()
+            current.mkdir()
+            unrelated.mkdir()
+
+            removed = _remove_agent_distribution_metadata(site_dir)
+
+            self.assertEqual(removed, ["mcd_agent-1.5.172.dist-info", "mcd_agent-1.5.180.dist-info"])
+            self.assertFalse(old.exists())
+            self.assertFalse(current.exists())
+            self.assertTrue(unrelated.exists())
+
     def test_legacy_1_5_75_verify_uses_venv_package_before_new_updater_runs(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
