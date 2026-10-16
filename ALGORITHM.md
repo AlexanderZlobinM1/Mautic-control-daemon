@@ -11,8 +11,8 @@ first-class фазой для patch records, которые должны зав�
 управления trigger-consumer; она не подменяется более широкой фазой
 `before_campaign_execution`. Контракт, runtime executor, fixture и receipt
 должны рекламировать и проверять один и тот же порядок.
- ручной `segments:update`, изменение профиля, capacity или данных на хосте.
- Актуальная редакция этого канона — MCD 1.5.186 (follow-up после immutable
+ручной `segments:update`, изменение профиля, capacity или данных на хосте.
+Актуальная редакция этого канона — MCD 1.5.186 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам
