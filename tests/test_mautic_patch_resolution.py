@@ -176,6 +176,12 @@ class MauticPatchResolutionTransportTests(unittest.TestCase):
             "dependency_update_preflight",
         )
 
+    def test_campaign_trigger_phase_is_published_and_runtime_supported(self):
+        contract = resolution._contract()
+        self.assertIn("before_campaign_trigger", contract["phases"])
+        self.assertIn("before_campaign_trigger", resolution._PHASES)
+        self.assertEqual(contract["minimum_agent_version"], __version__)
+
     def test_requires_rollback_run_id(self):
         with self.assertRaisesRegex(resolution.MauticPatchResolutionError, "rollback_run_id_required"):
             resolution.resolve_plan(

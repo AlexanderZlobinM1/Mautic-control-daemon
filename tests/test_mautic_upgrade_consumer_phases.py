@@ -16,6 +16,7 @@ PHASES = [
     ["post_source_install"], ["before_asset_generation"],
     ["post_source_install", "before_cache_warmup"],
     ["post_source_install", "before_cache_warmup"],
+    ["post_source_install", "before_campaign_trigger"],
     ["post_source_install", "before_campaign_execution"],
     ["post_source_install", "before_background_imports"],
 ]
@@ -79,7 +80,7 @@ def wire(root, plan, monkeypatch, *, drift=False):
         # Both early phases are real executor passes over already patched
         # records; no file or raw plan can be deduplicated or rewritten.
         before = [(root / row["source_paths"][0]).read_bytes() for row in plan["patches"]]
-        for phase in ("before_campaign_execution", "before_background_imports"):
+        for phase in ("before_campaign_trigger", "before_campaign_execution", "before_background_imports"):
             hook.apply_phase(str(root), phase)
         assert before == [(root / row["source_paths"][0]).read_bytes() for row in plan["patches"]]
         if drift: (root / plan["patches"][1]["source_paths"][0]).write_bytes(b"operator drift\n")
@@ -101,7 +102,7 @@ def test_upgrade_entrypoint_executes_all_six_record_phases_before_consumers(tmp_
     assert upgrade.run_upgrade_apply(**args) == 0
     assert plan == before
     assert events.index("target_bound") < events.index("post_source_install")
-    assert events.index("post_source_install") < events.index("before_campaign_execution") < events.index("before_background_imports")
+    assert events.index("post_source_install") < events.index("before_campaign_trigger") < events.index("before_campaign_execution") < events.index("before_background_imports")
     assert events.index("before_background_imports") < events.index("before_cache_warmup") < events.index("before_asset_generation") < events.index("scripts") < events.index("resume")
     assert all((tmp_path / row["source_paths"][0]).read_bytes() == b"after\n" for row in plan["patches"])
     assert executor.verify_applied(str(tmp_path), plan)["status"] == "success"

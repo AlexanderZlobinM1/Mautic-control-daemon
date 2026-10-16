@@ -27,6 +27,7 @@ PHASES = frozenset({
     "before_doctrine_migrations",
     "before_background_imports",
     "before_campaign_execution",
+    "before_campaign_trigger",
     "before_cache_warmup",
 })
 INSTALL_TYPES = frozenset({"composer", "zip"})

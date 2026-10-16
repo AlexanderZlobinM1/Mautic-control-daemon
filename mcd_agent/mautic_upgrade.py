@@ -2103,6 +2103,10 @@ def run_upgrade_apply(
                 # New sources are installed while maintenance still owns
                 # scheduler/cron quiescence. Admit runtime-consumer patches
                 # before scripts or any managed consumer can use this target.
+                # Campaign-trigger patches have their own barrier at the
+                # trigger-consumer handoff, intentionally distinct from the
+                # broader campaign-execution phase.
+                apply_patch_phase(source_root, "before_campaign_trigger")
                 apply_patch_phase(source_root, "before_campaign_execution")
                 apply_patch_phase(source_root, "before_background_imports")
 
@@ -2123,7 +2127,7 @@ def run_upgrade_apply(
                 raise RuntimeError("Mautic patch phase rejected: " + phase)
 
         if validated_patch_plan.get("schema") == "mcd-mautic-patch-plan-v3":
-            supported_phases = {"post_source_install", "before_cache_warmup", "before_asset_generation", "preflight_frontend_assets", "before_doctrine_migrations", "before_campaign_execution", "before_background_imports"}
+            supported_phases = {"post_source_install", "before_campaign_trigger", "before_cache_warmup", "before_asset_generation", "preflight_frontend_assets", "before_doctrine_migrations", "before_campaign_execution", "before_background_imports"}
             if any(set(record["phases"]) - supported_phases for record in validated_patch_plan["patches"]):
                 raise RuntimeError("Selected upgrade plan contains a phase unavailable in this upgrade workflow")
             target_stage = _prepare_patch_target_stage(config, _resolve_composer_project_root(install_root) if chosen_mode == "composer" else install_root,

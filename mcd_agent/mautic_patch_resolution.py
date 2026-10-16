@@ -31,6 +31,7 @@ _OPERATIONS = {"status", "verify", "apply", "rollback"}
 _PHASES = {
     "before_background_imports",
     "before_cache_warmup",
+    "before_campaign_trigger",
     "before_campaign_execution",
     "before_doctrine_migrations",
     "post_source_install",
