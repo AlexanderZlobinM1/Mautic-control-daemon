@@ -3,8 +3,16 @@
 Этот документ является рабочим каноном для MCD scheduler. Он описывает
 фактическую схему после исправления admission и должен обновляться вместе с
 кодом, тестами и runtime receipt. Документ не является разрешением на
-ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.185 (follow-up после immutable
+
+Для Mautic patch lifecycle канонический порядок фаз внутри upgrade barrier:
+`before_campaign_trigger` -> `before_campaign_execution` ->
+`before_background_imports`. `before_campaign_trigger` является отдельной
+first-class фазой для patch records, которые должны завершиться до передачи
+управления trigger-consumer; она не подменяется более широкой фазой
+`before_campaign_execution`. Контракт, runtime executor, fixture и receipt
+должны рекламировать и проверять один и тот же порядок.
+ ручной `segments:update`, изменение профиля, capacity или данных на хосте.
+ Актуальная редакция этого канона — MCD 1.5.186 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам
