@@ -65,7 +65,12 @@ from mcd_agent.contact_field_metadata_report import (
 from mcd_agent.mautic_version_cache import collect_mautic_version
 from mcd_agent.custom_scripts import fetch_custom_manifest, format_custom_scripts_list, run_custom_script_by_key
 from mcd_agent.db import MauticDB
-from mcd_agent.daemon import TaskStore, list_external_runtime_task_summaries, run_loop
+from mcd_agent.daemon import (
+    TaskStore,
+    _reconcile_running_state,
+    list_external_runtime_task_summaries,
+    run_loop,
+)
 from mcd_agent.discovery import discover_mautic
 from mcd_agent.email_activity_report import collect_email_activity_report
 from mcd_agent.email_counters import audit_campaign_email_counters, repair_campaign_email_counters
@@ -1058,8 +1063,13 @@ def _kill_pid(pid: int, grace_sec: int) -> str:
 
 def _tracked_running_tasks(cfg) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
+    store = None
     try:
         store = TaskStore(cfg.state_db_path, cfg)
+        # CLI status is also a lifecycle observation boundary. Reconcile
+        # durable rows before reporting them so a dead PID cannot remain a
+        # false scheduler gate until the next daemon tick.
+        _reconcile_running_state(store=store, running={}, popens={})
         for r in store.running_task_summaries():
             rows.append(
                 {
@@ -1073,6 +1083,9 @@ def _tracked_running_tasks(cfg) -> list[dict[str, object]]:
             )
     except Exception:
         return []
+    finally:
+        if store is not None:
+            store.close()
     return rows
 
 

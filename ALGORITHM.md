@@ -66,6 +66,30 @@ Legacy alias ACK reads its stable legacy projection; modern priority ACK reads
 the merged canonical priority projection.
 restart without starvation.
 
+### Durable stale-task reconciliation
+
+Каждый scheduler tick и команда `scheduler status` являются lifecycle
+boundary: MCD читает `TaskStore.running` и проверяет PID existence и полное
+command identity. Возраст задачи используется только как evidence в receipt и
+alert; сам по себе возраст никогда не является причиной остановки живого
+worker. Для segment runtime дополнительно сохраняется PID start identity и
+независимый runtime evidence.
+
+Если PID отсутствует, command identity не совпадает, а независимый segment
+evidence не подтверждает работу, MCD атомарно переводит только эту durable
+строку в `lost`, пишет `mcd-scheduler-reconciliation-receipt-v1` с root,
+task key, PID, возрастом и причиной, и удаляет только matching owner из
+in-memory registry. Stale admission не удерживается наличием lock-файла:
+execution lock проверяется через `flock`, а смерть владельца освобождает
+kernel lock; чужой живой lock не удаляется. Удаление одного stale owner не
+останавливает другие segment или campaign rings.
+
+После reconciliation dead/stale row не считается capacity, а новый
+campaign rebuild/trigger может быть admitted при свободном campaign/host
+slot, пока независимый segment worker продолжает работу. Live long-running
+worker остаётся running независимо от возраста и переживает daemon restart
+через adoption из durable row.
+
 Для instance-scoped desired state локальный inventory UID является стабильной
 основой, но transport запрашивает также динамически полученный
 `<uid>@<mcc-host>` alias. Если MCC вернул legacy/base и immutable qualified

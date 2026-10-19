@@ -2004,6 +2004,7 @@ _TASK_LOCK_BUSY_RC = 75
 _CAMPAIGN_EXACT_TASK_TYPES = frozenset({"campaign_update", "campaign_rebuild", "campaign_trigger"})
 _STATIC_SEGMENT_TASK_TYPES = frozenset({"segment_priority", "segment_super_priority"})
 _SEGMENT_RUNTIME_TASK_TYPES = frozenset({"segment", "segment_sql", "import", *_STATIC_SEGMENT_TASK_TYPES})
+_SCHEDULER_RECONCILIATION_RECEIPT_KEY = "scheduler_reconciliation_last_receipt"
 _SEGMENT_RUNTIME_MARKER_SCHEMA = "mcd-segment-runtime-marker-v1"
 _SEGMENT_RUNTIME_MARKER_PREFIX = "segment_runtime:"
 _SEGMENT_ORPHAN_GRACE_SEC = 60
@@ -15358,6 +15359,7 @@ def _reconcile_running_state(
         "lost_cmd": 0,
         "duplicate": 0,
         "shadow_replaced": 0,
+        "detached_memory": 0,
     }
     try:
         shadow = store.sync_sqlite_running_shadow()
@@ -15366,6 +15368,58 @@ def _reconcile_running_state(
         pass
     rows = store.running_rows()
     stats["tracked_total"] = len(rows)
+    row_keys = {str(row.get("task_key") or "") for row in rows if str(row.get("task_key") or "")}
+
+    def _detach(task: RunningTask) -> None:
+        current = running.get(task.task_key)
+        if current is not None and (
+            int(getattr(current, "row_id", 0) or 0) == int(task.row_id)
+            and int(getattr(current, "pid", 0) or 0) == int(task.pid)
+        ):
+            running.pop(task.task_key, None)
+            stats["detached_memory"] += 1
+        proc = popens.get(task.task_key)
+        if proc is not None and int(getattr(proc, "pid", 0) or 0) == int(task.pid):
+            popens.pop(task.task_key, None)
+
+    def _receipt(task: RunningTask, note: str, reason: str) -> None:
+        age_sec = max(0.0, time.time() - float(task.started_at or time.time()))
+        payload = {
+            "schema": "mcd-scheduler-reconciliation-receipt-v1",
+            "updated_at": time.time(),
+            "state": "lost",
+            "reason": str(reason),
+            "note": str(note),
+            "task_id": int(task.row_id),
+            "task_key": str(task.task_key),
+            "root": str(task.root),
+            "task_type": str(task.task_type),
+            "entity_id": task.entity_id,
+            "pid": int(task.pid),
+            "age_sec": age_sec,
+            "pid_alive": False,
+            "command": str(task.command_str),
+        }
+        try:
+            store.put_runtime_sync(_SCHEDULER_RECONCILIATION_RECEIPT_KEY, payload)
+        except Exception:
+            logging.debug("scheduler reconciliation receipt write failed", exc_info=True)
+        logging.warning(
+            "[%s] stale task reconciled: type=%s entity=%s pid=%s age_sec=%.1f reason=%s",
+            task.root,
+            task.task_type,
+            task.entity_id,
+            task.pid,
+            age_sec,
+            reason,
+        )
+
+    # A concurrent lifecycle monitor or a previous reconciliation may have
+    # already terminalized a row. Never retain its in-memory owner: a missing
+    # durable row is not an implicit live lease.
+    for key, current in list(running.items()):
+        if str(key) not in row_keys and int(getattr(current, "row_id", 0) or 0) > 0:
+            _detach(current)
     if not rows:
         return stats
 
@@ -15403,6 +15457,8 @@ def _reconcile_running_state(
             loss_note = "scheduler_error" if task.task_type in _SEGMENT_RUNTIME_TASK_TYPES else "pid_not_alive"
             _segment_runtime_marker_write(store, task, status="terminal", now_ts=time.time(), note=loss_note)
             store.finish(task.row_id, state="lost", rc=None, note=loss_note)
+            _receipt(task, loss_note, "pid_missing")
+            _detach(task)
             stats["lost_pid"] += 1
             continue
         if not _pid_matches_task_command(task.pid, task.command_str):
@@ -15414,6 +15470,8 @@ def _reconcile_running_state(
             loss_note = "scheduler_error" if task.task_type in _SEGMENT_RUNTIME_TASK_TYPES else "pid_cmd_mismatch"
             _segment_runtime_marker_write(store, task, status="terminal", now_ts=time.time(), note=loss_note)
             store.finish(task.row_id, state="lost", rc=None, note=loss_note)
+            _receipt(task, loss_note, "pid_command_mismatch")
+            _detach(task)
             stats["lost_cmd"] += 1
             continue
 
