@@ -77,6 +77,11 @@ def main() -> int:
     if len(target_parts) != 3:
         raise RuntimeError(f"unexpected agent version: {target_version}")
     previous_version = ".".join([target_parts[0], target_parts[1], str(max(0, int(target_parts[2]) - 1))])
+    source_commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"],
+        cwd=source,
+        text=True,
+    ).strip()
     with tempfile.TemporaryDirectory(prefix="mcd-runtime-migration-qa-") as tmp:
         root = Path(tmp)
         install = root / "install"
@@ -84,7 +89,7 @@ def main() -> int:
         _run([sys.executable, "-m", "venv", str(venv)])
 
         archive = root / f"runtime-{target_version}.tar.gz"
-        _build(source, archive, f"runtime-{target_version}-source")
+        _build(source, archive, source_commit)
         current_src = install / "src"
         _extract(archive, current_src)
         cfg = _cfg(root)
