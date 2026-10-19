@@ -13669,6 +13669,35 @@ def _import_process_liveness_signal(pid: int) -> dict[str, object]:
     return signal
 
 
+def _external_segment_process_liveness_signal(pid: int) -> dict[str, object]:
+    """Return independent process-group and CLI progress evidence."""
+
+    signal = _import_process_liveness_signal(pid)
+    if int(pid or 0) <= 0:
+        return signal
+    signal["pid_alive"] = _is_pid_alive(int(pid))
+    try:
+        pgid = int(os.getpgid(int(pid)))
+    except (OSError, TypeError, ValueError):
+        pgid = 0
+    signal["process_group_id"] = pgid
+    if pgid > 1:
+        try:
+            os.killpg(pgid, 0)
+            signal["process_group_alive"] = True
+        except (OSError, ProcessLookupError, PermissionError):
+            signal["process_group_alive"] = False
+    else:
+        signal["process_group_alive"] = bool(signal.get("pid_alive"))
+    cli_progress = {}
+    for name in ("cpu_progress", "io_progress"):
+        if name in signal:
+            cli_progress[name] = signal[name]
+    if cli_progress:
+        signal["cli_progress"] = tuple(sorted(cli_progress.items()))
+    return signal
+
+
 def _import_path_liveness_signal(root: str, command_str: str) -> dict[str, object]:
     """Read upload/log file counters without treating MCD markers as progress."""
 
@@ -14907,6 +14936,7 @@ def _monitor_running(
     mautic_timezones_by_root: dict[str, str | None] | None = None,
     campaign_progress_watchdog: dict[str, dict[str, object]] | None = None,
     import_progress_watchdog: dict[str, dict[str, object]] | None = None,
+    segment_progress_watchdog: dict[str, dict[str, object]] | None = None,
     segment_terminal_callback: Callable[[RunningTask, bool, str | None], None] | None = None,
     segment_liveness_probe: Callable[[RunningTask], Mapping[str, object] | bool] | None = None,
     import_liveness_probe: Callable[[RunningTask], Mapping[str, object] | bool] | None = None,
@@ -14917,6 +14947,7 @@ def _monitor_running(
     tz_by_root = mautic_timezones_by_root or {}
     progress_watchdog = campaign_progress_watchdog if campaign_progress_watchdog is not None else {}
     import_watchdog = import_progress_watchdog if import_progress_watchdog is not None else {}
+    segment_watchdog = segment_progress_watchdog if segment_progress_watchdog is not None else {}
 
     def _segment_liveness_evidence(task: RunningTask) -> dict[str, object]:
         if task.task_type not in _SEGMENT_RUNTIME_TASK_TYPES:
@@ -14941,7 +14972,19 @@ def _monitor_running(
         # Marker-only state is a bounded restart bridge, never a heartbeat.
         independent = any(
             bool(result.get(key))
-            for key in ("active", "process", "db", "db_process", "runtime_confirmed", "completed")
+            for key in (
+                "active",
+                "process",
+                "process_group_alive",
+                "db",
+                "db_active",
+                "db_process",
+                "cli_progress",
+                "cpu_progress",
+                "io_progress",
+                "runtime_confirmed",
+                "completed",
+            )
         )
         if independent:
             _segment_runtime_marker_write(store, task, status="running", now_ts=now)
@@ -15054,6 +15097,86 @@ def _monitor_running(
         )
         return False
 
+    def _external_segment_watchdog_keepalive(
+        task: RunningTask,
+        key: str,
+        evidence: Mapping[str, object],
+    ) -> bool:
+        """Keep an adopted segment only while independent progress is observed."""
+
+        state = segment_watchdog.setdefault(key, {})
+        progress_fields = {
+            field: evidence.get(field)
+            for field in (
+                "db_progress",
+                "db_query_progress",
+                "cli_progress",
+                "cpu_progress",
+                "io_progress",
+            )
+            if field in evidence
+        }
+        fingerprint = repr(sorted(progress_fields.items(), key=lambda item: item[0]))
+        changed = bool(progress_fields) and fingerprint != state.get("progress_fingerprint")
+        if progress_fields:
+            state["progress_fingerprint"] = fingerprint
+        if changed:
+            state["last_progress_at"] = float(now)
+            state.pop("stall_observed_at", None)
+        elif "last_progress_at" not in state:
+            state["last_progress_at"] = float(task.started_at or now)
+
+        stall_timeout = max(
+            30.0,
+            float(getattr(config, "segment_sql_orphan_after_sec", 900) or 900),
+        )
+        last_progress_at = float(state.get("last_progress_at") or task.started_at or now)
+        if now - last_progress_at <= stall_timeout:
+            return True
+
+        observed_at = state.get("stall_observed_at")
+        if observed_at is None:
+            state["stall_observed_at"] = float(now)
+            logging.warning(
+                "[%s] external segment=%s has no independent progress for %.1fs; starting stall recheck grace",
+                task.root,
+                task.entity_id,
+                max(0.0, now - last_progress_at),
+            )
+            return True
+        grace_sec = max(1.0, min(30.0, stall_timeout / 10.0))
+        if now - float(observed_at) <= grace_sec:
+            return True
+
+        # A dead/recycled process or command mismatch is handled by the normal
+        # release path. Only kill when the process group is still owned by the
+        # matching Mautic command and independent progress stayed absent for
+        # the complete observation window.
+        if not bool(evidence.get("process_group_alive", True)):
+            segment_watchdog.pop(key, None)
+            return False
+        _kill_pid(task.pid, int(getattr(config, "segment_kill_grace_sec", 10) or 10))
+        note = "stale:external_segment_stall"
+        _segment_runtime_marker_write(store, task, status="stale", now_ts=now, note=note)
+        _scheduler_reconciliation_receipt(
+            store,
+            task,
+            state="stale",
+            reason="external_segment_stall",
+            note=note,
+            evidence={**dict(evidence), "pid_alive": True, "process_group_alive": True},
+        )
+        segment_watchdog.pop(key, None)
+        running.pop(key, None)
+        popens.pop(key, None)
+        logging.warning(
+            "[%s] external segment=%s killed by stall watchdog after %.1fs without independent progress",
+            task.root,
+            task.entity_id,
+            max(0.0, now - last_progress_at),
+        )
+        return False
+
     def _finish_reconciled_segment_success(
         task: RunningTask,
         key: str,
@@ -15093,11 +15216,64 @@ def _monitor_running(
         if bool(getattr(task, "external", False)):
             alive = _is_pid_alive(task.pid)
             if alive and _pid_matches_task_command(task.pid, task.command_str):
+                if task.task_type in _SEGMENT_RUNTIME_TASK_TYPES:
+                    evidence = _segment_liveness_evidence(task)
+                    if bool(evidence.get("completed")):
+                        _segment_runtime_marker_write(
+                            store,
+                            task,
+                            status="terminal",
+                            now_ts=now,
+                            note="recovered:external_completed",
+                        )
+                        _scheduler_reconciliation_receipt(
+                            store,
+                            task,
+                            state="recovered",
+                            reason="completed_evidence",
+                            note="recovered:external_completed",
+                            evidence={**evidence, "pid_alive": True},
+                        )
+                        _mark_segment_finished(task.root, task.entity_id, now_ts=now)
+                        segment_watchdog.pop(key, None)
+                        running.pop(key, None)
+                        popens.pop(key, None)
+                        continue
+                    if not _external_segment_watchdog_keepalive(task, key, evidence):
+                        continue
                 continue
+            if task.task_type in _SEGMENT_RUNTIME_TASK_TYPES:
+                evidence = _segment_liveness_evidence(task)
+                segment_watchdog.pop(key, None)
+                if bool(evidence.get("completed")):
+                    _segment_runtime_marker_write(
+                        store,
+                        task,
+                        status="terminal",
+                        now_ts=now,
+                        note="recovered:external_completed",
+                    )
+                    _scheduler_reconciliation_receipt(
+                        store,
+                        task,
+                        state="recovered",
+                        reason="completed_evidence",
+                        note="recovered:external_completed",
+                        evidence={**evidence, "pid_alive": alive},
+                    )
+                    _mark_segment_finished(task.root, task.entity_id, now_ts=now)
+                else:
+                    _scheduler_reconciliation_receipt(
+                        store,
+                        task,
+                        state="stale",
+                        reason="external_process_lost",
+                        note="stale:external_process_lost",
+                        evidence={**evidence, "pid_alive": alive},
+                    )
             running.pop(key, None)
             popens.pop(key, None)
             if task.task_type == "segment":
-                _mark_segment_finished(task.root, task.entity_id, now_ts=now)
                 logging.info(
                     "[%s] segment scheduler exit id=%s outcome=external_released runtime_sec=%.3f",
                     task.root,
@@ -16054,6 +16230,7 @@ def run_loop(
     mautic_timezones_by_root: dict[str, str | None] = {}
     campaign_progress_watchdog: dict[str, dict[str, object]] = {}
     import_progress_watchdog: dict[str, dict[str, object]] = {}
+    segment_progress_watchdog: dict[str, dict[str, object]] = {}
 
     identity = resolve_agent_identity(config)
     if bool(identity.get("clone_detected", False)):
@@ -16097,6 +16274,7 @@ def run_loop(
         sid = int(task.entity_id)
         db_cfg = db_configs_by_root.get(str(task.root))
         db_active = False
+        db_query_progress: list[str] = []
         db_completed = False
         if db_cfg is not None:
             try:
@@ -16109,7 +16287,7 @@ def run_loop(
                         continue
                     if any(re.search(rf"(?<!\d){int(chain_id)}(?!\d)", info) for chain_id in chain_ids):
                         db_active = True
-                        break
+                        db_query_progress.append(info[:500])
             except Exception:
                 db_active = False
             try:
@@ -16122,7 +16300,15 @@ def run_loop(
                         break
             except Exception:
                 db_completed = False
-        return {"db": db_active, "completed": db_completed}
+        evidence: dict[str, object] = {
+            "db": db_active,
+            "db_active": db_active,
+            "completed": db_completed,
+        }
+        if db_query_progress:
+            evidence["db_query_progress"] = tuple(sorted(db_query_progress))
+        evidence.update(_external_segment_process_liveness_signal(task.pid))
+        return evidence
 
     def _import_liveness_probe(task: RunningTask) -> Mapping[str, object]:
         """Collect independent Mautic import progress signals.
@@ -16334,6 +16520,7 @@ def run_loop(
                 mautic_timezones_by_root=mautic_timezones_by_root,
                 campaign_progress_watchdog=campaign_progress_watchdog,
                 import_progress_watchdog=import_progress_watchdog,
+                segment_progress_watchdog=segment_progress_watchdog,
                 segment_terminal_callback=_segment_terminal_callback,
                 segment_liveness_probe=_segment_liveness_probe,
                 import_liveness_probe=_import_liveness_probe,
@@ -16362,6 +16549,7 @@ def run_loop(
                 mautic_timezones_by_root=mautic_timezones_by_root,
                 campaign_progress_watchdog=campaign_progress_watchdog,
                 import_progress_watchdog=import_progress_watchdog,
+                segment_progress_watchdog=segment_progress_watchdog,
                 segment_terminal_callback=_segment_terminal_callback,
                 segment_liveness_probe=_segment_liveness_probe,
                 import_liveness_probe=_import_liveness_probe,

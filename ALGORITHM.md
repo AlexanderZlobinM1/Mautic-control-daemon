@@ -12,7 +12,7 @@ first-class фазой для patch records, которые должны зав�
 `before_campaign_execution`. Контракт, runtime executor, fixture и receipt
 должны рекламировать и проверять один и тот же порядок.
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.190 (follow-up после immutable
+Актуальная редакция этого канона — MCD 1.5.191 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам
@@ -675,6 +675,15 @@ priority lane остатком instance/host budget; если regular ring пу�
 может временно занять неиспользованную regular capacity. Это не меняет
 whitelist policy и не отменяет priority precedence на реально eligible работе.
 
+Adopted external segment worker проходит тот же safe liveness contract: MCD
+проверяет PID, process-group, command identity, read-only SQL query fingerprint
+и независимые CLI CPU/IO counters. `segment_sql_orphan_after_sec` задаёт
+подтверждённое окно отсутствия progress; после него выполняется recheck grace,
+и только при сохранении matching process-group без progress выполняется group
+kill. Долгий rebuild с меняющимся SQL/CLI evidence сохраняется. Stale release
+пишет reconciliation receipt, освобождает logical admission slot и не отмечает
+segment `done`; поэтому следующий scheduler tick может безопасно re-admit item.
+
 ### Жизненный цикл import и владение сегментами
 
 Владение импортом определяется признаками жизненного цикла, а не только
@@ -928,6 +937,7 @@ cycle без ручного `segments:update`, profile/capacity/data changes. Ad
 | persisted cycle, never-built admission и atomic claim | `mcd_agent/segment_admission.py`, `daemon.py` | `tests/test_segment_admission.py` |
 | host/instance slots и rotation | `mcd_agent/daemon.py` | `tests/test_campaign_ring_dispatch.py` |
 | external Mautic logical-task dedupe by root/type/entity and regular-slot reservation | `mcd_agent/daemon.py:list_external_runtime_task_summaries`, `_effective_segment_priority_slot_limit`, ordinary segment dispatch | `tests/test_external_task_admission.py`, `tests/test_segment_liveness.py` |
+| adopted external segment PID/process-group progress watchdog with stale re-admission | `mcd_agent/daemon.py:_external_segment_process_liveness_signal`, `_external_segment_watchdog_keepalive` | `tests/test_external_task_admission.py` |
 | normal hard caps, manual per-instance N+1 и dedicated super budget не смешиваются | `mcd_agent/daemon.py:_scheduler_host_slots_available`, `_scheduler_instance_slots_available`, `_submit_if_slot_uncoordinated` | `tests/test_campaign_ring_dispatch.py` hard-cap/3+ root rows; `tests/test_segment_admission.py` cap-4 и `11+3→14→...→10→11` receipts |
 | важный root с заполненной capacity не ставит global remaining barrier | `mcd_agent/daemon.py:_scheduler_segment_entity_allowed`, `_scheduler_important_root_dispatchable` | `test_remaining_root_uses_free_host_slot_when_important_root_is_instance_full` |
 | root-local continuous monitor/refill, live durable occupancy, eligibility-aware terminal hand-off/rotation and shared claim lifecycle | `mcd_agent/daemon.py:_iter_instances_with_root_dispatch_gate`, `_SchedulerRuntimeRegistry`, `_scheduler_store_running_rows`, `_scheduler_live_task_capacity_keys`, `_scheduler_notify_refill_priority`, `_ordinary_persisted_refill_worker` (`_refill_priority_root_ready`) | `tests/test_segment_liveness.py`; `tests/test_dispatcher_production_sandbox.py` full `run_loop` paths with unavailable static graph, dead TaskStore rows and terminal-root hand-off |
