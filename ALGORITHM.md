@@ -12,7 +12,7 @@ first-class фазой для patch records, которые должны зав�
 `before_campaign_execution`. Контракт, runtime executor, fixture и receipt
 должны рекламировать и проверять один и тот же порядок.
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.188 (follow-up после immutable
+Актуальная редакция этого канона — MCD 1.5.189 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам
@@ -763,6 +763,13 @@ admission текущего cycle, освобождает claim в месте, н
 item возвращается в тот же durable pending order. Следующий
 current-generation worker проходит обычный `claim -> start -> terminal`, а
 новый cycle создаётся только после честного terminal всего текущего cycle.
+Для restart/reconciliation stale PID или mismatch не маскируются обычным
+`done`: legacy `tasks.state` сохраняет совместимость (`lost`/`done`), но
+`scheduler_reconciliation_last_receipt` обязан содержать explicit
+`state=stale|recovered`, `reason`, `note`, `task_id`, age и независимое
+`evidence`. Completion evidence получает `recovered_stale:*`, а отсутствие
+процесса — `stale:pid_missing`; обе ветки атомарно освобождают только свой
+root/task admission.
 Для dependency closure live owner marker распространяется на все его covered
 members: member не release-ится и не запускает duplicate, пока owner PID и
 его start identity живы.

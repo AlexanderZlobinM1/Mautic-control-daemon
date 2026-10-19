@@ -15,6 +15,7 @@ from mcd_agent.daemon import (
     TaskStore,
     _SCHEDULER_RECONCILIATION_RECEIPT_KEY,
     _reconcile_running_state,
+    _monitor_running,
     _scheduler_host_slots_available,
 )
 
@@ -52,7 +53,46 @@ class TaskLifecycleTests(unittest.TestCase):
             self.assertIsNotNone(receipt)
             assert receipt is not None
             self.assertEqual(receipt["reason"], "pid_missing")
+            self.assertEqual(receipt["state"], "stale")
+            self.assertEqual(receipt["outcome"], "stale")
+            self.assertEqual(receipt["note"], "stale:pid_missing")
             self.assertEqual(receipt["task_key"], task.task_key)
+            store.close()
+
+    def test_live_stale_segment_fixture_is_terminalized_with_explicit_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TaskStore(str(Path(temp_dir) / "state.db"))
+            task = RunningTask(
+                row_id=0,
+                root="/var/www/winwin/public_html",
+                task_key="/var/www/winwin/public_html|segment|2",
+                task_type="segment",
+                entity_id=2,
+                command_str="/usr/bin/flock --nonblock /bin/sh -c mautic:segments:update -i 2",
+                timeout_sec=0,
+                attempts=1,
+                started_at=1_792_033_079.5381107,
+                pid=3_446_461,
+            )
+            task.row_id = store.add_running(task)
+            running = {task.task_key: task}
+            with patch("mcd_agent.daemon._is_pid_alive", return_value=False):
+                stats = _reconcile_running_state(store=store, running=running, popens={})
+
+            self.assertEqual(stats["lost_pid"], 1)
+            self.assertEqual(running, {})
+            self.assertEqual(store.running_rows(), [])
+            row = store.conn.execute(
+                "SELECT state, rc, note FROM tasks WHERE id=?",
+                (task.row_id,),
+            ).fetchone()
+            self.assertEqual(tuple(row), ("lost", None, "stale:pid_missing"))
+            receipt = store.get_runtime_sync(_SCHEDULER_RECONCILIATION_RECEIPT_KEY)
+            self.assertEqual(receipt["task_id"], task.row_id)
+            self.assertEqual(receipt["root"], "/var/www/winwin/public_html")
+            self.assertEqual(receipt["entity_id"], 2)
+            self.assertFalse(receipt["evidence"]["pid_alive"])
+            self.assertEqual(receipt["evidence"]["pid_start_identity"], "missing")
             store.close()
 
     def test_reconcile_keeps_legitimate_long_running_task(self) -> None:
@@ -69,6 +109,42 @@ class TaskLifecycleTests(unittest.TestCase):
             self.assertEqual(stats["lost_cmd"], 0)
             self.assertIn(task.task_key, running)
             self.assertEqual(len(store.running_rows()), 1)
+            store.close()
+
+    def test_monitor_records_recovered_stale_completion_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store, task = self._running_task(Path(temp_dir))
+            running = {task.task_key: task}
+            with patch("mcd_agent.daemon._is_pid_alive", return_value=False):
+                _monitor_running(
+                    config=SimpleNamespace(
+                        task_retry_max=1,
+                        segment_retry_count=0,
+                        task_retry_delay_sec=0,
+                        worker_watchdog_sec=0,
+                    ),
+                    store=store,
+                    running=running,
+                    popens={},
+                    segment_liveness_probe=lambda _task: {
+                        "completed": True,
+                        "db": True,
+                        "completion_source": "read_only_fixture",
+                    },
+                )
+
+            self.assertEqual(running, {})
+            row = store.conn.execute(
+                "SELECT state, rc, note FROM tasks WHERE id=?",
+                (task.row_id,),
+            ).fetchone()
+            self.assertEqual(tuple(row), ("done", 0, "recovered_stale:completed_evidence"))
+            receipt = store.get_runtime_sync(_SCHEDULER_RECONCILIATION_RECEIPT_KEY)
+            self.assertEqual(receipt["state"], "recovered")
+            self.assertEqual(receipt["outcome"], "recovered")
+            self.assertEqual(receipt["reason"], "completed_evidence")
+            self.assertEqual(receipt["evidence"]["completion_source"], "read_only_fixture")
+            self.assertFalse(receipt["evidence"]["pid_alive"])
             store.close()
 
     def test_campaign_capacity_remains_available_while_segment_runs(self) -> None:

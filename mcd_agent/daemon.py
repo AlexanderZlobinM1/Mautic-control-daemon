@@ -15029,9 +15029,24 @@ def _monitor_running(
         )
         return False
 
-    def _finish_reconciled_segment_success(task: RunningTask, key: str) -> None:
-        _segment_runtime_marker_write(store, task, status="terminal", now_ts=now, note=None)
-        store.finish(task.row_id, state="done", rc=0, note=None)
+    def _finish_reconciled_segment_success(
+        task: RunningTask,
+        key: str,
+        evidence: Mapping[str, object],
+        *,
+        pid_alive: bool,
+    ) -> None:
+        recovery_note = "recovered_stale:completed_evidence"
+        _segment_runtime_marker_write(store, task, status="terminal", now_ts=now, note=recovery_note)
+        store.finish(task.row_id, state="done", rc=0, note=recovery_note)
+        _scheduler_reconciliation_receipt(
+            store,
+            task,
+            state="recovered",
+            reason="completed_evidence",
+            note=recovery_note,
+            evidence={**evidence, "pid_alive": bool(pid_alive)},
+        )
         progress_watchdog.pop(key, None)
         if task.task_type == "segment":
             _mark_segment_finished(task.root, task.entity_id, now_ts=now)
@@ -15158,7 +15173,7 @@ def _monitor_running(
         if alive and proc is None and not _pid_matches_task_command(task.pid, task.command_str):
             evidence = _segment_liveness_evidence(task)
             if bool(evidence.get("completed")):
-                _finish_reconciled_segment_success(task, key)
+                _finish_reconciled_segment_success(task, key, evidence, pid_alive=True)
                 continue
             if bool(evidence.get("active")):
                 logging.info(
@@ -15168,9 +15183,27 @@ def _monitor_running(
                     task.entity_id,
                 )
                 continue
-            loss_note = "scheduler_error" if task.task_type in _SEGMENT_RUNTIME_TASK_TYPES else "pid_cmd_mismatch"
-            _segment_runtime_marker_write(store, task, status="terminal", now_ts=now, note=loss_note)
+            loss_note = (
+                "stale:pid_command_mismatch"
+                if task.task_type in _SEGMENT_RUNTIME_TASK_TYPES
+                else "stale:pid_cmd_mismatch"
+            )
+            _segment_runtime_marker_write(
+                store,
+                task,
+                status="terminal",
+                now_ts=now,
+                note="scheduler_error" if task.task_type in _SEGMENT_RUNTIME_TASK_TYPES else loss_note,
+            )
             store.finish(task.row_id, state="lost", rc=None, note=loss_note)
+            _scheduler_reconciliation_receipt(
+                store,
+                task,
+                state="stale",
+                reason="pid_command_mismatch",
+                note=loss_note,
+                evidence={**evidence, "pid_alive": True},
+            )
             _plugin_operation_runtime_finish(
                 store,
                 task,
@@ -15191,7 +15224,11 @@ def _monitor_running(
                 and task.task_type == "segment"
                 and task.entity_id is not None
             ):
-                segment_terminal_callback(task, False, loss_note)
+                segment_terminal_callback(
+                    task,
+                    False,
+                    "scheduler_error" if task.task_type in _SEGMENT_RUNTIME_TASK_TYPES else loss_note,
+                )
             logging.warning(
                 "[%s] %s entity=%s pid=%s command-mismatch detected, marking lost",
                 task.root,
@@ -15276,7 +15313,7 @@ def _monitor_running(
         if not alive:
             evidence = _segment_liveness_evidence(task)
             if bool(evidence.get("completed")):
-                _finish_reconciled_segment_success(task, key)
+                _finish_reconciled_segment_success(task, key, evidence, pid_alive=False)
                 continue
             if bool(evidence.get("active")):
                 logging.info(
@@ -15286,8 +15323,18 @@ def _monitor_running(
                     task.entity_id,
                 )
                 continue
-            loss_note = "scheduler_error" if task.task_type in _SEGMENT_RUNTIME_TASK_TYPES else "pid_not_alive"
-            _segment_runtime_marker_write(store, task, status="terminal", now_ts=now, note=loss_note)
+            loss_note = (
+                "stale:pid_missing"
+                if task.task_type in _SEGMENT_RUNTIME_TASK_TYPES
+                else "stale:pid_not_alive"
+            )
+            _segment_runtime_marker_write(
+                store,
+                task,
+                status="terminal",
+                now_ts=now,
+                note="scheduler_error" if task.task_type in _SEGMENT_RUNTIME_TASK_TYPES else loss_note,
+            )
             if task.task_type == "segment":
                 logging.warning(
                     "[%s] segment scheduler exit id=%s outcome=lost runtime_sec=%.3f",
@@ -15296,6 +15343,14 @@ def _monitor_running(
                     max(0.0, elapsed),
                 )
             store.finish(task.row_id, state="lost", rc=None, note=loss_note)
+            _scheduler_reconciliation_receipt(
+                store,
+                task,
+                state="stale",
+                reason="pid_missing",
+                note=loss_note,
+                evidence={**evidence, "pid_alive": False},
+            )
             _plugin_operation_runtime_finish(
                 store,
                 task,
@@ -15317,7 +15372,11 @@ def _monitor_running(
                 and task.task_type == "segment"
                 and task.entity_id is not None
             ):
-                segment_terminal_callback(task, False, loss_note)
+                segment_terminal_callback(
+                    task,
+                    False,
+                    "scheduler_error" if task.task_type in _SEGMENT_RUNTIME_TASK_TYPES else loss_note,
+                )
             logging.warning(
                 "[%s] %s entity=%s pid_lost=%s note=%s",
                 task.root,
@@ -15344,6 +15403,66 @@ def _running_task_from_row(row: dict[str, object]) -> RunningTask:
     )
 
 
+def _scheduler_reconciliation_receipt(
+    store: TaskStore,
+    task: RunningTask,
+    *,
+    state: str,
+    reason: str,
+    note: str,
+    evidence: Mapping[str, object] | None = None,
+) -> None:
+    """Persist an auditable stale/recovered terminal result.
+
+    ``tasks.state`` keeps the historical scheduler states (``lost`` or
+    ``done``) for consumers that depend on them. The receipt is the explicit
+    reconciliation contract: it distinguishes stale release from successful
+    recovery and records the independent evidence for the transition.
+    """
+
+    def _json_safe(value: object) -> object:
+        if value is None or isinstance(value, (bool, int, float, str)):
+            return value
+        if isinstance(value, Mapping):
+            return {str(key): _json_safe(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple, set, frozenset)):
+            return [_json_safe(item) for item in value]
+        return repr(value)
+
+    age_sec = max(0.0, time.time() - float(task.started_at or time.time()))
+    evidence_payload: dict[str, object] = {
+        "pid_alive": False,
+        "pid_start_identity": "missing",
+        "age_sec": age_sec,
+    }
+    if isinstance(evidence, Mapping):
+        safe = _json_safe(evidence)
+        if isinstance(safe, Mapping):
+            evidence_payload.update(safe)
+    payload = {
+        "schema": "mcd-scheduler-reconciliation-receipt-v1",
+        "updated_at": time.time(),
+        "state": str(state),
+        "outcome": str(state),
+        "reason": str(reason),
+        "note": str(note),
+        "task_id": int(task.row_id),
+        "task_key": str(task.task_key),
+        "root": str(task.root),
+        "task_type": str(task.task_type),
+        "entity_id": task.entity_id,
+        "pid": int(task.pid),
+        "age_sec": age_sec,
+        "pid_alive": bool(evidence_payload.get("pid_alive")),
+        "command": str(task.command_str),
+        "evidence": evidence_payload,
+    }
+    try:
+        store.put_runtime_sync(_SCHEDULER_RECONCILIATION_RECEIPT_KEY, payload)
+    except Exception:
+        logging.debug("scheduler reconciliation receipt write failed", exc_info=True)
+
+
 def _reconcile_running_state(
     *,
     store: TaskStore,
@@ -15361,6 +15480,7 @@ def _reconcile_running_state(
         "shadow_replaced": 0,
         "detached_memory": 0,
     }
+
     try:
         shadow = store.sync_sqlite_running_shadow()
         stats["shadow_replaced"] = int(shadow.get("replaced", 0) or 0)
@@ -15384,26 +15504,17 @@ def _reconcile_running_state(
 
     def _receipt(task: RunningTask, note: str, reason: str) -> None:
         age_sec = max(0.0, time.time() - float(task.started_at or time.time()))
-        payload = {
-            "schema": "mcd-scheduler-reconciliation-receipt-v1",
-            "updated_at": time.time(),
-            "state": "lost",
-            "reason": str(reason),
-            "note": str(note),
-            "task_id": int(task.row_id),
-            "task_key": str(task.task_key),
-            "root": str(task.root),
-            "task_type": str(task.task_type),
-            "entity_id": task.entity_id,
-            "pid": int(task.pid),
-            "age_sec": age_sec,
-            "pid_alive": False,
-            "command": str(task.command_str),
-        }
-        try:
-            store.put_runtime_sync(_SCHEDULER_RECONCILIATION_RECEIPT_KEY, payload)
-        except Exception:
-            logging.debug("scheduler reconciliation receipt write failed", exc_info=True)
+        _scheduler_reconciliation_receipt(
+            store,
+            task,
+            state="stale",
+            reason=reason,
+            note=note,
+            evidence={
+                "pid_alive": False,
+                "pid_start_identity": "missing",
+            },
+        )
         logging.warning(
             "[%s] stale task reconciled: type=%s entity=%s pid=%s age_sec=%.1f reason=%s",
             task.root,
@@ -15454,7 +15565,11 @@ def _reconcile_running_state(
                 stats.setdefault("deferred_liveness", 0)
                 stats["deferred_liveness"] += 1
                 continue
-            loss_note = "scheduler_error" if task.task_type in _SEGMENT_RUNTIME_TASK_TYPES else "pid_not_alive"
+            loss_note = (
+                "stale:pid_missing"
+                if task.task_type in _SEGMENT_RUNTIME_TASK_TYPES
+                else "stale:pid_not_alive"
+            )
             _segment_runtime_marker_write(store, task, status="terminal", now_ts=time.time(), note=loss_note)
             store.finish(task.row_id, state="lost", rc=None, note=loss_note)
             _receipt(task, loss_note, "pid_missing")
@@ -15467,7 +15582,11 @@ def _reconcile_running_state(
                 stats.setdefault("deferred_liveness", 0)
                 stats["deferred_liveness"] += 1
                 continue
-            loss_note = "scheduler_error" if task.task_type in _SEGMENT_RUNTIME_TASK_TYPES else "pid_cmd_mismatch"
+            loss_note = (
+                "stale:pid_command_mismatch"
+                if task.task_type in _SEGMENT_RUNTIME_TASK_TYPES
+                else "stale:pid_cmd_mismatch"
+            )
             _segment_runtime_marker_write(store, task, status="terminal", now_ts=time.time(), note=loss_note)
             store.finish(task.row_id, state="lost", rc=None, note=loss_note)
             _receipt(task, loss_note, "pid_command_mismatch")

@@ -1265,9 +1265,12 @@ class SegmentAdmissionTests(unittest.TestCase):
             "last_independent_at": 100.0,
         }
         store = Mock()
-        persisted = {"value": marker}
-        store.get_runtime_sync.side_effect = lambda _key: persisted["value"]
-        store.put_runtime_sync.side_effect = lambda _key, payload: persisted.__setitem__("value", dict(payload))
+        persisted = {"marker": marker, "receipt": None}
+        store.get_runtime_sync.side_effect = lambda _key: persisted["marker"]
+        store.put_runtime_sync.side_effect = lambda key, payload: persisted.__setitem__(
+            "marker" if str(key).startswith("segment_runtime:") else "receipt",
+            dict(payload),
+        )
         _segment_runtime_marker_write(store, task, status="running", now_ts=100.0)
         running = {task.task_key: task}
         popens: dict[str, Mock] = {}
@@ -1291,9 +1294,9 @@ class SegmentAdmissionTests(unittest.TestCase):
                     segment_terminal_callback=lambda _task, success, note: callbacks.append((success, note)),
                 )
                 self.assertIn(task.task_key, running)
-                self.assertEqual(persisted["value"]["heartbeat_at"], 100.0)
-                self.assertEqual(persisted["value"]["last_independent_at"], 100.0)
-                self.assertEqual(persisted["value"]["lost_at"], 100.0)
+                self.assertEqual(persisted["marker"]["heartbeat_at"], 100.0)
+                self.assertEqual(persisted["marker"]["last_independent_at"], 100.0)
+                self.assertEqual(persisted["marker"]["lost_at"], 100.0)
 
                 clock["now"] = 161.0
                 _monitor_running(
@@ -1307,7 +1310,8 @@ class SegmentAdmissionTests(unittest.TestCase):
 
         self.assertNotIn(task.task_key, running)
         self.assertEqual(callbacks, [(False, "scheduler_error")])
-        self.assertEqual(persisted["value"]["terminal_note"], "scheduler_error")
+        self.assertEqual(persisted["marker"]["terminal_note"], "scheduler_error")
+        self.assertEqual(persisted["receipt"]["state"], "stale")
 
     def test_segment_retry_policy_runs_three_attempts_then_continues_next_item(self) -> None:
         state, _added, _started = sync_cycle(
