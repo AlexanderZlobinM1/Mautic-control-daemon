@@ -12,7 +12,7 @@ first-class фазой для patch records, которые должны зав�
 `before_campaign_execution`. Контракт, runtime executor, fixture и receipt
 должны рекламировать и проверять один и тот же порядок.
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.189 (follow-up после immutable
+Актуальная редакция этого канона — MCD 1.5.190 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам
@@ -659,12 +659,21 @@ host/instance cap, fairness, pause и MCD critical locks по-прежнему �
 Для admission используется единый `_scheduler_actual_work_items`: он
 канонизирует capacity key по `root/lane/entity`, объединяет обычные rows,
 adopted/static/native priority workers и SQL workers, а wrapper/повторную
-проекцию одной логической работы дедуплицирует. Dedicated super workers
+проекцию одной логической работы дедуплицирует. Для внешних Mautic console
+процессов canonical key равен `root/task_type/entity_id`, без PID; PID только
+наблюдаемая runtime identity, поэтому смена `flock/sudo/php` wrapper не создаёт
+второй slot. Если одновременно видны несколько процессов одного logical key,
+в receipt сохраняется самый старший по elapsed time представитель, без
+возрастного kill легитимной долгой работы. Dedicated super workers
 учитываются отдельным lane counter и не вычитаются из shared regular cap.
 Остальные priority reservations записываются под тем же
 `_SCHEDULER_RUNTIME_LOCK`, что и обычный submit, поэтому concurrent ordinary и
 priority launch не могут вместе пересечь explicit cap; независимые lane
-budgets при этом не сливаются.
+budgets при этом не сливаются. Когда regular ring содержит eligible pending
+work, ordinary dispatch резервирует её профильное число slots и ограничивает
+priority lane остатком instance/host budget; если regular ring пуст, priority
+может временно занять неиспользованную regular capacity. Это не меняет
+whitelist policy и не отменяет priority precedence на реально eligible работе.
 
 ### Жизненный цикл import и владение сегментами
 
@@ -918,6 +927,7 @@ cycle без ручного `segments:update`, profile/capacity/data changes. Ad
 | dependency closure и terminal plan | `mcd_agent/segment_dependencies.py`, `daemon.py` | `tests/test_segment_dependencies.py` |
 | persisted cycle, never-built admission и atomic claim | `mcd_agent/segment_admission.py`, `daemon.py` | `tests/test_segment_admission.py` |
 | host/instance slots и rotation | `mcd_agent/daemon.py` | `tests/test_campaign_ring_dispatch.py` |
+| external Mautic logical-task dedupe by root/type/entity and regular-slot reservation | `mcd_agent/daemon.py:list_external_runtime_task_summaries`, `_effective_segment_priority_slot_limit`, ordinary segment dispatch | `tests/test_external_task_admission.py`, `tests/test_segment_liveness.py` |
 | normal hard caps, manual per-instance N+1 и dedicated super budget не смешиваются | `mcd_agent/daemon.py:_scheduler_host_slots_available`, `_scheduler_instance_slots_available`, `_submit_if_slot_uncoordinated` | `tests/test_campaign_ring_dispatch.py` hard-cap/3+ root rows; `tests/test_segment_admission.py` cap-4 и `11+3→14→...→10→11` receipts |
 | важный root с заполненной capacity не ставит global remaining barrier | `mcd_agent/daemon.py:_scheduler_segment_entity_allowed`, `_scheduler_important_root_dispatchable` | `test_remaining_root_uses_free_host_slot_when_important_root_is_instance_full` |
 | root-local continuous monitor/refill, live durable occupancy, eligibility-aware terminal hand-off/rotation and shared claim lifecycle | `mcd_agent/daemon.py:_iter_instances_with_root_dispatch_gate`, `_SchedulerRuntimeRegistry`, `_scheduler_store_running_rows`, `_scheduler_live_task_capacity_keys`, `_scheduler_notify_refill_priority`, `_ordinary_persisted_refill_worker` (`_refill_priority_root_ready`) | `tests/test_segment_liveness.py`; `tests/test_dispatcher_production_sandbox.py` full `run_loop` paths with unavailable static graph, dead TaskStore rows and terminal-root hand-off |

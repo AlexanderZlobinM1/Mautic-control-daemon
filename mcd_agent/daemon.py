@@ -12330,7 +12330,7 @@ def list_external_runtime_task_summaries(
         tracked_entity_id = int(tracked_entity) if tracked_entity is not None else None
         if tracked_root and tracked_type:
             tracked_keys.add((tracked_root, tracked_type, tracked_entity_id))
-    rows: list[dict[str, object]] = []
+    rows_by_logical_key: dict[tuple[str, str, int | None], dict[str, object]] = {}
     seen_pids: set[int] = set()
     now_ts = time.time()
     for raw in (proc.stdout or "").splitlines():
@@ -12392,26 +12392,35 @@ def list_external_runtime_task_summaries(
         entity_id = _extract_mautic_task_entity_id(cmdline_args, command_idx + 1)
         if (root, task_type, entity_id) in tracked_keys:
             continue
-        rows.append(
-            {
-                "root": root,
-                "task_type": task_type,
-                "entity_id": entity_id,
-                "pid": pid,
-                "elapsed_sec": elapsed_sec,
-                "started_at": float(now_ts - max(0, elapsed_sec)),
-                "command_str": _CMD_SEP.join(str(x) for x in cmdline_args if str(x or "").strip()),
-                "external": True,
-            }
-        )
+        logical_key = (root, task_type, entity_id)
+        candidate = {
+            "root": root,
+            "task_type": task_type,
+            "entity_id": entity_id,
+            "pid": pid,
+            "elapsed_sec": elapsed_sec,
+            "started_at": float(now_ts - max(0, elapsed_sec)),
+            "command_str": _CMD_SEP.join(str(x) for x in cmdline_args if str(x or "").strip()),
+            "external": True,
+        }
+        previous = rows_by_logical_key.get(logical_key)
+        # A sudo/flock/php tree can expose multiple matching console processes.
+        # They are one logical Mautic task; retain the oldest observed process
+        # as the stable representative so capacity and adoption are counted
+        # once without imposing an age-based kill on a legitimate long job.
+        if previous is None or int(candidate["elapsed_sec"]) > int(previous["elapsed_sec"]):
+            rows_by_logical_key[logical_key] = candidate
         seen_pids.add(pid)
+    rows = list(rows_by_logical_key.values())
     rows.sort(key=lambda row: (str(row.get("root") or ""), str(row.get("task_type") or ""), int(row.get("pid") or 0)))
     return rows
 
 
-def _external_task_key(root: str, task_type: str, entity_id: int | None, pid: int) -> str:
+def _external_task_key(root: str, task_type: str, entity_id: int | None, pid: int | None = None) -> str:
     entity = "-" if entity_id is None else str(int(entity_id))
-    return f"external:{root}:{task_type}:{entity}:{int(pid)}"
+    # PID is process identity, not task identity. It must not consume a second
+    # slot when a wrapper/child changes during adoption or restart recovery.
+    return f"external:{root}:{task_type}:{entity}"
 
 
 @_scheduler_runtime_serialized
@@ -13909,6 +13918,22 @@ def _effective_segment_regular_slot_limit(
             return 0
         return max(0, int(config.segment_regular_parallel_throttled or 0))
     return max(0, int(config.segment_regular_parallel_idle or 0))
+
+
+def _effective_segment_priority_slot_limit(
+    priority_limit: int,
+    regular_limit: int,
+    total_limit: int,
+    *,
+    regular_pending: bool,
+) -> int:
+    """Reserve configured regular capacity while eligible regular work waits."""
+
+    priority = max(0, int(priority_limit or 0))
+    if not regular_pending:
+        return priority
+    reserve = min(max(0, int(regular_limit or 0)), max(0, int(total_limit or 0)))
+    return min(priority, max(0, int(total_limit or 0) - reserve))
 
 
 def _segment_shared_slots_used(
@@ -22668,11 +22693,21 @@ def run_loop(
                 eff_seg_prio_limit = seg_prio_limit
                 eff_seg_reg_limit = seg_reg_limit
                 prefer_priority_spill = False
+                regular_backlog = bool(
+                    seg_reg_limit > 0
+                    and _ring_has_launchable(
+                        seg_reg_ring,
+                        running=running,
+                        root=root,
+                        task_type="segment",
+                    )
+                )
                 if (
                     not segment_throttled_active
                     and seg_prio_limit > 0
                     and seg_reg_limit > 0
                     and seg_prio_set
+                    and not regular_backlog
                 ):
                     prio_backlog = _ring_has_launchable(
                         seg_prio_ring,
@@ -22704,6 +22739,13 @@ def run_loop(
                             eff_seg_prio_limit,
                             eff_seg_reg_limit,
                         )
+                if not segment_throttled_active:
+                    eff_seg_prio_limit = _effective_segment_priority_slot_limit(
+                        eff_seg_prio_limit,
+                        seg_reg_limit,
+                        seg_total_limit,
+                        regular_pending=regular_backlog,
+                    )
                 seg_resume_ring = segment_resume_rings.setdefault(root, deque())
                 _remove_ring_entities(seg_resume_ring, sql_managed_segment_ids)
 
