@@ -238,6 +238,8 @@ _CAMPAIGN_EMAIL_COUNTER_RECONCILE_MIN_INTERVAL_SEC = 6 * 3600
 _LOCAL_RUNTIME_PUSH_PENDING_KEY = "local_runtime_push_pending"
 _LOCAL_RUNTIME_ACCEPTED_KEY = "local_runtime_accepted"
 _LOCAL_RUNTIME_METADATA_KEY = "local_runtime_metadata"
+_BACKUP_SCHEDULE_STATE_KEY = "backup_schedule_state"
+_BACKUP_SCHEDULE_STATE_LOCK = threading.RLock()
 _SEGMENT_DISPATCH_CONTEXT_PREFIX = "segment_dispatch_context:"
 
 # The ordinary dispatcher and the lifecycle monitor share one in-process
@@ -8545,6 +8547,24 @@ def _backup_attempted_for_local_date(config: AgentConfig, local_dt: datetime) ->
         return ts.astimezone().date() == local_dt.date()
     except Exception:
         return False
+
+
+def _backup_schedule_claim(store: "TaskStore", run_day: str, now_ts: float, stale_after_sec: float) -> bool:
+    with _BACKUP_SCHEDULE_STATE_LOCK:
+        raw = store.get_runtime_sync(_BACKUP_SCHEDULE_STATE_KEY)
+        state = dict(raw) if isinstance(raw, Mapping) else {}
+        claimed_day = str(state.get("claimed_day") or "")
+        claimed_at = float(state.get("claimed_at") or 0.0)
+        status = str(state.get("status") or "")
+        if claimed_day == run_day and status in {"claimed", "running"} and now_ts - claimed_at < max(60.0, stale_after_sec):
+            return False
+        store.put_runtime_sync(_BACKUP_SCHEDULE_STATE_KEY, {"schema": "mcd-backup-schedule-state-v1", "claimed_day": run_day, "claimed_at": now_ts, "status": "claimed", "updated_at": now_ts})
+        return True
+
+
+def _backup_schedule_receipt(store: "TaskStore", run_day: str, status: str, now_ts: float, message: str) -> None:
+    with _BACKUP_SCHEDULE_STATE_LOCK:
+        store.put_runtime_sync(_BACKUP_SCHEDULE_STATE_KEY, {"schema": "mcd-backup-schedule-state-v1", "claimed_day": run_day, "status": status, "finished_at": now_ts, "updated_at": now_ts, "message": str(message or "")[:500]})
 
 
 def _backup_storage_probe_allowed(config: AgentConfig) -> tuple[bool, str]:
@@ -19877,14 +19897,23 @@ def run_loop(
                     last_backup_schedule_day = run_day
                     last_backup_schedule_ts = now
                 else:
+                    if backup_lock_active(config):
+                        logging.info("backup schedule: active backup lock, skip %s", run_day)
+                        continue
+                    if not _backup_schedule_claim(store, run_day, now, max(900.0, float(interval_sec))):
+                        logging.info("backup schedule: durable claim already exists for %s", run_day)
+                        continue
                     def _backup_worker() -> None:
                         try:
+                            _backup_schedule_receipt(store, run_day, "running", time.time(), "backup started")
                             res = backup_run(config, None)
+                            _backup_schedule_receipt(store, run_day, "succeeded" if res.ok else "failed", time.time(), res.message)
                             if res.ok:
                                 logging.info("backup schedule: %s", res.message)
                             else:
                                 logging.warning("backup schedule failed: %s", res.message)
                         except Exception as e:
+                            _backup_schedule_receipt(store, run_day, "failed", time.time(), str(e))
                             logging.warning("backup schedule failed: %s", e)
                     backup_thread = threading.Thread(target=_backup_worker, name="mcd-backup", daemon=True)
                     backup_thread.start()

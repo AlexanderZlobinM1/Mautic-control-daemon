@@ -12,7 +12,7 @@ first-class фазой для patch records, которые должны зав�
 `before_campaign_execution`. Контракт, runtime executor, fixture и receipt
 должны рекламировать и проверять один и тот же порядок.
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.191 (follow-up после immutable
+Актуальная редакция этого канона — MCD 1.5.192 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам
@@ -953,3 +953,7 @@ cycle без ручного `segments:update`, profile/capacity/data changes. Ad
 
 Любое расхождение между этой схемой, source, тестом и runtime receipt
 блокирует acceptance; его нужно явно зафиксировать и исправить до handoff.
+
+### Daily backup recovery
+
+Daily instance backup scheduling is a durable scheduler concern. Before a scheduled `backup_run` the daemon persists one local-date claim and changes it to a `running`, `succeeded`, or `failed` receipt in `TaskStore`. The claim is reloaded after an MCD restart, so a restart cannot duplicate the same daily slot. A stale claim may be recovered only after its bounded grace expires and only when no independent backup lock is active. A missed slot is not launched outside the configured quiet window: it is caught up at the next eligible window, without stopping or replacing an already-running backup.
