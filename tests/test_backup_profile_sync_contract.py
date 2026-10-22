@@ -39,6 +39,8 @@ class BackupProfileSyncContractTests(unittest.TestCase):
             "mcd_agent.backup._validate_cfg"
         ), patch("mcd_agent.backup.backup_profile_set"), patch(
             "mcd_agent.backup.backup_profile_for_push", return_value=profile
+        ), patch(
+            "mcd_agent.backup.backup_profile_get", return_value={}
         ):
             _, result = backup_profile_apply_sync(cfg, envelope)
         self.assertEqual(result["status"], "ok")
@@ -50,6 +52,33 @@ class BackupProfileSyncContractTests(unittest.TestCase):
         _, result = backup_profile_apply_sync(object(), {"schema": "other", "version": 1})
         self.assertEqual(result["status"], "unsynced")
         self.assertEqual(result["reason"], "unsupported_schema")
+
+    def test_equal_revision_different_hash_is_conflict(self):
+        cfg = object()
+        profile = {"enabled": True}
+        envelope = {"schema": BACKUP_PROFILE_SYNC_SCHEMA, "version": 1, "generation": 2,
+                    "revision": {"generation": 2, "source": "mcc", "updated_at": 20, "tie_break": "mcc"},
+                    "profile": profile, "desired_sha256": backup_profile_sync_hash(profile)}
+        current = {"_sync_revision": envelope["revision"]}
+        with patch("mcd_agent.backup.backup_profile_get", return_value=current), patch(
+            "mcd_agent.backup.backup_profile_for_push", return_value={"enabled": False}
+        ), patch("mcd_agent.backup.backup_profile_set") as apply:
+            _, result = backup_profile_apply_sync(cfg, envelope)
+        self.assertEqual(result["reason"], "revision_hash_conflict")
+        apply.assert_not_called()
+
+    def test_older_offline_revision_cannot_replace_newer_profile(self):
+        cfg = object()
+        profile = {"enabled": True}
+        envelope = {"schema": BACKUP_PROFILE_SYNC_SCHEMA, "version": 1,
+                    "revision": {"generation": 1, "source": "mcc", "updated_at": 20, "tie_break": "mcc"},
+                    "profile": profile, "desired_sha256": backup_profile_sync_hash(profile)}
+        current = {"_sync_revision": {"generation": 2, "source": "host", "updated_at": 10, "tie_break": "host"}}
+        with patch("mcd_agent.backup.backup_profile_get", return_value=current), patch(
+            "mcd_agent.backup.backup_profile_for_push", return_value={"enabled": False}
+        ):
+            _, result = backup_profile_apply_sync(cfg, envelope)
+        self.assertEqual(result["reason"], "stale_revision")
 
 
 if __name__ == "__main__":

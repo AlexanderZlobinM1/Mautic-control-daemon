@@ -12,7 +12,7 @@ first-class фазой для patch records, которые должны зав�
 `before_campaign_execution`. Контракт, runtime executor, fixture и receipt
 должны рекламировать и проверять один и тот же порядок.
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.194 (follow-up после immutable
+Актуальная редакция этого канона — MCD 1.5.195 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам
@@ -971,3 +971,15 @@ apply, or readback mismatch returns `unsynced` or `error` and does not claim a
 successful sync. The legacy `backup_profile` telemetry field remains for older
 MCC/MCD versions; it is not evidence of exact synchronization. Scheduler
 semantics are unchanged.
+
+### Bidirectional backup-profile revisions
+
+The backup-profile envelope is bidirectional. A local CLI edit increments a
+host-originated revision and publishes the complete effective profile; an MCC
+revision is applied through the same versioned contract. Revision ordering is
+lexicographic by `(generation, updated_at, tie_break)`, where `tie_break` is a
+stable source identifier. A newer revision wins deterministically when nodes
+were offline. Equal-generation/equal-order revisions with different hashes are
+reported as `unsynced` conflict and are not mutated. Every accepted apply and
+host callback includes the full profile, desired/effective hash, revision, and
+masked effective readback. No TOML file copying or rsync utility participates.
