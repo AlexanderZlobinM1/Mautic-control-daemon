@@ -1507,16 +1507,11 @@ def backup_profile_set(
     merge: bool = True,
     sync_config: bool = True,
     prepare_check: bool = True,
-    sync_revision: dict[str, Any] | None = None,
+    profile_updated_at: float | None = None,
 ) -> dict[str, Any]:
     current = backup_profile_get(cfg) if merge else {}
     merged = _deep_merge(current, payload)
-    if sync_revision is None:
-        previous = current.get("_sync_revision") if isinstance(current, dict) else {}
-        previous_generation = int(previous.get("generation") or 0) if isinstance(previous, dict) else 0
-        source = _host_name(cfg)
-        sync_revision = {"generation": previous_generation + 1, "source": source, "updated_at": time.time(), "tie_break": source}
-    merged["_sync_revision"] = dict(sync_revision)
+    merged["_profile_updated_at"] = float(profile_updated_at if profile_updated_at is not None else time.time())
     if "remote_root_dir" not in payload and _is_deleted_instances_remote_root(str(merged.get("remote_root_dir") or "")):
         merged["remote_root_dir"] = "backup"
     prepare_result: dict[str, Any] | None = None
@@ -6269,16 +6264,13 @@ def backup_profile_sync_hash(profile: dict[str, Any]) -> str:
 def backup_profile_sync_payload(config: AgentConfig) -> dict[str, Any]:
     profile = backup_profile_for_push(config)
     stored = backup_profile_get(config)
-    revision = stored.get("_sync_revision") if isinstance(stored, dict) else None
-    if not isinstance(revision, dict):
-        revision = {"generation": 0, "source": _host_name(config), "updated_at": 0, "tie_break": _host_name(config)}
+    updated_at = float(stored.get("_profile_updated_at") or 0) if isinstance(stored, dict) else 0.0
     return {
         "schema": BACKUP_PROFILE_SYNC_SCHEMA,
         "version": BACKUP_PROFILE_SYNC_VERSION,
-        "generation": int(revision.get("generation") or 0),
-        "revision": revision,
+        "profile_updated_at": updated_at,
         "profile": profile,
-        "desired_sha256": backup_profile_sync_hash(profile),
+        "profile_sha256": backup_profile_sync_hash(profile),
     }
 
 
@@ -6299,40 +6291,38 @@ def backup_profile_apply_sync(config: AgentConfig, envelope: object) -> tuple[Ag
     profile = envelope.get("profile")
     if not isinstance(profile, dict):
         return config, {"schema": BACKUP_PROFILE_SYNC_SCHEMA, "version": BACKUP_PROFILE_SYNC_VERSION, "status": "unsynced", "reason": "invalid_profile"}
-    desired_hash = str(envelope.get("desired_sha256") or "").strip().lower()
+    desired_hash = str(envelope.get("profile_sha256") or "").strip().lower()
     if not desired_hash or desired_hash != backup_profile_sync_hash(profile):
         return config, {"schema": BACKUP_PROFILE_SYNC_SCHEMA, "version": BACKUP_PROFILE_SYNC_VERSION, "status": "unsynced", "reason": "desired_hash_mismatch"}
-    incoming_revision = envelope.get("revision")
-    if not isinstance(incoming_revision, dict):
-        incoming_revision = {"generation": envelope.get("generation", 0), "source": "mcc", "updated_at": 0, "tie_break": "mcc"}
     try:
-        incoming_key = (int(incoming_revision.get("generation") or 0), float(incoming_revision.get("updated_at") or 0), str(incoming_revision.get("tie_break") or incoming_revision.get("source") or ""))
+        incoming_updated_at = float(envelope.get("profile_updated_at"))
     except (TypeError, ValueError):
-        return config, {"schema": BACKUP_PROFILE_SYNC_SCHEMA, "version": BACKUP_PROFILE_SYNC_VERSION, "status": "unsynced", "reason": "invalid_revision"}
+        return config, {"schema": BACKUP_PROFILE_SYNC_SCHEMA, "version": BACKUP_PROFILE_SYNC_VERSION, "status": "unsynced", "reason": "invalid_updated_at"}
     current = backup_profile_get(config)
-    current_revision = current.get("_sync_revision") if isinstance(current, dict) else None
-    if isinstance(current_revision, dict):
-        current_key = (int(current_revision.get("generation") or 0), float(current_revision.get("updated_at") or 0), str(current_revision.get("tie_break") or current_revision.get("source") or ""))
+    current_updated_at = float(current.get("_profile_updated_at") or 0) if isinstance(current, dict) else 0.0
+    if current_updated_at:
         current_hash = backup_profile_sync_hash(backup_profile_for_push(config))
-        if incoming_key < current_key:
-            return config, {"schema": BACKUP_PROFILE_SYNC_SCHEMA, "version": BACKUP_PROFILE_SYNC_VERSION, "revision": incoming_revision, "status": "unsynced", "reason": "stale_revision", "effective_sha256": current_hash}
-        if incoming_key == current_key and desired_hash != current_hash:
-            return config, {"schema": BACKUP_PROFILE_SYNC_SCHEMA, "version": BACKUP_PROFILE_SYNC_VERSION, "revision": incoming_revision, "status": "unsynced", "reason": "revision_hash_conflict", "effective_sha256": current_hash}
+        if incoming_updated_at < current_updated_at:
+            return config, {"schema": BACKUP_PROFILE_SYNC_SCHEMA, "version": BACKUP_PROFILE_SYNC_VERSION, "profile_updated_at": current_updated_at, "status": "unsynced", "reason": "stale_profile", "effective_sha256": current_hash}
+        if incoming_updated_at == current_updated_at and desired_hash != current_hash:
+            return config, {"schema": BACKUP_PROFILE_SYNC_SCHEMA, "version": BACKUP_PROFILE_SYNC_VERSION, "profile_updated_at": current_updated_at, "status": "unsynced", "reason": "profile_conflict", "effective_sha256": current_hash}
+        if incoming_updated_at == current_updated_at and desired_hash == current_hash:
+            effective = backup_profile_for_push(config)
+            return config, {"schema": BACKUP_PROFILE_SYNC_SCHEMA, "version": BACKUP_PROFILE_SYNC_VERSION, "profile_updated_at": current_updated_at, "profile_sha256": current_hash, "effective_profile": _backup_profile_masked_payload(effective), "effective_sha256": current_hash, "status": "ok"}
     try:
         candidate = _cfg_with_profile_payload(config, profile)
         _validate_cfg(candidate)
         applied_profile = dict(profile)
-        applied_profile["_sync_revision"] = incoming_revision
-        backup_profile_set(config, applied_profile, merge=False, sync_config=True, prepare_check=False, sync_revision=incoming_revision)
+        applied_profile["_profile_updated_at"] = incoming_updated_at
+        backup_profile_set(config, applied_profile, merge=False, sync_config=True, prepare_check=False, profile_updated_at=incoming_updated_at)
         effective = backup_profile_for_push(candidate)
         effective_hash = backup_profile_sync_hash(effective)
         status = "ok" if effective_hash == desired_hash else "unsynced"
         result = {
             "schema": BACKUP_PROFILE_SYNC_SCHEMA,
             "version": BACKUP_PROFILE_SYNC_VERSION,
-            "generation": envelope.get("generation"),
-            "revision": incoming_revision,
-            "desired_sha256": desired_hash,
+            "profile_updated_at": incoming_updated_at,
+            "profile_sha256": desired_hash,
             "effective_profile": _backup_profile_masked_payload(effective),
             "effective_sha256": effective_hash,
             "status": status,

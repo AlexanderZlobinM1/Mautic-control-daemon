@@ -972,14 +972,12 @@ successful sync. The legacy `backup_profile` telemetry field remains for older
 MCC/MCD versions; it is not evidence of exact synchronization. Scheduler
 semantics are unchanged.
 
-### Bidirectional backup-profile revisions
+### Bidirectional backup-profile synchronization
 
-The backup-profile envelope is bidirectional. A local CLI edit increments a
-host-originated revision and publishes the complete effective profile; an MCC
-revision is applied through the same versioned contract. Revision ordering is
-lexicographic by `(generation, updated_at, tie_break)`, where `tie_break` is a
-stable source identifier. A newer revision wins deterministically when nodes
-were offline. Equal-generation/equal-order revisions with different hashes are
-reported as `unsynced` conflict and are not mutated. Every accepted apply and
-host callback includes the full profile, desired/effective hash, revision, and
-masked effective readback. No TOML file copying or rsync utility participates.
+The backup-profile envelope is bidirectional. Both sides store the complete
+profile, UTC `profile_updated_at`, and canonical `profile_sha256`. A newer
+timestamp atomically replaces the older profile. Equal timestamp and equal
+hash is a no-op; equal timestamp with a different hash returns `unsynced`
+conflict without mutation. Every accepted apply and callback returns the full
+masked effective profile, hash, and timestamp. No TOML file copying or rsync
+utility participates.
