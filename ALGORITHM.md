@@ -12,7 +12,7 @@ first-class фазой для patch records, которые должны зав�
 `before_campaign_execution`. Контракт, runtime executor, fixture и receipt
 должны рекламировать и проверять один и тот же порядок.
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.197 (follow-up после immutable
+Актуальная редакция этого канона — MCD 1.5.198 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам
@@ -981,3 +981,11 @@ hash is a no-op; equal timestamp with a different hash returns `unsynced`
 conflict without mutation. Every accepted apply and callback returns the full
 masked effective profile, hash, and timestamp. No TOML file copying or rsync
 utility participates.
+
+### Split-config precedence
+
+For split installations, the entrypoint config is the base and declared include
+files are applied in order; the last existing local include is authoritative for
+overrides such as `[backup]` and `[backup.schedule]`. Startup and reload must
+therefore preserve `backup.enabled` and schedule enablement from the effective
+local file when the entrypoint only supplies defaults or MCC bootstrap fields.

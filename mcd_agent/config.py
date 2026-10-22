@@ -1595,7 +1595,9 @@ def _load_toml_with_includes(path: str) -> dict[str, Any]:
     files_raw = include.get("files", []) if isinstance(include, dict) else []
     files = _normalize_list(files_raw)
 
-    merged: dict[str, Any] = {}
+    root_wo_include = dict(root)
+    root_wo_include.pop("include", None)
+    merged: dict[str, Any] = root_wo_include
     for raw in files:
         p = Path(raw)
         if not p.is_absolute():
@@ -1604,10 +1606,7 @@ def _load_toml_with_includes(path: str) -> dict[str, Any]:
             continue
         child = tomllib.loads(p.read_text(encoding="utf-8"))
         merged = _deep_merge(merged, child)
-
-    root_wo_include = dict(root)
-    root_wo_include.pop("include", None)
-    return _deep_merge(merged, root_wo_include)
+    return merged
 
 
 def _resolve_mutable_config_path(path: str) -> Path:
