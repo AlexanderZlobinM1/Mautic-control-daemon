@@ -1961,6 +1961,33 @@ def _extract_mcc_bootstrap(raw_text: str) -> tuple[str | None, str | None, str |
     return url, token, host_name
 
 
+def _preserve_existing_backup_schedule(existing_text: str, desired_text: str) -> str:
+    """Keep the effective local schedule when MCC bootstrap omits that section."""
+    try:
+        existing = tomllib.loads(existing_text)
+        desired = tomllib.loads(desired_text)
+    except Exception:
+        return desired_text
+    old_backup = existing.get("backup") if isinstance(existing, dict) else None
+    new_backup = desired.get("backup") if isinstance(desired, dict) else None
+    old_schedule = old_backup.get("schedule") if isinstance(old_backup, dict) else None
+    new_schedule = new_backup.get("schedule") if isinstance(new_backup, dict) else None
+    if not isinstance(old_schedule, dict) or isinstance(new_schedule, dict) and new_schedule:
+        return desired_text
+    lines = ["", "[backup.schedule]"]
+    for key in ("enabled", "interval_sec", "quiet_hour", "quiet_minute", "quiet_window_min", "pre_pause_sec"):
+        if key in old_schedule:
+            value = old_schedule[key]
+            if isinstance(value, bool):
+                rendered = "true" if value else "false"
+            elif isinstance(value, (int, float)):
+                rendered = str(value)
+            else:
+                rendered = json.dumps(str(value), ensure_ascii=True)
+            lines.append(f"{key} = {rendered}")
+    return desired_text.rstrip() + "\n" + "\n".join(lines) + "\n"
+
+
 def _attempt_recover_config_from_mcc(config_path: str, *, load_error: Exception) -> tuple[bool, str]:
     p = Path(config_path)
     if not p.exists():
@@ -1995,6 +2022,7 @@ def _attempt_recover_config_from_mcc(config_path: str, *, load_error: Exception)
     if not isinstance(cfg_text, str) or not cfg_text.strip():
         return False, "mcc returned empty desired_config_toml"
 
+    cfg_text = _preserve_existing_backup_schedule(raw_text, cfg_text)
     try:
         tomllib.loads(cfg_text)
     except Exception as e:

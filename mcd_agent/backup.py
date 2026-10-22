@@ -1295,11 +1295,31 @@ def _profile_backup_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _profile_schedule_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    src = payload.get("schedule")
+    if not isinstance(src, dict):
+        return {}
+    out: dict[str, Any] = {}
+    if "enabled" in src:
+        out["enabled"] = bool(src.get("enabled"))
+    for key in ("interval_sec", "quiet_hour", "quiet_minute", "quiet_window_min", "pre_pause_sec"):
+        if key in src:
+            try:
+                out[key] = int(src.get(key))
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
 def _sync_profile_payload_to_config(cfg: AgentConfig, payload: dict[str, Any]) -> bool:
     changed = False
     backup = _profile_backup_payload(payload)
     if backup:
         _, c = upsert_section_values(cfg.config_file_path, "backup", backup)
+        changed = changed or c
+    schedule = _profile_schedule_payload(payload)
+    if schedule:
+        _, c = upsert_section_values(cfg.config_file_path, "backup.schedule", schedule)
         changed = changed or c
     storage = _profile_storage_payload(payload)
     if storage:
@@ -1354,6 +1374,9 @@ def _config_profile_payload(cfg: AgentConfig) -> dict[str, Any]:
     backup_settings = _profile_backup_payload(backup)
     if backup_settings:
         out.update(backup_settings)
+    schedule = _profile_schedule_payload({"schedule": backup.get("schedule", {})})
+    if schedule:
+        out["schedule"] = schedule
     return out
 
 
