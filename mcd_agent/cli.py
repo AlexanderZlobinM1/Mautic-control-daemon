@@ -5041,6 +5041,9 @@ def main() -> int:
                     raise RuntimeError(f"unsupported backup profile contract: {args.contract}")
                 _, receipt = backup_profile_apply_sync(cfg, payload)
                 print(json.dumps(receipt, ensure_ascii=True, indent=2))
+                if receipt.get("status") == "ok":
+                    cfg_after = load_config(args.config, allow_recover_from_mcc=False)
+                    _push_state_after_change(cfg_after, "backup-profile-set-contract")
                 return 0 if receipt.get("status") == "ok" else 1
             result = backup_profile_set(
                 cfg,
@@ -5052,7 +5055,8 @@ def main() -> int:
             if isinstance(result.get("_prepare_check"), dict):
                 masked["_prepare_check"] = result["_prepare_check"]
             print(json.dumps(masked, ensure_ascii=True, indent=2))
-            _push_state_after_change(cfg, "backup-profile-set")
+            cfg_after = load_config(args.config, allow_recover_from_mcc=False)
+            _push_state_after_change(cfg_after, "backup-profile-set")
             return 0
         st = backup_status(cfg, args.root)
         if args.op == "history":
