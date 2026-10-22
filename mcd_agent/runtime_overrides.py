@@ -519,6 +519,7 @@ def fetch_runtime_overrides(cfg: AgentConfig, *, instance_uids: list[str] | None
         "configured_host_name": str(ident.get("configured_host_name") or ""),
         "agent_version": __version__,
         "desired_state_protocol": 1,
+        "backup_profile_protocol": {"schema": "mcd-backup-profile-v1", "version": 1},
         "instance_uids": canonical_instance_uids,
     }
     url = base + "/api/v1/agent/runtime-overrides"
@@ -527,6 +528,9 @@ def fetch_runtime_overrides(cfg: AgentConfig, *, instance_uids: list[str] | None
         out.setdefault("status", "error")
         if not isinstance(out.get("runtime_overrides"), dict):
             out["runtime_overrides"] = {}
+        backup_sync = out.get("backup_profile_sync")
+        if backup_sync is not None and not isinstance(backup_sync, dict):
+            out["backup_profile_sync"] = {"status": "unsynced", "reason": "invalid_envelope"}
         out["instance_desired_states"] = normalize_instance_desired_state_rows(
             out.get("instance_desired_states"),
             canonical_instance_uids,

@@ -12,7 +12,7 @@ first-class фазой для patch records, которые должны зав�
 `before_campaign_execution`. Контракт, runtime executor, fixture и receipt
 должны рекламировать и проверять один и тот же порядок.
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.192 (follow-up после immutable
+Актуальная редакция этого канона — MCD 1.5.193 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам
@@ -957,3 +957,17 @@ cycle без ручного `segments:update`, profile/capacity/data changes. Ad
 ### Daily backup recovery
 
 Daily instance backup scheduling is a durable scheduler concern. Before a scheduled `backup_run` the daemon persists one local-date claim and changes it to a `running`, `succeeded`, or `failed` receipt in `TaskStore`. The claim is reloaded after an MCD restart, so a restart cannot duplicate the same daily slot. A stale claim may be recovered only after its bounded grace expires and only when no independent backup lock is active. A missed slot is not launched outside the configured quiet window: it is caught up at the next eligible window, without stopping or replacing an already-running backup.
+
+### Backup profile synchronization contract
+
+Backup profile synchronization is a separate typed contract and is never
+projected into generic runtime overrides. MCD advertises and consumes
+`mcd-backup-profile-v1` version 1 envelopes containing the complete normalized
+profile, `generation`, and canonical JSON SHA-256. MCD validates schema, version,
+and desired hash before applying the profile; the apply/readback result contains
+masked `effective_profile`, `effective_sha256`, generation, and `status`.
+`ok` is valid only when desired and effective hashes match. Schema, validation,
+apply, or readback mismatch returns `unsynced` or `error` and does not claim a
+successful sync. The legacy `backup_profile` telemetry field remains for older
+MCC/MCD versions; it is not evidence of exact synchronization. Scheduler
+semantics are unchanged.

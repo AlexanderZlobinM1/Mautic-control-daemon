@@ -44,6 +44,7 @@ from mcd_agent.config import (
 from mcd_agent.hardware_profile import write_profile_selection
 from mcd_agent.backup import (
     backup_lock_active,
+    backup_profile_apply_sync,
     backup_profile_sync_from_config,
     backup_run,
     backup_status,
@@ -19159,6 +19160,14 @@ def run_loop(
                     local_runtime_push_pending = True
                     status = "deferred_local_delta"
             if status == "ok" and not local_runtime_push_pending:
+                backup_sync = ro.get("backup_profile_sync")
+                if isinstance(backup_sync, dict):
+                    config, backup_sync_result = backup_profile_apply_sync(config, backup_sync)
+                    pusher.cfg = config
+                    sync_status = str(backup_sync_result.get("status") or "error").lower()
+                    store.put_runtime_sync("backup_profile_sync", backup_sync_result)
+                    if sync_status != "ok":
+                        logging.warning("backup-profile sync unsynced: %s", backup_sync_result.get("reason", "unknown"))
                 # An accepted desired write must not be undone by a stale
                 # response from a request that was already in flight. After
                 # that guard, resolve every host field and instance field by
