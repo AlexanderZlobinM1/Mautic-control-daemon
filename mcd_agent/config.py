@@ -1689,6 +1689,20 @@ def upsert_section_values(config_path: str, section_name: str, updates: dict[str
         p.write_text(text2, encoding="utf-8")
         return str(p), True
     body = m.group(2)
+    # Runtime reconciliation may repeat the same effective values after a
+    # restart.  Do not rewrite the mutable include merely to normalize
+    # quoting, ordering, or whitespace: startup/reload must be byte-stable
+    # when the operator did not change the configuration.
+    try:
+        current = tomllib.loads(m.group(1) + body)
+        current_section = current.get(section_name, {})
+        if isinstance(current_section, dict) and all(
+            key in current_section and current_section[key] == value
+            for key, value in updates.items()
+        ):
+            return str(p), False
+    except Exception:
+        pass
     key_set = set(updates.keys())
     out_lines: list[str] = []
     key_re = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=")

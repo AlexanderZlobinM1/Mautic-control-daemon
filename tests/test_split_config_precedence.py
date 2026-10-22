@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from mcd_agent.config import _load_toml_with_includes
+from mcd_agent.config import _load_toml_with_includes, upsert_section_values
 
 
 class SplitConfigPrecedenceTests(unittest.TestCase):
@@ -22,6 +22,20 @@ class SplitConfigPrecedenceTests(unittest.TestCase):
             self.assertTrue(effective["backup"]["enabled"])
             self.assertTrue(effective["backup"]["schedule"]["enabled"])
             self.assertEqual(effective["backup"]["schedule"]["interval_sec"], 86400)
+
+    def test_repeated_runtime_upsert_preserves_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            local = Path(tmp) / "mcd.local.toml"
+            original = '[runtime]\nsegment_limit = 7 # operator formatting\nother = "keep"\n'
+            local.write_text(original, encoding="utf-8")
+
+            path, changed = upsert_section_values(
+                str(local), "runtime", {"segment_limit": 7}
+            )
+
+            self.assertEqual(path, str(local))
+            self.assertFalse(changed)
+            self.assertEqual(local.read_text(encoding="utf-8"), original)
 
 
 if __name__ == "__main__":
