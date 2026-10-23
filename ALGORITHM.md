@@ -12,7 +12,7 @@ first-class фазой для patch records, которые должны зав�
 `before_campaign_execution`. Контракт, runtime executor, fixture и receipt
 должны рекламировать и проверять один и тот же порядок.
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.189 (follow-up после immutable
+Актуальная редакция этого канона — MCD 1.5.199 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам
@@ -659,12 +659,30 @@ host/instance cap, fairness, pause и MCD critical locks по-прежнему �
 Для admission используется единый `_scheduler_actual_work_items`: он
 канонизирует capacity key по `root/lane/entity`, объединяет обычные rows,
 adopted/static/native priority workers и SQL workers, а wrapper/повторную
-проекцию одной логической работы дедуплицирует. Dedicated super workers
+проекцию одной логической работы дедуплицирует. Для внешних Mautic console
+процессов canonical key равен `root/task_type/entity_id`, без PID; PID только
+наблюдаемая runtime identity, поэтому смена `flock/sudo/php` wrapper не создаёт
+второй slot. Если одновременно видны несколько процессов одного logical key,
+в receipt сохраняется самый старший по elapsed time представитель, без
+возрастного kill легитимной долгой работы. Dedicated super workers
 учитываются отдельным lane counter и не вычитаются из shared regular cap.
 Остальные priority reservations записываются под тем же
 `_SCHEDULER_RUNTIME_LOCK`, что и обычный submit, поэтому concurrent ordinary и
 priority launch не могут вместе пересечь explicit cap; независимые lane
-budgets при этом не сливаются.
+budgets при этом не сливаются. Когда regular ring содержит eligible pending
+work, ordinary dispatch резервирует её профильное число slots и ограничивает
+priority lane остатком instance/host budget; если regular ring пуст, priority
+может временно занять неиспользованную regular capacity. Это не меняет
+whitelist policy и не отменяет priority precedence на реально eligible работе.
+
+Adopted external segment worker проходит тот же safe liveness contract: MCD
+проверяет PID, process-group, command identity, read-only SQL query fingerprint
+и независимые CLI CPU/IO counters. `segment_sql_orphan_after_sec` задаёт
+подтверждённое окно отсутствия progress; после него выполняется recheck grace,
+и только при сохранении matching process-group без progress выполняется group
+kill. Долгий rebuild с меняющимся SQL/CLI evidence сохраняется. Stale release
+пишет reconciliation receipt, освобождает logical admission slot и не отмечает
+segment `done`; поэтому следующий scheduler tick может безопасно re-admit item.
 
 ### Жизненный цикл import и владение сегментами
 
@@ -918,6 +936,8 @@ cycle без ручного `segments:update`, profile/capacity/data changes. Ad
 | dependency closure и terminal plan | `mcd_agent/segment_dependencies.py`, `daemon.py` | `tests/test_segment_dependencies.py` |
 | persisted cycle, never-built admission и atomic claim | `mcd_agent/segment_admission.py`, `daemon.py` | `tests/test_segment_admission.py` |
 | host/instance slots и rotation | `mcd_agent/daemon.py` | `tests/test_campaign_ring_dispatch.py` |
+| external Mautic logical-task dedupe by root/type/entity and regular-slot reservation | `mcd_agent/daemon.py:list_external_runtime_task_summaries`, `_effective_segment_priority_slot_limit`, ordinary segment dispatch | `tests/test_external_task_admission.py`, `tests/test_segment_liveness.py` |
+| adopted external segment PID/process-group progress watchdog with stale re-admission | `mcd_agent/daemon.py:_external_segment_process_liveness_signal`, `_external_segment_watchdog_keepalive` | `tests/test_external_task_admission.py` |
 | normal hard caps, manual per-instance N+1 и dedicated super budget не смешиваются | `mcd_agent/daemon.py:_scheduler_host_slots_available`, `_scheduler_instance_slots_available`, `_submit_if_slot_uncoordinated` | `tests/test_campaign_ring_dispatch.py` hard-cap/3+ root rows; `tests/test_segment_admission.py` cap-4 и `11+3→14→...→10→11` receipts |
 | важный root с заполненной capacity не ставит global remaining barrier | `mcd_agent/daemon.py:_scheduler_segment_entity_allowed`, `_scheduler_important_root_dispatchable` | `test_remaining_root_uses_free_host_slot_when_important_root_is_instance_full` |
 | root-local continuous monitor/refill, live durable occupancy, eligibility-aware terminal hand-off/rotation and shared claim lifecycle | `mcd_agent/daemon.py:_iter_instances_with_root_dispatch_gate`, `_SchedulerRuntimeRegistry`, `_scheduler_store_running_rows`, `_scheduler_live_task_capacity_keys`, `_scheduler_notify_refill_priority`, `_ordinary_persisted_refill_worker` (`_refill_priority_root_ready`) | `tests/test_segment_liveness.py`; `tests/test_dispatcher_production_sandbox.py` full `run_loop` paths with unavailable static graph, dead TaskStore rows and terminal-root hand-off |
@@ -933,3 +953,39 @@ cycle без ручного `segments:update`, profile/capacity/data changes. Ad
 
 Любое расхождение между этой схемой, source, тестом и runtime receipt
 блокирует acceptance; его нужно явно зафиксировать и исправить до handoff.
+
+### Daily backup recovery
+
+Daily instance backup scheduling is a durable scheduler concern. Before a scheduled `backup_run` the daemon persists one local-date claim and changes it to a `running`, `succeeded`, or `failed` receipt in `TaskStore`. The claim is reloaded after an MCD restart, so a restart cannot duplicate the same daily slot. A stale claim may be recovered only after its bounded grace expires and only when no independent backup lock is active. A missed slot is not launched outside the configured quiet window: it is caught up at the next eligible window, without stopping or replacing an already-running backup.
+
+### Backup profile synchronization contract
+
+Backup profile synchronization is a separate typed contract and is never
+projected into generic runtime overrides. MCD advertises and consumes
+`mcd-backup-profile-v1` version 1 envelopes containing the complete normalized
+profile, `generation`, and canonical JSON SHA-256. MCD validates schema, version,
+and desired hash before applying the profile; the apply/readback result contains
+masked `effective_profile`, `effective_sha256`, generation, and `status`.
+`ok` is valid only when desired and effective hashes match. Schema, validation,
+apply, or readback mismatch returns `unsynced` or `error` and does not claim a
+successful sync. The legacy `backup_profile` telemetry field remains for older
+MCC/MCD versions; it is not evidence of exact synchronization. Scheduler
+semantics are unchanged.
+
+### Bidirectional backup-profile synchronization
+
+The backup-profile envelope is bidirectional. Both sides store the complete
+profile, UTC `profile_updated_at`, and canonical `profile_sha256`. A newer
+timestamp atomically replaces the older profile. Equal timestamp and equal
+hash is a no-op; equal timestamp with a different hash returns `unsynced`
+conflict without mutation. Every accepted apply and callback returns the full
+masked effective profile, hash, and timestamp. No TOML file copying or rsync
+utility participates.
+
+### Split-config precedence
+
+For split installations, the entrypoint config is the base and declared include
+files are applied in order; the last existing local include is authoritative for
+overrides such as `[backup]` and `[backup.schedule]`. Startup and reload must
+therefore preserve `backup.enabled` and schedule enablement from the effective
+local file when the entrypoint only supplies defaults or MCC bootstrap fields.

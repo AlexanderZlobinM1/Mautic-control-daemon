@@ -44,6 +44,7 @@ from mcd_agent.config import (
 from mcd_agent.hardware_profile import write_profile_selection
 from mcd_agent.backup import (
     backup_lock_active,
+    backup_profile_apply_sync,
     backup_profile_sync_from_config,
     backup_run,
     backup_status,
@@ -238,6 +239,8 @@ _CAMPAIGN_EMAIL_COUNTER_RECONCILE_MIN_INTERVAL_SEC = 6 * 3600
 _LOCAL_RUNTIME_PUSH_PENDING_KEY = "local_runtime_push_pending"
 _LOCAL_RUNTIME_ACCEPTED_KEY = "local_runtime_accepted"
 _LOCAL_RUNTIME_METADATA_KEY = "local_runtime_metadata"
+_BACKUP_SCHEDULE_STATE_KEY = "backup_schedule_state"
+_BACKUP_SCHEDULE_STATE_LOCK = threading.RLock()
 _SEGMENT_DISPATCH_CONTEXT_PREFIX = "segment_dispatch_context:"
 
 # The ordinary dispatcher and the lifecycle monitor share one in-process
@@ -8547,6 +8550,24 @@ def _backup_attempted_for_local_date(config: AgentConfig, local_dt: datetime) ->
         return False
 
 
+def _backup_schedule_claim(store: "TaskStore", run_day: str, now_ts: float, stale_after_sec: float) -> bool:
+    with _BACKUP_SCHEDULE_STATE_LOCK:
+        raw = store.get_runtime_sync(_BACKUP_SCHEDULE_STATE_KEY)
+        state = dict(raw) if isinstance(raw, Mapping) else {}
+        claimed_day = str(state.get("claimed_day") or "")
+        claimed_at = float(state.get("claimed_at") or 0.0)
+        status = str(state.get("status") or "")
+        if claimed_day == run_day and status in {"claimed", "running"} and now_ts - claimed_at < max(60.0, stale_after_sec):
+            return False
+        store.put_runtime_sync(_BACKUP_SCHEDULE_STATE_KEY, {"schema": "mcd-backup-schedule-state-v1", "claimed_day": run_day, "claimed_at": now_ts, "status": "claimed", "updated_at": now_ts})
+        return True
+
+
+def _backup_schedule_receipt(store: "TaskStore", run_day: str, status: str, now_ts: float, message: str) -> None:
+    with _BACKUP_SCHEDULE_STATE_LOCK:
+        store.put_runtime_sync(_BACKUP_SCHEDULE_STATE_KEY, {"schema": "mcd-backup-schedule-state-v1", "claimed_day": run_day, "status": status, "finished_at": now_ts, "updated_at": now_ts, "message": str(message or "")[:500]})
+
+
 def _backup_storage_probe_allowed(config: AgentConfig) -> tuple[bool, str]:
     if not bool(getattr(config, "backup_enabled", False)):
         return False, "backup disabled"
@@ -12330,7 +12351,7 @@ def list_external_runtime_task_summaries(
         tracked_entity_id = int(tracked_entity) if tracked_entity is not None else None
         if tracked_root and tracked_type:
             tracked_keys.add((tracked_root, tracked_type, tracked_entity_id))
-    rows: list[dict[str, object]] = []
+    rows_by_logical_key: dict[tuple[str, str, int | None], dict[str, object]] = {}
     seen_pids: set[int] = set()
     now_ts = time.time()
     for raw in (proc.stdout or "").splitlines():
@@ -12392,26 +12413,35 @@ def list_external_runtime_task_summaries(
         entity_id = _extract_mautic_task_entity_id(cmdline_args, command_idx + 1)
         if (root, task_type, entity_id) in tracked_keys:
             continue
-        rows.append(
-            {
-                "root": root,
-                "task_type": task_type,
-                "entity_id": entity_id,
-                "pid": pid,
-                "elapsed_sec": elapsed_sec,
-                "started_at": float(now_ts - max(0, elapsed_sec)),
-                "command_str": _CMD_SEP.join(str(x) for x in cmdline_args if str(x or "").strip()),
-                "external": True,
-            }
-        )
+        logical_key = (root, task_type, entity_id)
+        candidate = {
+            "root": root,
+            "task_type": task_type,
+            "entity_id": entity_id,
+            "pid": pid,
+            "elapsed_sec": elapsed_sec,
+            "started_at": float(now_ts - max(0, elapsed_sec)),
+            "command_str": _CMD_SEP.join(str(x) for x in cmdline_args if str(x or "").strip()),
+            "external": True,
+        }
+        previous = rows_by_logical_key.get(logical_key)
+        # A sudo/flock/php tree can expose multiple matching console processes.
+        # They are one logical Mautic task; retain the oldest observed process
+        # as the stable representative so capacity and adoption are counted
+        # once without imposing an age-based kill on a legitimate long job.
+        if previous is None or int(candidate["elapsed_sec"]) > int(previous["elapsed_sec"]):
+            rows_by_logical_key[logical_key] = candidate
         seen_pids.add(pid)
+    rows = list(rows_by_logical_key.values())
     rows.sort(key=lambda row: (str(row.get("root") or ""), str(row.get("task_type") or ""), int(row.get("pid") or 0)))
     return rows
 
 
-def _external_task_key(root: str, task_type: str, entity_id: int | None, pid: int) -> str:
+def _external_task_key(root: str, task_type: str, entity_id: int | None, pid: int | None = None) -> str:
     entity = "-" if entity_id is None else str(int(entity_id))
-    return f"external:{root}:{task_type}:{entity}:{int(pid)}"
+    # PID is process identity, not task identity. It must not consume a second
+    # slot when a wrapper/child changes during adoption or restart recovery.
+    return f"external:{root}:{task_type}:{entity}"
 
 
 @_scheduler_runtime_serialized
@@ -13660,6 +13690,35 @@ def _import_process_liveness_signal(pid: int) -> dict[str, object]:
     return signal
 
 
+def _external_segment_process_liveness_signal(pid: int) -> dict[str, object]:
+    """Return independent process-group and CLI progress evidence."""
+
+    signal = _import_process_liveness_signal(pid)
+    if int(pid or 0) <= 0:
+        return signal
+    signal["pid_alive"] = _is_pid_alive(int(pid))
+    try:
+        pgid = int(os.getpgid(int(pid)))
+    except (OSError, TypeError, ValueError):
+        pgid = 0
+    signal["process_group_id"] = pgid
+    if pgid > 1:
+        try:
+            os.killpg(pgid, 0)
+            signal["process_group_alive"] = True
+        except (OSError, ProcessLookupError, PermissionError):
+            signal["process_group_alive"] = False
+    else:
+        signal["process_group_alive"] = bool(signal.get("pid_alive"))
+    cli_progress = {}
+    for name in ("cpu_progress", "io_progress"):
+        if name in signal:
+            cli_progress[name] = signal[name]
+    if cli_progress:
+        signal["cli_progress"] = tuple(sorted(cli_progress.items()))
+    return signal
+
+
 def _import_path_liveness_signal(root: str, command_str: str) -> dict[str, object]:
     """Read upload/log file counters without treating MCD markers as progress."""
 
@@ -13909,6 +13968,22 @@ def _effective_segment_regular_slot_limit(
             return 0
         return max(0, int(config.segment_regular_parallel_throttled or 0))
     return max(0, int(config.segment_regular_parallel_idle or 0))
+
+
+def _effective_segment_priority_slot_limit(
+    priority_limit: int,
+    regular_limit: int,
+    total_limit: int,
+    *,
+    regular_pending: bool,
+) -> int:
+    """Reserve configured regular capacity while eligible regular work waits."""
+
+    priority = max(0, int(priority_limit or 0))
+    if not regular_pending:
+        return priority
+    reserve = min(max(0, int(regular_limit or 0)), max(0, int(total_limit or 0)))
+    return min(priority, max(0, int(total_limit or 0) - reserve))
 
 
 def _segment_shared_slots_used(
@@ -14882,6 +14957,7 @@ def _monitor_running(
     mautic_timezones_by_root: dict[str, str | None] | None = None,
     campaign_progress_watchdog: dict[str, dict[str, object]] | None = None,
     import_progress_watchdog: dict[str, dict[str, object]] | None = None,
+    segment_progress_watchdog: dict[str, dict[str, object]] | None = None,
     segment_terminal_callback: Callable[[RunningTask, bool, str | None], None] | None = None,
     segment_liveness_probe: Callable[[RunningTask], Mapping[str, object] | bool] | None = None,
     import_liveness_probe: Callable[[RunningTask], Mapping[str, object] | bool] | None = None,
@@ -14892,6 +14968,7 @@ def _monitor_running(
     tz_by_root = mautic_timezones_by_root or {}
     progress_watchdog = campaign_progress_watchdog if campaign_progress_watchdog is not None else {}
     import_watchdog = import_progress_watchdog if import_progress_watchdog is not None else {}
+    segment_watchdog = segment_progress_watchdog if segment_progress_watchdog is not None else {}
 
     def _segment_liveness_evidence(task: RunningTask) -> dict[str, object]:
         if task.task_type not in _SEGMENT_RUNTIME_TASK_TYPES:
@@ -14916,7 +14993,19 @@ def _monitor_running(
         # Marker-only state is a bounded restart bridge, never a heartbeat.
         independent = any(
             bool(result.get(key))
-            for key in ("active", "process", "db", "db_process", "runtime_confirmed", "completed")
+            for key in (
+                "active",
+                "process",
+                "process_group_alive",
+                "db",
+                "db_active",
+                "db_process",
+                "cli_progress",
+                "cpu_progress",
+                "io_progress",
+                "runtime_confirmed",
+                "completed",
+            )
         )
         if independent:
             _segment_runtime_marker_write(store, task, status="running", now_ts=now)
@@ -15029,6 +15118,86 @@ def _monitor_running(
         )
         return False
 
+    def _external_segment_watchdog_keepalive(
+        task: RunningTask,
+        key: str,
+        evidence: Mapping[str, object],
+    ) -> bool:
+        """Keep an adopted segment only while independent progress is observed."""
+
+        state = segment_watchdog.setdefault(key, {})
+        progress_fields = {
+            field: evidence.get(field)
+            for field in (
+                "db_progress",
+                "db_query_progress",
+                "cli_progress",
+                "cpu_progress",
+                "io_progress",
+            )
+            if field in evidence
+        }
+        fingerprint = repr(sorted(progress_fields.items(), key=lambda item: item[0]))
+        changed = bool(progress_fields) and fingerprint != state.get("progress_fingerprint")
+        if progress_fields:
+            state["progress_fingerprint"] = fingerprint
+        if changed:
+            state["last_progress_at"] = float(now)
+            state.pop("stall_observed_at", None)
+        elif "last_progress_at" not in state:
+            state["last_progress_at"] = float(task.started_at or now)
+
+        stall_timeout = max(
+            30.0,
+            float(getattr(config, "segment_sql_orphan_after_sec", 900) or 900),
+        )
+        last_progress_at = float(state.get("last_progress_at") or task.started_at or now)
+        if now - last_progress_at <= stall_timeout:
+            return True
+
+        observed_at = state.get("stall_observed_at")
+        if observed_at is None:
+            state["stall_observed_at"] = float(now)
+            logging.warning(
+                "[%s] external segment=%s has no independent progress for %.1fs; starting stall recheck grace",
+                task.root,
+                task.entity_id,
+                max(0.0, now - last_progress_at),
+            )
+            return True
+        grace_sec = max(1.0, min(30.0, stall_timeout / 10.0))
+        if now - float(observed_at) <= grace_sec:
+            return True
+
+        # A dead/recycled process or command mismatch is handled by the normal
+        # release path. Only kill when the process group is still owned by the
+        # matching Mautic command and independent progress stayed absent for
+        # the complete observation window.
+        if not bool(evidence.get("process_group_alive", True)):
+            segment_watchdog.pop(key, None)
+            return False
+        _kill_pid(task.pid, int(getattr(config, "segment_kill_grace_sec", 10) or 10))
+        note = "stale:external_segment_stall"
+        _segment_runtime_marker_write(store, task, status="stale", now_ts=now, note=note)
+        _scheduler_reconciliation_receipt(
+            store,
+            task,
+            state="stale",
+            reason="external_segment_stall",
+            note=note,
+            evidence={**dict(evidence), "pid_alive": True, "process_group_alive": True},
+        )
+        segment_watchdog.pop(key, None)
+        running.pop(key, None)
+        popens.pop(key, None)
+        logging.warning(
+            "[%s] external segment=%s killed by stall watchdog after %.1fs without independent progress",
+            task.root,
+            task.entity_id,
+            max(0.0, now - last_progress_at),
+        )
+        return False
+
     def _finish_reconciled_segment_success(
         task: RunningTask,
         key: str,
@@ -15068,11 +15237,64 @@ def _monitor_running(
         if bool(getattr(task, "external", False)):
             alive = _is_pid_alive(task.pid)
             if alive and _pid_matches_task_command(task.pid, task.command_str):
+                if task.task_type in _SEGMENT_RUNTIME_TASK_TYPES:
+                    evidence = _segment_liveness_evidence(task)
+                    if bool(evidence.get("completed")):
+                        _segment_runtime_marker_write(
+                            store,
+                            task,
+                            status="terminal",
+                            now_ts=now,
+                            note="recovered:external_completed",
+                        )
+                        _scheduler_reconciliation_receipt(
+                            store,
+                            task,
+                            state="recovered",
+                            reason="completed_evidence",
+                            note="recovered:external_completed",
+                            evidence={**evidence, "pid_alive": True},
+                        )
+                        _mark_segment_finished(task.root, task.entity_id, now_ts=now)
+                        segment_watchdog.pop(key, None)
+                        running.pop(key, None)
+                        popens.pop(key, None)
+                        continue
+                    if not _external_segment_watchdog_keepalive(task, key, evidence):
+                        continue
                 continue
+            if task.task_type in _SEGMENT_RUNTIME_TASK_TYPES:
+                evidence = _segment_liveness_evidence(task)
+                segment_watchdog.pop(key, None)
+                if bool(evidence.get("completed")):
+                    _segment_runtime_marker_write(
+                        store,
+                        task,
+                        status="terminal",
+                        now_ts=now,
+                        note="recovered:external_completed",
+                    )
+                    _scheduler_reconciliation_receipt(
+                        store,
+                        task,
+                        state="recovered",
+                        reason="completed_evidence",
+                        note="recovered:external_completed",
+                        evidence={**evidence, "pid_alive": alive},
+                    )
+                    _mark_segment_finished(task.root, task.entity_id, now_ts=now)
+                else:
+                    _scheduler_reconciliation_receipt(
+                        store,
+                        task,
+                        state="stale",
+                        reason="external_process_lost",
+                        note="stale:external_process_lost",
+                        evidence={**evidence, "pid_alive": alive},
+                    )
             running.pop(key, None)
             popens.pop(key, None)
             if task.task_type == "segment":
-                _mark_segment_finished(task.root, task.entity_id, now_ts=now)
                 logging.info(
                     "[%s] segment scheduler exit id=%s outcome=external_released runtime_sec=%.3f",
                     task.root,
@@ -16029,6 +16251,7 @@ def run_loop(
     mautic_timezones_by_root: dict[str, str | None] = {}
     campaign_progress_watchdog: dict[str, dict[str, object]] = {}
     import_progress_watchdog: dict[str, dict[str, object]] = {}
+    segment_progress_watchdog: dict[str, dict[str, object]] = {}
 
     identity = resolve_agent_identity(config)
     if bool(identity.get("clone_detected", False)):
@@ -16072,6 +16295,7 @@ def run_loop(
         sid = int(task.entity_id)
         db_cfg = db_configs_by_root.get(str(task.root))
         db_active = False
+        db_query_progress: list[str] = []
         db_completed = False
         if db_cfg is not None:
             try:
@@ -16084,7 +16308,7 @@ def run_loop(
                         continue
                     if any(re.search(rf"(?<!\d){int(chain_id)}(?!\d)", info) for chain_id in chain_ids):
                         db_active = True
-                        break
+                        db_query_progress.append(info[:500])
             except Exception:
                 db_active = False
             try:
@@ -16097,7 +16321,15 @@ def run_loop(
                         break
             except Exception:
                 db_completed = False
-        return {"db": db_active, "completed": db_completed}
+        evidence: dict[str, object] = {
+            "db": db_active,
+            "db_active": db_active,
+            "completed": db_completed,
+        }
+        if db_query_progress:
+            evidence["db_query_progress"] = tuple(sorted(db_query_progress))
+        evidence.update(_external_segment_process_liveness_signal(task.pid))
+        return evidence
 
     def _import_liveness_probe(task: RunningTask) -> Mapping[str, object]:
         """Collect independent Mautic import progress signals.
@@ -16309,6 +16541,7 @@ def run_loop(
                 mautic_timezones_by_root=mautic_timezones_by_root,
                 campaign_progress_watchdog=campaign_progress_watchdog,
                 import_progress_watchdog=import_progress_watchdog,
+                segment_progress_watchdog=segment_progress_watchdog,
                 segment_terminal_callback=_segment_terminal_callback,
                 segment_liveness_probe=_segment_liveness_probe,
                 import_liveness_probe=_import_liveness_probe,
@@ -16337,6 +16570,7 @@ def run_loop(
                 mautic_timezones_by_root=mautic_timezones_by_root,
                 campaign_progress_watchdog=campaign_progress_watchdog,
                 import_progress_watchdog=import_progress_watchdog,
+                segment_progress_watchdog=segment_progress_watchdog,
                 segment_terminal_callback=_segment_terminal_callback,
                 segment_liveness_probe=_segment_liveness_probe,
                 import_liveness_probe=_import_liveness_probe,
@@ -18926,6 +19160,14 @@ def run_loop(
                     local_runtime_push_pending = True
                     status = "deferred_local_delta"
             if status == "ok" and not local_runtime_push_pending:
+                backup_sync = ro.get("backup_profile_sync")
+                if isinstance(backup_sync, dict):
+                    config, backup_sync_result = backup_profile_apply_sync(config, backup_sync)
+                    pusher.cfg = config
+                    sync_status = str(backup_sync_result.get("status") or "error").lower()
+                    store.put_runtime_sync("backup_profile_sync", backup_sync_result)
+                    if sync_status != "ok":
+                        logging.warning("backup-profile sync unsynced: %s", backup_sync_result.get("reason", "unknown"))
                 # An accepted desired write must not be undone by a stale
                 # response from a request that was already in flight. After
                 # that guard, resolve every host field and instance field by
@@ -19664,14 +19906,23 @@ def run_loop(
                     last_backup_schedule_day = run_day
                     last_backup_schedule_ts = now
                 else:
+                    if backup_lock_active(config):
+                        logging.info("backup schedule: active backup lock, skip %s", run_day)
+                        continue
+                    if not _backup_schedule_claim(store, run_day, now, max(900.0, float(interval_sec))):
+                        logging.info("backup schedule: durable claim already exists for %s", run_day)
+                        continue
                     def _backup_worker() -> None:
                         try:
+                            _backup_schedule_receipt(store, run_day, "running", time.time(), "backup started")
                             res = backup_run(config, None)
+                            _backup_schedule_receipt(store, run_day, "succeeded" if res.ok else "failed", time.time(), res.message)
                             if res.ok:
                                 logging.info("backup schedule: %s", res.message)
                             else:
                                 logging.warning("backup schedule failed: %s", res.message)
                         except Exception as e:
+                            _backup_schedule_receipt(store, run_day, "failed", time.time(), str(e))
                             logging.warning("backup schedule failed: %s", e)
                     backup_thread = threading.Thread(target=_backup_worker, name="mcd-backup", daemon=True)
                     backup_thread.start()
@@ -22668,11 +22919,21 @@ def run_loop(
                 eff_seg_prio_limit = seg_prio_limit
                 eff_seg_reg_limit = seg_reg_limit
                 prefer_priority_spill = False
+                regular_backlog = bool(
+                    seg_reg_limit > 0
+                    and _ring_has_launchable(
+                        seg_reg_ring,
+                        running=running,
+                        root=root,
+                        task_type="segment",
+                    )
+                )
                 if (
                     not segment_throttled_active
                     and seg_prio_limit > 0
                     and seg_reg_limit > 0
                     and seg_prio_set
+                    and not regular_backlog
                 ):
                     prio_backlog = _ring_has_launchable(
                         seg_prio_ring,
@@ -22704,6 +22965,13 @@ def run_loop(
                             eff_seg_prio_limit,
                             eff_seg_reg_limit,
                         )
+                if not segment_throttled_active:
+                    eff_seg_prio_limit = _effective_segment_priority_slot_limit(
+                        eff_seg_prio_limit,
+                        seg_reg_limit,
+                        seg_total_limit,
+                        regular_pending=regular_backlog,
+                    )
                 seg_resume_ring = segment_resume_rings.setdefault(root, deque())
                 _remove_ring_entities(seg_resume_ring, sql_managed_segment_ids)
 

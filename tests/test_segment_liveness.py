@@ -27,6 +27,7 @@ from mcd_agent.daemon import (
     _active_persisted_segment_cycle_roots,
     _scheduler_persisted_pending_roots,
     _effective_segment_regular_slot_limit,
+    _effective_segment_priority_slot_limit,
     _segment_pending_dispatch_limits,
     _segment_shared_slots_available,
     _segment_lazy_update_effective_setting,
@@ -67,6 +68,26 @@ class SegmentLivenessTests(unittest.TestCase):
             scheduler_instance_max_parallel=1,
             scheduler_elastic_slots_enabled=True,
             scheduler_emergency_reserved_slots=1,
+        )
+
+    def test_regular_backlog_reserves_profiled_slots_from_priority_lane(self) -> None:
+        self.assertEqual(
+            _effective_segment_priority_slot_limit(
+                6,
+                2,
+                6,
+                regular_pending=True,
+            ),
+            4,
+        )
+        self.assertEqual(
+            _effective_segment_priority_slot_limit(
+                6,
+                2,
+                6,
+                regular_pending=False,
+            ),
+            6,
         )
 
     def test_full_cycle_is_default_and_lazy_flag_is_explicit(self) -> None:

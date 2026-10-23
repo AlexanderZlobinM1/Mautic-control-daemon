@@ -21,6 +21,7 @@ import time
 from mcd_agent import __version__
 from mcd_agent.backup import (
     backup_preflight,
+    backup_profile_apply_sync,
     backup_profile_masked,
     backup_profile_set,
     backup_prune,
@@ -2348,6 +2349,7 @@ def _build_parser() -> argparse.ArgumentParser:
     bkp.add_argument("--remote-root-dir", help="One-shot remote root override for instance-run")
     bkp.add_argument("--profile-json-file", help="JSON file with backup profile payload for profile-set")
     bkp.add_argument("--profile-json-stdin", action="store_true", help="Read backup profile JSON payload from stdin")
+    bkp.add_argument("--contract", default="", help="Versioned profile contract (profile-set only)")
     bkp.add_argument("--replace", action="store_true", help="Replace backup profile payload instead of merge")
     bkp.add_argument("--skip-prepare-check", action="store_true", help="Store backup profile without package/storage/DB verification")
     bkp.add_argument("--json", action="store_true")
@@ -5034,6 +5036,15 @@ def main() -> int:
             payload = json.loads(raw)
             if not isinstance(payload, dict):
                 raise RuntimeError("backup profile payload must be a JSON object")
+            if args.contract:
+                if args.contract != "mcd-backup-profile-v1":
+                    raise RuntimeError(f"unsupported backup profile contract: {args.contract}")
+                _, receipt = backup_profile_apply_sync(cfg, payload)
+                print(json.dumps(receipt, ensure_ascii=True, indent=2))
+                if receipt.get("status") == "ok":
+                    cfg_after = load_config(args.config, allow_recover_from_mcc=False)
+                    _push_state_after_change(cfg_after, "backup-profile-set-contract")
+                return 0 if receipt.get("status") == "ok" else 1
             result = backup_profile_set(
                 cfg,
                 payload,
@@ -5044,7 +5055,8 @@ def main() -> int:
             if isinstance(result.get("_prepare_check"), dict):
                 masked["_prepare_check"] = result["_prepare_check"]
             print(json.dumps(masked, ensure_ascii=True, indent=2))
-            _push_state_after_change(cfg, "backup-profile-set")
+            cfg_after = load_config(args.config, allow_recover_from_mcc=False)
+            _push_state_after_change(cfg_after, "backup-profile-set")
             return 0
         st = backup_status(cfg, args.root)
         if args.op == "history":

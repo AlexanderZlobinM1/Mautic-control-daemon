@@ -1595,7 +1595,9 @@ def _load_toml_with_includes(path: str) -> dict[str, Any]:
     files_raw = include.get("files", []) if isinstance(include, dict) else []
     files = _normalize_list(files_raw)
 
-    merged: dict[str, Any] = {}
+    root_wo_include = dict(root)
+    root_wo_include.pop("include", None)
+    merged: dict[str, Any] = root_wo_include
     for raw in files:
         p = Path(raw)
         if not p.is_absolute():
@@ -1604,10 +1606,7 @@ def _load_toml_with_includes(path: str) -> dict[str, Any]:
             continue
         child = tomllib.loads(p.read_text(encoding="utf-8"))
         merged = _deep_merge(merged, child)
-
-    root_wo_include = dict(root)
-    root_wo_include.pop("include", None)
-    return _deep_merge(merged, root_wo_include)
+    return merged
 
 
 def _resolve_mutable_config_path(path: str) -> Path:
@@ -1690,6 +1689,20 @@ def upsert_section_values(config_path: str, section_name: str, updates: dict[str
         p.write_text(text2, encoding="utf-8")
         return str(p), True
     body = m.group(2)
+    # Runtime reconciliation may repeat the same effective values after a
+    # restart.  Do not rewrite the mutable include merely to normalize
+    # quoting, ordering, or whitespace: startup/reload must be byte-stable
+    # when the operator did not change the configuration.
+    try:
+        current = tomllib.loads(m.group(1) + body)
+        current_section = current.get(section_name, {})
+        if isinstance(current_section, dict) and all(
+            key in current_section and current_section[key] == value
+            for key, value in updates.items()
+        ):
+            return str(p), False
+    except Exception:
+        pass
     key_set = set(updates.keys())
     out_lines: list[str] = []
     key_re = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=")
@@ -1961,6 +1974,33 @@ def _extract_mcc_bootstrap(raw_text: str) -> tuple[str | None, str | None, str |
     return url, token, host_name
 
 
+def _preserve_existing_backup_schedule(existing_text: str, desired_text: str) -> str:
+    """Keep the effective local schedule when MCC bootstrap omits that section."""
+    try:
+        existing = tomllib.loads(existing_text)
+        desired = tomllib.loads(desired_text)
+    except Exception:
+        return desired_text
+    old_backup = existing.get("backup") if isinstance(existing, dict) else None
+    new_backup = desired.get("backup") if isinstance(desired, dict) else None
+    old_schedule = old_backup.get("schedule") if isinstance(old_backup, dict) else None
+    new_schedule = new_backup.get("schedule") if isinstance(new_backup, dict) else None
+    if not isinstance(old_schedule, dict) or isinstance(new_schedule, dict) and new_schedule:
+        return desired_text
+    lines = ["", "[backup.schedule]"]
+    for key in ("enabled", "interval_sec", "quiet_hour", "quiet_minute", "quiet_window_min", "pre_pause_sec"):
+        if key in old_schedule:
+            value = old_schedule[key]
+            if isinstance(value, bool):
+                rendered = "true" if value else "false"
+            elif isinstance(value, (int, float)):
+                rendered = str(value)
+            else:
+                rendered = json.dumps(str(value), ensure_ascii=True)
+            lines.append(f"{key} = {rendered}")
+    return desired_text.rstrip() + "\n" + "\n".join(lines) + "\n"
+
+
 def _attempt_recover_config_from_mcc(config_path: str, *, load_error: Exception) -> tuple[bool, str]:
     p = Path(config_path)
     if not p.exists():
@@ -1995,6 +2035,7 @@ def _attempt_recover_config_from_mcc(config_path: str, *, load_error: Exception)
     if not isinstance(cfg_text, str) or not cfg_text.strip():
         return False, "mcc returned empty desired_config_toml"
 
+    cfg_text = _preserve_existing_backup_schedule(raw_text, cfg_text)
     try:
         tomllib.loads(cfg_text)
     except Exception as e:

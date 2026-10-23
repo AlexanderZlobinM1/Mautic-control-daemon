@@ -27,7 +27,7 @@ from pymysql.cursors import DictCursor
 
 from mcd_agent import __version__
 from mcd_agent.apt_profile import collect_apt_state
-from mcd_agent.backup import backup_profile_for_push, backup_state_for_push
+from mcd_agent.backup import backup_profile_for_push, backup_profile_sync_payload, backup_state_for_push
 from mcd_agent.cluster_assets import collect_cluster_assets_status
 from mcd_agent.config import AgentConfig
 from mcd_agent.form_embed import load_form_embed_state
@@ -2266,6 +2266,7 @@ class MCCStatePusher:
             },
             "backup_state": backup_state_for_push(self.cfg),
             "backup_profile": backup_profile_for_push(self.cfg),
+            "backup_profile_sync": backup_profile_sync_payload(self.cfg),
             "apt_state": self._apt_state(now_ts),
             "mautic_install_readiness": collect_mautic_install_readiness(),
             "cluster_db": self._cluster_db_state(now_ts),
