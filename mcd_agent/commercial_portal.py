@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
@@ -117,6 +118,7 @@ class CommercialState:
             db.execute("CREATE TABLE IF NOT EXISTS commercial_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS commercial_nonces (nonce TEXT PRIMARY KEY, seen_at REAL NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS commercial_receipts (job_id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS commercial_usage_sequences (metric TEXT PRIMARY KEY, value INTEGER NOT NULL)")
         try:
             os.chmod(self.path, 0o600)
         except OSError:
@@ -143,6 +145,13 @@ class CommercialState:
             except sqlite3.IntegrityError:
                 return False
 
+    def next_usage_sequence(self, metric: str) -> int:
+        with sqlite3.connect(self.path) as db:
+            row = db.execute("SELECT value FROM commercial_usage_sequences WHERE metric=?", (metric,)).fetchone()
+            value = int(row[0]) + 1 if row else 0
+            db.execute("INSERT INTO commercial_usage_sequences(metric,value) VALUES(?,?) ON CONFLICT(metric) DO UPDATE SET value=excluded.value", (metric, value))
+        return value
+
 
 class PortalClient:
     def __init__(self, state: CommercialState, *, timeout_sec: int = 35, activation_transport: Any = None):
@@ -150,7 +159,7 @@ class PortalClient:
         self.timeout_sec = max(1, min(60, int(timeout_sec)))
         self.activation_transport = activation_transport
 
-    def _request(self, method: str, path: str, payload: dict[str, Any] | None = None, *, idempotency_key: str | None = None) -> dict[str, Any]:
+    def _request(self, method: str, path: str, payload: dict[str, Any] | None = None, *, idempotency_key: str | None = None, extra_headers: Mapping[str, str] | None = None) -> dict[str, Any]:
         base = str(self.state.get("portal_api_base") or "").rstrip("/")
         if not base or not self.state.get("portal_agent_credential"):
             raise RuntimeError("commercial_portal_not_activated")
@@ -161,6 +170,8 @@ class PortalClient:
             headers["Content-Type"] = "application/json"
         if idempotency_key:
             headers["Idempotency-Key"] = idempotency_key
+        if extra_headers:
+            headers.update({str(k): str(v) for k, v in extra_headers.items()})
         req = request.Request(base + "/" + path.lstrip("/"), data=body, headers=headers, method=method)
         try:
             with request.urlopen(req, timeout=self.timeout_sec, context=ssl.create_default_context()) as response:
@@ -232,4 +243,27 @@ class PortalClient:
         if result.get("schema") != "portal-mcd-installation-register-response-v1" or result.get("contract_version") != CONTRACT_VERSION or not result.get("installation_id"):
             raise RuntimeError("commercial_installation_response_invalid")
         return result
+
+    def send_usage(self, *, installation_id: str, metric: str, observed_at: str, raw_value: int,
+                   cadence_policy_seconds: int, evidence_ref: str, sequence: int,
+                   sample_id: str, reset_type: str = "none") -> dict[str, Any]:
+        """Send one immutable usage sample; retries must reuse sample_id/sequence."""
+        agent_id = str(self.state.get("agent_id") or "")
+        credential = str(self.state.get("portal_agent_credential") or "")
+        if not agent_id or not credential or not installation_id:
+            raise RuntimeError("commercial_usage_not_activated")
+        if metric not in {"contact_count_current", "confirmed_successful_sends_cumulative"}:
+            raise ValueError("commercial_usage_metric_invalid")
+        if reset_type not in {"none", "counter_reset", "counter_wrap"}:
+            raise ValueError("commercial_usage_reset_type_invalid")
+        payload = {"schema": "portal-mcd-usage", "contract_version": 1, "agent_id": agent_id,
+                   "installation_id": installation_id, "metric": metric, "observed_at": observed_at,
+                   "sequence": max(0, int(sequence)), "sample_id": sample_id,
+                   "raw_value": max(0, int(raw_value)), "reset_type": reset_type,
+                   "cadence_policy_seconds": max(1, int(cadence_policy_seconds)), "evidence_ref": evidence_ref}
+        body = canonical_json(payload)
+        signature = "hmac-sha256=" + _b64(hmac.new(credential.encode(), body, hashlib.sha256).digest())
+        path = f"agents/{agent_id}/installations/{installation_id}/usage"
+        return self._request("POST", path, payload, idempotency_key=sample_id,
+                             extra_headers={"X-Portal-Usage-Signature": signature})
 

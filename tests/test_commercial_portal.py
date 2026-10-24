@@ -7,6 +7,7 @@ from pathlib import Path
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import shutil
+import hmac
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -132,4 +133,26 @@ def test_installation_registration_defaults_to_passive_and_binds_agent():
         assert captured["idempotency_key"] == first_key
         with pytest.raises(ValueError, match="commercial_installation_idempotency_conflict"):
             client.register_installation(local_identity="local-1", display_name="Changed", mautic_version="7.2.1", application_root_fingerprint="sha256:" + "a" * 64)
+
+
+def test_usage_contract_signs_exact_payload_and_reuses_sample_id():
+    with tempfile.TemporaryDirectory() as td:
+        state = CommercialState(str(Path(td) / "state.sqlite"))
+        state.put("portal_api_base", "https://portal.invalid/api/v1/commercial")
+        state.put("portal_agent_credential", "credential")
+        state.put("agent_id", "agent-1")
+        captured = {}
+        client = PortalClient(state)
+        def fake_request(method, path, payload, idempotency_key, extra_headers):
+            captured.update(locals())
+            assert extra_headers["X-Portal-Usage-Signature"].startswith("hmac-sha256=")
+            expected = hmac.new(b"credential", canonical_json(payload), hashlib.sha256).digest()
+            actual = extra_headers["X-Portal-Usage-Signature"].split("=", 1)[1]
+            assert base64.urlsafe_b64decode(actual + "=" * (-len(actual) % 4)) == expected
+            return {"schema": "portal-mcd-usage-ack-v1", "accepted": True}
+        client._request = fake_request
+        result = client.send_usage(installation_id="inst-1", metric="contact_count_current", observed_at="2026-10-24T12:00:00Z", raw_value=17, cadence_policy_seconds=60, evidence_ref="usage-1", sequence=0, sample_id="sample-1")
+        assert result["accepted"] is True
+        assert captured["path"] == "agents/agent-1/installations/inst-1/usage"
+        assert captured["idempotency_key"] == "sample-1"
 
