@@ -217,8 +217,17 @@ class PortalClient:
         agent_id = str(self.state.get("agent_id") or "")
         if not agent_id or activation_state not in {"passive", "active"}:
             raise ValueError("commercial_installation_request_invalid")
-        idempotency_key = _b64(os.urandom(16))
-        payload = {"schema": "portal-mcd-installation-register-request-v1", "contract_version": CONTRACT_VERSION, "installation": {"local_identity": local_identity, "display_name": display_name, "mautic_version": mautic_version, "application_root_fingerprint": application_root_fingerprint, "activation_state": activation_state}, "idempotency_key": idempotency_key}
+        payload = {"schema": "portal-mcd-installation-register-request-v1", "contract_version": CONTRACT_VERSION, "installation": {"local_identity": local_identity, "display_name": display_name, "mautic_version": mautic_version, "application_root_fingerprint": application_root_fingerprint, "activation_state": activation_state}}
+        request_fingerprint = hashlib.sha256(canonical_json({k: v for k, v in payload.items() if k != "idempotency_key"})).hexdigest()
+        requests = self.state.get("installation_requests") or {}
+        previous = requests.get(local_identity) if isinstance(requests, dict) else None
+        if isinstance(previous, dict) and previous.get("fingerprint") != request_fingerprint:
+            raise ValueError("commercial_installation_idempotency_conflict")
+        idempotency_key = str(previous.get("idempotency_key")) if isinstance(previous, dict) else _b64(os.urandom(16))
+        payload["idempotency_key"] = idempotency_key
+        requests = dict(requests) if isinstance(requests, dict) else {}
+        requests[local_identity] = {"fingerprint": request_fingerprint, "idempotency_key": idempotency_key}
+        self.state.put("installation_requests", requests)
         result = self._request("POST", f"agents/{agent_id}/installations", payload, idempotency_key=idempotency_key)
         if result.get("schema") != "portal-mcd-installation-register-response-v1" or result.get("contract_version") != CONTRACT_VERSION or not result.get("installation_id"):
             raise RuntimeError("commercial_installation_response_invalid")
