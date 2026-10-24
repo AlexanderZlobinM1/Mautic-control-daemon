@@ -213,3 +213,14 @@ class PortalClient:
         self.state.put("portal_job_signing_keys", {x["key_id"]: x["value"] for x in signing_keys})
         return {"status": "activated", "agent_id": result["agent_id"], "contract_version": CONTRACT_VERSION}
 
+    def register_installation(self, *, local_identity: str, display_name: str, mautic_version: str, application_root_fingerprint: str, activation_state: str = "passive") -> dict[str, Any]:
+        agent_id = str(self.state.get("agent_id") or "")
+        if not agent_id or activation_state not in {"passive", "active"}:
+            raise ValueError("commercial_installation_request_invalid")
+        idempotency_key = _b64(os.urandom(16))
+        payload = {"schema": "portal-mcd-installation-register-request-v1", "contract_version": CONTRACT_VERSION, "installation": {"local_identity": local_identity, "display_name": display_name, "mautic_version": mautic_version, "application_root_fingerprint": application_root_fingerprint, "activation_state": activation_state}, "idempotency_key": idempotency_key}
+        result = self._request("POST", f"agents/{agent_id}/installations", payload, idempotency_key=idempotency_key)
+        if result.get("schema") != "portal-mcd-installation-register-response-v1" or result.get("contract_version") != CONTRACT_VERSION or not result.get("installation_id"):
+            raise RuntimeError("commercial_installation_response_invalid")
+        return result
+

@@ -113,3 +113,18 @@ def test_snapshot_restore_on_new_host_cannot_reuse_portal_identity(monkeypatch):
         restored = CommercialState(str(clone))
         assert not restored.commercial_enabled
 
+
+def test_installation_registration_defaults_to_passive_and_binds_agent():
+    with tempfile.TemporaryDirectory() as td:
+        state = CommercialState(str(Path(td) / "state.sqlite"))
+        state.put("portal_api_base", "https://portal.invalid/api/v1/commercial")
+        state.put("portal_agent_credential", "credential")
+        state.put("agent_id", "agent-1")
+        captured = {}
+        client = PortalClient(state)
+        client._request = lambda method, path, payload, idempotency_key: captured.update({"method": method, "path": path, "payload": payload, "idempotency_key": idempotency_key}) or {"schema": "portal-mcd-installation-register-response-v1", "contract_version": "1.0", "installation_id": "inst-1", "activation_state": "passive"}
+        result = client.register_installation(local_identity="local-1", display_name="Tenant", mautic_version="7.2.1", application_root_fingerprint="sha256:" + "a" * 64)
+        assert result["installation_id"] == "inst-1"
+        assert captured["path"] == "agents/agent-1/installations"
+        assert captured["payload"]["installation"]["activation_state"] == "passive"
+

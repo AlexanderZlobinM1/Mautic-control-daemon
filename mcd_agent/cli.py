@@ -2105,9 +2105,14 @@ def _build_parser() -> argparse.ArgumentParser:
 
     commercial = sub.add_parser("commercial", help="Portal commercial transport (explicit activation only)")
     commercial.add_argument("--config", default=default_cfg)
-    commercial.add_argument("op", choices=["status", "activate"])
+    commercial.add_argument("op", choices=["status", "activate", "register"])
     commercial.add_argument("--portal-url", default="")
     commercial.add_argument("--activation-code", default="")
+    commercial.add_argument("--local-identity", default="")
+    commercial.add_argument("--display-name", default="")
+    commercial.add_argument("--mautic-version", default="")
+    commercial.add_argument("--application-root-fingerprint", default="")
+    commercial.add_argument("--activation-state", choices=["passive", "active"], default="passive")
     commercial.add_argument("--json", action="store_true")
 
     scheduler = sub.add_parser("scheduler", help="Pause/resume scheduler launches")
@@ -2460,10 +2465,15 @@ def main() -> int:
                 "portal_api_base": state.get("portal_api_base") if state.commercial_enabled else None,
                 "mcc_configured": bool(cfg.mcc_url and cfg.mcc_token),
             }
-        else:
+        elif args.op == "activate":
             if not args.portal_url or not args.activation_code:
                 parser.error("commercial activate requires --portal-url and --activation-code")
             payload = PortalClient(state).activate(args.portal_url, args.activation_code, __version__)
+        else:
+            required = (args.local_identity, args.display_name, args.mautic_version, args.application_root_fingerprint)
+            if not all(required):
+                parser.error("commercial register requires installation fields")
+            payload = PortalClient(state).register_installation(local_identity=args.local_identity, display_name=args.display_name, mautic_version=args.mautic_version, application_root_fingerprint=args.application_root_fingerprint, activation_state=args.activation_state)
         print(json.dumps(payload, ensure_ascii=True, indent=2 if args.json else None))
         return 0
 
