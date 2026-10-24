@@ -10,6 +10,9 @@ from pathlib import Path
 import sqlite3
 import socket
 import ssl
+import platform
+import time
+from datetime import datetime, timezone
 from typing import Any, Mapping
 from urllib import request
 from urllib.error import HTTPError
@@ -56,6 +59,14 @@ def verify_signed_job(job: Mapping[str, Any], public_keys: Mapping[str, str], *,
     required = ("job_id", "idempotency_key", "agent_id", "installation_id", "command", "issued_at", "expires_at", "nonce", "scope", "package", "portal_signature")
     if any(not item.get(key) for key in required):
         raise ValueError("commercial_job_fields_missing")
+    current = time.time() if now is None else float(now)
+    try:
+        issued = datetime.fromisoformat(str(item["issued_at"]).replace("Z", "+00:00")).timestamp()
+        expires = datetime.fromisoformat(str(item["expires_at"]).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("commercial_job_time_invalid") from exc
+    if expires <= issued or current < issued - 60 or current >= expires:
+        raise ValueError("commercial_job_expired_or_not_yet_valid")
     scope = item["scope"]
     package = item["package"]
     signature = item["portal_signature"]
@@ -146,18 +157,40 @@ class PortalClient:
             raise RuntimeError("commercial_portal_response_too_large")
         return json.loads(raw.decode("utf-8")) if raw else {}
 
+    def _activation_request(self, base_url: str, payload: dict[str, Any]) -> dict[str, Any]:
+        body = canonical_json(payload)
+        headers = {"Content-Type": "application/json", "X-Portal-Contract": CONTRACT, "X-Request-Id": _b64(os.urandom(16)), "Idempotency-Key": payload["idempotency_key"]}
+        req = request.Request(base_url.rstrip("/") + "/api/v1/commercial/activations/redeem", data=body, headers=headers, method="POST")
+        try:
+            with request.urlopen(req, timeout=self.timeout_sec, context=ssl.create_default_context()) as response:
+                raw = response.read(2 * 1024 * 1024 + 1)
+        except HTTPError as exc:
+            raise RuntimeError(f"commercial_activation_http_{exc.code}") from exc
+        if len(raw) > 2 * 1024 * 1024:
+            raise RuntimeError("commercial_activation_response_too_large")
+        return json.loads(raw.decode("utf-8")) if raw else {}
+
     def activate(self, base_url: str, activation_code: str, agent_version: str) -> dict[str, Any]:
         key = Ed25519PrivateKey.generate()
         public = key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
         private = key.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption())
         host_fingerprint = "sha256:" + hashlib.sha256(socket.gethostname().encode()).hexdigest()
-        payload = {"schema": "portal-mcd-activation-request-v1", "contract_version": CONTRACT_VERSION, "activation_code": activation_code, "agent": {"public_key": {"algorithm": "ed25519", "key_id": "agent-" + _b64(public)[:22], "value": _b64(public)}, "host_fingerprint": host_fingerprint, "agent_version": agent_version, "platform": "linux-amd64"}, "supported_contract_versions": [CONTRACT_VERSION], "idempotency_key": _b64(os.urandom(16))}
+        machine = platform.machine().lower()
+        normalized_platform = "linux-arm64" if machine in {"aarch64", "arm64"} else "linux-amd64" if machine in {"x86_64", "amd64"} else "linux-" + machine
+        payload = {"schema": "portal-mcd-activation-request-v1", "contract_version": CONTRACT_VERSION, "activation_code": activation_code, "agent": {"public_key": {"algorithm": "ed25519", "key_id": "agent-" + _b64(public)[:22], "value": _b64(public)}, "host_fingerprint": host_fingerprint, "agent_version": agent_version, "platform": normalized_platform}, "supported_contract_versions": [CONTRACT_VERSION], "idempotency_key": _b64(os.urandom(16))}
+        result = self._activation_request(base_url, payload)
+        if result.get("schema") != "portal-mcd-activation-response-v1" or result.get("contract_version") != CONTRACT_VERSION:
+            raise RuntimeError("commercial_activation_response_schema_invalid")
+        if not result.get("agent_id") or not result.get("agent_credential") or not isinstance(result.get("portal"), dict):
+            raise RuntimeError("commercial_activation_response_fields_invalid")
+        signing_keys = result["portal"].get("job_signing_keys")
+        if not isinstance(signing_keys, list) or any(not isinstance(item, dict) or not item.get("key_id") or item.get("algorithm") != "ed25519" or not item.get("value") for item in signing_keys):
+            raise RuntimeError("commercial_activation_signing_keys_invalid")
         self.state.put("portal_api_base", base_url.rstrip("/") + "/api/v1/commercial")
-        result = self._request("POST", "activations/redeem", payload, idempotency_key=payload["idempotency_key"])
         self.state.put("portal_agent_credential", result["agent_credential"])
         self.state.put("agent_id", result["agent_id"])
         self.state.put("agent_private_key", _b64(private))
         self.state.put("agent_key_id", payload["agent"]["public_key"]["key_id"])
-        self.state.put("portal_job_signing_keys", {x["key_id"]: x["value"] for x in result.get("portal", {}).get("job_signing_keys", [])})
+        self.state.put("portal_job_signing_keys", {x["key_id"]: x["value"] for x in signing_keys})
         return {"status": "activated", "agent_id": result["agent_id"], "contract_version": CONTRACT_VERSION}
 

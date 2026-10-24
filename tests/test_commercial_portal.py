@@ -4,12 +4,14 @@ import json
 import tempfile
 import time
 from pathlib import Path
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives import serialization
 
-from mcd_agent.commercial_portal import CommercialState, canonical_json, verify_signed_job
+from mcd_agent.commercial_portal import CommercialState, PortalClient, canonical_json, verify_signed_job
 
 
 def test_signed_job_is_verified_and_replay_state_is_durable():
@@ -29,4 +31,55 @@ def test_unknown_signer_and_scope_mismatch_are_rejected():
     envelope = {"schema": "portal-mcd-job-delivery-v1", "contract_version": "1.0", "job": {"job_id": "j", "scope": {}, "package": {"digest": "sha256:" + "a" * 64, "size_bytes": 1}}}
     with pytest.raises(ValueError, match="commercial_job_fields_missing"):
         verify_signed_job(envelope, {})
+
+
+def test_signed_job_time_boundaries_fail_closed():
+    key = Ed25519PrivateKey.generate()
+    public = base64.urlsafe_b64encode(key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)).rstrip(b"=").decode()
+    job = {"job_id": "job-time", "idempotency_key": "idem-time", "agent_id": "agent-1", "installation_id": "inst-1", "command": "package.apply", "issued_at": "2026-01-01T00:00:00Z", "expires_at": "2026-01-01T00:01:00Z", "nonce": "nonce-time", "scope": {"agent_id": "agent-1", "installation_id": "inst-1"}, "package": {"package_id": "pkg-1", "revision": "rev-1", "sha256": "a" * 64, "size_bytes": 1, "media_type": "application/octet-stream"}, "portal_signature": {"algorithm": "ed25519", "key_id": "portal-1"}}
+    job["portal_signature"]["value"] = base64.urlsafe_b64encode(key.sign(canonical_json({k: v for k, v in job.items() if k != "portal_signature"}))).rstrip(b"=").decode()
+    envelope = {"schema": "portal-mcd-job-delivery-v1", "contract_version": "1.0", "job": job}
+    with pytest.raises(ValueError, match="commercial_job_expired_or_not_yet_valid"):
+        verify_signed_job(envelope, {"portal-1": public}, now=1_767_225_660)
+
+
+def test_activation_uses_only_exact_unauthenticated_path_and_stores_validated_state():
+    received = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            received.append((self.path, dict(self.headers)))
+            body = json.dumps({
+                "schema": "portal-mcd-activation-response-v1",
+                "contract_version": "1.0",
+                "agent_id": "agent-1",
+                "agent_credential": "credential-1",
+                "portal": {"job_signing_keys": [{"algorithm": "ed25519", "key_id": "portal-1", "value": "a" * 43}]},
+            }).encode()
+            self.send_response(201)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            state = CommercialState(str(Path(td) / "state.sqlite"))
+            client = PortalClient(state)
+            result = client.activate(f"http://127.0.0.1:{server.server_port}", "activation", "1.5.200")
+            assert result["status"] == "activated"
+            assert state.commercial_enabled
+            assert received[0][0] == "/api/v1/commercial/activations/redeem"
+            assert "Authorization" not in received[0][1]
+            with pytest.raises(RuntimeError, match="commercial_portal_not_activated"):
+                CommercialState(str(Path(td) / "other.sqlite"))
+                PortalClient(CommercialState(str(Path(td) / "other.sqlite")))._request("GET", "arbitrary")
+    finally:
+        server.shutdown()
 
