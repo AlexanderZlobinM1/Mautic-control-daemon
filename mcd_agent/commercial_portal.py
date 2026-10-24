@@ -11,6 +11,7 @@ import sqlite3
 import socket
 import ssl
 import platform
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any, Mapping
@@ -51,6 +52,11 @@ def _without_signature(job: Mapping[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _require_https(url: str) -> None:
+    if not str(url).lower().startswith("https://"):
+        raise ValueError("commercial_portal_https_required")
+
+
 def verify_signed_job(job: Mapping[str, Any], public_keys: Mapping[str, str], *, now: float | None = None) -> dict[str, Any]:
     """Validate the immutable Portal job envelope before any executor call."""
     import time
@@ -64,6 +70,8 @@ def verify_signed_job(job: Mapping[str, Any], public_keys: Mapping[str, str], *,
     if any(not item.get(key) for key in required):
         raise ValueError("commercial_job_fields_missing")
     current = time.time() if now is None else float(now)
+    if not isinstance(item["issued_at"], str) or not isinstance(item["expires_at"], str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z", item["issued_at"]) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z", item["expires_at"]):
+        raise ValueError("commercial_job_time_invalid")
     try:
         issued = datetime.fromisoformat(str(item["issued_at"]).replace("Z", "+00:00")).timestamp()
         expires = datetime.fromisoformat(str(item["expires_at"]).replace("Z", "+00:00")).timestamp()
@@ -137,14 +145,16 @@ class CommercialState:
 
 
 class PortalClient:
-    def __init__(self, state: CommercialState, *, timeout_sec: int = 35):
+    def __init__(self, state: CommercialState, *, timeout_sec: int = 35, activation_transport: Any = None):
         self.state = state
         self.timeout_sec = max(1, min(60, int(timeout_sec)))
+        self.activation_transport = activation_transport
 
     def _request(self, method: str, path: str, payload: dict[str, Any] | None = None, *, idempotency_key: str | None = None) -> dict[str, Any]:
         base = str(self.state.get("portal_api_base") or "").rstrip("/")
         if not base or not self.state.get("portal_agent_credential"):
             raise RuntimeError("commercial_portal_not_activated")
+        _require_https(base)
         body = None if payload is None else canonical_json(payload)
         headers = {"Authorization": "Bearer " + str(self.state.get("portal_agent_credential")), "X-Portal-Contract": CONTRACT, "X-Request-Id": _b64(os.urandom(16))}
         if body is not None:
@@ -162,6 +172,9 @@ class PortalClient:
         return json.loads(raw.decode("utf-8")) if raw else {}
 
     def _activation_request(self, base_url: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if self.activation_transport is not None:
+            return dict(self.activation_transport(base_url, payload))
+        _require_https(base_url)
         body = canonical_json(payload)
         headers = {"Content-Type": "application/json", "X-Portal-Contract": CONTRACT, "X-Request-Id": _b64(os.urandom(16)), "Idempotency-Key": payload["idempotency_key"]}
         req = request.Request(base_url.rstrip("/") + "/api/v1/commercial/activations/redeem", data=body, headers=headers, method="POST")
@@ -175,6 +188,7 @@ class PortalClient:
         return json.loads(raw.decode("utf-8")) if raw else {}
 
     def activate(self, base_url: str, activation_code: str, agent_version: str) -> dict[str, Any]:
+        _require_https(base_url)
         key = Ed25519PrivateKey.generate()
         public = key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
         private = key.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption())

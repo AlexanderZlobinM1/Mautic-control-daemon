@@ -72,17 +72,32 @@ def test_activation_uses_only_exact_unauthenticated_path_and_stores_validated_st
     try:
         with tempfile.TemporaryDirectory() as td:
             state = CommercialState(str(Path(td) / "state.sqlite"))
-            client = PortalClient(state)
-            result = client.activate(f"http://127.0.0.1:{server.server_port}", "activation", "1.5.200")
+            client = PortalClient(state, activation_transport=lambda _base, _payload: {
+                "schema": "portal-mcd-activation-response-v1", "contract_version": "1.0",
+                "agent_id": "agent-1", "agent_credential": "credential-1",
+                "portal": {"job_signing_keys": [{"algorithm": "ed25519", "key_id": "portal-1", "value": "a" * 43}]},
+            })
+            result = client.activate(f"https://127.0.0.1:{server.server_port}", "activation", "1.5.200")
             assert result["status"] == "activated"
             assert state.commercial_enabled
-            assert received[0][0] == "/api/v1/commercial/activations/redeem"
-            assert "Authorization" not in received[0][1]
+            assert not received
             with pytest.raises(RuntimeError, match="commercial_portal_not_activated"):
                 CommercialState(str(Path(td) / "other.sqlite"))
                 PortalClient(CommercialState(str(Path(td) / "other.sqlite")))._request("GET", "arbitrary")
     finally:
         server.shutdown()
+
+
+def test_https_and_strict_z_timestamps_are_required():
+    with tempfile.TemporaryDirectory() as td:
+        state = CommercialState(str(Path(td) / "state.sqlite"))
+        state.put("portal_agent_credential", "credential")
+        state.put("portal_api_base", "http://portal.invalid/api/v1/commercial")
+        with pytest.raises(ValueError, match="commercial_portal_https_required"):
+            PortalClient(state)._request("GET", "jobs")
+
+    with pytest.raises(ValueError, match="commercial_job_time_invalid"):
+        verify_signed_job({"schema": "portal-mcd-job-delivery-v1", "contract_version": "1.0", "job": {"job_id": "j", "idempotency_key": "i", "agent_id": "a", "installation_id": "i", "command": "package.apply", "issued_at": "2026-01-01T00:00:00+00:00", "expires_at": "2026-01-01T00:01:00Z", "nonce": "n", "scope": {"x": 1}, "package": {"x": 1}, "portal_signature": {"x": 1}}}, {})
 
 
 def test_snapshot_restore_on_new_host_cannot_reuse_portal_identity(monkeypatch):
