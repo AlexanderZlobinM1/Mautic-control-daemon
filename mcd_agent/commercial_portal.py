@@ -63,9 +63,13 @@ def verify_signed_job(job: Mapping[str, Any], public_keys: Mapping[str, str], *,
         raise ValueError("commercial_job_shape_invalid")
     if item["scope"].get("agent_id") != item["agent_id"] or item["scope"].get("installation_id") != item["installation_id"]:
         raise ValueError("commercial_job_scope_mismatch")
-    digest = str(package.get("digest") or "")
-    if not digest.startswith("sha256:") or len(digest) != 71:
+    digest = str(package.get("sha256") or package.get("digest") or "").lower()
+    if digest.startswith("sha256:"):
+        digest = digest[7:]
+    if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
         raise ValueError("commercial_package_digest_invalid")
+    if not package.get("package_id") or not package.get("revision") or not package.get("media_type"):
+        raise ValueError("commercial_package_identity_missing")
     size = int(package.get("size_bytes") or 0)
     if size < 0 or size > MAX_ARTIFACT_BYTES:
         raise ValueError("commercial_package_size_invalid")
@@ -77,7 +81,7 @@ def verify_signed_job(job: Mapping[str, Any], public_keys: Mapping[str, str], *,
         Ed25519PublicKey.from_public_bytes(_unb64(key)).verify(_unb64(str(signature["value"])), canonical_json(_without_signature(item)))
     except Exception as exc:
         raise ValueError("commercial_job_signature_invalid") from exc
-    return {"job_id": str(item["job_id"]), "idempotency_key": str(item["idempotency_key"]), "command": str(item["command"]), "digest": digest, "size_bytes": size}
+    return {"job_id": str(item["job_id"]), "idempotency_key": str(item["idempotency_key"]), "command": str(item["command"]), "package_id": str(package["package_id"]), "revision": str(package["revision"]), "digest": "sha256:" + digest, "size_bytes": size, "media_type": str(package["media_type"])}
 
 
 class CommercialState:
