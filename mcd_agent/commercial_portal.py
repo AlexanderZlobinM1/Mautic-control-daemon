@@ -41,6 +41,10 @@ def _sha256(value: bytes) -> str:
     return "sha256:" + hashlib.sha256(value).hexdigest()
 
 
+def _host_fingerprint() -> str:
+    return "sha256:" + hashlib.sha256(socket.gethostname().encode()).hexdigest()
+
+
 def _without_signature(job: Mapping[str, Any]) -> dict[str, Any]:
     result = dict(job)
     result.pop("portal_signature", None)
@@ -121,7 +125,7 @@ class CommercialState:
 
     @property
     def commercial_enabled(self) -> bool:
-        return bool(self.get("portal_agent_credential"))
+        return bool(self.get("portal_agent_credential")) and self.get("host_fingerprint") == _host_fingerprint()
 
     def remember_nonce(self, nonce: str, now: float) -> bool:
         with sqlite3.connect(self.path) as db:
@@ -174,7 +178,7 @@ class PortalClient:
         key = Ed25519PrivateKey.generate()
         public = key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
         private = key.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption())
-        host_fingerprint = "sha256:" + hashlib.sha256(socket.gethostname().encode()).hexdigest()
+        host_fingerprint = _host_fingerprint()
         machine = platform.machine().lower()
         normalized_platform = "linux-arm64" if machine in {"aarch64", "arm64"} else "linux-amd64" if machine in {"x86_64", "amd64"} else "linux-" + machine
         payload = {"schema": "portal-mcd-activation-request-v1", "contract_version": CONTRACT_VERSION, "activation_code": activation_code, "agent": {"public_key": {"algorithm": "ed25519", "key_id": "agent-" + _b64(public)[:22], "value": _b64(public)}, "host_fingerprint": host_fingerprint, "agent_version": agent_version, "platform": normalized_platform}, "supported_contract_versions": [CONTRACT_VERSION], "idempotency_key": _b64(os.urandom(16))}
@@ -189,6 +193,7 @@ class PortalClient:
         self.state.put("portal_api_base", base_url.rstrip("/") + "/api/v1/commercial")
         self.state.put("portal_agent_credential", result["agent_credential"])
         self.state.put("agent_id", result["agent_id"])
+        self.state.put("host_fingerprint", host_fingerprint)
         self.state.put("agent_private_key", _b64(private))
         self.state.put("agent_key_id", payload["agent"]["public_key"]["key_id"])
         self.state.put("portal_job_signing_keys", {x["key_id"]: x["value"] for x in signing_keys})

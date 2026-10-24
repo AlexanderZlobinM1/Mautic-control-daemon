@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import shutil
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -82,4 +83,18 @@ def test_activation_uses_only_exact_unauthenticated_path_and_stores_validated_st
                 PortalClient(CommercialState(str(Path(td) / "other.sqlite")))._request("GET", "arbitrary")
     finally:
         server.shutdown()
+
+
+def test_snapshot_restore_on_new_host_cannot_reuse_portal_identity(monkeypatch):
+    with tempfile.TemporaryDirectory() as td:
+        source = Path(td) / "source.sqlite"
+        clone = Path(td) / "clone.sqlite"
+        original = CommercialState(str(source))
+        original.put("portal_agent_credential", "credential-1")
+        original.put("agent_id", "agent-1")
+        original.put("host_fingerprint", "sha256:" + "a" * 64)
+        shutil.copy2(source, clone)
+        monkeypatch.setattr("mcd_agent.commercial_portal._host_fingerprint", lambda: "sha256:" + "b" * 64)
+        restored = CommercialState(str(clone))
+        assert not restored.commercial_enabled
 
