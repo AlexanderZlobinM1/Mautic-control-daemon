@@ -17,6 +17,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Mapping
 from urllib import request
+from urllib.parse import quote
 from urllib.error import HTTPError
 
 from cryptography.hazmat.primitives import serialization
@@ -87,11 +88,17 @@ def verify_signed_job(job: Mapping[str, Any], public_keys: Mapping[str, str], *,
         raise ValueError("commercial_job_shape_invalid")
     if item["scope"].get("agent_id") != item["agent_id"] or item["scope"].get("installation_id") != item["installation_id"]:
         raise ValueError("commercial_job_scope_mismatch")
+    allowed_commands = item["scope"].get("allowed_commands")
+    if isinstance(allowed_commands, list) and item["command"] not in allowed_commands:
+        raise ValueError("commercial_job_command_not_allowed")
     digest = str(package.get("sha256") or package.get("digest") or "").lower()
     if digest.startswith("sha256:"):
         digest = digest[7:]
     if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
         raise ValueError("commercial_package_digest_invalid")
+    scoped_digest = str(item["scope"].get("artifact_sha256") or "").lower().removeprefix("sha256:")
+    if scoped_digest and scoped_digest != digest:
+        raise ValueError("commercial_job_artifact_scope_mismatch")
     if not package.get("package_id") or not package.get("revision") or not package.get("media_type"):
         raise ValueError("commercial_package_identity_missing")
     size = int(package.get("size_bytes") or 0)
@@ -105,7 +112,37 @@ def verify_signed_job(job: Mapping[str, Any], public_keys: Mapping[str, str], *,
         Ed25519PublicKey.from_public_bytes(_unb64(key)).verify(_unb64(str(signature["value"])), canonical_json(_without_signature(item)))
     except Exception as exc:
         raise ValueError("commercial_job_signature_invalid") from exc
-    return {"job_id": str(item["job_id"]), "idempotency_key": str(item["idempotency_key"]), "command": str(item["command"]), "package_id": str(package["package_id"]), "revision": str(package["revision"]), "digest": "sha256:" + digest, "size_bytes": size, "media_type": str(package["media_type"])}
+    applicability = package.get("applicability")
+    if not isinstance(applicability, dict):
+        raise ValueError("commercial_package_applicability_missing")
+    return {"job_id": str(item["job_id"]), "idempotency_key": str(item["idempotency_key"]), "command": str(item["command"]), "package_id": str(package["package_id"]), "revision": str(package["revision"]), "digest": "sha256:" + digest, "size_bytes": size, "media_type": str(package["media_type"]), "applicability": applicability}
+
+
+def verify_mcc_artifact(job: Mapping[str, Any], artifact: bytes, publisher_keys: Mapping[str, str]) -> dict[str, Any]:
+    """Verify exact Portal-delivered bytes against the MCC publisher statement."""
+    item = job.get("job") if isinstance(job.get("job"), dict) else job
+    package = item.get("package") if isinstance(item, dict) else None
+    if not isinstance(package, dict):
+        raise ValueError("commercial_package_missing")
+    digest = str(package.get("sha256") or "").lower().removeprefix("sha256:")
+    if len(digest) != 64 or hashlib.sha256(artifact).hexdigest() != digest:
+        raise ValueError("commercial_artifact_digest_invalid")
+    if len(artifact) != int(package.get("size_bytes") or -1):
+        raise ValueError("commercial_artifact_size_invalid")
+    signature = package.get("signature")
+    if not isinstance(signature, dict) or signature.get("algorithm") != "ed25519":
+        raise ValueError("commercial_artifact_signature_missing")
+    key = publisher_keys.get(str(signature.get("key_id") or ""))
+    kind = str(package.get("kind") or "scenario")
+    statement = {"kind": kind, "revision": str(package.get("revision") or ""), "sha256": digest, "media_type": str(package.get("media_type") or ""), "size_bytes": int(package.get("size_bytes") or 0)}
+    signed = b"com.sales-snap.portal-mcc/artifact-signature/1.0\n" + canonical_json(statement) + b"\n"
+    if not key:
+        raise ValueError("commercial_artifact_signer_unknown")
+    try:
+        Ed25519PublicKey.from_public_bytes(_unb64(key)).verify(_unb64(str(signature.get("value") or "")), signed)
+    except Exception as exc:
+        raise ValueError("commercial_artifact_signature_invalid") from exc
+    return {"kind": kind, "revision": str(package["revision"]), "sha256": "sha256:" + digest, "size_bytes": len(artifact), "media_type": str(package["media_type"])}
 
 
 class CommercialState:
@@ -181,6 +218,62 @@ class PortalClient:
         if len(raw) > 2 * 1024 * 1024:
             raise RuntimeError("commercial_portal_response_too_large")
         return json.loads(raw.decode("utf-8")) if raw else {}
+
+    def ack_job(self, *, job_id: str, installation_id: str, status: str, reason: str | None, idempotency_key: str) -> dict[str, Any]:
+        agent_id = str(self.state.get("agent_id") or "")
+        payload = {"schema": "portal-mcd-job-ack-v1", "contract_version": CONTRACT_VERSION, "job_id": job_id, "installation_id": installation_id, "status": status, "reason": reason, "idempotency_key": idempotency_key}
+        return self._request("POST", f"agents/{agent_id}/jobs/{job_id}/ack", payload, idempotency_key=idempotency_key)
+
+    def pull_job(self, *, installation_id: str, cursor: str = "", wait_seconds: int = 25, limit: int = 1) -> dict[str, Any] | None:
+        agent_id = str(self.state.get("agent_id") or "")
+        wait = max(0, min(30, int(wait_seconds)))
+        bounded_limit = max(1, min(20, int(limit)))
+        query = f"?installation_id={quote(installation_id)}&wait_seconds={wait}&limit={bounded_limit}"
+        if cursor:
+            query += "&cursor=" + quote(cursor)
+        base = str(self.state.get("portal_api_base") or "").rstrip("/")
+        if not base:
+            raise RuntimeError("commercial_portal_not_activated")
+        _require_https(base)
+        req = request.Request(base + f"/agents/{agent_id}/jobs" + query, headers={"Authorization": "Bearer " + str(self.state.get("portal_agent_credential")), "X-Portal-Contract": CONTRACT}, method="GET")
+        try:
+            with request.urlopen(req, timeout=self.timeout_sec, context=ssl.create_default_context()) as response:
+                if int(getattr(response, "status", 200)) == 204:
+                    return None
+                raw = response.read(2 * 1024 * 1024 + 1)
+        except HTTPError as exc:
+            raise RuntimeError(f"commercial_portal_http_{exc.code}") from exc
+        if len(raw) > 2 * 1024 * 1024:
+            raise RuntimeError("commercial_portal_response_too_large")
+        result = json.loads(raw.decode("utf-8")) if raw else {}
+        if result.get("schema") != "portal-mcd-job-delivery-v1" or result.get("contract_version") != CONTRACT_VERSION:
+            raise RuntimeError("commercial_job_delivery_schema_invalid")
+        return result
+
+    def download_artifact(self, *, path: str, grant: str, expected_size: int) -> bytes:
+        base = str(self.state.get("portal_api_base") or "").rstrip("/")
+        _require_https(base)
+        expected = int(expected_size)
+        if expected < 0 or expected > MAX_ARTIFACT_BYTES:
+            raise ValueError("commercial_artifact_size_invalid")
+        req = request.Request(base + "/" + path.lstrip("/"), headers={"Authorization": "Bearer " + str(self.state.get("portal_agent_credential")), "X-Portal-Contract": CONTRACT, "X-Portal-Artifact-Grant": grant}, method="GET")
+        try:
+            with request.urlopen(req, timeout=self.timeout_sec, context=ssl.create_default_context()) as response:
+                body = response.read(expected + 1)
+        except HTTPError as exc:
+            raise RuntimeError(f"commercial_artifact_http_{exc.code}") from exc
+        if len(body) != expected:
+            raise RuntimeError("commercial_artifact_size_mismatch")
+        return body
+
+    def send_receipt(self, payload: dict[str, Any]) -> dict[str, Any]:
+        agent_id = str(self.state.get("agent_id") or "")
+        private = Ed25519PrivateKey.from_private_bytes(_unb64(str(self.state.get("agent_private_key") or "")))
+        signed = dict(payload)
+        signed.pop("agent_signature", None)
+        payload = dict(payload)
+        payload["agent_signature"] = {"algorithm": "ed25519", "key_id": str(self.state.get("agent_key_id") or ""), "value": _b64(private.sign(canonical_json(signed)))}
+        return self._request("POST", f"agents/{agent_id}/receipts", payload, idempotency_key=str(payload.get("idempotency_key") or payload.get("job_id") or ""))
 
     def _activation_request(self, base_url: str, payload: dict[str, Any]) -> dict[str, Any]:
         if self.activation_transport is not None:

@@ -989,3 +989,23 @@ files are applied in order; the last existing local include is authoritative for
 overrides such as `[backup]` and `[backup.schedule]`. Startup and reload must
 therefore preserve `backup.enabled` and schedule enablement from the effective
 local file when the entrypoint only supplies defaults or MCC bootstrap fields.
+
+### Commercial Portal scenario admission
+
+Commercial MCD is an outbound-only Portal lane. A delivered job is admitted
+only after Portal envelope, scope, expiry, nonce, command, applicability and
+Portal signature validation. The complete artifact is then hashed and checked
+against the MCC publisher Ed25519 statement; MCD never fetches MCC directly.
+The artifact may contain only `portal-mcd-scenario-v1` with declared stages.
+Stage handlers are an injected registry: an unknown stage, schema, contract or
+compatibility value fails closed before execution.
+
+Scenario progress is checkpointed by `job_id` and completed `stage_id` in the
+commercial state store. Re-delivery resumes from the checkpoint and does not
+repeat completed stages. A failed run executes registered rollback handlers in
+reverse order and writes a failed checkpoint. A successful run produces a
+monotonic Portal receipt payload signed by the host agent. This lane does not
+alter corporate MCC↔MCD, standalone mode, scheduler ownership, cron, or Mautic
+state semantics; existing-server discovery/registration and new-server
+bootstrap are scenario stages supplied by the owning operation, not hardcoded
+commercial policy in MCD.
