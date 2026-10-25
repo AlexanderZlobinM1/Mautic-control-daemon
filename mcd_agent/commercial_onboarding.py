@@ -19,6 +19,11 @@ ONBOARDING_STAGE_KINDS = (
 
 ONBOARDING_RECEIPTS = {"mcd-onboarding-stage-receipt-v1", "mcd-onboarding-terminal-receipt-v1"}
 FORBIDDEN_PRIMITIVES = {"arbitrary_shell", "arbitrary_sql", "delete_unowned_data", "delete_migration_history", "take_cron_ownership"}
+PRIMITIVE_VERSIONS = {kind: "1.0" for kind in ONBOARDING_STAGE_KINDS}
+
+
+def exposed_capabilities() -> dict[str, Any]:
+    return {"capabilities": ["portal_scenario_execution_v1", "mcd_passive_activation_v1"], "primitive_versions": dict(PRIMITIVE_VERSIONS)}
 
 
 def validate_onboarding_artifact(scenario: Mapping[str, Any]) -> None:

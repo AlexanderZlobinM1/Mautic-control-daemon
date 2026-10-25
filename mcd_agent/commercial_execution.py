@@ -7,6 +7,7 @@ from typing import Any, Callable, Mapping
 
 from mcd_agent.commercial_portal import CONTRACT_VERSION, CommercialState, canonical_json, verify_mcc_artifact, verify_signed_job
 from mcd_agent.commercial_onboarding import validate_onboarding_artifact
+from mcd_agent.commercial_detector import validate_scenario_detector
 
 
 def _utc() -> str:
@@ -58,6 +59,11 @@ class CommercialScenarioExecutor:
             raise ValueError("commercial_scenario_schema_invalid")
         if scenario.get("schema") == "mcc-self-hosted-onboarding-scenario-v1":
             validate_onboarding_artifact(scenario)
+        if scenario.get("detector"):
+            facts = (context or {}).get("local_facts")
+            if not isinstance(facts, dict):
+                raise ValueError("commercial_detector_facts_missing")
+            validate_scenario_detector(scenario, facts, detector_id=str(scenario["detector"].get("id") or ""), detector_revision=str(scenario["detector"].get("revision") or ""))
         matrix = scenario.get("compatibility", {})
         if not isinstance(matrix, dict):
             raise ValueError("commercial_scenario_compatibility_rejected")
