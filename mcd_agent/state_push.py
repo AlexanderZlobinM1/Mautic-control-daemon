@@ -32,6 +32,7 @@ from mcd_agent.cluster_assets import collect_cluster_assets_status
 from mcd_agent.config import AgentConfig
 from mcd_agent.form_embed import load_form_embed_state
 from mcd_agent.host_identity import resolve_agent_identity
+from mcd_agent.commercial_portal import _host_fingerprint
 from mcd_agent.install_readiness import collect_mautic_install_readiness
 from mcd_agent.instance_size import collect_instance_sizes
 from mcd_agent.install_type import detect_install_type, is_complete_plugin_bundle, plugin_dir_candidates
@@ -2216,6 +2217,7 @@ class MCCStatePusher:
                     "runtime_capabilities": release_capabilities(i.runtime, install_type, runtime_profile.capabilities),
                     "runtime_adapter": str(i.runtime_adapter or ""),
                     "runtime_image_ref": str(i.runtime_image_ref or ""),
+                    "docker_runtime_capability": getattr(i, "docker_runtime_capability", None) if str(i.runtime or "").strip().lower() == "docker" else None,
                     "runtime_profile": runtime_profile.safe_dict(),
                     "plugins": plugins,
                     "sender_type": str(sender.get("sender_type", "") or "").strip() or "unknown",
@@ -2235,6 +2237,8 @@ class MCCStatePusher:
 
         payload: dict[str, Any] = {
             "schema": "mcd-state-v1",
+            "agent_id": str(getattr(self.cfg, "agent_id", "") or ""),
+            "host_fingerprint": _host_fingerprint(),
             "hostname": str(identity.get("effective_hostname") or ""),
             "mcc_host_name": str(identity.get("effective_mcc_host_name") or ""),
             "agent_hostname": str(identity.get("local_hostname") or ""),
