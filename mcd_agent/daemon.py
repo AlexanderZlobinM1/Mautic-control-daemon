@@ -280,6 +280,7 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
                 publisher_keys={str(key): str(value) for key, value in publisher_keys.items()},
                 context={"platform": "linux-arm64" if platform.machine().lower() in {"aarch64", "arm64"} else "linux-amd64", "runtime": "host", "cron_ownership": "none"},
                 capabilities={"portal_scenario_execution_v1", "mcd_passive_activation_v1"},
+                preflight_required=True,
             )
         except Exception:
             disabled("commercial_worker_material_invalid")

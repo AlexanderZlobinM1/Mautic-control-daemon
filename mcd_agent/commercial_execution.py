@@ -8,6 +8,7 @@ from typing import Any, Callable, Mapping
 from mcd_agent.commercial_portal import CONTRACT_VERSION, CommercialState, canonical_json, verify_mcc_artifact, verify_signed_job
 from mcd_agent.commercial_onboarding import validate_onboarding_artifact
 from mcd_agent.commercial_detector import validate_scenario_detector
+from mcd_agent.commercial_bootstrap_precheck import validate_portal_preflight_receipt
 
 
 def _utc() -> str:
@@ -126,7 +127,7 @@ class CommercialScenarioExecutor:
 class CommercialPortalWorker:
     """One non-blocking commercial poll/execute/receipt cycle."""
 
-    def __init__(self, client: Any, executor: CommercialScenarioExecutor, *, installation_id: str | list[str], portal_keys: Mapping[str, str], publisher_keys: Mapping[str, str], context: dict[str, Any], capabilities: set[str]):
+    def __init__(self, client: Any, executor: CommercialScenarioExecutor, *, installation_id: str | list[str], portal_keys: Mapping[str, str], publisher_keys: Mapping[str, str], context: dict[str, Any], capabilities: set[str], preflight_required: bool = False):
         self.client, self.executor = client, executor
         self.installation_ids = [installation_id] if isinstance(installation_id, str) else [str(value) for value in installation_id]
         self.installation_ids = [value for value in self.installation_ids if value]
@@ -134,6 +135,7 @@ class CommercialPortalWorker:
             raise ValueError("commercial_installation_identity_missing")
         self.portal_keys, self.publisher_keys = dict(portal_keys), dict(publisher_keys)
         self.context, self.capabilities = dict(context), set(capabilities)
+        self.preflight_required = bool(preflight_required)
 
     def run_once(self) -> dict[str, Any]:
         pending = self.executor.state.get("commercial_pending_receipt")
@@ -156,6 +158,19 @@ class CommercialPortalWorker:
         download = package.get("download") if isinstance(package.get("download"), dict) else {}
         try:
             verified = verify_signed_job(delivery, self.portal_keys)
+            preflight = job.get("preflight_receipt")
+            if self.preflight_required and not isinstance(preflight, dict):
+                raise ValueError("portal_preflight_receipt_missing")
+            if isinstance(preflight, dict):
+                tuple_key = str(job.get("preflight_tuple_key") or job.get("idempotency_key") or "")
+                host_fingerprint = str(job.get("preflight_host_fingerprint") or self.context.get("host_fingerprint") or "")
+                receipt_meta = validate_portal_preflight_receipt(preflight, portal_keys=self.portal_keys, tuple_key=tuple_key, host_fingerprint=host_fingerprint, request_id=str(job.get("job_id") or ""))
+                replay_key = str(job.get("job_id") or "") + ":" + str(preflight.get("checked_at") or "")
+                used = self.executor.state.get("commercial_preflight_receipts") or {}
+                if replay_key in used:
+                    raise ValueError("portal_preflight_receipt_replay")
+                used[replay_key] = receipt_meta
+                self.executor.state.put("commercial_preflight_receipts", used)
             artifact = self.client.download_artifact(path=str(download["path"]), grant=str(download["grant"]), expected_size=verified["size_bytes"])
             self.client.ack_job(job_id=str(job["job_id"]), installation_id=active_installation_id, status="accepted", reason=None, idempotency_key=str(job["idempotency_key"]))
             terminal = self.executor.run(delivery, portal_keys=self.portal_keys, publisher_keys=self.publisher_keys, artifact=artifact, context=self.context, capabilities=self.capabilities, receipt_sink=self.client.send_receipt)

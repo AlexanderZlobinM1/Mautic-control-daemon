@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import base64
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from mcd_agent.commercial_portal import canonical_json
 from typing import Any, Mapping
 
 
@@ -23,6 +26,44 @@ CHECKS = {
     "dns_exact_server",
 }
 STATUSES = {"PASS", "WARN", "FAIL"}
+
+
+def validate_portal_preflight_receipt(receipt: Mapping[str, Any], *, portal_keys: Mapping[str, str], tuple_key: str, host_fingerprint: str, request_id: str, now: datetime | None = None) -> dict[str, Any]:
+    """Verify Portal-authored preflight evidence before any scenario mutation."""
+    if receipt.get("schema") != "portal-self-hosted-preflight-receipt-v1" or receipt.get("contract_version") != CONTRACT_VERSION:
+        raise ValueError("portal_preflight_receipt_schema_invalid")
+    if receipt.get("tuple_key") != tuple_key or receipt.get("host_fingerprint") != host_fingerprint or receipt.get("request_id") != request_id:
+        raise ValueError("portal_preflight_receipt_binding_invalid")
+    signature = receipt.get("portal_signature")
+    if not isinstance(signature, dict) or signature.get("algorithm") != "ed25519":
+        raise ValueError("portal_preflight_signature_invalid")
+    key_value = portal_keys.get(str(signature.get("key_id") or ""))
+    if not key_value:
+        raise ValueError("portal_preflight_signing_key_unknown")
+    try:
+        key_padded = str(key_value) + "=" * (-len(str(key_value)) % 4)
+        public = Ed25519PublicKey.from_public_bytes(base64.urlsafe_b64decode(key_padded))
+        signed = dict(receipt)
+        signed.pop("portal_signature", None)
+        public.verify(base64.urlsafe_b64decode(padded := str(signature["value"]) + "=" * (-len(str(signature["value"])) % 4)), canonical_json(signed))
+    except Exception as exc:
+        raise ValueError("portal_preflight_signature_invalid") from exc
+    checked = receipt.get("checked_at")
+    observed = receipt.get("observed_at", checked)
+    if not checked or observed != checked:
+        raise ValueError("portal_preflight_timestamp_mismatch")
+    try:
+        expires_at = datetime.fromisoformat(str(receipt["expires_at"]).replace("Z", "+00:00"))
+        checked_at = datetime.fromisoformat(str(checked).replace("Z", "+00:00"))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("portal_preflight_receipt_time_invalid") from exc
+    current = now or datetime.now(timezone.utc)
+    if checked_at > current or current >= expires_at:
+        raise ValueError("portal_preflight_receipt_expired")
+    checks = receipt.get("checks")
+    if receipt.get("ready") is not True or receipt.get("cleanup") != "clean" or not isinstance(checks, list) or not checks or any(item.get("status") not in {"PASS", "WARN"} for item in checks if isinstance(item, dict)) or any(not isinstance(item, dict) for item in checks):
+        raise ValueError("portal_preflight_receipt_not_ready")
+    return {"schema": receipt["schema"], "contract_version": CONTRACT_VERSION, "tuple_key": tuple_key, "host_fingerprint": host_fingerprint, "request_id": request_id, "checked_at": checked, "expires_at": receipt["expires_at"], "ready": True, "cleanup": "clean", "check_count": len(checks), "signing_key_id": str(signature["key_id"])}
 
 
 def validate_precheck_scenario(value: Mapping[str, Any]) -> dict[str, Any]:
