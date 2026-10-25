@@ -10,7 +10,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import pytest
 
-from mcd_agent.commercial_execution import CommercialScenarioExecutor
+from mcd_agent.commercial_execution import CommercialPortalWorker, CommercialScenarioExecutor, validate_onboarding_stage_receipt, validate_onboarding_terminal_receipt
 from mcd_agent.commercial_portal import CommercialState, canonical_json
 
 
@@ -46,3 +46,10 @@ def test_unknown_stage_fails_closed_before_handler():
         runner = CommercialScenarioExecutor(state, stage_handlers={})
         with pytest.raises(ValueError, match="commercial_job_fields_missing"):
             runner.run({"schema": "portal-mcd-job-delivery-v1", "contract_version": "1.0", "job": {}}, portal_keys={}, publisher_keys={}, artifact=b"{}")
+
+
+def test_receipt_schema_validation_is_strict():
+    validate_onboarding_stage_receipt({"schema": "mcd-onboarding-stage-receipt-v1", "contract_version": "1.0", "job_id": "j", "stage_id": "s", "sequence": 1, "status": "succeeded"}, job_id="j", stage_id="s", sequence=1)
+    validate_onboarding_terminal_receipt({"schema": "mcd-onboarding-terminal-receipt-v1", "contract_version": "1.0", "job_id": "j", "status": "succeeded"}, job_id="j")
+    with pytest.raises(ValueError, match="commercial_stage_receipt_schema_invalid"):
+        validate_onboarding_stage_receipt({"schema": "wrong"}, job_id="j", stage_id="s", sequence=1)

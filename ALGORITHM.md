@@ -1009,3 +1009,12 @@ alter corporate MCC↔MCD, standalone mode, scheduler ownership, cron, or Mautic
 state semantics; existing-server discovery/registration and new-server
 bootstrap are scenario stages supplied by the owning operation, not hardcoded
 commercial policy in MCD.
+
+The commercial transport worker is a separate non-blocking Portal lane:
+`pull_job` → exact artifact download/admission → accepted acknowledgement →
+stage execution/checkpoint receipts → one terminal receipt. Its cursor and
+pending terminal receipt are durable in the commercial state store, so a
+restart retries the same receipt and resumes completed stages without
+re-executing them. Network/Portal failure never pauses corporate or standalone
+scheduler work. Onboarding stage and terminal receipt schemas are validated
+before they are sent.

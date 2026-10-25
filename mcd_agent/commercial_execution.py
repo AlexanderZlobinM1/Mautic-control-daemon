@@ -12,6 +12,22 @@ def _utc() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def validate_onboarding_stage_receipt(receipt: Mapping[str, Any], *, job_id: str, stage_id: str, sequence: int) -> None:
+    if receipt.get("schema") != "mcd-onboarding-stage-receipt-v1":
+        raise ValueError("commercial_stage_receipt_schema_invalid")
+    if receipt.get("contract_version") != CONTRACT_VERSION or receipt.get("job_id") != job_id or receipt.get("stage_id") != stage_id:
+        raise ValueError("commercial_stage_receipt_binding_invalid")
+    if int(receipt.get("sequence", -1)) != int(sequence) or receipt.get("status") not in {"running", "waiting", "succeeded", "failed"}:
+        raise ValueError("commercial_stage_receipt_fields_invalid")
+
+
+def validate_onboarding_terminal_receipt(receipt: Mapping[str, Any], *, job_id: str) -> None:
+    if receipt.get("schema") != "mcd-onboarding-terminal-receipt-v1" or receipt.get("contract_version") != CONTRACT_VERSION or receipt.get("job_id") != job_id:
+        raise ValueError("commercial_terminal_receipt_invalid")
+    if receipt.get("status") not in {"succeeded", "failed", "rejected", "expired", "cancelled"}:
+        raise ValueError("commercial_terminal_receipt_status_invalid")
+
+
 class CommercialScenarioExecutor:
     """Generic scenario bridge; concrete stage behavior is injected by MCD."""
 
@@ -26,7 +42,7 @@ class CommercialScenarioExecutor:
         with sqlite3.connect(self.state.path) as db:
             db.execute("INSERT INTO commercial_scenario_runs(job_id,payload) VALUES(?,?) ON CONFLICT(job_id) DO UPDATE SET payload=excluded.payload", (job_id, json.dumps(payload, sort_keys=True)))
 
-    def run(self, job: Mapping[str, Any], *, portal_keys: Mapping[str, str], publisher_keys: Mapping[str, str], artifact: bytes, context: dict[str, Any] | None = None, mcd_contract: str = "1.5.200", capabilities: set[str] | None = None) -> dict[str, Any]:
+    def run(self, job: Mapping[str, Any], *, portal_keys: Mapping[str, str], publisher_keys: Mapping[str, str], artifact: bytes, context: dict[str, Any] | None = None, mcd_contract: str = "1.5.200", capabilities: set[str] | None = None, receipt_sink: Callable[[dict[str, Any]], Any] | None = None) -> dict[str, Any]:
         verified = verify_signed_job(job, portal_keys)
         package = job["job"]["package"]
         compatibility = verified["applicability"].get("mcd_contract")
@@ -73,6 +89,10 @@ class CommercialScenarioExecutor:
                 result = handler({"stage": stage, "context": ctx})
                 completed.append(stage_id)
                 results.append({"stage_id": stage_id, "result": result})
+                if receipt_sink:
+                    stage_receipt = {"schema": "mcd-onboarding-stage-receipt-v1", "contract_version": CONTRACT_VERSION, "job_id": job_id, "stage_id": stage_id, "sequence": len(results), "idempotency_key": f"{job_id}:stage:{len(results)}", "status": "succeeded", "result": result}
+                    validate_onboarding_stage_receipt(stage_receipt, job_id=job_id, stage_id=stage_id, sequence=len(results))
+                    receipt_sink(stage_receipt)
                 self._save(job_id, {"completed": completed, "results": results, "status": "running"})
         except Exception:
             for stage_id in reversed(completed):
@@ -89,3 +109,45 @@ class CommercialScenarioExecutor:
         with sqlite3.connect(self.state.path) as db:
             row = db.execute("SELECT payload FROM commercial_scenario_runs WHERE job_id=?", (job_id,)).fetchone()
         return json.loads(row[0]) if row else None
+
+
+class CommercialPortalWorker:
+    """One non-blocking commercial poll/execute/receipt cycle."""
+
+    def __init__(self, client: Any, executor: CommercialScenarioExecutor, *, installation_id: str, portal_keys: Mapping[str, str], publisher_keys: Mapping[str, str], context: dict[str, Any], capabilities: set[str]):
+        self.client, self.executor = client, executor
+        self.installation_id = installation_id
+        self.portal_keys, self.publisher_keys = dict(portal_keys), dict(publisher_keys)
+        self.context, self.capabilities = dict(context), set(capabilities)
+
+    def run_once(self) -> dict[str, Any]:
+        pending = self.executor.state.get("commercial_pending_receipt")
+        if isinstance(pending, dict):
+            self.client.send_receipt(pending)
+            self.executor.state.put("commercial_pending_receipt", None)
+        cursor = str(self.executor.state.get("commercial_portal_cursor") or "")
+        delivery = self.client.pull_job(installation_id=self.installation_id, cursor=cursor, wait_seconds=0, limit=1)
+        if not delivery:
+            return {"status": "idle"}
+        job = delivery.get("job")
+        if not isinstance(job, dict):
+            raise ValueError("commercial_job_delivery_missing")
+        package = job.get("package") if isinstance(job.get("package"), dict) else {}
+        download = package.get("download") if isinstance(package.get("download"), dict) else {}
+        try:
+            verified = verify_signed_job(delivery, self.portal_keys)
+            artifact = self.client.download_artifact(path=str(download["path"]), grant=str(download["grant"]), expected_size=verified["size_bytes"])
+            self.client.ack_job(job_id=str(job["job_id"]), installation_id=self.installation_id, status="accepted", reason=None, idempotency_key=str(job["idempotency_key"]))
+            terminal = self.executor.run(delivery, portal_keys=self.portal_keys, publisher_keys=self.publisher_keys, artifact=artifact, context=self.context, capabilities=self.capabilities, receipt_sink=self.client.send_receipt)
+            terminal["schema"] = "mcd-onboarding-terminal-receipt-v1"
+            validate_onboarding_terminal_receipt(terminal, job_id=str(job["job_id"]))
+            try:
+                self.client.send_receipt(terminal)
+            except Exception:
+                self.executor.state.put("commercial_pending_receipt", terminal)
+                return {"status": "receipt_pending", "job_id": str(job["job_id"])}
+            self.executor.state.put("commercial_portal_cursor", delivery.get("cursor", cursor))
+            return {"status": "succeeded", "job_id": str(job["job_id"])}
+        except Exception as exc:
+            self.client.ack_job(job_id=str(job.get("job_id") or ""), installation_id=self.installation_id, status="rejected", reason=str(exc), idempotency_key=str(job.get("idempotency_key") or ""))
+            return {"status": "rejected", "reason": str(exc)}
