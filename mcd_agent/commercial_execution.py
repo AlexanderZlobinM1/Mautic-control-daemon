@@ -26,7 +26,7 @@ class CommercialScenarioExecutor:
         with sqlite3.connect(self.state.path) as db:
             db.execute("INSERT INTO commercial_scenario_runs(job_id,payload) VALUES(?,?) ON CONFLICT(job_id) DO UPDATE SET payload=excluded.payload", (job_id, json.dumps(payload, sort_keys=True)))
 
-    def run(self, job: Mapping[str, Any], *, portal_keys: Mapping[str, str], publisher_keys: Mapping[str, str], artifact: bytes, context: dict[str, Any] | None = None, mcd_contract: str = "1.5.200") -> dict[str, Any]:
+    def run(self, job: Mapping[str, Any], *, portal_keys: Mapping[str, str], publisher_keys: Mapping[str, str], artifact: bytes, context: dict[str, Any] | None = None, mcd_contract: str = "1.5.200", capabilities: set[str] | None = None) -> dict[str, Any]:
         verified = verify_signed_job(job, portal_keys)
         package = job["job"]["package"]
         compatibility = verified["applicability"].get("mcd_contract")
@@ -39,6 +39,18 @@ class CommercialScenarioExecutor:
             raise ValueError("commercial_scenario_schema_invalid") from exc
         if scenario.get("schema") != "portal-mcd-scenario-v1" or scenario.get("contract_version") != CONTRACT_VERSION or not isinstance(scenario.get("stages"), list):
             raise ValueError("commercial_scenario_schema_invalid")
+        available = set(capabilities or set())
+        required = scenario.get("required_capabilities", [])
+        if not isinstance(required, list) or any(not isinstance(item, str) or item not in available for item in required):
+            raise ValueError("commercial_scenario_capability_rejected")
+        matrix = scenario.get("compatibility", {})
+        runtime_context = context or {}
+        if not isinstance(matrix, dict):
+            raise ValueError("commercial_scenario_compatibility_rejected")
+        for key in ("platform", "runtime"):
+            allowed = matrix.get(key)
+            if allowed and str(runtime_context.get(key) or "") not in {str(value) for value in allowed}:
+                raise ValueError("commercial_scenario_compatibility_rejected")
         job_id = str(job["job"]["job_id"])
         prior = self._load(job_id)
         completed = list(prior.get("completed", [])) if prior else []
@@ -49,6 +61,9 @@ class CommercialScenarioExecutor:
             for stage in scenario["stages"]:
                 if not isinstance(stage, dict) or not stage.get("stage_id") or not stage.get("handler"):
                     raise ValueError("commercial_scenario_stage_invalid")
+                stage_capabilities = stage.get("requires_capabilities", [])
+                if not isinstance(stage_capabilities, list) or any(not isinstance(item, str) or item not in available for item in stage_capabilities):
+                    raise ValueError("commercial_scenario_capability_rejected")
                 stage_id, handler_name = str(stage["stage_id"]), str(stage["handler"])
                 if stage_id in completed:
                     continue
