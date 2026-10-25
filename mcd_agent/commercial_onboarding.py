@@ -17,6 +17,28 @@ ONBOARDING_STAGE_KINDS = (
     "verify_onboarding_receipts",
 )
 
+ONBOARDING_RECEIPTS = {"mcd-onboarding-stage-receipt-v1", "mcd-onboarding-terminal-receipt-v1"}
+FORBIDDEN_PRIMITIVES = {"arbitrary_shell", "arbitrary_sql", "delete_unowned_data", "delete_migration_history", "take_cron_ownership"}
+
+
+def validate_onboarding_artifact(scenario: Mapping[str, Any]) -> None:
+    security = scenario.get("security")
+    rollback = scenario.get("rollback")
+    if not isinstance(security, dict) or security.get("embedded_secrets") is not False or security.get("unknown_input_policy") != "reject":
+        raise ValueError("commercial_onboarding_security_policy_invalid")
+    if security.get("executor_boundary") != "MCD fixed onboarding primitives only":
+        raise ValueError("commercial_onboarding_executor_boundary_invalid")
+    if not isinstance(rollback, dict) or rollback.get("requires_checkpoint_receipt") is not True:
+        raise ValueError("commercial_onboarding_rollback_policy_invalid")
+    forbidden = set(rollback.get("forbidden") or [])
+    if not FORBIDDEN_PRIMITIVES.issubset(forbidden):
+        raise ValueError("commercial_onboarding_forbidden_primitives_incomplete")
+    for stage in scenario.get("stages") or []:
+        if not isinstance(stage, dict) or stage.get("receipt") not in ONBOARDING_RECEIPTS:
+            raise ValueError("commercial_onboarding_stage_receipt_invalid")
+        if not isinstance(stage.get("idempotency"), dict) or stage["idempotency"].get("replay") not in {"return_existing_receipt", "verify_and_continue"}:
+            raise ValueError("commercial_onboarding_idempotency_invalid")
+
 
 def build_onboarding_primitive_registry(
     implementations: Mapping[str, Callable[[dict[str, Any]], Any]] | None = None,

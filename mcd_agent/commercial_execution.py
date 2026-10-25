@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Mapping
 
 from mcd_agent.commercial_portal import CONTRACT_VERSION, CommercialState, canonical_json, verify_mcc_artifact, verify_signed_job
+from mcd_agent.commercial_onboarding import validate_onboarding_artifact
 
 
 def _utc() -> str:
@@ -55,6 +56,8 @@ class CommercialScenarioExecutor:
             raise ValueError("commercial_scenario_schema_invalid") from exc
         if scenario.get("schema") not in {"portal-mcd-scenario-v1", "mcc-self-hosted-onboarding-scenario-v1"} or (scenario.get("schema") == "portal-mcd-scenario-v1" and scenario.get("contract_version") != CONTRACT_VERSION) or not isinstance(scenario.get("stages"), list):
             raise ValueError("commercial_scenario_schema_invalid")
+        if scenario.get("schema") == "mcc-self-hosted-onboarding-scenario-v1":
+            validate_onboarding_artifact(scenario)
         matrix = scenario.get("compatibility", {})
         if not isinstance(matrix, dict):
             raise ValueError("commercial_scenario_compatibility_rejected")
