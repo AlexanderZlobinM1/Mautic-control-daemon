@@ -12,6 +12,7 @@ class ControlStore:
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(self.path) as db:
             db.execute("CREATE TABLE IF NOT EXISTS mcd_control_jobs (job_id TEXT PRIMARY KEY, request_json TEXT NOT NULL, receipt_json TEXT NOT NULL, updated_at REAL NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS mcd_result_key_ack (key_id TEXT PRIMARY KEY, ack_json TEXT NOT NULL, updated_at REAL NOT NULL)")
 
     def receipts(self) -> list[dict[str, Any]]:
         with sqlite3.connect(self.path) as db:
@@ -42,3 +43,8 @@ class ControlStore:
                 db.commit()
                 out.append(receipt)
         return out
+
+    def record_key_ack(self, ack: Mapping[str, Any]) -> None:
+        with sqlite3.connect(self.path) as db:
+            db.execute("INSERT OR REPLACE INTO mcd_result_key_ack VALUES (?,?,?)", (str(ack["key_id"]), json.dumps(dict(ack), sort_keys=True), time.time()))
+            db.commit()

@@ -33,6 +33,7 @@ from mcd_agent.config import AgentConfig
 from mcd_agent.form_embed import load_form_embed_state
 from mcd_agent.host_identity import resolve_agent_identity
 from mcd_agent.mcd_control import ControlStore, SCHEMA
+from mcd_agent.result_signing import ensure_result_key
 from mcd_agent.commercial_portal import _host_fingerprint
 from mcd_agent.install_readiness import collect_mautic_install_readiness
 from mcd_agent.instance_size import collect_instance_sizes
@@ -2187,6 +2188,13 @@ class MCCStatePusher:
         instances_snapshot_complete: bool = True,
     ) -> dict[str, Any]:
         identity = resolve_agent_identity(self.cfg)
+        result_key = None
+        key_path = str(getattr(self.cfg, "result_signing_key_path", "") or "")
+        if key_path:
+            try:
+                _private, result_key = ensure_result_key(key_path)
+            except Exception:
+                result_key = None
         from mcd_agent.mautic_release_authorization import runtime_capabilities as release_capabilities
         instances = []
         for i in installs:
@@ -2240,6 +2248,7 @@ class MCCStatePusher:
             "schema": "mcd-state-v1",
             "control_receipts": ControlStore(self.cfg.state_db_path).receipts(),
             "control_capabilities": {"schema": "mcd-control-capabilities-v1", "version": "1.0", "commands": ["docker_runtime_preflight_v1"]},
+            "result_signing_key": result_key,
             "agent_id": str(getattr(self.cfg, "agent_id", "") or ""),
             "host_fingerprint": _host_fingerprint(),
             "hostname": str(identity.get("effective_hostname") or ""),
@@ -2325,6 +2334,9 @@ class MCCStatePusher:
                             control = json.loads(body)
                             if isinstance(control, dict) and control.get("schema") == SCHEMA:
                                 ControlStore(self.cfg.state_db_path).ingest(control, agent_id=str(payload.get("agent_id") or ""), host_fingerprint=str(payload.get("host_fingerprint") or ""))
+                                ack = control.get("result_signing_key_ack")
+                                if isinstance(ack, dict) and ack.get("status") in {"active", "retired", "revoked"} and ack.get("key_id") == (payload.get("result_signing_key") or {}).get("key_id"):
+                                    ControlStore(self.cfg.state_db_path).record_key_ack(ack)
                         except (ValueError, json.JSONDecodeError):
                             pass
                     mark_state_snapshot_push_result_mysql(
