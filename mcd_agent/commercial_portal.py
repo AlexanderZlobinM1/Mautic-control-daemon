@@ -335,6 +335,10 @@ class PortalClient:
         result = self._request("POST", f"agents/{agent_id}/installations", payload, idempotency_key=idempotency_key)
         if result.get("schema") != "portal-mcd-installation-register-response-v1" or result.get("contract_version") != CONTRACT_VERSION or not result.get("installation_id"):
             raise RuntimeError("commercial_installation_response_invalid")
+        installation_ids = self.state.get("installation_ids")
+        installation_ids = dict(installation_ids) if isinstance(installation_ids, dict) else {}
+        installation_ids[local_identity] = str(result["installation_id"])
+        self.state.put("installation_ids", installation_ids)
         return result
 
     def send_usage(self, *, installation_id: str, metric: str, observed_at: str, raw_value: int,

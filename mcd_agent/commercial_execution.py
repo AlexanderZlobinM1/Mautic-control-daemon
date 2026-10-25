@@ -55,18 +55,21 @@ class CommercialScenarioExecutor:
             raise ValueError("commercial_scenario_schema_invalid") from exc
         if scenario.get("schema") not in {"portal-mcd-scenario-v1", "mcc-self-hosted-onboarding-scenario-v1"} or (scenario.get("schema") == "portal-mcd-scenario-v1" and scenario.get("contract_version") != CONTRACT_VERSION) or not isinstance(scenario.get("stages"), list):
             raise ValueError("commercial_scenario_schema_invalid")
-        available = set(capabilities or set())
-        required = scenario.get("required_capabilities", [])
-        if not isinstance(required, list) or any(not isinstance(item, str) or item not in available for item in required):
-            raise ValueError("commercial_scenario_capability_rejected")
         matrix = scenario.get("compatibility", {})
-        runtime_context = context or {}
         if not isinstance(matrix, dict):
             raise ValueError("commercial_scenario_compatibility_rejected")
+        available = set(capabilities or set())
+        required = scenario.get("required_capabilities", matrix.get("mcd_required_capabilities", []))
+        if not isinstance(required, list) or any(not isinstance(item, str) or item not in available for item in required):
+            raise ValueError("commercial_scenario_capability_rejected")
+        runtime_context = context or {}
         for key in ("platform", "runtime"):
             allowed = matrix.get(key)
             if allowed and str(runtime_context.get(key) or "") not in {str(value) for value in allowed}:
                 raise ValueError("commercial_scenario_compatibility_rejected")
+        allowed_platforms = matrix.get("platforms")
+        if allowed_platforms and str(runtime_context.get("platform") or "") not in {str(value) for value in allowed_platforms}:
+            raise ValueError("commercial_scenario_compatibility_rejected")
         job_id = str(job["job"]["job_id"])
         prior = self._load(job_id)
         completed = list(prior.get("completed", [])) if prior else []
@@ -151,3 +154,12 @@ class CommercialPortalWorker:
         except Exception as exc:
             self.client.ack_job(job_id=str(job.get("job_id") or ""), installation_id=self.installation_id, status="rejected", reason=str(exc), idempotency_key=str(job.get("idempotency_key") or ""))
             return {"status": "rejected", "reason": str(exc)}
+
+    def run_forever(self, stop_event: Any, *, interval_sec: float = 1.0) -> None:
+        while not stop_event.is_set():
+            try:
+                self.run_once()
+            except Exception:
+                # Portal outage or a malformed delivery must not terminate MCD.
+                pass
+            stop_event.wait(max(0.1, float(interval_sec)))
