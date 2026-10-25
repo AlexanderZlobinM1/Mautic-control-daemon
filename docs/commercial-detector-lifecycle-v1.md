@@ -3,12 +3,14 @@
 MCD does not contain detector definitions, OS matrices, scenario JSON, shell,
 Ansible, or provisioning seeds.
 
-1. MCC superadmin publication creates an immutable versioned artifact in the
-   MCC artifact/object store and catalog metadata in the catalog database.
-2. MCC signs the canonical artifact statement and records revision, digest,
+1. Portal superadmin publication creates an immutable versioned scenario or
+   detector artifact in the Portal external artifact/object store and catalog
+   metadata database.
+2. Portal signs the canonical scenario statement and records revision, digest,
    size, compatibility, detector requirements and capability requirements.
-3. Portal imports only the read-only catalog projection and verified artifact
-   metadata. Portal owns entitlement, subscription and installation binding.
+3. Portal may reference separately signed MCC plugin/image/compatibility
+   artifacts, but MCC is never the scenario authority. Portal owns scenario
+   publication, entitlement, subscription and installation binding.
 4. Portal wraps the exact artifact revision/digest in a signed job and serves
    bytes through a short-lived installation-scoped grant.
 5. MCD reads normalized local facts after installation, evaluates the external

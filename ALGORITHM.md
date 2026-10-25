@@ -995,7 +995,9 @@ local file when the entrypoint only supplies defaults or MCC bootstrap fields.
 Commercial MCD is an outbound-only Portal lane. A delivered job is admitted
 only after Portal envelope, scope, expiry, nonce, command, applicability and
 Portal signature validation. The complete artifact is then hashed and checked
-against the MCC publisher Ed25519 statement; MCD never fetches MCC directly.
+against the Portal-delivered artifact signature and any separately referenced
+MCC publisher statement; MCD never fetches MCC directly and MCC is not the
+scenario authority.
 The artifact may contain only `portal-mcd-scenario-v1` with declared stages.
 Stage handlers are an injected registry: an unknown stage, schema, contract or
 compatibility value fails closed before execution.
