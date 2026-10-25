@@ -1026,3 +1026,17 @@ Portal stop event and bounded thread; it does not enter scheduler admission,
 locks, or task slots. Shutdown sets that event and joins the worker with a
 bounded grace period. Corporate, standalone, and single-cycle paths do not
 instantiate or call the commercial worker.
+
+### Managed-cloud versus self-hosted commercial boundary
+
+For managed-cloud installations under `name.sales-snap.com`, the single
+corporate MCD remains connected only to MCC. Portal reaches MCC through the
+MCC server-to-server projection/intents boundary; MCC continues to dispatch
+work and receive receipts through the corporate MCD. A second Portal key or
+control plane must not be added to that host.
+
+The Portal↔commercial-MCD lane is reserved for self-hosted installations. It
+uses the outbound Portal contract and a host-level commercial agent, separate
+from the corporate MCD identity. Passive commercial acceptance is held until
+Portal completes the approved “Установки” flow; this hold authorizes no host,
+source, credential, or tenant mutation.
