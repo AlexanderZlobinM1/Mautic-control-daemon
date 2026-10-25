@@ -7,6 +7,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey,
 from mcd_agent.commercial_portal import canonical_json
 
 SCHEMA = "mcd-docker-runtime-capability-v1"
+PREFLIGHT_SCHEMA = "mcd-docker-runtime-preflight-v1"
 _PHP_RE = re.compile(r"PHP\s+(\d+\.\d+(?:\.\d+)?)", re.I)
 
 def observe_docker_runtime(*, image_ref: str, image_digest: str, adapter: str, container: str, runner: Callable[[list[str]], str], agent_id: str, installation_id: str, host_fingerprint: str, signing_key: Ed25519PrivateKey | None = None, key_id: str = "", now: datetime | None = None) -> dict[str, Any]:
@@ -61,3 +62,44 @@ def validate_docker_runtime_capability(value: Mapping[str, Any], *, expected_ima
 
 def _b64(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode()
+
+
+def build_docker_runtime_preflight(*, image_ref: str, image_digest: str, adapter: str, agent_id: str, host_fingerprint: str, probe_id: str, request_id: str, runner: Callable[[list[str]], str], signing_key: Ed25519PrivateKey, key_id: str, now: datetime | None = None) -> dict[str, Any]:
+    """Build signed, non-persistent candidate-image evidence; runner owns cleanup."""
+    if not probe_id or not request_id or not signing_key or not key_id:
+        raise ValueError("docker_preflight_identity_missing")
+    cli = runner(["probe", image_ref, image_digest, adapter, probe_id, "php-cli"])
+    fpm = runner(["probe", image_ref, image_digest, adapter, probe_id, "php-fpm"])
+    cli_match, fpm_match = _PHP_RE.search(cli), _PHP_RE.search(fpm)
+    if not cli_match or not fpm_match:
+        raise ValueError("docker_preflight_php_observation_missing")
+    checked = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    value: dict[str, Any] = {"schema": PREFLIGHT_SCHEMA, "contract_version": "1.0", "agent_id": agent_id, "host_fingerprint": host_fingerprint, "image_ref": image_ref, "image_digest": image_digest, "adapter": adapter, "probe_id": probe_id, "request_id": request_id, "php_cli_version": cli_match.group(1), "php_fpm_version": fpm_match.group(1), "capabilities": ["php.cli", "php.fpm"], "checked_at": checked, "cleanup": "clean", "persistent_workload": False, "installation_id": None}
+    value["signature"] = {"algorithm": "ed25519", "key_id": key_id, "value": _b64(signing_key.sign(canonical_json(value)))}
+    return value
+
+
+def validate_docker_runtime_preflight(value: Mapping[str, Any], *, portal_keys: Mapping[str, str], expected_agent_id: str, expected_host_fingerprint: str, expected_image_digest: str, expected_adapter: str, expected_probe_id: str, expected_request_id: str, max_age_seconds: int = 300, now: datetime | None = None) -> dict[str, Any]:
+    if value.get("schema") != PREFLIGHT_SCHEMA or value.get("contract_version") != "1.0" or value.get("installation_id") is not None:
+        raise ValueError("docker_preflight_schema_invalid")
+    fields = {"agent_id": expected_agent_id, "host_fingerprint": expected_host_fingerprint, "image_digest": expected_image_digest, "adapter": expected_adapter, "probe_id": expected_probe_id, "request_id": expected_request_id}
+    if any(value.get(k) != v for k, v in fields.items()) or value.get("cleanup") != "clean" or value.get("persistent_workload") is not False:
+        raise ValueError("docker_preflight_binding_invalid")
+    try:
+        checked = datetime.fromisoformat(str(value["checked_at"]).replace("Z", "+00:00"))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("docker_preflight_timestamp_invalid") from exc
+    current = now or datetime.now(timezone.utc)
+    if checked > current or (current - checked).total_seconds() > max_age_seconds:
+        raise ValueError("docker_preflight_stale")
+    signature = value.get("signature")
+    key = portal_keys.get(str(signature.get("key_id") or "")) if isinstance(signature, dict) else None
+    if not key or not isinstance(signature, dict) or signature.get("algorithm") != "ed25519":
+        raise ValueError("docker_preflight_signature_invalid")
+    try:
+        public = Ed25519PublicKey.from_public_bytes(base64.urlsafe_b64decode(str(key) + "=" * (-len(str(key)) % 4)))
+        unsigned = dict(value); unsigned.pop("signature", None)
+        public.verify(base64.urlsafe_b64decode(str(signature["value"]) + "=" * (-len(str(signature["value"])) % 4)), canonical_json(unsigned))
+    except Exception as exc:
+        raise ValueError("docker_preflight_signature_invalid") from exc
+    return dict(value)
