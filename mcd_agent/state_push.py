@@ -32,6 +32,7 @@ from mcd_agent.cluster_assets import collect_cluster_assets_status
 from mcd_agent.config import AgentConfig
 from mcd_agent.form_embed import load_form_embed_state
 from mcd_agent.host_identity import resolve_agent_identity
+from mcd_agent.mcd_control import ControlStore, SCHEMA
 from mcd_agent.commercial_portal import _host_fingerprint
 from mcd_agent.install_readiness import collect_mautic_install_readiness
 from mcd_agent.instance_size import collect_instance_sizes
@@ -2237,6 +2238,8 @@ class MCCStatePusher:
 
         payload: dict[str, Any] = {
             "schema": "mcd-state-v1",
+            "control_receipts": ControlStore(self.cfg.state_db_path).receipts(),
+            "control_capabilities": {"schema": "mcd-control-capabilities-v1", "version": "1.0", "commands": ["docker_runtime_preflight_v1"]},
             "agent_id": str(getattr(self.cfg, "agent_id", "") or ""),
             "host_fingerprint": _host_fingerprint(),
             "hostname": str(identity.get("effective_hostname") or ""),
@@ -2317,6 +2320,13 @@ class MCCStatePusher:
                 code = int(getattr(resp, "status", 200))
                 body = (resp.read() or b"").decode("utf-8", errors="replace")
                 if 200 <= code < 300:
+                    if body.strip():
+                        try:
+                            control = json.loads(body)
+                            if isinstance(control, dict) and control.get("schema") == SCHEMA:
+                                ControlStore(self.cfg.state_db_path).ingest(control, agent_id=str(payload.get("agent_id") or ""), host_fingerprint=str(payload.get("host_fingerprint") or ""))
+                        except (ValueError, json.JSONDecodeError):
+                            pass
                     mark_state_snapshot_push_result_mysql(
                         self.cfg,
                         payload_hash=payload_hash,
