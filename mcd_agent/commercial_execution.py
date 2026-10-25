@@ -117,9 +117,12 @@ class CommercialScenarioExecutor:
 class CommercialPortalWorker:
     """One non-blocking commercial poll/execute/receipt cycle."""
 
-    def __init__(self, client: Any, executor: CommercialScenarioExecutor, *, installation_id: str, portal_keys: Mapping[str, str], publisher_keys: Mapping[str, str], context: dict[str, Any], capabilities: set[str]):
+    def __init__(self, client: Any, executor: CommercialScenarioExecutor, *, installation_id: str | list[str], portal_keys: Mapping[str, str], publisher_keys: Mapping[str, str], context: dict[str, Any], capabilities: set[str]):
         self.client, self.executor = client, executor
-        self.installation_id = installation_id
+        self.installation_ids = [installation_id] if isinstance(installation_id, str) else [str(value) for value in installation_id]
+        self.installation_ids = [value for value in self.installation_ids if value]
+        if not self.installation_ids:
+            raise ValueError("commercial_installation_identity_missing")
         self.portal_keys, self.publisher_keys = dict(portal_keys), dict(publisher_keys)
         self.context, self.capabilities = dict(context), set(capabilities)
 
@@ -129,7 +132,12 @@ class CommercialPortalWorker:
             self.client.send_receipt(pending)
             self.executor.state.put("commercial_pending_receipt", None)
         cursor = str(self.executor.state.get("commercial_portal_cursor") or "")
-        delivery = self.client.pull_job(installation_id=self.installation_id, cursor=cursor, wait_seconds=0, limit=1)
+        delivery = None
+        active_installation_id = self.installation_ids[0]
+        for active_installation_id in self.installation_ids:
+            delivery = self.client.pull_job(installation_id=active_installation_id, cursor=cursor, wait_seconds=0, limit=1)
+            if delivery:
+                break
         if not delivery:
             return {"status": "idle"}
         job = delivery.get("job")
@@ -140,7 +148,7 @@ class CommercialPortalWorker:
         try:
             verified = verify_signed_job(delivery, self.portal_keys)
             artifact = self.client.download_artifact(path=str(download["path"]), grant=str(download["grant"]), expected_size=verified["size_bytes"])
-            self.client.ack_job(job_id=str(job["job_id"]), installation_id=self.installation_id, status="accepted", reason=None, idempotency_key=str(job["idempotency_key"]))
+            self.client.ack_job(job_id=str(job["job_id"]), installation_id=active_installation_id, status="accepted", reason=None, idempotency_key=str(job["idempotency_key"]))
             terminal = self.executor.run(delivery, portal_keys=self.portal_keys, publisher_keys=self.publisher_keys, artifact=artifact, context=self.context, capabilities=self.capabilities, receipt_sink=self.client.send_receipt)
             terminal["schema"] = "mcd-onboarding-terminal-receipt-v1"
             validate_onboarding_terminal_receipt(terminal, job_id=str(job["job_id"]))
@@ -152,7 +160,7 @@ class CommercialPortalWorker:
             self.executor.state.put("commercial_portal_cursor", delivery.get("cursor", cursor))
             return {"status": "succeeded", "job_id": str(job["job_id"])}
         except Exception as exc:
-            self.client.ack_job(job_id=str(job.get("job_id") or ""), installation_id=self.installation_id, status="rejected", reason=str(exc), idempotency_key=str(job.get("idempotency_key") or ""))
+            self.client.ack_job(job_id=str(job.get("job_id") or ""), installation_id=active_installation_id, status="rejected", reason=str(exc), idempotency_key=str(job.get("idempotency_key") or ""))
             return {"status": "rejected", "reason": str(exc)}
 
     def run_forever(self, stop_event: Any, *, interval_sec: float = 1.0) -> None:
