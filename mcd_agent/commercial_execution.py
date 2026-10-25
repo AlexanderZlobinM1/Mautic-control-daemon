@@ -127,7 +127,7 @@ class CommercialScenarioExecutor:
 class CommercialPortalWorker:
     """One non-blocking commercial poll/execute/receipt cycle."""
 
-    def __init__(self, client: Any, executor: CommercialScenarioExecutor, *, installation_id: str | list[str], portal_keys: Mapping[str, str], publisher_keys: Mapping[str, str], context: dict[str, Any], capabilities: set[str], preflight_required: bool = False):
+    def __init__(self, client: Any, executor: CommercialScenarioExecutor, *, installation_id: str | list[str], portal_keys: Mapping[str, str], publisher_keys: Mapping[str, str], context: dict[str, Any], capabilities: set[str], preflight_required: bool = True):
         self.client, self.executor = client, executor
         self.installation_ids = [installation_id] if isinstance(installation_id, str) else [str(value) for value in installation_id]
         self.installation_ids = [value for value in self.installation_ids if value]
@@ -168,6 +168,10 @@ class CommercialPortalWorker:
                 replay_key = str(job.get("job_id") or "") + ":" + str(preflight.get("checked_at") or "")
                 used = self.executor.state.get("commercial_preflight_receipts") or {}
                 if replay_key in used:
+                    prior = self.executor._load(str(job.get("job_id") or ""))
+                    if isinstance(prior, dict) and prior.get("status") == "succeeded":
+                        self.executor.state.put("commercial_portal_cursor", delivery.get("cursor", cursor))
+                        return {"status": "succeeded", "job_id": str(job["job_id"]), "replayed": True}
                     raise ValueError("portal_preflight_receipt_replay")
                 used[replay_key] = receipt_meta
                 self.executor.state.put("commercial_preflight_receipts", used)

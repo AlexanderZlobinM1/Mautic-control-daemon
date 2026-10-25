@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from cryptography.hazmat.primitives import serialization
@@ -31,6 +32,11 @@ def test_actual_mcc_fixture_fake_portal_restart_replay_and_valid_grant(tmp_path)
     publisher_key = fixture["test_public_key"]
     package = {"package_id": fixture["catalog_item"]["id"], "revision": digest, "sha256": digest, "size_bytes": len(artifact), "media_type": "application/json", "kind": "scenario", "applicability": {"mcd_contract": ">=1.0 <2.0"}, "download": {"path": "/artifacts/" + digest, "grant": "grant-1"}, "signature": fixture["catalog_item"]["signature"]}
     job = {"job_id": "job-e2e", "idempotency_key": "idem-e2e", "agent_id": "agent-e2e", "installation_id": "inst-e2e", "command": "scenario.apply", "issued_at": "2026-10-24T00:00:00Z", "expires_at": "2099-10-24T00:00:00Z", "nonce": "nonce-e2e", "scope": {"agent_id": "agent-e2e", "installation_id": "inst-e2e", "allowed_commands": ["scenario.apply"], "artifact_sha256": digest}, "package": package, "portal_signature": {"algorithm": "ed25519", "key_id": "portal-e2e"}}
+    preflight = {"schema": "portal-self-hosted-preflight-receipt-v1", "contract_version": "1.0", "request_id": "job-e2e", "tuple_key": "idem-e2e", "host_fingerprint": "sha256:host-e2e", "checked_at": "2026-10-25T00:00:00Z", "observed_at": "2026-10-25T00:00:00Z", "expires_at": "2099-10-24T00:00:00Z", "checks": [{"id": "host", "status": "PASS", "reason": "ok", "remediation": "none"}], "ready": True, "cleanup": "clean", "portal_signature": {"algorithm": "ed25519", "key_id": "portal-e2e"}}
+    preflight["portal_signature"]["value"] = _b64(portal_key.sign(canonical_json({k: v for k, v in preflight.items() if k != "portal_signature"})))
+    job["preflight_receipt"] = preflight
+    job["preflight_tuple_key"] = "idem-e2e"
+    job["preflight_host_fingerprint"] = "sha256:host-e2e"
     job["portal_signature"]["value"] = _b64(portal_key.sign(canonical_json({k: v for k, v in job.items() if k != "portal_signature"})))
     delivery = {"schema": "portal-mcd-job-delivery-v1", "contract_version": "1.0", "cursor": "cursor-1", "job": job}
 
@@ -67,7 +73,7 @@ def test_actual_mcc_fixture_fake_portal_restart_replay_and_valid_grant(tmp_path)
     with_tmp = CommercialState(str(tmp_path / "commercial.sqlite"))
     executor = CommercialScenarioExecutor(with_tmp, stage_handlers=handlers)
     fake = FakePortal()
-    worker = CommercialPortalWorker(fake, executor, installation_id="inst-e2e", portal_keys={"portal-e2e": _b64(portal_key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw))}, publisher_keys={fixture["catalog_item"]["signature"]["key_id"]: publisher_key}, context={"platform": "linux-amd64", "cron_ownership": "none"}, capabilities=set(json.loads(artifact)["compatibility"]["mcd_required_capabilities"]))
+    worker = CommercialPortalWorker(fake, executor, installation_id="inst-e2e", portal_keys={"portal-e2e": _b64(portal_key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw))}, publisher_keys={fixture["catalog_item"]["signature"]["key_id"]: publisher_key}, context={"platform": "linux-amd64", "cron_ownership": "none", "host_fingerprint": "sha256:host-e2e"}, capabilities=set(json.loads(artifact)["compatibility"]["mcd_required_capabilities"]))
     assert worker.run_once()["status"] == "receipt_pending"
     assert worker.run_once()["status"] == "succeeded"
     assert len(events) == len(stages)
@@ -84,6 +90,6 @@ def test_actual_mcc_fixture_fake_portal_restart_replay_and_valid_grant(tmp_path)
     bad_state = CommercialState(str(tmp_path / "bad.sqlite"))
     bad_executor = CommercialScenarioExecutor(bad_state, stage_handlers=handlers)
     bad_fake = BadGrantPortal()
-    bad_worker = CommercialPortalWorker(bad_fake, bad_executor, installation_id="inst-e2e", portal_keys={"portal-e2e": _b64(portal_key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw))}, publisher_keys={fixture["catalog_item"]["signature"]["key_id"]: publisher_key}, context={"platform": "linux-amd64", "cron_ownership": "none"}, capabilities=set(json.loads(artifact)["compatibility"]["mcd_required_capabilities"]))
+    bad_worker = CommercialPortalWorker(bad_fake, bad_executor, installation_id="inst-e2e", portal_keys={"portal-e2e": _b64(portal_key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw))}, publisher_keys={fixture["catalog_item"]["signature"]["key_id"]: publisher_key}, context={"platform": "linux-amd64", "cron_ownership": "none", "host_fingerprint": "sha256:host-e2e"}, capabilities=set(json.loads(artifact)["compatibility"]["mcd_required_capabilities"]))
     assert bad_worker.run_once()["status"] == "rejected"
     assert not bad_executor._load("job-e2e")
