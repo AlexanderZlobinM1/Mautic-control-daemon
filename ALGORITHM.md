@@ -1018,3 +1018,11 @@ restart retries the same receipt and resumes completed stages without
 re-executing them. Network/Portal failure never pauses corporate or standalone
 scheduler work. Onboarding stage and terminal receipt schemas are validated
 before they are sent.
+
+`daemon.run_loop` may start at most one Portal worker only when the effective
+profile is `commercial`, the caller supplies a validated commercial worker
+factory, and the daemon is not in single-cycle mode. The worker owns only its
+Portal stop event and bounded thread; it does not enter scheduler admission,
+locks, or task slots. Shutdown sets that event and joins the worker with a
+bounded grace period. Corporate, standalone, and single-cycle paths do not
+instantiate or call the commercial worker.

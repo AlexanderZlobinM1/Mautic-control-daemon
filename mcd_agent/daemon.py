@@ -217,6 +217,7 @@ from mcd_agent.state_backend import (
     mysql_state_table_names,
     normalized_state_backend,
 )
+from mcd_agent.commercial_execution import CommercialPortalWorker
 
 _CMD_SEP = "\x1f"
 _M4_CAMPAIGN_DELETED_CLAUSE_RE = re.compile(r"\s+AND\s*\(?\s*c\.deleted\s+IS\s+NULL\s*\)?", re.IGNORECASE)
@@ -238,6 +239,15 @@ _CAMPAIGN_NATIVE_FALLBACK_TIMEOUT_SEC = 30 * 60
 _CAMPAIGN_EMAIL_COUNTER_RECONCILE_MIN_INTERVAL_SEC = 6 * 3600
 _LOCAL_RUNTIME_PUSH_PENDING_KEY = "local_runtime_push_pending"
 _LOCAL_RUNTIME_ACCEPTED_KEY = "local_runtime_accepted"
+
+
+def _commercial_worker_allowed(config: AgentConfig, *, single_cycle: bool, factory: object) -> bool:
+    """Keep the Portal lane outside corporate/standalone scheduler paths."""
+    return (
+        not single_cycle
+        and callable(factory)
+        and str(getattr(config, "profile_name", "") or "").strip().lower() == "commercial"
+    )
 _LOCAL_RUNTIME_METADATA_KEY = "local_runtime_metadata"
 _BACKUP_SCHEDULE_STATE_KEY = "backup_schedule_state"
 _BACKUP_SCHEDULE_STATE_LOCK = threading.RLock()
@@ -16181,6 +16191,7 @@ def run_loop(
     single_cycle: bool = False,
     *,
     _test_stop_event: threading.Event | None = None,
+    _commercial_worker_factory: Callable[[threading.Event], CommercialPortalWorker] | None = None,
 ) -> None:
     """Run the daemon."""
 
@@ -16505,6 +16516,24 @@ def run_loop(
     scheduler_last_promoted_roots: frozenset[str] = frozenset()
     scheduler_next_fairness_log_at = 0.0
     pusher = MCCStatePusher(config, runtime_store=store)
+    commercial_stop_event = threading.Event()
+    commercial_thread: threading.Thread | None = None
+    commercial_mode = str(getattr(config, "profile_name", "") or "").strip().lower() == "commercial"
+    if commercial_mode and _commercial_worker_allowed(config, single_cycle=single_cycle, factory=_commercial_worker_factory):
+        try:
+            commercial_worker = _commercial_worker_factory(commercial_stop_event)
+            if not isinstance(commercial_worker, CommercialPortalWorker):
+                raise TypeError("commercial_worker_factory_invalid")
+            commercial_thread = threading.Thread(
+                target=commercial_worker.run_forever,
+                args=(commercial_stop_event,),
+                kwargs={"interval_sec": max(0.1, float(getattr(config, "poll_interval_sec", 1) or 1))},
+                name="mcd-commercial-portal-worker",
+                daemon=True,
+            )
+            commercial_thread.start()
+        except Exception as exc:
+            logging.warning("commercial Portal worker was not started: %s", exc)
 
     priority_executor = _PriorityTaskExecutor()
     _ACTIVE_PRIORITY_EXECUTOR = priority_executor
@@ -24419,9 +24448,16 @@ def run_loop(
                     last_monitor_signals_push_error = reason
 
         if single_cycle:
+            commercial_stop_event.set()
+            if commercial_thread is not None:
+                commercial_thread.join(timeout=2.0)
             _ACTIVE_PRIORITY_EXECUTOR = None
             _SEGMENT_DISPATCH_WAKEUP = None
             _ORDINARY_REFILL_WAKEUP = None
             return
         segment_dispatch_wakeup.wait(timeout=max(0.1, float(config.dispatch_interval_sec)))
         segment_dispatch_wakeup.clear()
+
+    commercial_stop_event.set()
+    if commercial_thread is not None:
+        commercial_thread.join(timeout=2.0)
