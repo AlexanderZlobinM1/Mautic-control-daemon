@@ -48,3 +48,24 @@ class ControlStore:
         with sqlite3.connect(self.path) as db:
             db.execute("INSERT OR REPLACE INTO mcd_result_key_ack VALUES (?,?,?)", (str(ack["key_id"]), json.dumps(dict(ack), sort_keys=True), time.time()))
             db.commit()
+
+    def execute_pending(self, *, agent_id: str, host_fingerprint: str, active_key: tuple[Any, str] | None, runner: Any, signer: Any) -> list[dict[str, Any]]:
+        if not active_key:
+            return []
+        private, key_id = active_key
+        with sqlite3.connect(self.path) as db:
+            rows = db.execute("SELECT job_id,request_json,receipt_json FROM mcd_control_jobs WHERE receipt_json NOT LIKE '%\\\"status\\\": \\\"succeeded\\\"%' AND receipt_json NOT LIKE '%\\\"status\\\": \\\"failed\\\"%'").fetchall()
+        out = []
+        for job_id, request_json, _receipt_json in rows:
+            request = json.loads(request_json)
+            with sqlite3.connect(self.path) as db:
+                db.execute("UPDATE mcd_control_jobs SET receipt_json=?,updated_at=? WHERE job_id=?", (json.dumps({"job_id": job_id, "status": "running", "idempotency_key": job_id}, sort_keys=True), time.time(), job_id)); db.commit()
+            try:
+                result = dict(runner(request))
+                terminal = signer({"schema": "mcd-docker-runtime-preflight-terminal-v1", "contract_version": "1.0", "job_id": job_id, "request_id": request["request_id"], "probe_id": request["probe_id"], "status": "succeeded", "idempotency_key": job_id, "result": result}, private, key_id)
+            except Exception as exc:
+                terminal = {"schema": "mcd-docker-runtime-preflight-terminal-v1", "contract_version": "1.0", "job_id": job_id, "request_id": request.get("request_id"), "probe_id": request.get("probe_id"), "status": "failed", "idempotency_key": job_id, "error": type(exc).__name__}
+            with sqlite3.connect(self.path) as db:
+                db.execute("UPDATE mcd_control_jobs SET receipt_json=?,updated_at=? WHERE job_id=?", (json.dumps(terminal, sort_keys=True), time.time(), job_id)); db.commit()
+            out.append(terminal)
+        return out
