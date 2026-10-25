@@ -49,6 +49,14 @@ class ControlStore:
             db.execute("INSERT OR REPLACE INTO mcd_result_key_ack VALUES (?,?,?)", (str(ack["key_id"]), json.dumps(dict(ack), sort_keys=True), time.time()))
             db.commit()
 
+    def active_key_ack(self, key_id: str) -> dict[str, Any] | None:
+        with sqlite3.connect(self.path) as db:
+            row = db.execute("SELECT ack_json FROM mcd_result_key_ack WHERE key_id=?", (key_id,)).fetchone()
+        if not row:
+            return None
+        value = json.loads(row[0])
+        return value if value.get("status") == "active" else None
+
     def execute_pending(self, *, agent_id: str, host_fingerprint: str, active_key: tuple[Any, str] | None, runner: Any, signer: Any) -> list[dict[str, Any]]:
         if not active_key:
             return []

@@ -34,6 +34,8 @@ from mcd_agent.form_embed import load_form_embed_state
 from mcd_agent.host_identity import resolve_agent_identity
 from mcd_agent.mcd_control import ControlStore, SCHEMA
 from mcd_agent.result_signing import ensure_result_key
+from mcd_agent.result_signing import sign_result
+from mcd_agent.docker_preflight_runner import DockerRuntimePreflightRunner
 from mcd_agent.commercial_portal import _host_fingerprint
 from mcd_agent.install_readiness import collect_mautic_install_readiness
 from mcd_agent.instance_size import collect_instance_sizes
@@ -2195,6 +2197,14 @@ class MCCStatePusher:
                 _private, result_key = ensure_result_key(key_path)
             except Exception:
                 result_key = None
+        control_store = ControlStore(self.cfg.state_db_path)
+        if result_key and key_path:
+            try:
+                private_key, _ = ensure_result_key(key_path)
+                if control_store.active_key_ack(result_key["key_id"]):
+                    control_store.execute_pending(agent_id=str(getattr(self.cfg, "agent_id", "") or ""), host_fingerprint=_host_fingerprint(), active_key=(private_key, result_key["key_id"]), runner=DockerRuntimePreflightRunner(), signer=sign_result)
+            except Exception:
+                pass
         from mcd_agent.mautic_release_authorization import runtime_capabilities as release_capabilities
         instances = []
         for i in installs:
@@ -2246,7 +2256,7 @@ class MCCStatePusher:
 
         payload: dict[str, Any] = {
             "schema": "mcd-state-v1",
-            "control_receipts": ControlStore(self.cfg.state_db_path).receipts(),
+            "control_receipts": control_store.receipts(),
             "control_capabilities": {"schema": "mcd-control-capabilities-v1", "version": "1.0", "commands": ["docker_runtime_preflight_v1"]},
             "result_signing_key": result_key,
             "agent_id": str(getattr(self.cfg, "agent_id", "") or ""),
