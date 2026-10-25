@@ -321,7 +321,8 @@ class PortalClient:
         agent_id = str(self.state.get("agent_id") or "")
         if not agent_id or activation_state not in {"passive", "active"}:
             raise ValueError("commercial_installation_request_invalid")
-        payload = {"schema": "portal-mcd-installation-register-request-v1", "contract_version": CONTRACT_VERSION, "installation": {"local_identity": local_identity, "display_name": display_name, "mautic_version": mautic_version, "application_root_fingerprint": application_root_fingerprint, "activation_state": activation_state}}
+        from mcd_agent.commercial_capabilities import build_capability_manifest
+        payload = {"schema": "portal-mcd-installation-register-request-v1", "contract_version": CONTRACT_VERSION, "installation": {"local_identity": local_identity, "display_name": display_name, "mautic_version": mautic_version, "application_root_fingerprint": application_root_fingerprint, "activation_state": activation_state, "capability_manifest": build_capability_manifest(agent_version=str(self.state.get("agent_version") or "runtime"))}}
         request_fingerprint = hashlib.sha256(canonical_json({k: v for k, v in payload.items() if k != "idempotency_key"})).hexdigest()
         requests = self.state.get("installation_requests") or {}
         previous = requests.get(local_identity) if isinstance(requests, dict) else None

@@ -23,7 +23,8 @@ PRIMITIVE_VERSIONS = {kind: "1.0" for kind in ONBOARDING_STAGE_KINDS}
 
 
 def exposed_capabilities() -> dict[str, Any]:
-    return {"capabilities": ["portal_scenario_execution_v1", "mcd_passive_activation_v1"], "primitive_versions": dict(PRIMITIVE_VERSIONS)}
+    from mcd_agent.commercial_capabilities import build_capability_manifest
+    return {"capabilities": ["portal_scenario_execution_v1", "mcd_passive_activation_v1"], "primitive_versions": dict(PRIMITIVE_VERSIONS), "capability_manifest": build_capability_manifest(agent_version="runtime")}
 
 
 def validate_onboarding_artifact(scenario: Mapping[str, Any]) -> None:
