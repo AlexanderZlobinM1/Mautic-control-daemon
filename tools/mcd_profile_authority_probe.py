@@ -105,10 +105,20 @@ def _include_files(config: Path) -> list[Path]:
         if not clean:
             continue
         if clean.startswith("["):
-            match = re.fullmatch(r"\[\s*([A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*)\s*\]", clean)
+            # Included system config is a complete TOML document and may
+            # contain array-of-table declarations (for example [[jobs]] and
+            # [[instances]]).  The probe only needs to locate the include
+            # table, but it must still accept every valid section form so a
+            # real split config cannot be rejected before the read-only
+            # authority snapshot is captured.
+            match = re.fullmatch(
+                r"(?:\[\s*([A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*)\s*\]|"
+                r"\[\[\s*([A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*)\s*\]\])",
+                clean,
+            )
             if not match:
                 raise ProbeError(f"malformed TOML section in {config}")
-            section = match.group(1)
+            section = match.group(1) or match.group(2)
             continue
         if section != "include":
             continue

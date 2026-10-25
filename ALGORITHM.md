@@ -385,7 +385,15 @@ config на его profile baseline и только после этого при
    not an active production runtime or duplicate test tree. The manifest binds
    payload hashes while an external receipt binds archive/source/wheel
    identity, avoiding self-referential provenance. See
-   `docs/mcd-update-invariants-v1.md` for the release evidence contract.
+   `docs/mcd-update-invariants-v1.md` for the release evidence contract. A
+   host running the pre-runtime-only updater transitions through the
+   separately transported `tools/mcd_runtime_bootstrap.py` bridge and its
+   read-only `tools/mcd_profile_authority_probe.py` sidecar: the bridge
+   verifies the exact archive/manifest, uses the same update lease and
+   scheduler barrier, installs and imports the wheel before the atomic source
+   switch, retains bounded rollback material, and records a bootstrap receipt.
+   The sidecar must accept the complete valid split TOML graph, including
+   array-of-table sections, while never writing configuration.
    Self-update сначала публикует persisted `scheduler.pause` под общим
    межпроцессным `scheduler.pause.lock`. Каждый новый запуск, включая
    ordinary, priority, super-priority, manual, import и retry, перед
@@ -947,7 +955,8 @@ cycle без ручного `segments:update`, profile/capacity/data changes. Ad
 | import admission baseline, partial-batch pending и terminal monitor distinction | `mcd_agent/config.py`, `mcd_agent/daemon.py` | `tests/test_campaign_due_sql.py`, `tests/test_campaign_ring_dispatch.py`, `tests/test_import_liveness.py` |
 | monitor queued/running/done/error receipt | `mcd_agent/daemon.py` | `tests/test_scheduler_monitor_cycle.py`, `tests/test_signals_scheduler_history.py` |
 | heavy-plan deferral and durable pending guard | `mcd_agent/daemon.py` | `tests/test_segment_liveness.py`, live M6/M7 acceptance receipt |
-| self-update preserves ordinary application work and all durable queues | `mcd_agent/self_update.py`, `daemon.py`, systemd unit | `tests/test_self_update_version_reporting.py` |
+| self-update preserves ordinary application work and all durable queues | `mcd_agent/self_update.py`, `daemon.py`, systemd unit | `tests/test_self_update_version_reporting.py`, `tools/runtime_bridge_qa.py` (`mcd-runtime-bridge-qa-v1`) |
+| legacy source-tree to runtime-only transition is authority-safe and accepts complete split TOML config | `tools/mcd_runtime_bootstrap.py`, `tools/mcd_profile_authority_probe.py` | `tests/test_profile_authority_probe.py`, `tests/test_runtime_bootstrap_capture.py`, live `mcd-runtime-bootstrap-receipt-v1` |
 | authority-safe desired runtime projection | `mcd_agent/config.py`, `mcd_agent/runtime_overrides.py` | `tests/test_runtime_override_direction.py`, `tests/test_runtime_stable_keys.py`, `tests/test_runtime_migration_adapter.py` |
 | natural b2bss/Adonis evidence | runtime TaskStore/MCC receipts | rollout acceptance (после package/install) |
 
