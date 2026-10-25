@@ -17,14 +17,14 @@ def _utc() -> str:
 def validate_onboarding_stage_receipt(receipt: Mapping[str, Any], *, job_id: str, stage_id: str, sequence: int) -> None:
     if receipt.get("schema") != "mcd-onboarding-stage-receipt-v1":
         raise ValueError("commercial_stage_receipt_schema_invalid")
-    if receipt.get("contract_version") != CONTRACT_VERSION or receipt.get("job_id") != job_id or receipt.get("stage_id") != stage_id:
+    if receipt.get("contract_version") != CONTRACT_VERSION or (receipt.get("request_id") or receipt.get("job_id")) != job_id or receipt.get("stage_id") != stage_id:
         raise ValueError("commercial_stage_receipt_binding_invalid")
-    if int(receipt.get("sequence", -1)) != int(sequence) or receipt.get("status") not in {"running", "waiting", "succeeded", "failed"}:
+    if int(receipt.get("sequence", -1)) != int(sequence) or receipt.get("status") not in {"passed", "failed", "running", "waiting", "succeeded"} or not receipt.get("idempotency_key"):
         raise ValueError("commercial_stage_receipt_fields_invalid")
 
 
 def validate_onboarding_terminal_receipt(receipt: Mapping[str, Any], *, job_id: str) -> None:
-    if receipt.get("schema") != "mcd-onboarding-terminal-receipt-v1" or receipt.get("contract_version") != CONTRACT_VERSION or receipt.get("job_id") != job_id:
+    if receipt.get("schema") != "mcd-onboarding-terminal-receipt-v1" or receipt.get("contract_version") != CONTRACT_VERSION or (receipt.get("request_id") or receipt.get("job_id")) != job_id or not receipt.get("idempotency_key"):
         raise ValueError("commercial_terminal_receipt_invalid")
     if receipt.get("status") not in {"succeeded", "failed", "rejected", "expired", "cancelled"}:
         raise ValueError("commercial_terminal_receipt_status_invalid")
@@ -102,7 +102,7 @@ class CommercialScenarioExecutor:
                 completed.append(stage_id)
                 results.append({"stage_id": stage_id, "result": result})
                 if receipt_sink:
-                    stage_receipt = {"schema": "mcd-onboarding-stage-receipt-v1", "contract_version": CONTRACT_VERSION, "job_id": job_id, "stage_id": stage_id, "sequence": len(results), "idempotency_key": f"{job_id}:stage:{len(results)}", "status": "succeeded", "result": result}
+                    stage_receipt = {"schema": "mcd-onboarding-stage-receipt-v1", "contract_version": CONTRACT_VERSION, "request_id": job_id, "job_id": job_id, "stage_id": stage_id, "sequence": len(results), "idempotency_key": f"{job_id}:stage:{len(results)}", "status": "passed", "result": result}
                     validate_onboarding_stage_receipt(stage_receipt, job_id=job_id, stage_id=stage_id, sequence=len(results))
                     receipt_sink(stage_receipt)
                 self._save(job_id, {"completed": completed, "results": results, "status": "running"})
@@ -113,7 +113,7 @@ class CommercialScenarioExecutor:
                     rollback({"stage_id": stage_id, "context": ctx})
             self._save(job_id, {"completed": completed, "results": results, "status": "failed"})
             raise
-        payload = {"schema": "portal-mcd-receipt-v1", "contract_version": CONTRACT_VERSION, "job_id": job_id, "correlation_id": job_id, "idempotency_key": str(job["job"]["idempotency_key"]), "installation_id": str(job["job"]["installation_id"]), "sequence": len(results), "status": "succeeded", "progress": {"completed": len(results), "total": len(scenario["stages"]), "message": "Scenario complete"}, "artifact": {"revision": str(package["revision"]), "sha256": str(package["sha256"]), "size_bytes": int(package["size_bytes"]), "media_type": str(package["media_type"])}, "started_at": _utc(), "completed_at": _utc(), "result": {"executor": "mcd-commercial-scenario", "stages": results}, "error": None}
+        payload = {"schema": "mcd-onboarding-terminal-receipt-v1", "contract_version": CONTRACT_VERSION, "request_id": job_id, "job_id": job_id, "correlation_id": job_id, "idempotency_key": str(job["job"]["idempotency_key"]), "installation_id": str(job["job"]["installation_id"]), "sequence": len(results), "status": "succeeded", "progress": {"completed": len(results), "total": len(scenario["stages"]), "message": "Scenario complete"}, "artifact": {"revision": str(package["revision"]), "sha256": str(package["sha256"]), "size_bytes": int(package["size_bytes"]), "media_type": str(package["media_type"])}, "started_at": _utc(), "completed_at": _utc(), "result": {"executor": "mcd-commercial-scenario", "stages": results}, "error": None}
         self._save(job_id, {"completed": completed, "results": results, "status": "succeeded"})
         return payload
 

@@ -43,9 +43,11 @@ def validate_precheck_scenario(value: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def validate_precheck_receipt(receipt: Mapping[str, Any], *, input_fingerprint: str, now: datetime | None = None) -> dict[str, Any]:
-    if receipt.get("schema") != RECEIPT_SCHEMA or receipt.get("contract_version") != CONTRACT_VERSION:
+    portal_schema = receipt.get("schema") == "portal-self-hosted-preflight-receipt-v1"
+    if receipt.get("schema") not in {RECEIPT_SCHEMA, "portal-self-hosted-preflight-receipt-v1"} or receipt.get("contract_version") != CONTRACT_VERSION:
         raise ValueError("bootstrap_precheck_receipt_schema_invalid")
-    if receipt.get("input_fingerprint") != input_fingerprint or not str(receipt.get("host_fingerprint") or "").startswith("sha256:"):
+    bound_fingerprint = receipt.get("tuple_key") if portal_schema else receipt.get("input_fingerprint")
+    if bound_fingerprint != input_fingerprint or not str(receipt.get("host_fingerprint") or "").startswith("sha256:"):
         raise ValueError("bootstrap_precheck_receipt_binding_invalid")
     observed = str(receipt.get("observed_at") or "")
     expires = str(receipt.get("expires_at") or "")
@@ -59,15 +61,16 @@ def validate_precheck_receipt(receipt: Mapping[str, Any], *, input_fingerprint: 
     current = now or datetime.now(timezone.utc)
     if current.astimezone(timezone.utc) >= expires_at:
         raise ValueError("bootstrap_precheck_receipt_expired")
-    results = receipt.get("results")
+    results = receipt.get("checks") if portal_schema else receipt.get("results")
     if not isinstance(results, list) or not results:
         raise ValueError("bootstrap_precheck_receipt_results_invalid")
     for result in results:
-        if not isinstance(result, dict) or result.get("status") not in STATUSES or not result.get("code") or not result.get("remediation"):
+        if not isinstance(result, dict) or result.get("status") not in STATUSES or not (result.get("code") or result.get("id")) or not (result.get("remediation") or result.get("reason")):
             raise ValueError("bootstrap_precheck_result_invalid")
         if any(secret in str(result).lower() for secret in ("password", "private_key", "credential", "token")):
             raise ValueError("bootstrap_precheck_secret_disclosure")
     cleanup = receipt.get("cleanup")
-    if not isinstance(cleanup, dict) or cleanup.get("status") != "PASS" or cleanup.get("temporary_responder_removed") is not True:
+    cleanup_ok = cleanup == "clean" if portal_schema else isinstance(cleanup, dict) and cleanup.get("status") == "PASS" and cleanup.get("temporary_responder_removed") is True
+    if not cleanup_ok:
         raise ValueError("bootstrap_precheck_cleanup_incomplete")
-    return {"schema": RECEIPT_SCHEMA, "contract_version": CONTRACT_VERSION, "input_fingerprint": str(input_fingerprint), "host_fingerprint": str(receipt["host_fingerprint"]), "status": str(receipt.get("status") or ""), "result_count": len(results), "cleanup": {"status": "PASS", "temporary_responder_removed": True}}
+    return {"schema": str(receipt["schema"]), "contract_version": CONTRACT_VERSION, "input_fingerprint": str(input_fingerprint), "host_fingerprint": str(receipt["host_fingerprint"]), "status": str(receipt.get("status") or ("PASS" if receipt.get("ready") else "FAIL")), "result_count": len(results), "cleanup": {"status": "PASS", "temporary_responder_removed": True}}

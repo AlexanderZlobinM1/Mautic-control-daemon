@@ -49,7 +49,7 @@ def test_unknown_stage_fails_closed_before_handler():
 
 
 def test_receipt_schema_validation_is_strict():
-    validate_onboarding_stage_receipt({"schema": "mcd-onboarding-stage-receipt-v1", "contract_version": "1.0", "job_id": "j", "stage_id": "s", "sequence": 1, "status": "succeeded"}, job_id="j", stage_id="s", sequence=1)
-    validate_onboarding_terminal_receipt({"schema": "mcd-onboarding-terminal-receipt-v1", "contract_version": "1.0", "job_id": "j", "status": "succeeded"}, job_id="j")
+    validate_onboarding_stage_receipt({"schema": "mcd-onboarding-stage-receipt-v1", "contract_version": "1.0", "request_id": "j", "stage_id": "s", "sequence": 1, "status": "passed", "idempotency_key": "j:1"}, job_id="j", stage_id="s", sequence=1)
+    validate_onboarding_terminal_receipt({"schema": "mcd-onboarding-terminal-receipt-v1", "contract_version": "1.0", "request_id": "j", "status": "succeeded", "idempotency_key": "j:terminal"}, job_id="j")
     with pytest.raises(ValueError, match="commercial_stage_receipt_schema_invalid"):
         validate_onboarding_stage_receipt({"schema": "wrong"}, job_id="j", stage_id="s", sequence=1)

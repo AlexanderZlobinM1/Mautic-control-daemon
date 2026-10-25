@@ -11,7 +11,38 @@ from mcd_agent.commercial_portal import canonical_json
 
 
 SCHEMA = "mcd-scenario-detector-v1"
-def read_normalized_local_facts(*, os_release_path: str = "/etc/os-release", machine: str | None = None) -> dict[str, Any]:
+
+
+def validate_portal_scenario_resolution(value: Mapping[str, Any], *, expected_digest: str | None = None) -> dict[str, Any]:
+    """Validate Portal's external catalog resolution without embedding scenarios."""
+    if value.get("schema") != "portal-scenario-resolve-response-v1" or value.get("contract_version") != "1.0":
+        raise ValueError("commercial_portal_resolution_schema_invalid")
+    status = value.get("status")
+    if status not in {"matched", "unsupported", "ambiguous"}:
+        raise ValueError("commercial_portal_resolution_status_invalid")
+    facts = value.get("detected_facts")
+    required = {"os_id", "os_version", "architecture", "package_manager", "capabilities", "target_kind"}
+    if not isinstance(facts, dict) or not required.issubset(facts) or facts["target_kind"] not in {"new_server", "existing_server"}:
+        raise ValueError("commercial_portal_resolution_facts_invalid")
+    matches = value.get("matches") or []
+    if not isinstance(matches, list):
+        raise ValueError("commercial_portal_resolution_matches_invalid")
+    if status == "matched":
+        if len(matches) != 1:
+            raise ValueError("commercial_portal_resolution_not_unique")
+        match = matches[0]
+        artifact = match.get("artifact") if isinstance(match, dict) else None
+        signature = match.get("signature") if isinstance(match, dict) else None
+        if match.get("lifecycle") != "published" or not isinstance(artifact, dict) or not str(artifact.get("digest", "")).startswith("sha256:") or not isinstance(signature, dict):
+            raise ValueError("commercial_portal_resolution_artifact_invalid")
+        if expected_digest and artifact["digest"] != expected_digest:
+            raise ValueError("commercial_portal_resolution_digest_mismatch")
+    elif matches:
+        raise ValueError("commercial_portal_resolution_unexpected_matches")
+    return {"schema": value["schema"], "contract_version": "1.0", "status": status, "detected_facts": dict(facts), "matches": matches}
+
+
+def read_normalized_local_facts(*, os_release_path: str = "/etc/os-release", machine: str | None = None, target_kind: str = "existing_server", capabilities: list[str] | None = None) -> dict[str, Any]:
     values: dict[str, str] = {}
     try:
         for line in Path(os_release_path).read_text(encoding="utf-8").splitlines():
@@ -27,7 +58,9 @@ def read_normalized_local_facts(*, os_release_path: str = "/etc/os-release", mac
     managers = [name for name in ("apt-get", "dnf", "yum", "apk") if shutil.which(name)]
     if not os_id or not version or not arch or len(managers) != 1:
         raise ValueError("commercial_detector_facts_ambiguous")
-    return {"os_id": os_id, "os_version": version, "arch": arch, "package_manager": managers[0], "package_manager_capabilities": ["update", "install", "query"], "detector_schema": SCHEMA}
+    if target_kind not in {"new_server", "existing_server"}:
+        raise ValueError("commercial_detector_target_kind_invalid")
+    return {"os_id": os_id, "os_version": version, "architecture": arch, "package_manager": managers[0], "capabilities": sorted(set(capabilities or ["package_manager.query"])), "target_kind": target_kind, "detector_schema": SCHEMA}
 
 
 def detector_digest(facts: Mapping[str, Any]) -> str:
@@ -43,14 +76,15 @@ def validate_scenario_detector(scenario: Mapping[str, Any], facts: Mapping[str, 
     supported = detector.get("supported")
     if not isinstance(supported, list) or not supported:
         raise ValueError("commercial_detector_requirements_missing")
-    matching = [item for item in supported if isinstance(item, dict) and item.get("os_id") == facts.get("os_id") and facts.get("os_version") in list(item.get("versions") or []) and facts.get("arch") in list(item.get("architectures") or [])]
+    matching = [item for item in supported if isinstance(item, dict) and (not item.get("os_ids") or facts.get("os_id") in list(item.get("os_ids") or [])) and (not item.get("os_versions") and not item.get("versions") or facts.get("os_version") in list(item.get("os_versions") or item.get("versions") or [])) and (not item.get("architectures") or facts.get("architecture") in list(item.get("architectures") or []))]
     if not matching:
         raise ValueError("commercial_detector_unsupported_platform")
     required_manager = matching[0].get("package_manager")
-    if required_manager and required_manager != facts.get("package_manager"):
+    required_managers = list(matching[0].get("package_managers") or ([required_manager] if required_manager else []))
+    if required_managers and facts.get("package_manager") not in required_managers:
         raise ValueError("commercial_detector_package_manager_mismatch")
     required_capabilities = set(detector.get("required_capabilities") or [])
-    available_capabilities = set(detector.get("available_capabilities") or [])
+    available_capabilities = set(facts.get("capabilities") or detector.get("available_capabilities") or [])
     if not required_capabilities.issubset(available_capabilities):
         raise ValueError("commercial_detector_capability_missing")
-    return {"status": "matched", "detector_id": detector_id, "revision": detector_revision, "facts_digest": detector_digest(facts), "os_id": facts["os_id"], "os_version": facts["os_version"], "arch": facts["arch"]}
+    return {"status": "matched", "detector_id": detector_id, "revision": detector_revision, "facts_digest": detector_digest(facts), "os_id": facts["os_id"], "os_version": facts["os_version"], "architecture": facts["architecture"], "target_kind": facts["target_kind"]}
