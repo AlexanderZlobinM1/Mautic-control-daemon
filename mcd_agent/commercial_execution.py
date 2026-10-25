@@ -37,7 +37,7 @@ class CommercialScenarioExecutor:
             scenario = json.loads(artifact.decode("utf-8"))
         except Exception as exc:
             raise ValueError("commercial_scenario_schema_invalid") from exc
-        if scenario.get("schema") != "portal-mcd-scenario-v1" or scenario.get("contract_version") != CONTRACT_VERSION or not isinstance(scenario.get("stages"), list):
+        if scenario.get("schema") not in {"portal-mcd-scenario-v1", "mcc-self-hosted-onboarding-scenario-v1"} or (scenario.get("schema") == "portal-mcd-scenario-v1" and scenario.get("contract_version") != CONTRACT_VERSION) or not isinstance(scenario.get("stages"), list):
             raise ValueError("commercial_scenario_schema_invalid")
         available = set(capabilities or set())
         required = scenario.get("required_capabilities", [])
@@ -59,12 +59,12 @@ class CommercialScenarioExecutor:
         ctx["mcd_contract"] = mcd_contract
         try:
             for stage in scenario["stages"]:
-                if not isinstance(stage, dict) or not stage.get("stage_id") or not stage.get("handler"):
+                if not isinstance(stage, dict) or not (stage.get("stage_id") or stage.get("id")) or not (stage.get("handler") or stage.get("kind")):
                     raise ValueError("commercial_scenario_stage_invalid")
                 stage_capabilities = stage.get("requires_capabilities", [])
                 if not isinstance(stage_capabilities, list) or any(not isinstance(item, str) or item not in available for item in stage_capabilities):
                     raise ValueError("commercial_scenario_capability_rejected")
-                stage_id, handler_name = str(stage["stage_id"]), str(stage["handler"])
+                stage_id, handler_name = str(stage.get("stage_id") or stage.get("id")), str(stage.get("handler") or stage.get("kind"))
                 if stage_id in completed:
                     continue
                 handler = self.stage_handlers.get(handler_name)
