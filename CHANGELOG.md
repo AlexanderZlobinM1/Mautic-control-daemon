@@ -1,3 +1,9 @@
+## 1.5.241 - 2026-10-26
+
+- Restore every MCC-allowed runtime setting after an MCD update replaces or
+  truncates the mutable runtime include; explicit MCC tombstones remain the
+  only destructive signal during post-update recovery.
+
 ## 1.5.240 - 2026-10-26
 
 - Reload the complete recovered runtime include before scheduler startup when
