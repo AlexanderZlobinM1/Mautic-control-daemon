@@ -821,6 +821,13 @@ effective `plugin_operations` содержит большой structured payload
 может только явно authoritative full snapshot или host tombstone; после
 восстановления catalog scheduler снова применяет обычные
 bundle-registration, slot и resource guards.
+После смены версии/источника MCD первый запуск помечается как post-update
+recovery. Пропавшее или обнулённое mutable runtime include в этом запуске не
+является изменением оператора: MCD восстанавливает полный durable runtime
+snapshot и свежий MCC snapshot, причём явный MCC tombstone имеет приоритет.
+Реальное локальное изменение MCD по-прежнему фиксируется своим
+timestamp/event и проходит через тот же LWW: более новый источник становится
+истиной и синхронизируется в обратную сторону.
 Если отдельное `desired` или `effective` значение само превышает safety
 budget, оно заменяется строго проверяемой ссылкой
 `{encoding:"canonical-json-sha256",sha256,bytes}`; key не отбрасывается.
