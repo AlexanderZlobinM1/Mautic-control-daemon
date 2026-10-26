@@ -1,5 +1,42 @@
 from mcd_agent.docker_preflight_runner import DockerPreflightError, DockerRuntimePreflightRunner
 
+
+def test_runner_rejects_mcc_artifact_digest_with_typed_identity_evidence():
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append(argv)
+
+    try:
+        DockerRuntimePreflightRunner(run=run)({
+            "image_ref": "mauticrfp/mautic:playground7-52c88074fa23-v4",
+            "image_digest": "sha256:" + "d" * 64,
+            "adapter": "mauticrfp-docker-v1",
+        })
+    except DockerPreflightError as exc:
+        assert exc.error_code == "docker_preflight_runtime_image_digest_missing"
+        assert exc.stage == "identity"
+        assert exc.detail == "runtime_image_digest is required; image_digest is not accepted"
+        assert exc.argv == []
+    else:
+        raise AssertionError("artifact digest must be rejected before Docker execution")
+    assert calls == []
+
+
+def test_runner_rejects_invalid_runtime_digest_with_typed_identity_evidence():
+    try:
+        DockerRuntimePreflightRunner(run=lambda *args, **kwargs: None)({
+            "image_ref": "r/mcd",
+            "runtime_image_digest": "sha256:UPPERCASE",
+            "adapter": "mauticrfp-docker-v1",
+        })
+    except DockerPreflightError as exc:
+        assert exc.error_code == "docker_preflight_runtime_image_digest_invalid"
+        assert exc.stage == "identity"
+        assert exc.detail == "runtime_image_digest must match sha256:<64 lowercase hex>"
+    else:
+        raise AssertionError("invalid runtime digest must fail closed")
+
 def test_runner_has_fixed_argv_and_cleanup_on_failure():
     calls = []
     class Result:

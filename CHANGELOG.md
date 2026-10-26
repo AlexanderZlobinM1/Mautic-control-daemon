@@ -1,3 +1,10 @@
+## 1.5.228 - 2026-10-26
+
+- Emit typed, bounded identity evidence when a Docker preflight receives an
+  MCC artifact/files digest as `image_digest` instead of the required
+  `runtime_image_digest`; keep the fail-closed contract and do not invoke
+  Docker.
+
 ## 1.5.227 - 2026-10-26
 
 - Preserve the safe `com.sales-snap.mauticrfp.*` semantic Docker labels in

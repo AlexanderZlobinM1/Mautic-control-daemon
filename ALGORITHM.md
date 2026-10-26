@@ -423,12 +423,16 @@ config на его profile baseline и только после этого при
   of waiting for the normal 300-second heartbeat. This preserves the
   accepted-to-terminal lifecycle without shortening command TTLs or creating
   duplicate jobs.
-  Docker preflight failures are typed at the fixed argv boundary: image
-  availability, Docker access, timeout, PHP CLI/FPM observation, exit code,
-  bounded redacted stderr, argv stage and cleanup state are retained in the
-  terminal receipt. A missing digest image is therefore an actionable
+  Docker preflight failures are typed at the identity and fixed argv
+  boundaries: a missing or malformed `runtime_image_digest` (including an
+  MCC `image_digest` artifact/files digest) is rejected before Docker with a
+  bounded `error_code`, `stage=identity`, empty `argv` and redacted `detail`;
+  image availability, Docker access, timeout, PHP CLI/FPM observation, exit
+  code, bounded redacted stderr, argv, stage and cleanup state are retained in
+  the terminal receipt. A missing digest image is therefore an actionable
   `docker_preflight_image_unavailable` evidence result, not an opaque
-  `RuntimeError`; no pull, arbitrary command or host mutation is attempted.
+  `RuntimeError` or `ValueError`; no pull, arbitrary command or host mutation
+  is attempted.
   The normal `mcd-state-v1` payload also exposes a signed generic
   `mcd-docker-runtime-image-inventory-v1`: each local image carries its
   repository tag, fixed `image_ref@runtime_image_digest`, Docker `image_id`,
