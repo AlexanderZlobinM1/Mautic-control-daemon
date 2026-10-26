@@ -614,6 +614,97 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
         self.assertEqual(fingerprint, overrides_fingerprint(baseline))
         self.assertEqual(store.values["local_runtime"], {"scheduler_host_max_parallel": 6})
 
+    def test_mcd_update_recovery_restores_complete_runtime_snapshot(self) -> None:
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        class MemoryStore:
+            def __init__(self, values=None):
+                self.values = dict(values or {})
+
+            def get_runtime_sync(self, key):
+                return self.values.get(key)
+
+            def put_runtime_sync(self, key, value):
+                self.values[key] = dict(value)
+
+        desired = {
+            "plugin_operation_instance_settings": {
+                "/var/www/neodent/public_html": {
+                    "salessnapviberbundle:5-6-7:stats_update": {
+                        "enabled": True,
+                        "interval_sec": 600,
+                    }
+                }
+            },
+            "scheduler_host_max_parallel": 8,
+        }
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "mcd.toml"
+            path.write_text('[profile]\nname = "farm-hiload"\n', encoding="utf-8")
+            cfg = SimpleNamespace(config_file_path=str(path))
+            store = MemoryStore({
+                "local_runtime": desired,
+                "mcc_runtime": desired,
+                "mcc_runtime_metadata": daemon._runtime_metadata_for_snapshot(
+                    {}, desired, source="mcc", updated_at=200.0, revision=4
+                ),
+            })
+
+            baseline, _ = daemon._initialize_local_runtime_baseline(
+                cfg,
+                store,
+                recover_after_update=True,
+            )
+
+            self.assertEqual(baseline, desired)
+            self.assertEqual(
+                local_runtime_overrides(load_config(str(path), allow_recover_from_mcc=False)),
+                desired,
+            )
+
+    def test_mcd_update_recovery_respects_explicit_mcc_tombstone(self) -> None:
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        class MemoryStore:
+            def __init__(self, values=None):
+                self.values = dict(values or {})
+
+            def get_runtime_sync(self, key):
+                return self.values.get(key)
+
+            def put_runtime_sync(self, key, value):
+                self.values[key] = dict(value)
+
+        desired = {"scheduler_host_max_parallel": 8}
+        metadata = daemon._runtime_metadata_empty()
+        daemon._runtime_metadata_set(
+            metadata,
+            "host",
+            "scheduler_host_max_parallel",
+            daemon._runtime_metadata_stamp(
+                source="mcc",
+                updated_at=300.0,
+                revision=5,
+                event_id="mcc:delete",
+                tombstone=True,
+            ),
+        )
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "mcd.toml"
+            path.write_text('[profile]\nname = "farm-hiload"\n', encoding="utf-8")
+            baseline, _ = daemon._initialize_local_runtime_baseline(
+                SimpleNamespace(config_file_path=str(path)),
+                MemoryStore({
+                    "local_runtime": desired,
+                    "mcc_runtime": {},
+                    "mcc_runtime_metadata": metadata,
+                }),
+                recover_after_update=True,
+            )
+        self.assertNotIn("scheduler_host_max_parallel", baseline)
+
     def test_restart_profile_snapshot_without_local_provenance_does_not_push(self) -> None:
         class MemoryStore:
             def __init__(self):

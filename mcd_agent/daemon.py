@@ -25,6 +25,8 @@ from pathlib import Path
 from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
+from mcd_agent import __version__
+
 try:
     import fcntl
 except Exception:  # pragma: no cover - non-POSIX development environments
@@ -242,6 +244,7 @@ _CAMPAIGN_NATIVE_FALLBACK_TIMEOUT_SEC = 30 * 60
 _CAMPAIGN_EMAIL_COUNTER_RECONCILE_MIN_INTERVAL_SEC = 6 * 3600
 _LOCAL_RUNTIME_PUSH_PENDING_KEY = "local_runtime_push_pending"
 _LOCAL_RUNTIME_ACCEPTED_KEY = "local_runtime_accepted"
+_MCD_RUNTIME_AGENT_VERSION_KEY = "mcd_runtime_agent_version"
 
 
 def _commercial_worker_allowed(config: AgentConfig, *, single_cycle: bool, factory: object) -> bool:
@@ -1511,14 +1514,114 @@ def _sync_local_runtime_baseline_after_config_recovery(config: AgentConfig, stor
     return fingerprint
 
 
-def _initialize_local_runtime_baseline(config: AgentConfig, store: object) -> tuple[dict[str, Any], str]:
+def _mcd_runtime_update_recovery_needed(store: object) -> bool:
+    """Detect the first daemon start after an MCD package/source transition."""
+    try:
+        raw = store.get_runtime_sync(_MCD_RUNTIME_AGENT_VERSION_KEY)
+    except Exception:
+        raw = None
+    previous = raw.get("version") if isinstance(raw, dict) else raw
+    return str(previous or "").strip() != str(__version__).strip()
+
+
+def _mark_mcd_runtime_agent_version(store: object) -> None:
+    try:
+        store.put_runtime_sync(
+            _MCD_RUNTIME_AGENT_VERSION_KEY,
+            {"version": str(__version__), "updated_at": time.time()},
+        )
+    except Exception:
+        logging.warning("runtime-overrides agent version marker update failed")
+
+
+def _persist_recovered_runtime_values(
+    config: AgentConfig,
+    current_runtime: Mapping[str, Any],
+    recovered_runtime: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Materialize the complete runtime snapshot restored after an update."""
+    updates = {
+        str(key): deepcopy(value)
+        for key, value in recovered_runtime.items()
+        if current_runtime.get(key) != value
+    }
+    if not updates:
+        return dict(recovered_runtime)
+    try:
+        path, changed = upsert_runtime_values(config.config_file_path, updates)
+        if changed:
+            logging.warning(
+                "runtime-overrides restored after MCD update (%s): keys=%s",
+                path,
+                ",".join(sorted(updates)),
+            )
+    except Exception as exc:
+        logging.warning("runtime-overrides post-update recovery failed: %s", exc)
+    return dict(recovered_runtime)
+
+
+def _remove_remote_tombstoned_runtime_values(
+    runtime: Mapping[str, Any],
+    metadata: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Apply only explicit MCC tombstones to a recovered runtime snapshot."""
+    out = deepcopy(dict(runtime))
+    normalized = _runtime_metadata_normalize(metadata)
+    for key, stamp in normalized.get("host", {}).items():
+        if isinstance(stamp, Mapping) and stamp.get("source") == "mcc" and stamp.get("tombstone"):
+            out.pop(str(key), None)
+    for uid, fields in normalized.get("instances", {}).items():
+        if not isinstance(fields, Mapping):
+            continue
+        for key, stamp in fields.items():
+            if not (
+                isinstance(stamp, Mapping)
+                and stamp.get("source") == "mcc"
+                and stamp.get("tombstone")
+            ):
+                continue
+            rows = out.get(str(key))
+            if not isinstance(rows, Mapping):
+                continue
+            matched_uid = _matching_instance_runtime_entry(rows, str(uid))
+            if matched_uid is None:
+                continue
+            next_rows = dict(rows)
+            next_rows.pop(matched_uid, None)
+            if next_rows:
+                out[str(key)] = next_rows
+            else:
+                out.pop(str(key), None)
+    return out
+
+
+def _initialize_local_runtime_baseline(
+    config: AgentConfig,
+    store: object,
+    *,
+    recover_after_update: bool = False,
+) -> tuple[dict[str, Any], str]:
     """Recover local instance intent before the first post-update classification."""
     current = local_runtime_overrides(config)
     pending = _read_local_runtime_push_pending(store)
     stored = store.get_runtime_sync("local_runtime")
     if pending is not None:
-        recovered = _merge_missing_instance_runtime_values(current, pending["current"])
-        _persist_recovered_instance_runtime(config, current, recovered)
+        if recover_after_update:
+            # A pending local snapshot is already a complete MCD-side edit;
+            # preserve every key across the package transition, not only
+            # instance-scoped rows.
+            recovered = deepcopy(pending["current"])
+            recovered.update(
+                {
+                    key: deepcopy(value)
+                    for key, value in current.items()
+                    if key not in recovered
+                }
+            )
+            _persist_recovered_runtime_values(config, current, recovered)
+        else:
+            recovered = _merge_missing_instance_runtime_values(current, pending["current"])
+            _persist_recovered_instance_runtime(config, current, recovered)
         stored = pending["previous"]
         store.put_runtime_sync("local_runtime", stored)
         metadata = _runtime_metadata_for_snapshot(
@@ -1544,6 +1647,31 @@ def _initialize_local_runtime_baseline(config: AgentConfig, store: object) -> tu
     remote_runtime = remote_runtime if isinstance(remote_runtime, dict) else {}
     accepted_runtime = _accepted_local_runtime_snapshot(store)
     remote_for_recovery = _merge_missing_instance_runtime_values(remote_runtime, accepted_runtime)
+
+    if recover_after_update:
+        # A package/source transition may leave the mutable runtime include
+        # empty or partially rebuilt. That is not an operator deletion. Start
+        # from the complete durable baseline and overlay non-empty MCC values;
+        # an explicit MCC tombstone is the only destructive signal.
+        remote_metadata = _runtime_metadata_normalize(
+            store.get_runtime_sync(_MCC_RUNTIME_METADATA_KEY)
+        )
+        recovered_after_update = _remove_remote_tombstoned_runtime_values(stored, remote_metadata)
+        for key, value in remote_for_recovery.items():
+            text_key = str(key)
+            if _runtime_metadata_has_remote_tombstone(remote_metadata, text_key):
+                recovered_after_update.pop(text_key, None)
+                continue
+            if isinstance(value, Mapping) and not value:
+                continue
+            recovered_after_update[text_key] = deepcopy(value)
+        recovered_after_update = _persist_recovered_runtime_values(
+            config,
+            current,
+            recovered_after_update,
+        )
+        current = recovered_after_update
+        stored = recovered_after_update
 
     # A package/update may leave the mutable file without an instance row even
     # though the durable local baseline still has it. Restore only rows that
@@ -16358,7 +16486,13 @@ def run_loop(
             profile_authority = str(getattr(config, "profile_name", "") or "").strip().lower()
         except Exception as exc:
             logging.warning("runtime-overrides startup bootstrap reload failed: %s", exc)
-    _, startup_local_runtime_fp = _initialize_local_runtime_baseline(config, store)
+    recover_after_update = _mcd_runtime_update_recovery_needed(store)
+    _, startup_local_runtime_fp = _initialize_local_runtime_baseline(
+        config,
+        store,
+        recover_after_update=recover_after_update,
+    )
+    _mark_mcd_runtime_agent_version(store)
     _sync_segment_whitelist_file(config, installs)
     _refresh_instance_db_maps(installs, db_configs_by_root, mautic_timezones_by_root)
     _apply_instance_runtime_guard(installs, reason="startup")

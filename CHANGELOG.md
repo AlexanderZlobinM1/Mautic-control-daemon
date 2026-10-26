@@ -1,3 +1,9 @@
+## 1.5.237 - 2026-10-26
+
+- Restore the complete durable MCC runtime snapshot after an MCD
+  package/source update resets the mutable runtime include; explicit MCC
+  tombstones still win.
+
 ## 1.5.236 - 2026-10-26
 
 - Preserve a non-empty plugin-operation catalog across non-authoritative MCC
