@@ -67,3 +67,18 @@ def test_control_receipt_explains_legacy_artifact_digest_mismatch(tmp_path):
     assert output[0]["stage"] == "identity"
     assert output[0]["detail"] == "runtime_image_digest is required; image_digest is not accepted"
     assert calls == []
+
+
+def test_terminal_conflict_reconciliation_preserves_audit_and_hides_stale_receipt(tmp_path):
+    store = ControlStore(str(tmp_path / "state.sqlite"))
+    command = {"command":"docker_runtime_preflight_v1","job_id":"docker-preflight-worker02-15228","request_id":"r","probe_id":"p","agent_id":"a","host_fingerprint":"sha256:h","image_ref":"playground7","runtime_image_digest":"sha256:"+"a"*64,"adapter":"mauticrfp-docker-v1","ttl_seconds":60}
+    store.ingest({"schema":"mcd-control-v1","contract_version":"1.0","commands":[command]}, agent_id="a", host_fingerprint="sha256:h")
+    store.execute_pending(agent_id="a", host_fingerprint="sha256:h", active_key=(object(), "k"), runner=lambda _request: {"status":"ready"}, signer=lambda value, *_args: value)
+    assert store.receipts()[0]["status"] == "succeeded"
+    assert store.acknowledge_terminal_conflict(command["job_id"], reason="control receipt conflicts with immutable terminal command", remote_response='{"job_id":"docker-preflight-worker02-15228"}') is True
+    assert store.receipts() == []
+    audit = store.receipts(include_conflict_acknowledged=True)[0]
+    assert audit["status"] == "conflict_acknowledged"
+    assert audit["original_receipt"]["status"] == "succeeded"
+    assert len(audit["original_receipt_sha256"]) == 64
+    assert audit["conflict"]["reason"] == "control receipt conflicts with immutable terminal command"

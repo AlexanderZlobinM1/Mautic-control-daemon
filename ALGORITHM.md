@@ -452,6 +452,14 @@ config на его profile baseline и только после этого при
   Consumers validate the observed timestamp/freshness window, signature,
   agent/host binding, inventory hash and `fixed_runtime_ref`↔digest equality;
   ambiguous or tampered rows are rejected before any runtime decision.
+  If MCC rejects a previously terminal local control receipt with the exact
+  immutable-terminal 409, MCD records a local
+  `mcd-control-conflict-reconciliation-v1` audit containing the original
+  receipt, its SHA-256 and the bounded conflict reason/remote-response hash.
+  That one `conflict_acknowledged` row is omitted from subsequent outbound
+  `control_receipts`; no SQLite row is deleted, no MCC row is changed, and
+  other jobs remain eligible. An unrelated 409 is never treated as this
+  reconciliation.
   The safe semantic label set preserves the `com.sales-snap.mauticrfp.*`
   image selector/runtime metadata and OCI labels while excluding
   secret-shaped keys.
