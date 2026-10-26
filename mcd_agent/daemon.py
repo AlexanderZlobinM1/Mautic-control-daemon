@@ -1758,6 +1758,24 @@ def _store_runtime_fetch_snapshot(
     store.put_runtime_sync("mcc_runtime_desired_state", state_for_store)
 
 
+def _runtime_bootstrap_needs_full_snapshot(
+    resolution: Mapping[str, Any],
+    *,
+    recover_after_update: bool,
+) -> bool:
+    """Materialize every MCC-managed key when recovery filled a local gap."""
+    if recover_after_update:
+        return True
+    # Ordinary polls persist only the stable projection.  If MCC won any
+    # non-stable field, the local file was incomplete (or lost that field), so
+    # persist the complete allowed snapshot, including false/zero/empty values.
+    for path in resolution.get("remote_wins", []):
+        if isinstance(path, (tuple, list)) and len(path) >= 2:
+            if str(path[1]) not in _STABLE_RUNTIME_KEYS:
+                return True
+    return False
+
+
 def _bootstrap_remote_runtime_before_local_baseline(
     config: AgentConfig,
     store: object,
@@ -1834,7 +1852,10 @@ def _bootstrap_remote_runtime_before_local_baseline(
         current_local_runtime,
         resolved_runtime,
         resolved_metadata,
-        full_snapshot=recover_after_update,
+        full_snapshot=_runtime_bootstrap_needs_full_snapshot(
+            resolution,
+            recover_after_update=recover_after_update,
+        ),
     )
     store.put_runtime_sync("local_runtime", resolved_runtime)
     store.put_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY, resolved_metadata)

@@ -1,3 +1,9 @@
+## 1.5.243 - 2026-10-26
+
+- Restore the complete MCC-managed runtime snapshot after any local runtime
+  loss, not only after an MCD update; preserve false, zero and empty values
+  without treating recovery as a new local settings change.
+
 ## 1.5.242 - 2026-10-26
 
 - Keep a completed native plugin reload from failing when the optional MCC

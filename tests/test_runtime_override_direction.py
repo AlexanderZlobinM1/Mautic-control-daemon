@@ -2256,6 +2256,60 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             self.assertIsNone(daemon._read_local_runtime_push_pending(store))
             self.assertEqual(store.get_runtime_sync("mcc_runtime"), desired_runtime)
 
+    def test_runtime_loss_restores_complete_mcc_snapshot_not_only_stable_keys(self) -> None:
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        class MemoryStore:
+            def __init__(self):
+                self.values = {}
+
+            def get_runtime_sync(self, key):
+                return self.values.get(key)
+
+            def put_runtime_sync(self, key, value):
+                self.values[key] = dict(value)
+
+            def delete_runtime_sync(self, keys):
+                for key in keys:
+                    self.values.pop(key, None)
+                return 1
+
+        desired_runtime = {
+            "segment_full_scan_interval_sec": 47,
+            "segment_priority_parallel_idle": 0,
+            "scheduler_elastic_slots_enabled": False,
+            "db_watchdog": {},
+        }
+        response = {
+            "status": "ok",
+            "runtime_overrides": desired_runtime,
+            "desired_state": {
+                "revision": 202,
+                "updated_at": 600.0,
+                "runtime_overrides": desired_runtime,
+            },
+        }
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "mcd.toml"
+            # Simulate an arbitrary local runtime loss, not an operator edit:
+            # MCC remains the complete source of settings.
+            path.write_text('[profile]\nname = "custom"\n', encoding="utf-8")
+            cfg = replace(
+                load_config(str(path), allow_recover_from_mcc=False),
+                mcc_url="https://mcc.example",
+                mcc_token="token",
+            )
+            store = MemoryStore()
+            with patch("mcd_agent.daemon.fetch_runtime_overrides", return_value=response):
+                status = daemon._bootstrap_remote_runtime_before_local_baseline(cfg, store, [])
+
+            self.assertEqual(status, "applied")
+            restored = local_runtime_overrides(load_config(str(path), allow_recover_from_mcc=False))
+            self.assertEqual(restored, desired_runtime)
+            self.assertEqual(store.get_runtime_sync("local_runtime"), desired_runtime)
+
     def test_post_update_bootstrap_prefers_canonical_catalog_over_reset_local_projection(self) -> None:
         from pathlib import Path
         from tempfile import TemporaryDirectory

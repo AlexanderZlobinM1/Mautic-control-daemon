@@ -157,6 +157,15 @@ Qualified UID и его priority/super-priority lane maps сначала materia
 создаёт ложную local deletion и не отправляет пустой instance-row обратно в
 MCC.
 
+Если локальный runtime include потерян или обнулён, любой remote winner вне
+stable-проекции переводит bootstrap в full-snapshot режим: в config
+materialize-ся весь `runtime_remote_allowed_keys()` MCC snapshot, включая
+`false`, `0`, пустые структуры и явные tombstone. Такое materialize-ние не
+создаёт локальную revision и не отправляет потерю обратно в MCC. После MCD
+update этот режим включается всегда: reset локального файла не считается
+изменением настроек, а источником истины остаётся полный сохранённый snapshot
+MCC.
+
 Если локальный config-файл изменился во время remote poll/apply, MCD сначала
 сохраняет пару `previous/current` в durable `local_runtime_push_pending`, а
 remote baseline не продвигает. Проверка выполняется перед fetch, после network
