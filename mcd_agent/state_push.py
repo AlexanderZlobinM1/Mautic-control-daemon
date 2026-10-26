@@ -36,6 +36,8 @@ from mcd_agent.mcd_control import ControlStore, SCHEMA
 from mcd_agent.result_signing import ensure_result_key
 from mcd_agent.result_signing import sign_result
 from mcd_agent.docker_preflight_runner import DockerRuntimePreflightRunner
+from mcd_agent.docker_image_inventory import capability as docker_image_inventory_capability
+from mcd_agent.docker_image_inventory import collect_signed_inventory
 from mcd_agent.commercial_portal import _host_fingerprint
 from mcd_agent.install_readiness import collect_mautic_install_readiness
 from mcd_agent.instance_size import collect_instance_sizes
@@ -2261,10 +2263,11 @@ class MCCStatePusher:
     ) -> dict[str, Any]:
         identity = resolve_agent_identity(self.cfg)
         result_key = None
+        result_private_key = None
         key_path = str(getattr(self.cfg, "result_signing_key_path", "") or "")
         if key_path:
             try:
-                _private, result_key = ensure_result_key(key_path)
+                result_private_key, result_key = ensure_result_key(key_path)
             except Exception:
                 result_key = None
         control_store = ControlStore(self.cfg.state_db_path)
@@ -2277,6 +2280,12 @@ class MCCStatePusher:
                 result_key=result_key,
                 key_path=key_path,
             )
+        docker_image_inventory = collect_signed_inventory(
+            agent_id=state_identity["agent_id"],
+            host_fingerprint=state_identity["host_fingerprint"],
+            private_key=result_private_key,
+            key_id=str(result_key.get("key_id") or "") if isinstance(result_key, dict) else "",
+        )
         from mcd_agent.mautic_release_authorization import runtime_capabilities as release_capabilities
         instances = []
         for i in installs:
@@ -2330,6 +2339,8 @@ class MCCStatePusher:
             "schema": "mcd-state-v1",
             "control_receipts": control_store.receipts(),
             "control_capabilities": {"schema": "mcd-control-capabilities-v1", "version": "1.0", "commands": ["docker_runtime_preflight_v1"]},
+            "docker_runtime_image_inventory_capability": docker_image_inventory_capability(),
+            "docker_runtime_image_inventory": docker_image_inventory,
             "result_signing_key": result_key,
             **state_identity,
             "hostname": str(identity.get("effective_hostname") or ""),
