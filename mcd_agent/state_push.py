@@ -2384,7 +2384,9 @@ class MCCStatePusher:
                     if body.strip():
                         try:
                             control = json.loads(body)
-                            if isinstance(control, dict) and control.get("schema") == SCHEMA:
+                            if isinstance(control, dict) and (
+                                control.get("schema") == SCHEMA or isinstance(control.get("control"), dict)
+                            ):
                                 _ingest_control_response(self.cfg.state_db_path, payload, control)
                         except (ValueError, json.JSONDecodeError):
                             pass
