@@ -193,21 +193,20 @@ def test_inventory_sync_wire_payload_is_versioned_and_compact():
 
 
 def test_observation_timestamps_do_not_trigger_change_only_pushes():
+    observation = {
+        "schema": "mcd-plugin-inventory-observation-v1",
+        "instance_uid": "instance-a",
+        "status": "ok",
+        "complete": True,
+        "last_known": False,
+        "inventory": [{"bundle": "DemoBundle", "version": "1.0.0"}],
+        "inventory_sha256": "sha256:a",
+        "observed_at_utc": "2026-10-26T10:00:00Z",
+        "last_known_observed_at_utc": "2026-10-26T10:00:00Z",
+    }
     base = {
         "schema": "mcd-state-v1",
-        "plugin_inventory_observations": [
-            {
-                "schema": "mcd-plugin-inventory-observation-v1",
-                "instance_uid": "instance-a",
-                "status": "ok",
-                "complete": True,
-                "last_known": False,
-                "inventory": [{"bundle": "DemoBundle", "version": "1.0.0"}],
-                "inventory_sha256": "sha256:a",
-                "observed_at_utc": "2026-10-26T10:00:00Z",
-                "last_known_observed_at_utc": "2026-10-26T10:00:00Z",
-            }
-        ],
+        "plugin_inventory_observations": [observation],
         "plugin_inventory_sync": {
             "schema": "mcd-plugin-inventory-sync-v1",
             "status": "ok",
@@ -219,7 +218,7 @@ def test_observation_timestamps_do_not_trigger_change_only_pushes():
         "instances": [
             {
                 "instance_uid": "instance-a",
-                "plugin_inventory": base["plugin_inventory_observations"][0],
+                "plugin_inventory": observation,
             }
         ],
     }
