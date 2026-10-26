@@ -258,6 +258,7 @@ def test_stage2_adoption_and_batch_commands_are_durable_and_ordered(tmp_path):
                     {
                         "schema": "portal-mcd-command-noop-v1",
                         "command_id": "noop-1",
+                        "delivery_cursor": 1,
                         "request_id": "request-1",
                         "idempotency_key": "noop-key-1",
                         "expected_standalone_etag": etag,
@@ -265,6 +266,7 @@ def test_stage2_adoption_and_batch_commands_are_durable_and_ordered(tmp_path):
                     {
                         "schema": "portal-mcd-command-noop-v1",
                         "command_id": "noop-2",
+                        "delivery_cursor": 2,
                         "request_id": "request-2",
                         "idempotency_key": "noop-key-2",
                         "expected_standalone_etag": etag,
@@ -291,6 +293,7 @@ def test_stage2_adoption_and_batch_commands_are_durable_and_ordered(tmp_path):
     assert state.get("commercial_portal_cursor") == "cursor-batch-1"
     assert state.get("commercial_self_hosted_pending_delivery_v1") is None
     assert [item[0]["command_id"] for item in portal.receipts if item[0].get("schema") == "portal-mcd-command-noop-receipt-v1"] == ["noop-1", "noop-2"]
+    assert [item[0]["delivery_cursor"] for item in portal.receipts if item[0].get("schema") == "portal-mcd-command-noop-receipt-v1"] == [1, 2]
 
 
 def test_stage2_v3_command_is_handled_and_receipted(tmp_path):
@@ -305,6 +308,7 @@ def test_stage2_v3_command_is_handled_and_receipted(tmp_path):
                     "schema": "mcc-desired-runtime-sync-v3",
                     "desired_state_sync_protocol": 3,
                     "command_id": "sync-1",
+                    "delivery_cursor": 3,
                     "request_id": "sync-request-1",
                     "idempotency_key": "sync-key-1",
                     "runtime_overrides": {"scheduler_host_max_parallel": 8},
@@ -325,4 +329,5 @@ def test_stage2_v3_command_is_handled_and_receipted(tmp_path):
     assert state.get("commercial_portal_cursor") == "cursor-v3-1"
     receipt = next(item for item in portal.receipts if item.get("schema") == "portal-mcd-command-receipt-v1")
     assert receipt["command_id"] == "sync-1"
+    assert receipt["delivery_cursor"] == 3
     assert receipt["status"] == "succeeded"

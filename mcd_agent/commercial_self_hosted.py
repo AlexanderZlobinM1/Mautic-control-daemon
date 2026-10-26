@@ -486,6 +486,7 @@ class SelfHostedPortalWorker:
             "schema": _PORTAL_NOOP_RECEIPT_SCHEMA,
             "contract_version": PORTAL_MCD_ADOPT_CONTRACT_VERSION,
             "command_id": str(command.get("command_id") or ""),
+            "delivery_cursor": int(command.get("delivery_cursor") or 0),
             "request_id": str(command.get("request_id") or ""),
             "idempotency_key": str(command.get("idempotency_key") or ""),
             "binding": dict(command.get("binding") or {}),
@@ -494,7 +495,7 @@ class SelfHostedPortalWorker:
             "standalone": {"before_etag": actual, "after_etag": actual, "unchanged": unchanged},
             "connection_status": "active",
         }
-        if not receipt["command_id"] or not receipt["request_id"] or not receipt["idempotency_key"]:
+        if not receipt["command_id"] or receipt["delivery_cursor"] <= 0 or not receipt["request_id"] or not receipt["idempotency_key"]:
             return {"status": "rejected", "reason": "commercial_noop_command_invalid"}
         if not self._send_or_queue(receipt):
             return {"status": "receipt_pending", "command_id": receipt["command_id"]}
@@ -505,7 +506,7 @@ class SelfHostedPortalWorker:
 
     def _command_receipt(self, command: Mapping[str, Any], *, status: str, payload: Mapping[str, Any]) -> dict[str, Any]:
         binding = command.get("binding") if isinstance(command.get("binding"), Mapping) else {"agent_id": self.agent_id, "installation_id": self._active_installation_id, "host_fingerprint": self.host_fingerprint, "commercial_key_id": self.commercial_key_id}
-        return {"schema": "portal-mcd-command-receipt-v1", "contract_version": "1.0", "command_id": str(command.get("command_id") or command.get("conflict_id") or ""), "request_id": str(command.get("request_id") or command.get("command_id") or ""), "idempotency_key": str(command.get("idempotency_key") or ""), "binding": dict(binding), "status": status if status in {"succeeded", "failed"} else "failed", "payload": dict(payload), "observed_at": _utc()}
+        return {"schema": "portal-mcd-command-receipt-v1", "contract_version": "1.0", "command_id": str(command.get("command_id") or command.get("conflict_id") or ""), "delivery_cursor": int(command.get("delivery_cursor") or 0), "request_id": str(command.get("request_id") or command.get("command_id") or ""), "idempotency_key": str(command.get("idempotency_key") or ""), "binding": dict(binding), "status": status if status in {"succeeded", "failed"} else "failed", "payload": dict(payload), "observed_at": _utc()}
 
     def _run_runtime_command(self, command: Mapping[str, Any], *, cursor_next: str) -> dict[str, Any]:
         if str(command.get("schema") or "") != "mcc-desired-runtime-sync-v3" or int(command.get("desired_state_sync_protocol") or 0) != 3:
@@ -513,7 +514,7 @@ class SelfHostedPortalWorker:
             if self._send_or_queue(receipt):
                 self._finish_command(cursor_next=cursor_next)
             return {"status": "failed", "reason": "commercial_command_unsupported"}
-        if not str(command.get("command_id") or "").strip() or not str(command.get("idempotency_key") or "").strip():
+        if not str(command.get("command_id") or "").strip() or int(command.get("delivery_cursor") or 0) <= 0 or not str(command.get("idempotency_key") or "").strip():
             # Portal must expose the durable command identity in every poll
             # payload. Without it no receipt can be accepted safely; retain
             # the batch for replay instead of acknowledging an unaddressable
