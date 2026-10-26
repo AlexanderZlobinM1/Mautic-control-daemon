@@ -19113,6 +19113,7 @@ def run_loop(
         local_runtime = local_runtime_overrides(config)
         local_fp = overrides_fingerprint(local_runtime)
         pending_local_runtime = None
+        local_runtime_push_accepted_this_tick = False
         if config.mcc_url and config.mcc_token:
             pending_local_runtime = _queue_local_runtime_delta(
                 store,
@@ -19170,6 +19171,7 @@ def run_loop(
                     runtime_metadata=push_metadata,
                 )
                 if accepted:
+                    local_runtime_push_accepted_this_tick = True
                     after_push_runtime = local_runtime_overrides(config)
                     store.put_runtime_sync("local_runtime", local_runtime_to_push)
                     if after_push_runtime != local_runtime_to_push:
@@ -19190,6 +19192,18 @@ def run_loop(
                     logging.info(
                         "runtime-overrides local change pushed to MCC (keys=%s)",
                         ",".join(sorted(local_runtime_to_push.keys())) if local_runtime_to_push else "-",
+                    )
+                    # The accepted response is already the canonical result
+                    # of this write. Do not start the startup/periodic remote
+                    # poll in the same tick: a lagging response can otherwise
+                    # move the durable baseline back to `previous` and make
+                    # the identical local delta push forever. A later normal
+                    # poll still reconciles any independent MCC changes.
+                    startup_runtime_sync_pending = False
+                    runtime_overrides_sync_requested = False
+                    next_runtime_overrides_poll_at = now + max(
+                        15,
+                        min(300, int(config.mcc_push_interval_sec or config.poll_interval_sec or 60)),
                     )
                     _sync_and_publish_form_embed_status(config, installs, reason="local_runtime_push")
                 elif p_status == "conflict":
@@ -19231,6 +19245,7 @@ def run_loop(
                 local_runtime_push_pending = True
         if config.mcc_url and config.mcc_token and (
             (startup_runtime_sync_pending or runtime_overrides_sync_requested or should_runtime_poll)
+            and not local_runtime_push_accepted_this_tick
             and not local_runtime_push_pending
         ):
             ro = fetch_runtime_overrides(

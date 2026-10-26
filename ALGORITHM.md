@@ -155,6 +155,15 @@ round-trip и непосредственно перед baseline refresh; pendin
 разрешает сохранить новый local baseline и удалить pending; conflict/error или
 неполный ответ оставляют delta для следующего ровно одного rebased push.
 
+После принятого local runtime push MCD не выполняет remote poll в том же
+main-loop tick. Принятый ответ уже является canonical результатом записи;
+немедленный poll может вернуть lagging/неполный snapshot, снова положить
+`previous` в baseline и превратить один delta в бесконечный повторный push.
+Startup-флаг и ручной poll-trigger сбрасываются, а следующий poll назначается
+по обычному `mcc_push_interval_sec` (с теми же границами 15--300 секунд).
+Таким образом, durable pending сохраняется при реальном втором локальном
+изменении, а независимые изменения MCC будут приняты следующим штатным poll.
+
 ## 1. Область и границы
 
 Планирование выполняется по каждому instance root, но capacity и защита

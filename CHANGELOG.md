@@ -1,3 +1,11 @@
+## 1.5.222 - 2026-10-26
+
+- Defer the runtime-overrides remote poll after an accepted local push until
+  the normal poll interval, preventing a lagging same-tick response from
+  re-queuing the identical durable delta indefinitely.
+- Document the baseline/poll ordering and preserve durable pending behavior
+  for a real second local edit.
+
 ## 1.5.185 - 2026-10-14
 
 - Preserve the accepted `plugin_operations` catalog across partial, empty, or
