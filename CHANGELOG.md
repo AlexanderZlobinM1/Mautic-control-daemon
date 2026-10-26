@@ -1,3 +1,12 @@
+## 1.5.249 - 2026-10-26
+
+- Enforce the commercial Portal network boundary as an outbound-only MCD
+  transport: long-poll delivery, durable command cursor, pending delivery and
+  exponential outage backoff are persisted locally and replayed after restart.
+- Keep Portal commands queued until the next successful MCD outbound cycle;
+  no inbound listener, webhook, SSH path, bind, or public host reachability is
+  introduced. Corporate MCC and standalone scheduler paths remain separate.
+
 ## 1.5.248 - 2026-10-26
 
 - Add opt-in MCC desired-runtime sync v3 producer/consumer with durable common

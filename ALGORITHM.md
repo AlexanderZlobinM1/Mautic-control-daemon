@@ -1225,3 +1225,23 @@ uses the outbound Portal contract and a host-level commercial agent, separate
 from the corporate MCD identity. Passive commercial acceptance is held until
 Portal completes the approved “Установки” flow; this hold authorizes no host,
 source, credential, or tenant mutation.
+
+### Commercial Portal network boundary and durable outbound cycle
+
+The commercial worker is an outbound-only transport. MCD is the sole
+connection initiator: it uses HTTPS poll/long-poll to consume queued Portal
+commands and settings/resolutions, and HTTPS POST to deliver signed ACKs,
+receipts, local intents, inventory and state. Portal has no callback, webhook,
+SSH, reverse connection, inbound listener, bind, or public host reachability
+through this lane. The corporate MCC transport remains a separate path.
+
+Before processing a delivery MCD durably records the delivery, its prior
+cursor, next cursor and installation binding. The cursor advances only after
+the terminal receipt and all earlier receipts are accepted by Portal. A daemon
+restart therefore resumes the saved delivery or the durable receipt queue;
+replay uses the existing job and stage idempotency keys and never re-runs a
+completed scenario. A Portal/network failure leaves the command queued at
+Portal and records an exponential, durable retry deadline. The next outbound
+cycle drains receipts first, then resumes the saved delivery or polls with the
+last cursor; no scheduler or standalone work is blocked. Backoff is applied
+only to transport failures, not to local signature/applicability rejection.

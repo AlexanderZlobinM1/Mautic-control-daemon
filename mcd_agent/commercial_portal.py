@@ -17,7 +17,6 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Mapping
 from urllib import request
-from urllib.parse import quote
 from urllib.error import HTTPError
 
 from cryptography.hazmat.primitives import serialization
@@ -33,6 +32,11 @@ SELF_HOSTED_MCD_STAGE_IDS = frozenset({"scenario_dispatch", "execution"})
 SELF_HOSTED_MCD_STAGE_STATUSES = frozenset({"queued", "running", "waiting", "succeeded", "failed"})
 SELF_HOSTED_MCD_TERMINAL_STATUSES = frozenset({"succeeded", "failed"})
 SELF_HOSTED_MCD_ROLLBACK_STATUSES = frozenset({"not_attempted", "succeeded", "failed"})
+PORTAL_MCD_ADOPT_CONTRACT_VERSION = "1.0"
+PORTAL_MCD_POLL_REQUEST_SCHEMA = "portal-mcd-poll-request-v1"
+PORTAL_MCD_POLL_RESPONSE_SCHEMA = "portal-mcd-poll-response-v1"
+PORTAL_MCD_MAX_LONG_POLL_MS = 30_000
+PORTAL_MCD_MAX_BACKOFF_MS = 300_000
 MCC_ARTIFACT_SIGNATURE_DOMAIN = b"com.sales-snap.portal-mcc/artifact-signature/1.0\n"
 MAX_ARTIFACT_BYTES = 512 * 1024 * 1024
 
@@ -66,6 +70,59 @@ def _without_signature(job: Mapping[str, Any]) -> dict[str, Any]:
 def _require_https(url: str) -> None:
     if not str(url).lower().startswith("https://"):
         raise ValueError("commercial_portal_https_required")
+
+
+def build_portal_mcd_poll_request(*, request_id: str, idempotency_key: str, binding: Mapping[str, str], cursor: str | None, wait_ms: int, backoff_ms: int) -> dict[str, Any]:
+    """Build the exact Stage2 outbound poll envelope."""
+    if not request_id or not idempotency_key:
+        raise ValueError("portal_mcd_poll_request_invalid")
+    required = ("agent_id", "installation_id", "host_fingerprint", "commercial_key_id")
+    if any(not str(binding.get(key) or "") for key in required):
+        raise ValueError("portal_mcd_poll_request_binding_invalid")
+    wait = int(wait_ms)
+    backoff = int(backoff_ms)
+    if wait < 0 or wait > PORTAL_MCD_MAX_LONG_POLL_MS or backoff < 0 or backoff > PORTAL_MCD_MAX_BACKOFF_MS:
+        raise ValueError("portal_mcd_poll_request_invalid")
+    return {
+        "schema": PORTAL_MCD_POLL_REQUEST_SCHEMA,
+        "contract_version": PORTAL_MCD_ADOPT_CONTRACT_VERSION,
+        "request_id": str(request_id),
+        "idempotency_key": str(idempotency_key),
+        "binding": {key: str(binding[key]) for key in required},
+        "direction": "mcd_to_portal",
+        "cursor": None if cursor is None or cursor == "" else str(cursor),
+        "wait_ms": wait,
+        "backoff_ms": backoff,
+    }
+
+
+def verify_portal_mcd_poll_response(response: Mapping[str, Any], *, public_keys: Mapping[str, str], expected_request_id: str, expected_idempotency_key: str, expected_binding: Mapping[str, str]) -> dict[str, Any]:
+    """Validate and authenticate the signed Portal poll response."""
+    if response.get("schema") != PORTAL_MCD_POLL_RESPONSE_SCHEMA or response.get("contract_version") != PORTAL_MCD_ADOPT_CONTRACT_VERSION:
+        raise ValueError("portal_mcd_poll_response_invalid")
+    if response.get("request_id") != expected_request_id or response.get("idempotency_key") != expected_idempotency_key:
+        raise ValueError("portal_mcd_poll_response_idempotency_mismatch")
+    binding = response.get("binding")
+    if not isinstance(binding, Mapping) or any(str(binding.get(key) or "") != str(expected_binding.get(key) or "") for key in ("agent_id", "installation_id", "host_fingerprint", "commercial_key_id")):
+        raise ValueError("portal_mcd_poll_response_binding_mismatch")
+    next_cursor = response.get("next_cursor")
+    commands = response.get("commands")
+    retry_after_ms = response.get("retry_after_ms")
+    signature = response.get("portal_signature")
+    if not isinstance(next_cursor, str) or not next_cursor or not isinstance(commands, list) or any(not isinstance(command, Mapping) for command in commands) or isinstance(retry_after_ms, bool) or not isinstance(retry_after_ms, int) or retry_after_ms < 0 or retry_after_ms > PORTAL_MCD_MAX_BACKOFF_MS or not isinstance(signature, Mapping):
+        raise ValueError("portal_mcd_poll_response_invalid")
+    key_id = str(signature.get("key_id") or "")
+    key = public_keys.get(key_id)
+    if not key or signature.get("algorithm") != "ed25519":
+        raise ValueError("portal_mcd_poll_response_signer_unknown")
+    unsigned = dict(response)
+    unsigned.pop("portal_signature", None)
+    try:
+        Ed25519PublicKey.from_public_bytes(_unb64(key)).verify(_unb64(str(signature.get("value") or "")), canonical_json(unsigned))
+    except Exception as exc:
+        raise ValueError("portal_mcd_poll_response_signature_invalid") from exc
+    _assert_no_contract_secrets(response)
+    return {"next_cursor": next_cursor, "commands": [dict(command) for command in commands], "retry_after_ms": retry_after_ms}
 
 
 def verify_signed_job(job: Mapping[str, Any], public_keys: Mapping[str, str], *, now: float | None = None) -> dict[str, Any]:
@@ -443,35 +500,56 @@ class PortalClient:
         return self._request("POST", f"agents/{agent_id}/jobs/{job_id}/ack", payload, idempotency_key=idempotency_key)
 
     def pull_job(self, *, installation_id: str, cursor: str = "", wait_seconds: int = 25, limit: int = 1) -> dict[str, Any] | None:
+        """Poll the exact outbound-only Portal channel and normalize one command.
+
+        ``limit`` remains accepted for the v2 worker API, but the Stage2 poll
+        contract intentionally returns a bounded command list whose processing
+        and cursor advancement are controlled by MCD.
+        """
         agent_id = str(self.state.get("agent_id") or "")
-        wait = max(0, min(30, int(wait_seconds)))
-        bounded_limit = max(1, min(20, int(limit)))
-        query = f"?installation_id={quote(installation_id)}&wait_seconds={wait}&limit={bounded_limit}"
-        if cursor:
-            query += "&cursor=" + quote(cursor)
-        base = str(self.state.get("portal_api_base") or "").rstrip("/")
-        if not base:
-            raise RuntimeError("commercial_portal_not_activated")
-        _require_https(base)
-        req = request.Request(base + f"/agents/{agent_id}/jobs" + query, headers={"Authorization": "Bearer " + str(self.state.get("portal_agent_credential")), "X-Portal-Contract": CONTRACT}, method="GET")
-        try:
-            with request.urlopen(req, timeout=self.timeout_sec, context=ssl.create_default_context()) as response:
-                if int(getattr(response, "status", 200)) == 204:
-                    return None
-                raw = response.read(2 * 1024 * 1024 + 1)
-        except HTTPError as exc:
-            raise RuntimeError(f"commercial_portal_http_{exc.code}") from exc
-        if len(raw) > 2 * 1024 * 1024:
-            raise RuntimeError("commercial_portal_response_too_large")
-        result = json.loads(raw.decode("utf-8")) if raw else {}
-        if result.get("schema") == SELF_HOSTED_MCD_JOB_SCHEMA and result.get("contract_version") == SELF_HOSTED_MCD_CONTRACT_VERSION:
-            return result
-        nested = result.get("job") if isinstance(result.get("job"), dict) else None
-        if isinstance(nested, dict) and nested.get("schema") == SELF_HOSTED_MCD_JOB_SCHEMA and nested.get("contract_version") == SELF_HOSTED_MCD_CONTRACT_VERSION:
-            return result
-        if result.get("schema") != "portal-mcd-job-delivery-v1" or result.get("contract_version") != CONTRACT_VERSION:
-            raise RuntimeError("commercial_job_delivery_schema_invalid")
-        return result
+        request_state = self.state.get("commercial_portal_poll_request")
+        if not isinstance(request_state, dict) or str(request_state.get("cursor") or "") != str(cursor or ""):
+            request_state = {"request_id": _b64(os.urandom(16)), "idempotency_key": _b64(os.urandom(16)), "cursor": str(cursor or "")}
+            self.state.put("commercial_portal_poll_request", request_state)
+        binding = {
+            "agent_id": agent_id,
+            "installation_id": str(installation_id),
+            "host_fingerprint": str(self.state.get("host_fingerprint") or _host_fingerprint()),
+            "commercial_key_id": str(self.state.get("commercial_key_id") or ""),
+        }
+        transport = self.state.get("commercial_portal_transport_v1")
+        retry_after = float(transport.get("retry_after") or 0.0) if isinstance(transport, dict) else 0.0
+        backoff_ms = max(0, min(PORTAL_MCD_MAX_BACKOFF_MS, int(max(0.0, retry_after - time.time()) * 1000)))
+        payload = build_portal_mcd_poll_request(
+            request_id=str(request_state["request_id"]),
+            idempotency_key=str(request_state["idempotency_key"]),
+            binding=binding,
+            cursor=cursor or None,
+            wait_ms=max(0, min(PORTAL_MCD_MAX_LONG_POLL_MS, int(wait_seconds) * 1000)),
+            backoff_ms=backoff_ms,
+        )
+        result = self._request("POST", f"agents/{agent_id}/poll", payload, idempotency_key=str(request_state["idempotency_key"]))
+        keys = self.state.get("portal_job_signing_keys")
+        verified = verify_portal_mcd_poll_response(
+            result,
+            public_keys=keys if isinstance(keys, dict) else {},
+            expected_request_id=str(request_state["request_id"]),
+            expected_idempotency_key=str(request_state["idempotency_key"]),
+            expected_binding=binding,
+        )
+        self.state.put("commercial_portal_poll_request", None)
+        retry_after_ms = int(verified["retry_after_ms"])
+        self.state.put("commercial_portal_server_retry_after", time.time() + (retry_after_ms / 1000.0))
+        commands = verified["commands"]
+        if not commands:
+            self.state.put("commercial_portal_cursor", verified["next_cursor"])
+            return None
+        command = commands[0]
+        if command.get("schema") == SELF_HOSTED_MCD_JOB_SCHEMA and command.get("contract_version") == SELF_HOSTED_MCD_CONTRACT_VERSION:
+            return {"cursor": verified["next_cursor"], "job": command}
+        if command.get("schema") == "portal-mcd-job-delivery-v1" and command.get("contract_version") == CONTRACT_VERSION:
+            return {"cursor": verified["next_cursor"], "job": command.get("job") if isinstance(command.get("job"), dict) else command}
+        return {"cursor": verified["next_cursor"], "command": command}
 
     def download_artifact(self, *, path: str, grant: str, expected_size: int) -> bytes:
         base = str(self.state.get("portal_api_base") or "").rstrip("/")
