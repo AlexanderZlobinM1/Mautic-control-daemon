@@ -1751,6 +1751,9 @@ class MCCStatePusher:
         self._last_snapshot_ts = 0.0
         self._last_monitor_signals_hash = ""
         self._last_monitor_signals_push_ts = 0.0
+        # A command ingested from the last MCC response has been executed and
+        # its terminal receipt must be delivered on the next state push.
+        self._control_push_pending = False
         # Filesystem-permissions repair deltas.
         # We push deltas (not cumulative totals) so MCC 3-day aggregation
         # remains correct and stable across daemon restarts.
@@ -2130,7 +2133,32 @@ class MCCStatePusher:
 
         interval_due = (now_ts - self.last_push_ts) >= max(1, int(self.cfg.mcc_push_interval_sec))
         change_due = bool(self.cfg.mcc_push_on_change and changed)
-        return (interval_due or change_due or force_alert), changed
+        return (self._control_push_pending or interval_due or change_due or force_alert), changed
+
+    def _execute_pending_control_jobs(
+        self,
+        control_store: ControlStore,
+        *,
+        agent_id: str,
+        host_fingerprint: str,
+        result_key: dict[str, Any] | None,
+        key_path: str,
+    ) -> list[dict[str, Any]]:
+        if not result_key or not key_path:
+            return []
+        try:
+            private_key, _ = ensure_result_key(key_path)
+            if not control_store.active_key_ack(str(result_key.get("key_id") or "")):
+                return []
+            return control_store.execute_pending(
+                agent_id=agent_id,
+                host_fingerprint=host_fingerprint,
+                active_key=(private_key, str(result_key["key_id"])),
+                runner=DockerRuntimePreflightRunner(),
+                signer=sign_result,
+            )
+        except Exception:
+            return []
 
     def mark_pushed(self, now_ts: float, payload_no_ts: dict[str, Any]) -> None:
         self.last_push_ts = now_ts
@@ -2242,12 +2270,13 @@ class MCCStatePusher:
         control_store = ControlStore(self.cfg.state_db_path)
         state_identity = state_identity_payload(self.cfg)
         if result_key and key_path:
-            try:
-                private_key, _ = ensure_result_key(key_path)
-                if control_store.active_key_ack(result_key["key_id"]):
-                    control_store.execute_pending(agent_id=state_identity["agent_id"], host_fingerprint=state_identity["host_fingerprint"], active_key=(private_key, result_key["key_id"]), runner=DockerRuntimePreflightRunner(), signer=sign_result)
-            except Exception:
-                pass
+            self._execute_pending_control_jobs(
+                control_store,
+                agent_id=state_identity["agent_id"],
+                host_fingerprint=state_identity["host_fingerprint"],
+                result_key=result_key,
+                key_path=key_path,
+            )
         from mcd_agent.mautic_release_authorization import runtime_capabilities as release_capabilities
         instances = []
         for i in installs:
@@ -2381,6 +2410,7 @@ class MCCStatePusher:
                 code = int(getattr(resp, "status", 200))
                 body = (resp.read() or b"").decode("utf-8", errors="replace")
                 if 200 <= code < 300:
+                    executed_receipts: list[dict[str, Any]] = []
                     if body.strip():
                         try:
                             control = json.loads(body)
@@ -2388,8 +2418,17 @@ class MCCStatePusher:
                                 control.get("schema") == SCHEMA or isinstance(control.get("control"), dict)
                             ):
                                 _ingest_control_response(self.cfg.state_db_path, payload, control)
+                                result_key = payload.get("result_signing_key")
+                                executed_receipts = self._execute_pending_control_jobs(
+                                    ControlStore(self.cfg.state_db_path),
+                                    agent_id=str(payload.get("agent_id") or ""),
+                                    host_fingerprint=str(payload.get("host_fingerprint") or ""),
+                                    result_key=result_key if isinstance(result_key, dict) else None,
+                                    key_path=str(getattr(self.cfg, "result_signing_key_path", "") or ""),
+                                )
                         except (ValueError, json.JSONDecodeError):
                             pass
+                    self._control_push_pending = bool(executed_receipts)
                     mark_state_snapshot_push_result_mysql(
                         self.cfg,
                         payload_hash=payload_hash,

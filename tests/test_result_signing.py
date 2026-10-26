@@ -141,3 +141,77 @@ def test_state_push_send_persists_wrapped_mcc_ack(tmp_path):
             assert MCCStatePusher(cfg).send(payload)[0] is True
 
     assert ControlStore(db_path).active_key_ack("k1") == {"key_id": "k1", "status": "active"}
+
+
+def test_state_push_executes_new_control_command_immediately(tmp_path):
+    db_path = str(Path(tmp_path) / "state.db")
+    key_path = str(Path(tmp_path) / "result.key")
+    _private, public = ensure_result_key(key_path)
+    command = {
+        "command": "docker_runtime_preflight_v1",
+        "job_id": "job-immediate",
+        "request_id": "request-immediate",
+        "probe_id": "probe-immediate",
+        "agent_id": "mcd-agent-1",
+        "host_fingerprint": "sha256:" + "a" * 64,
+        "image_ref": "playground7",
+        "image_digest": "sha256:" + "b" * 64,
+        "adapter": "mauticrfp-docker-v1",
+        "ttl_seconds": 300,
+    }
+    body = {
+        "status": "ok",
+        "control": {
+            "schema": "mcd-control-v1",
+            "contract_version": "1.0",
+            "commands": [command],
+            "result_signing_key_ack": {
+                "key_id": public["key_id"],
+                "status": "active",
+                "agent_id": command["agent_id"],
+                "host_fingerprint": command["host_fingerprint"],
+            },
+        },
+    }
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def read(self):
+            import json
+
+            return json.dumps(body).encode("utf-8")
+
+    cfg = SimpleNamespace(
+        mcc_push_enabled=True,
+        mcc_url="https://mcc.example.test",
+        mcc_token="token",
+        state_db_path=db_path,
+        result_signing_key_path=key_path,
+    )
+    with patch("mcd_agent.state_push.request.urlopen", return_value=Response()):
+        with patch("mcd_agent.state_push.mark_state_snapshot_push_result_mysql"):
+            with patch(
+                "mcd_agent.state_push.DockerRuntimePreflightRunner",
+                return_value=lambda request: {"status": "ready", "image_digest": request["image_digest"]},
+            ):
+                pusher = MCCStatePusher(cfg)
+                assert pusher.send(
+                    {
+                        "schema": "mcd-state-v1",
+                        "agent_id": command["agent_id"],
+                        "host_fingerprint": command["host_fingerprint"],
+                        "result_signing_key": public,
+                    }
+                )[0] is True
+
+    receipt = ControlStore(db_path).receipts()[0]
+    assert receipt["job_id"] == command["job_id"]
+    assert receipt["status"] == "succeeded"
+    assert pusher._control_push_pending is True

@@ -1,3 +1,10 @@
+## 1.5.223 - 2026-10-26
+
+- Ingest and execute a valid MCC control command immediately after the
+  successful state response is parsed; force the following state push to carry
+  the signed terminal receipt instead of waiting for the heartbeat interval.
+- Keep command execution idempotent and gated by the acknowledged result key.
+
 ## 1.5.222 - 2026-10-26
 
 - Defer the runtime-overrides remote poll after an accepted local push until
