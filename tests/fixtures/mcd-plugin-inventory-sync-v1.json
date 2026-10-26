@@ -1,0 +1,44 @@
+{
+  "schema": "mcd-state-v1",
+  "inventory_sync_status": "pending",
+  "plugin_inventory_sync": {
+    "schema": "mcd-plugin-inventory-sync-v1",
+    "status": "pending",
+    "items": [
+      {
+        "instance_uid": "instance-a",
+        "root": "/var/www/example/public_html",
+        "inventory_sha256": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "observed_at_utc": "2026-10-26T10:00:00Z"
+      }
+    ],
+    "requested_at_utc": "2026-10-26T10:00:00Z",
+    "last_attempt_at_utc": "2026-10-26T10:00:01Z",
+    "retry_count": 1,
+    "last_error": "urlerror: connection refused",
+    "operation_id": "plugin-update-instance-a-123"
+  },
+  "instances": [
+    {
+      "instance_uid": "instance-a",
+      "plugin_inventory": {
+        "schema": "mcd-plugin-inventory-observation-v1",
+        "instance_uid": "instance-a",
+        "root": "/var/www/example/public_html",
+        "status": "ok",
+        "complete": true,
+        "last_known": false,
+        "inventory": [
+          {
+            "bundle": "DemoBundle",
+            "version": "1.0.0"
+          }
+        ],
+        "inventory_sha256": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "observed_at_utc": "2026-10-26T10:00:00Z",
+        "last_known_observed_at_utc": "2026-10-26T10:00:00Z",
+        "scan_error": null
+      }
+    }
+  ]
+}

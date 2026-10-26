@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MCD plugin inventory observation and sync",
+  "type": "object",
+  "required": ["schema", "inventory_sync_status", "plugin_inventory_sync", "instances"],
+  "properties": {
+    "schema": {"const": "mcd-state-v1"},
+    "inventory_sync_status": {"enum": ["ok", "pending", "error"]},
+    "plugin_inventory_sync": {
+      "type": "object",
+      "required": ["schema", "status", "items", "retry_count"],
+      "properties": {
+        "schema": {"const": "mcd-plugin-inventory-sync-v1"},
+        "status": {"enum": ["ok", "pending"]},
+        "items": {"type": "array"},
+        "requested_at_utc": {"type": "string"},
+        "last_attempt_at_utc": {"type": "string"},
+        "retry_count": {"type": "integer", "minimum": 0},
+        "last_error": {"type": "string"},
+        "operation_id": {"type": "string"}
+      }
+    },
+    "instances": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["instance_uid", "plugin_inventory"],
+        "properties": {
+          "instance_uid": {"type": "string"},
+          "plugin_inventory": {
+            "type": "object",
+            "required": ["schema", "status", "complete", "last_known", "inventory", "inventory_sha256", "observed_at_utc"],
+            "properties": {
+              "schema": {"const": "mcd-plugin-inventory-observation-v1"},
+              "status": {"enum": ["ok", "error"]},
+              "complete": {"type": "boolean"},
+              "last_known": {"type": "boolean"},
+              "inventory": {"type": "array"},
+              "inventory_sha256": {"type": "string", "pattern": "^sha256:"},
+              "observed_at_utc": {"type": "string"},
+              "last_known_observed_at_utc": {"type": "string"},
+              "scan_error": {"type": ["object", "null"]}
+            }
+          }
+        }
+      }
+    }
+  }
+}

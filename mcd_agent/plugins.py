@@ -1493,6 +1493,7 @@ def _emit_plugin_apply_result(
     overall_status: str,
     rc: int | None,
     inventory: list[dict[str, Any]] | None = None,
+    inventory_sync: dict[str, Any] | None = None,
     error: str = "",
 ) -> dict[str, Any]:
     payload = {
@@ -1512,12 +1513,32 @@ def _emit_plugin_apply_result(
         "inventory": list(inventory or []),
         "error": error,
     }
+    if isinstance(inventory_sync, dict):
+        payload["inventory_sync_status"] = str(inventory_sync.get("inventory_sync_status") or inventory_sync.get("status") or "error")
+        payload["inventory_sync"] = dict(inventory_sync)
     print(
         "MCD_PLUGIN_APPLY_RESULT="
         + json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
         flush=True,
     )
     return payload
+
+
+def _sync_plugin_inventory_before_terminal(
+    config: AgentConfig,
+    install,
+    *,
+    operation_id: str,
+    action: str,
+) -> dict[str, Any]:
+    from mcd_agent.state_push import sync_plugin_inventory_after_operation
+
+    return sync_plugin_inventory_after_operation(
+        config,
+        install,
+        operation_id=operation_id,
+        action=action,
+    )
 
 
 def _plugin_files_applied_observed(
@@ -2103,6 +2124,12 @@ def _apply_plugin_file_changes_impl(
                     action=action,
                     selected=selected,
                 )
+                inventory_sync = _sync_plugin_inventory_before_terminal(
+                    config,
+                    install,
+                    operation_id=operation_id,
+                    action=action,
+                )
                 _emit_plugin_apply_result(
                     operation_id=operation_id,
                     install_root=install_root,
@@ -2115,6 +2142,7 @@ def _apply_plugin_file_changes_impl(
                     overall_status="success",
                     rc=0,
                     inventory=inventory,
+                    inventory_sync=inventory_sync,
                 )
         elif run_post_steps:
             expected_bundles = (
@@ -2133,6 +2161,12 @@ def _apply_plugin_file_changes_impl(
                 action=action,
                 selected=selected,
             )
+            inventory_sync = _sync_plugin_inventory_before_terminal(
+                config,
+                install,
+                operation_id=operation_id,
+                action=action,
+            )
             _emit_plugin_apply_result(
                 operation_id=operation_id,
                 install_root=install_root,
@@ -2145,6 +2179,7 @@ def _apply_plugin_file_changes_impl(
                 overall_status="success",
                 rc=0,
                 inventory=inventory,
+                inventory_sync=inventory_sync,
             )
     except Exception as exc:
         if run_post_steps:
@@ -2670,6 +2705,12 @@ def _run_cluster_plugin_operation(
                 action=action,
                 selected=selected,
             )
+            inventory_sync = _sync_plugin_inventory_before_terminal(
+                config,
+                install,
+                operation_id=operation_id,
+                action=action,
+            )
             _emit_plugin_apply_result(
                 operation_id=operation_id,
                 install_root=install_root,
@@ -2682,6 +2723,7 @@ def _run_cluster_plugin_operation(
                 overall_status="success",
                 rc=0,
                 inventory=inventory,
+                inventory_sync=inventory_sync,
             )
             return 0
         except Exception as exc:
@@ -2742,6 +2784,12 @@ def _run_cluster_plugin_operation(
             action=action,
             selected=selected,
         )
+        inventory_sync = _sync_plugin_inventory_before_terminal(
+            config,
+            install,
+            operation_id=operation_id,
+            action=action,
+        )
         _emit_plugin_apply_result(
             operation_id=operation_id,
             install_root=install_root,
@@ -2754,6 +2802,7 @@ def _run_cluster_plugin_operation(
             overall_status="success",
             rc=0,
             inventory=inventory,
+            inventory_sync=inventory_sync,
         )
         return 0
     if begin_action == "busy":
@@ -2857,6 +2906,12 @@ def _run_cluster_plugin_operation(
             action=action,
             selected=selected,
         )
+        inventory_sync = _sync_plugin_inventory_before_terminal(
+            config,
+            install,
+            operation_id=operation_id,
+            action=action,
+        )
         _emit_plugin_apply_result(
             operation_id=operation_id,
             install_root=install_root,
@@ -2869,6 +2924,7 @@ def _run_cluster_plugin_operation(
             overall_status="success",
             rc=0,
             inventory=inventory,
+            inventory_sync=inventory_sync,
         )
         _cluster_plugin_set_phase(
             config,

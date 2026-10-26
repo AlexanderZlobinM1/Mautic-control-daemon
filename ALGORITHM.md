@@ -22,7 +22,7 @@ post-step могут завершиться. Следующая совмести
 только незавершённую каталоговую remediation; native plugin operation не
 переисполняется из-за этого отказа.
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.244 (follow-up после immutable
+Актуальная редакция этого канона — MCD 1.5.245 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам
@@ -31,6 +31,23 @@ chunk. Recurring super-priority admission сохраняет резерв для
 ordinary cycle. Active dedicated super-priority work не вычитается из ordinary
 shared capacity: постоянный super-ring не может голодать обычный tail; обычная
 priority остаётся частью shared regular accounting.
+
+Plugin inventory is an observed, durable per-instance state, not a destructive
+filesystem listing. A complete scan canonically replaces the stored
+last-known inventory and records `mcd-plugin-inventory-observation-v1`. A scan
+error retains the last-known rows, marks the observation `complete=false` and
+`last_known=true`, and carries a typed `scan_error`; MCC must not prune from
+that observation. After a successful install, update, remove, purge, or reload,
+MCD persists the observation and a single deduplicated pending item before
+emitting the terminal receipt. It attempts an immediate normal state push; the
+receipt reports `inventory_sync_status=ok`, `pending`, or `error`, with the
+inventory digest and observation time. A failed push remains in the durable
+`plugin_inventory_sync_pending` runtime key and is retried by the ordinary
+state-push loop after errors and restarts. HTTP success ACKs only the exact
+instance/digest/observation tuple sent, so a newer local change cannot be
+cleared by an older response. The wire envelope is
+`mcd-plugin-inventory-sync-v1`; it is additive to `mcd-state-v1` and does not
+require Docker or alter native runtime execution.
 
 Super-priority ticks are a dedicated recurring lane: each tick advances its
 own static round-robin cycle and is not gated by completion, refill, or fair

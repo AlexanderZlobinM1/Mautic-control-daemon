@@ -1,3 +1,16 @@
+## 1.5.245 - 2026-10-26
+
+- Make plugin inventory synchronization durable per instance. A successful
+  observation replaces the last-known canonical inventory; scan failures retain
+  that inventory and publish an explicit incomplete/error observation so MCC
+  never prunes settings or rows from a transient filesystem failure.
+- Persist pending inventory synchronization before plugin-operation terminal
+  receipts, retry it idempotently across daemon restart, and report the exact
+  `ok`, `pending`, or `error` outcome with digest and observation timestamps.
+- Add the versioned `mcd-plugin-inventory-sync-v1` wire contract and regression
+  coverage for manual changes, multi-instance deduplication, removals,
+  restart/retry/ACK, and stable change detection.
+
 ## 1.5.244 - 2026-10-26
 
 - Apply the complete MCC-managed runtime snapshot on normal runtime polls as
