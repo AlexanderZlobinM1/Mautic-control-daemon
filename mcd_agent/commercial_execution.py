@@ -31,6 +31,48 @@ def validate_onboarding_terminal_receipt(receipt: Mapping[str, Any], *, job_id: 
         raise ValueError("commercial_terminal_receipt_status_invalid")
 
 
+def build_failed_terminal_receipt(
+    job: Mapping[str, Any],
+    package: Mapping[str, Any] | None,
+    *,
+    error: BaseException,
+    completed: int = 0,
+    total: int = 0,
+) -> dict[str, Any]:
+    """Build a bounded, secret-free terminal receipt for execution failure."""
+    job_id = str(job.get("job_id") or "")
+    package_value = package if isinstance(package, Mapping) else {}
+    error_code = type(error).__name__[:80] or "scenario_execution_failed"
+    return {
+        "schema": "mcd-onboarding-terminal-receipt-v1",
+        "contract_version": CONTRACT_VERSION,
+        "request_id": job_id,
+        "job_id": job_id,
+        "correlation_id": job_id,
+        "idempotency_key": str(job.get("idempotency_key") or ""),
+        "installation_id": str(job.get("installation_id") or ""),
+        "sequence": max(1, int(completed) + 1),
+        "status": "failed",
+        "progress": {
+            "completed": max(0, int(completed)),
+            "total": max(0, int(total)),
+            "message": "Scenario failed",
+        },
+        "artifact": {
+            "revision": str(package_value.get("revision") or ""),
+            "sha256": str(package_value.get("sha256") or ""),
+            "size_bytes": max(0, int(package_value.get("size_bytes") or 0)),
+            "media_type": str(package_value.get("media_type") or ""),
+        },
+        "started_at": _utc(),
+        "completed_at": _utc(),
+        "result": {"executor": "mcd-commercial-scenario", "completed_stages": max(0, int(completed))},
+        # Never copy exception text: subprocess output and external inputs may
+        # contain credentials or other secret-shaped material.
+        "error": {"code": "commercial_scenario_execution_failed", "type": error_code},
+    }
+
+
 class CommercialScenarioExecutor:
     """Generic scenario bridge; concrete stage behavior is injected by MCD."""
 
@@ -156,8 +198,10 @@ class CommercialPortalWorker:
             raise ValueError("commercial_job_delivery_missing")
         package = job.get("package") if isinstance(job.get("package"), dict) else {}
         download = package.get("download") if isinstance(package.get("download"), dict) else {}
+        authenticated_delivery = False
         try:
             verified = verify_signed_job(delivery, self.portal_keys)
+            authenticated_delivery = True
             preflight = job.get("preflight_receipt")
             if self.preflight_required and not isinstance(preflight, dict):
                 raise ValueError("portal_preflight_receipt_missing")
@@ -188,7 +232,24 @@ class CommercialPortalWorker:
             self.executor.state.put("commercial_portal_cursor", delivery.get("cursor", cursor))
             return {"status": "succeeded", "job_id": str(job["job_id"])}
         except Exception as exc:
-            self.client.ack_job(job_id=str(job.get("job_id") or ""), installation_id=active_installation_id, status="rejected", reason=str(exc), idempotency_key=str(job.get("idempotency_key") or ""))
+            job_id = str(job.get("job_id") or "")
+            if authenticated_delivery and job_id and str(job.get("installation_id") or "") and str(job.get("idempotency_key") or ""):
+                prior = self.executor._load(job_id) or {}
+                completed = prior.get("completed") if isinstance(prior.get("completed"), list) else []
+                failed_terminal = build_failed_terminal_receipt(
+                    job,
+                    package,
+                    error=exc,
+                    completed=len(completed),
+                    total=len(prior.get("results") or []) if isinstance(prior.get("results"), list) else 0,
+                )
+                validate_onboarding_terminal_receipt(failed_terminal, job_id=job_id)
+                try:
+                    self.client.send_receipt(failed_terminal)
+                except Exception:
+                    self.executor.state.put("commercial_pending_receipt", failed_terminal)
+                    return {"status": "receipt_pending", "job_id": job_id}
+            self.client.ack_job(job_id=job_id, installation_id=active_installation_id, status="rejected", reason="commercial_scenario_execution_failed", idempotency_key=str(job.get("idempotency_key") or ""))
             return {"status": "rejected", "reason": str(exc)}
 
     def run_forever(self, stop_event: Any, *, interval_sec: float = 1.0) -> None:

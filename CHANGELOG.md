@@ -1,3 +1,11 @@
+## 1.5.246 - 2026-10-26
+
+- Emit a bounded, secret-free durable terminal failure receipt for commercial
+  scenario execution errors before the rejected job ACK. Portal outages retain
+  the exact receipt for restart retry; no installer, OS, Mautic, or scenario
+  knowledge is added to MCD.
+- Keep the guarded patch-resolution contract synchronized with the release.
+
 ## 1.5.245 - 2026-10-26
 
 - Make plugin inventory synchronization durable per instance. A successful

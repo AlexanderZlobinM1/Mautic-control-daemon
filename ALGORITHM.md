@@ -22,7 +22,7 @@ post-step могут завершиться. Следующая совмести
 только незавершённую каталоговую remediation; native plugin operation не
 переисполняется из-за этого отказа.
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.245 (follow-up после immutable
+Актуальная редакция этого канона — MCD 1.5.246 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам
@@ -48,6 +48,15 @@ instance/digest/observation tuple sent, so a newer local change cannot be
 cleared by an older response. The wire envelope is
 `mcd-plugin-inventory-sync-v1`; it is additive to `mcd-state-v1` and does not
 require Docker or alter native runtime execution.
+
+Commercial scenario failures are terminally observable: after a validated job
+has an execution error, MCD creates a bounded, secret-free
+`mcd-onboarding-terminal-receipt-v1` with `status=failed` before sending the
+rejected job ACK. If Portal receipt delivery fails, the exact signed receipt is
+stored as the durable pending receipt and retried after restart; exception text,
+subprocess output, SSH credentials and DNS credentials are never copied into
+the receipt. This is only transport/execution/retry behavior; external Portal
+artifacts remain the sole owner of bootstrap, OS, Mautic and scenario policy.
 
 Super-priority ticks are a dedicated recurring lane: each tick advances its
 own static round-robin cycle and is not gated by completion, refill, or fair

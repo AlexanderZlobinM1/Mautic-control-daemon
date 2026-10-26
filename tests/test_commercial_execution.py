@@ -10,7 +10,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import pytest
 
-from mcd_agent.commercial_execution import CommercialPortalWorker, CommercialScenarioExecutor, validate_onboarding_stage_receipt, validate_onboarding_terminal_receipt
+from mcd_agent.commercial_execution import CommercialPortalWorker, CommercialScenarioExecutor, build_failed_terminal_receipt, validate_onboarding_stage_receipt, validate_onboarding_terminal_receipt
 from mcd_agent.commercial_portal import CommercialState, canonical_json
 
 
@@ -53,3 +53,19 @@ def test_receipt_schema_validation_is_strict():
     validate_onboarding_terminal_receipt({"schema": "mcd-onboarding-terminal-receipt-v1", "contract_version": "1.0", "request_id": "j", "status": "succeeded", "idempotency_key": "j:terminal"}, job_id="j")
     with pytest.raises(ValueError, match="commercial_stage_receipt_schema_invalid"):
         validate_onboarding_stage_receipt({"schema": "wrong"}, job_id="j", stage_id="s", sequence=1)
+
+
+def test_failed_terminal_receipt_is_durable_contract_shaped_and_secret_free():
+    job = {"job_id": "job-failed", "idempotency_key": "idem-failed", "installation_id": "installation-1"}
+    receipt = build_failed_terminal_receipt(
+        job,
+        {"revision": "scenario-r1", "sha256": "sha256:" + "a" * 64, "size_bytes": 12, "media_type": "application/octet-stream"},
+        error=RuntimeError("password=do-not-persist"),
+        completed=2,
+        total=5,
+    )
+    validate_onboarding_terminal_receipt(receipt, job_id="job-failed")
+    assert receipt["status"] == "failed"
+    assert receipt["installation_id"] == "installation-1"
+    assert receipt["progress"] == {"completed": 2, "total": 5, "message": "Scenario failed"}
+    assert "password" not in json.dumps(receipt)
