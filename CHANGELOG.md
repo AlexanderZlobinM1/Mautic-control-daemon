@@ -1,3 +1,17 @@
+## 1.5.230 - 2026-10-26
+
+- Probe fixed, versioned PHP-FPM binary paths such as `php-fpm8.4` and
+  reconcile stale created preflight containers before a new probe.
+- Report successful or failed transient-container cleanup without masking the
+  original typed probe evidence.
+
+## 1.5.229 - 2026-10-26
+
+- Probe PHP-FPM through a fixed safe allowlist, accepting versioned binaries
+  such as `/usr/sbin/php-fpm8.4` without shell or arbitrary argv execution.
+- Emit structured evidence when no allowed PHP-FPM binary exists in the
+  runtime image.
+
 ## 1.5.228 - 2026-10-26
 
 - Emit typed, bounded identity evidence when a Docker preflight receives an
