@@ -1,3 +1,9 @@
+## 1.5.238 - 2026-10-26
+
+- Run post-update runtime recovery before the first MCC poll so a previously
+  self-stamped empty local projection cannot outrank the canonical MCC
+  plugin-operation catalog.
+
 ## 1.5.237 - 2026-10-26
 
 - Restore the complete durable MCC runtime snapshot after an MCD

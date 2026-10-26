@@ -825,6 +825,8 @@ bundle-registration, slot и resource guards.
 recovery. Пропавшее или обнулённое mutable runtime include в этом запуске не
 является изменением оператора: MCD восстанавливает полный durable runtime
 snapshot и свежий MCC snapshot, причём явный MCC tombstone имеет приоритет.
+Этот режим включается до первого MCC poll: сброшенный локальный projection не
+может получить свежий `mcd` timestamp и победить canonical MCC snapshot.
 Реальное локальное изменение MCD по-прежнему фиксируется своим
 timestamp/event и проходит через тот же LWW: более новый источник становится
 истиной и синхронизируется в обратную сторону.

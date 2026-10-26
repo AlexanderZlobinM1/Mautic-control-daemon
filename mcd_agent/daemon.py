@@ -1750,6 +1750,8 @@ def _bootstrap_remote_runtime_before_local_baseline(
     config: AgentConfig,
     store: object,
     instance_uids: list[str],
+    *,
+    recover_after_update: bool = False,
 ) -> str:
     """Read canonical MCC state before startup can mistake a missing file row for deletion."""
     if not config.mcc_url or not config.mcc_token:
@@ -1784,7 +1786,12 @@ def _bootstrap_remote_runtime_before_local_baseline(
         (accepted_runtime, previous_mcc_runtime),
     )
 
-    current_local_runtime = local_runtime_overrides(config)
+    # During the first start after an MCD package/source transition, the
+    # mutable include may contain a reset snapshot that was self-stamped by
+    # the previous broken startup. Do not let that synthetic local event win
+    # LWW over the canonical MCC response; durable values are reconciled after
+    # this fetch and explicit MCC tombstones remain destructive.
+    current_local_runtime = {} if recover_after_update else local_runtime_overrides(config)
     local_metadata = _runtime_metadata_for_snapshot(
         store.get_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY),
         current_local_runtime,
@@ -16474,10 +16481,12 @@ def run_loop(
             installs = inventory.list_instances()
     else:
         installs = inventory.list_instances()
+    recover_after_update = _mcd_runtime_update_recovery_needed(store)
     bootstrap_status = _bootstrap_remote_runtime_before_local_baseline(
         config,
         store,
         [str(getattr(inst, "instance_uid", "") or "") for inst in installs],
+        recover_after_update=recover_after_update,
     )
     if bootstrap_status == "applied":
         try:
@@ -16486,7 +16495,6 @@ def run_loop(
             profile_authority = str(getattr(config, "profile_name", "") or "").strip().lower()
         except Exception as exc:
             logging.warning("runtime-overrides startup bootstrap reload failed: %s", exc)
-    recover_after_update = _mcd_runtime_update_recovery_needed(store)
     _, startup_local_runtime_fp = _initialize_local_runtime_baseline(
         config,
         store,

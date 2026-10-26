@@ -2256,6 +2256,85 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             self.assertIsNone(daemon._read_local_runtime_push_pending(store))
             self.assertEqual(store.get_runtime_sync("mcc_runtime"), desired_runtime)
 
+    def test_post_update_bootstrap_prefers_canonical_catalog_over_reset_local_projection(self) -> None:
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        class MemoryStore:
+            def __init__(self, values=None):
+                self.values = dict(values or {})
+
+            def get_runtime_sync(self, key):
+                return self.values.get(key)
+
+            def put_runtime_sync(self, key, value):
+                self.values[key] = dict(value)
+
+        catalog = {
+            "/var/www/neodent/public_html": [
+                {
+                    "operation_key": "salessnapviberbundle:5-6-7:stats_update",
+                    "bundle": "SalesSnapViberBundle",
+                    "operation": {
+                        "id": "stats_update",
+                        "mode": "scheduled",
+                        "command": {"runner": "mautic_console", "name": "viber:stats:update"},
+                    },
+                }
+            ]
+        }
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "mcd.toml"
+            path.write_text(
+                '[profile]\nname = "farm-hiload"\n\n[runtime]\nplugin_operations = {}\n',
+                encoding="utf-8",
+            )
+            cfg = replace(
+                load_config(str(path), allow_recover_from_mcc=False),
+                mcc_url="https://mcc.example",
+                mcc_token="token",
+            )
+            local_metadata = daemon._runtime_metadata_empty()
+            daemon._runtime_metadata_set(
+                local_metadata,
+                "host",
+                "plugin_operations",
+                daemon._runtime_metadata_stamp(
+                    source="mcd",
+                    updated_at=400.0,
+                    revision=6984,
+                    event_id="mcd:6984",
+                ),
+            )
+            store = MemoryStore({
+                "local_runtime": {"plugin_operations": {}},
+                "mcc_runtime": {"plugin_operations": {}},
+                "local_runtime_metadata": local_metadata,
+                "mcc_runtime_metadata": local_metadata,
+            })
+            response = {
+                "status": "ok",
+                "runtime_overrides": {"plugin_operations": catalog},
+                "desired_state": {
+                    "revision": 201,
+                    "updated_at": 500.0,
+                    "runtime_overrides": {"plugin_operations": catalog},
+                },
+            }
+            with patch("mcd_agent.daemon.fetch_runtime_overrides", return_value=response):
+                status = daemon._bootstrap_remote_runtime_before_local_baseline(
+                    cfg,
+                    store,
+                    ["neodent.sales-snap.com"],
+                    recover_after_update=True,
+                )
+            self.assertEqual(status, "applied")
+            self.assertEqual(
+                local_runtime_overrides(load_config(str(path), allow_recover_from_mcc=False))["plugin_operations"],
+                catalog,
+            )
+            self.assertEqual(store.get_runtime_sync("mcc_runtime")["plugin_operations"], catalog)
+
     def test_plugin_catalog_survives_partial_restart_and_authoritative_empty_clears(self) -> None:
         from pathlib import Path
         from tempfile import TemporaryDirectory
