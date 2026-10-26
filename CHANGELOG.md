@@ -1,3 +1,9 @@
+## 1.5.254 - 2026-10-26
+
+- Preserve safe `self_hosted_mcd_*` verifier codes in failed commercial
+  terminal receipts so missing or unknown MCC artifact trust remains typed at
+  the operation boundary instead of being reported as generic `ValueError`.
+
 ## 1.5.253 - 2026-10-26
 
 - Keep the self-hosted commercial Portal worker available with valid durable

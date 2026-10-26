@@ -87,6 +87,14 @@ def _bounded_result(value: object) -> object:
 
 
 def _error_code(error: BaseException) -> str:
+    # Preserve bounded contract error codes in terminal evidence.  The
+    # verifier raises typed ValueError messages for operation-level failures;
+    # collapsing those to "ValueError" hides the actionable fail-closed
+    # reason from Portal.  Only the MCD-owned namespace is exposed; all other
+    # exceptions remain class names and cannot leak arbitrary text.
+    message = str(error).strip()
+    if isinstance(error, ValueError) and message.startswith("self_hosted_mcd_") and len(message) <= 80 and all(char.isalnum() or char == "_" for char in message):
+        return message
     return (type(error).__name__ or "scenario_execution_failed")[:80]
 
 
