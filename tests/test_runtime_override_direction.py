@@ -2213,6 +2213,41 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
                 )
             self.assertEqual(local_runtime_overrides(load_config(str(path), allow_recover_from_mcc=False))["plugin_operations"], catalog)
 
+            # MCC may include the host field as an empty value in a scoped
+            # response. This is still partial unless it carries the explicit
+            # authoritative marker; never turn that response into a global
+            # scheduler stop.
+            explicit_empty_store = MemoryStore({"mcc_runtime": previous})
+            with patch(
+                "mcd_agent.daemon.fetch_runtime_overrides",
+                return_value={
+                    "status": "ok",
+                    "runtime_overrides": {"plugin_operations": {}},
+                    "desired_state": {"revision": 4},
+                },
+            ):
+                self.assertEqual(
+                    daemon._bootstrap_remote_runtime_before_local_baseline(cfg, explicit_empty_store, []),
+                    "applied",
+                )
+            self.assertEqual(
+                local_runtime_overrides(load_config(str(path), allow_recover_from_mcc=False))["plugin_operations"],
+                catalog,
+            )
+
+            self.assertNotIn(
+                "plugin_operations",
+                daemon._merge_missing_plugin_operation_catalog(
+                    {"plugin_operations": catalog},
+                    {
+                        "runtime_metadata": {
+                            "host": {"plugin_operations": {"tombstone": True}}
+                        }
+                    },
+                    (previous,),
+                ),
+            )
+
             # Simulate the mutable file being replaced by an update. A scoped
             # response omitting the host catalog must recover it from the last
             # accepted persisted MCC snapshot before the daemon classifies it.

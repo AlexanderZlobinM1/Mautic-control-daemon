@@ -1,3 +1,9 @@
+## 1.5.236 - 2026-10-26
+
+- Preserve a non-empty plugin-operation catalog across non-authoritative MCC
+  responses that carry an empty partial field; only a full snapshot or
+  tombstone may clear the catalog.
+
 ## 1.5.235 - 2026-10-26
 
 - Never re-execute a locally reconciled `conflict_acknowledged` control

@@ -416,6 +416,21 @@ def _runtime_response_has_explicit_field(response: Mapping[str, Any], key: str) 
     return any(isinstance(envelope, Mapping) and key in envelope for envelope in envelopes)
 
 
+def _runtime_response_explicit_field_value(
+    response: Mapping[str, Any], key: str
+) -> tuple[bool, Any]:
+    """Return the first explicit host runtime field and its value."""
+
+    envelopes: list[object] = [response.get("runtime_overrides")]
+    desired = response.get("desired_state")
+    if isinstance(desired, Mapping):
+        envelopes.append(desired.get("runtime_overrides"))
+    for envelope in envelopes:
+        if isinstance(envelope, Mapping) and key in envelope:
+            return True, envelope.get(key)
+    return False, None
+
+
 def _runtime_response_has_host_tombstone(response: Mapping[str, Any], key: str) -> bool:
     """Whether MCC explicitly tombstones a host runtime field."""
 
@@ -713,25 +728,36 @@ def _merge_missing_plugin_operation_catalog(
     """Keep the last accepted plugin catalog across partial MCC reads.
 
     The catalog is a host runtime field, while MCC also serves scoped and
-    empty envelopes that legitimately omit it.  A value present in the wire
-    response (including an explicit empty map) wins.  Otherwise recover the
-    last accepted host snapshot unless MCC explicitly declared a complete
-    snapshot or supplied a tombstone.
+    empty envelopes.  A non-empty catalog in the wire response wins.  An
+    empty catalog in a non-authoritative response is treated as an absent
+    partial value, because replacing a working catalog with it silently stops
+    every declared plugin operation.  Only an authoritative full snapshot or
+    explicit tombstone may clear the catalog.
     """
 
     key = _PLUGIN_OPERATIONS_RUNTIME_KEY
     merged = deepcopy(dict(current_runtime))
-    if (
-        _runtime_response_has_explicit_field(response, key)
-        or _runtime_response_is_authoritative_full_snapshot(response)
-        or _runtime_response_has_host_tombstone(response, key)
-        or key in merged
-    ):
+    authoritative = _runtime_response_is_authoritative_full_snapshot(response)
+    tombstone = _runtime_response_has_host_tombstone(response, key)
+    explicit, value = _runtime_response_explicit_field_value(response, key)
+    if explicit and isinstance(value, Mapping) and value:
+        return merged
+    if authoritative or tombstone:
+        # A complete host snapshot or an explicit host tombstone is the only
+        # destructive signal. It must also clear a previously accepted value
+        # when the response omits the field (full snapshot) or carries a
+        # tombstone without a value.
+        merged.pop(key, None)
+        return merged
+    if key in merged and isinstance(merged.get(key), Mapping) and merged[key]:
         return merged
     for fallback in fallback_runtimes:
-        if isinstance(fallback, Mapping) and key in fallback:
-            merged[key] = deepcopy(fallback[key])
-            break
+        if not isinstance(fallback, Mapping):
+            continue
+        candidate = fallback.get(key)
+        if isinstance(candidate, Mapping) and candidate:
+            merged[key] = deepcopy(candidate)
+            return merged
     return merged
 
 
