@@ -1,3 +1,9 @@
+## 1.5.233 - 2026-10-26
+
+- Require a machine-readable MCC immutable-terminal conflict envelope with
+  `code=immutable_terminal_conflict` and an exact `job_id` before reconciling
+  any local terminal receipt; unbound or ambiguous 409 responses are no-op.
+
 ## 1.5.232 - 2026-10-26
 
 - Reconcile an immutable-terminal 409 only from a machine-readable MCC
