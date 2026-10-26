@@ -1,3 +1,9 @@
+## 1.5.227 - 2026-10-26
+
+- Preserve the safe `com.sales-snap.mauticrfp.*` semantic Docker labels in
+  signed runtime inventory, including the logical image-ref selector, while
+  continuing to exclude secret-shaped labels.
+
 ## 1.5.226 - 2026-10-26
 
 - Add strict inventory evidence validation for freshness, signature,

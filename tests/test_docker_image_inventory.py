@@ -27,7 +27,7 @@ def test_inventory_is_signed_bound_and_read_only(tmp_path):
         return Result(json.dumps([{
             "Id": image_id,
             "RepoDigests": [f"mauticrfp/mautic@{repo_digest}"],
-            "Config": {"Labels": {"mcc.files_sha256": "3" * 64, "org.opencontainers.image.version": "7", "mcc.token": "do-not-export"}},
+            "Config": {"Labels": {"mcc.files_sha256": "3" * 64, "com.sales-snap.mauticrfp.image-ref": "playground7", "org.opencontainers.image.version": "7", "mcc.token": "do-not-export"}},
         }]))
 
     inventory = collect_signed_inventory(
@@ -49,6 +49,7 @@ def test_inventory_is_signed_bound_and_read_only(tmp_path):
     assert image["fixed_runtime_ref"].endswith("@" + repo_digest)
     assert image["image_id"] == image_id
     assert image["files_sha256"] == "sha256:" + "3" * 64
+    assert image["labels"]["com.sales-snap.mauticrfp.image-ref"] == "playground7"
     assert "mcc.token" not in image["labels"]
     assert all(argv[0:3] == ["/usr/bin/docker", "image", "ls"] or argv[0:3] == ["/usr/bin/docker", "image", "inspect"] for argv in calls)
 
