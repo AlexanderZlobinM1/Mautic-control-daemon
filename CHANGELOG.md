@@ -1,3 +1,9 @@
+## 1.5.240 - 2026-10-26
+
+- Reload the complete recovered runtime include before scheduler startup when
+  MCC bootstrap is deferred, so the in-memory daemon cannot retain a reset or
+  partial projection after an MCD update.
+
 ## 1.5.239 - 2026-10-26
 
 - Fail the runtime-only archive builder and bridge QA when required import

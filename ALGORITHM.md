@@ -833,6 +833,9 @@ timestamp/event и проходит через тот же LWW: более но�
 Runtime-only release gate также проверяет обязательный import closure
 (`daemon.py`, `state_push.py`, `mcd_control.py`); архив без любого из них не
 может пройти bridge QA и не допускается до host switch.
+Если MCC bootstrap после обновления временно отложен, MCD всё равно сначала
+материализует полный durable snapshot, затем перечитывает include в память;
+scheduler не стартует с пустой или частичной post-update projection.
 Если отдельное `desired` или `effective` значение само превышает safety
 budget, оно заменяется строго проверяемой ссылкой
 `{encoding:"canonical-json-sha256",sha256,bytes}`; key не отбрасывается.

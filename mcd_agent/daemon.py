@@ -16500,6 +16500,18 @@ def run_loop(
         store,
         recover_after_update=recover_after_update,
     )
+    if recover_after_update and bootstrap_status != "applied":
+        # Bootstrap may be deferred behind an accepted revision or a transient
+        # MCC response.  The recovery path still materializes the complete
+        # durable snapshot into the mutable include; reload it before the
+        # scheduler starts so the in-memory config cannot keep an empty or
+        # partial post-update projection (notably plugin_operations).
+        try:
+            config = load_config(config.config_file_path, allow_recover_from_mcc=False)
+            base_config = config
+            profile_authority = str(getattr(config, "profile_name", "") or "").strip().lower()
+        except Exception as exc:
+            logging.warning("runtime-overrides post-update recovery reload failed: %s", exc)
     _mark_mcd_runtime_agent_version(store)
     _sync_segment_whitelist_file(config, installs)
     _refresh_instance_db_maps(installs, db_configs_by_root, mautic_timezones_by_root)
