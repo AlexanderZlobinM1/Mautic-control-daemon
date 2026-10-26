@@ -1,3 +1,9 @@
+## 1.5.255 - 2026-10-27
+
+- Persist one canonical standalone-settings ETag across inventory and noop processing.
+- Emit durable signed terminal command receipts for noop mismatch, unavailable, malformed, expired, and delivery-outage outcomes.
+- Restore the complete MCC-managed runtime snapshot after update/reset loss; use per-field LWW metadata and explicit tombstones instead of partial recovery.
+
 ## 1.5.254 - 2026-10-26
 
 - Preserve safe `self_hosted_mcd_*` verifier codes in failed commercial

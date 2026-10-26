@@ -1209,6 +1209,27 @@ creates a duplicate Portal worker.
 
 ### Opt-in MCC desired-runtime sync v3
 
+#### Полное восстановление runtime-настроек после потери
+
+MCC хранит полный разрешённый runtime-снимок хоста и его версионные метаданные.
+Если локальный runtime-файл после обновления, перезапуска или неудачной записи
+стал пустым, неполным или содержит reset-проекцию, это не считается изменением
+настроек MCD. MCD сначала читает канонический снимок MCC, восстанавливает весь
+`runtime_remote_allowed_keys` (включая host-поля, структурированные каталоги и
+все instance-строки), сохраняет его в локальный mutable include и только затем
+перезагружает конфигурацию. Восстановление не ограничивается stable- или
+instance-ключами; false/zero/empty значения восстанавливаются как валидные
+значения, если они присутствуют в каноническом снимке.
+
+Для каждого host/instance-поля применяется LWW по сохранённому `updated_at`,
+затем `revision`, с детерминированным MCC tie-break. Более новое изменение MCD
+отправляется в MCC и не затирается устаревшим ответом; более новое изменение
+MCC применяется на хосте. Отсутствие поля в частичном ответе не является
+удалением. Удаление допускается только явным MCC tombstone либо подтверждённым
+локальным tombstone с последующей синхронизацией. После восстановления MCD
+обновляет baseline без повторной отправки того же состояния как новой локальной
+правки.
+
 MCD may negotiate the opt-in `desired_state_sync_protocol=3` endpoint without
 changing the legacy v2 transport. The producer keeps the complete acknowledged
 MCC snapshot and its revision as the common base in `runtime_sync`; a local

@@ -233,7 +233,7 @@ from mcd_agent.state_backend import (
     normalized_state_backend,
 )
 from mcd_agent.commercial_self_hosted import ExternalProcessPolicy, SelfHostedPortalWorker, SelfHostedScenarioExecutor
-from mcd_agent.commercial_portal import CommercialState, PortalClient, canonical_json
+from mcd_agent.commercial_portal import CommercialState, PortalClient, build_standalone_settings_snapshot, canonical_json
 
 _CMD_SEP = "\x1f"
 _M4_CAMPAIGN_DELETED_CLAUSE_RE = re.compile(r"\s+AND\s*\(?\s*c\.deleted\s+IS\s+NULL\s*\)?", re.IGNORECASE)
@@ -442,13 +442,7 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
                     "conflict": conflict,
                 }
                 def settings(values: Mapping[str, Any]) -> dict[str, Any]:
-                    clean = dict(values)
-                    return {
-                        "values": clean,
-                        "revision": host_revision,
-                        "etag": "sha256:" + hashlib.sha256(canonical_json(clean)).hexdigest(),
-                        "sync": sync,
-                    }
+                    return build_standalone_settings_snapshot(values, revision=host_revision, sync=sync)
                 scoped = instance_desired_states(runtime, instances)
                 rows = []
                 for inst in instances:
@@ -1077,10 +1071,11 @@ def _merge_recovered_runtime_values(
 ) -> dict[str, Any]:
     """Restore every missing/reset field while preserving explicit local deletes.
 
-    A mutable runtime include can be replaced by an update or truncated by a
-    failed write.  The durable snapshot is therefore authoritative for fields
-    that disappeared or became empty.  A real local deletion is represented by
-    a non-bootstrap MCD tombstone and must not be resurrected here.
+    A mutable runtime include can be replaced by an update or truncated by an
+    failed write.  The durable snapshot is therefore authoritative for every
+    allowed field that disappeared or became empty, not only instance rows or
+    stable keys.  A real local deletion is represented by a non-bootstrap MCD
+    tombstone and must not be resurrected here.
     """
     merged = deepcopy(dict(current_runtime))
     for raw_key, fallback_value in fallback_runtime.items():

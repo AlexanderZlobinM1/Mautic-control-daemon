@@ -38,6 +38,7 @@ PORTAL_MCD_POLL_REQUEST_SCHEMA = "portal-mcd-poll-request-v1"
 PORTAL_MCD_POLL_RESPONSE_SCHEMA = "portal-mcd-poll-response-v1"
 PORTAL_MCD_MAX_LONG_POLL_MS = 30_000
 PORTAL_MCD_MAX_BACKOFF_MS = 300_000
+STANDALONE_SETTINGS_SNAPSHOT_SCHEMA = "mcd-standalone-settings-snapshot-v1"
 MCC_ARTIFACT_SIGNATURE_DOMAIN = b"com.sales-snap.portal-mcc/artifact-signature/1.0\n"
 MAX_ARTIFACT_BYTES = 512 * 1024 * 1024
 PORTAL_USER_AGENT = f"mcd-agent/{__version__} portal-commercial/{CONTRACT_VERSION}"
@@ -102,6 +103,34 @@ def canonical_json(value: object) -> bytes:
 
 def _sha256(value: bytes) -> str:
     return "sha256:" + hashlib.sha256(value).hexdigest()
+
+
+def canonical_standalone_settings(values: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the one canonical, secret-free settings value set used by MCD."""
+    if not isinstance(values, Mapping):
+        raise ValueError("commercial_standalone_settings_invalid")
+    return dict(values)
+
+
+def standalone_settings_etag(values: Mapping[str, Any]) -> str:
+    """Hash exactly the settings values represented in Portal inventory."""
+    return _sha256(canonical_json(canonical_standalone_settings(values)))
+
+
+def build_standalone_settings_snapshot(
+    values: Mapping[str, Any],
+    *,
+    revision: int,
+    sync: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the durable settings shape shared by inventory and noop checks."""
+    clean = canonical_standalone_settings(values)
+    return {
+        "values": clean,
+        "revision": int(revision),
+        "etag": standalone_settings_etag(clean),
+        "sync": dict(sync),
+    }
 
 
 def _host_fingerprint() -> str:

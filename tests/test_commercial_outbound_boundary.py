@@ -4,6 +4,7 @@ import base64
 import socket
 from pathlib import Path
 
+import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -11,8 +12,10 @@ from mcd_agent.commercial_portal import (
     PORTAL_MCD_POLL_REQUEST_SCHEMA,
     CommercialState,
     PortalClient,
+    build_standalone_settings_snapshot,
     build_portal_mcd_poll_request,
     canonical_json,
+    standalone_settings_etag,
     verify_portal_mcd_poll_response,
 )
 from mcd_agent.commercial_self_hosted import SelfHostedPortalWorker
@@ -263,6 +266,8 @@ def test_stage2_adoption_and_batch_commands_are_durable_and_ordered(tmp_path):
                         "delivery_cursor": 1,
                         "request_id": "request-1",
                         "idempotency_key": "noop-key-1",
+                        "issued_at": "1970-01-01T00:00:00Z",
+                        "expires_at": "2099-01-01T00:00:00Z",
                         "expected_standalone_etag": etag,
                     },
                     {
@@ -271,6 +276,8 @@ def test_stage2_adoption_and_batch_commands_are_durable_and_ordered(tmp_path):
                         "delivery_cursor": 2,
                         "request_id": "request-2",
                         "idempotency_key": "noop-key-2",
+                        "issued_at": "1970-01-01T00:00:00Z",
+                        "expires_at": "2099-01-01T00:00:00Z",
                         "expected_standalone_etag": etag,
                     },
                 ],
@@ -333,3 +340,131 @@ def test_stage2_v3_command_is_handled_and_receipted(tmp_path):
     assert receipt["command_id"] == "sync-1"
     assert receipt["delivery_cursor"] == 3
     assert receipt["status"] == "succeeded"
+
+
+def test_standalone_settings_etag_is_shared_and_durable_across_worker_restart(tmp_path):
+    values = {"jobs_max_workers": 2, "scheduler_paused": False}
+    expected = standalone_settings_etag(values)
+    snapshot = build_standalone_settings_snapshot(values, revision=7, sync={"desired_state_sync_protocol": 3, "pending_intent": None, "conflict": None})
+    assert snapshot["etag"] == expected
+
+    class Portal:
+        def pull_job(self, **_kwargs):
+            return None
+
+    worker, state, _executor = _worker(tmp_path, Portal(), _Clock())
+    worker.context["runtime_overrides"] = values
+    inventory = worker._inventory("installation-1")
+    assert inventory["host"]["settings"]["etag"] == expected
+    assert state.get("commercial_standalone_etag") == expected
+    assert state.get("commercial_standalone_settings_snapshot_v1")["etag"] == expected
+    assert state.get("commercial_standalone_settings_snapshot_v1")["schema"] == "mcd-standalone-settings-snapshot-v1"
+
+    restarted = CommercialState(str(tmp_path / "commercial.sqlite"))
+    assert restarted.get("commercial_standalone_etag") == expected
+    assert restarted.get("commercial_standalone_settings_snapshot_v1")["etag"] == expected
+
+
+@pytest.mark.parametrize(
+    ("case", "expected", "actual", "expires_at", "reason"),
+    [
+        ("unavailable", "sha256:" + "a" * 64, "", "2099-01-01T00:00:00Z", "commercial_standalone_etag_unavailable"),
+        ("mismatch", "sha256:" + "a" * 64, "sha256:" + "b" * 64, "2099-01-01T00:00:00Z", "commercial_standalone_etag_mismatch"),
+        ("malformed", "not-an-etag", "sha256:" + "b" * 64, "2099-01-01T00:00:00Z", "commercial_noop_command_invalid"),
+        ("expired", "sha256:" + "a" * 64, "sha256:" + "a" * 64, "1970-01-01T00:00:00Z", "commercial_noop_command_expired"),
+    ],
+)
+def test_noop_failure_always_emits_terminal_receipt_and_advances_delivery(tmp_path, case, expected, actual, expires_at, reason):
+    class Portal:
+        def __init__(self):
+            self.receipts = []
+
+        def pull_job(self, **_kwargs):
+            return {
+                "cursor": "cursor-1",
+                "commands": [{
+                    "schema": "portal-mcd-command-noop-v1",
+                    "command_id": f"noop-{case}",
+                    "delivery_cursor": 1,
+                    "request_id": f"request-{case}",
+                    "idempotency_key": f"noop-key-{case}",
+                    "issued_at": "1970-01-01T00:00:00Z",
+                    "expires_at": expires_at,
+                    "expected_standalone_etag": expected,
+                    "command": {"primitive": "connection.noop", "version": "1.0"},
+                }],
+            }
+
+        def send_receipt(self, payload, **_kwargs):
+            self.receipts.append(payload)
+            return {}
+
+    portal = Portal()
+    worker, state, executor = _worker(tmp_path / case, portal, _Clock())
+    if actual:
+        worker.context["standalone_etag"] = actual
+
+    result = worker.run_once()
+
+    assert result["status"] == "failed"
+    assert result["reason"] == reason
+    assert executor.runs == 0
+    assert state.get("commercial_portal_cursor") == "cursor-1"
+    assert state.get("commercial_self_hosted_pending_delivery_v1") is None
+    assert len(portal.receipts) == 1
+    receipt = portal.receipts[0]
+    assert receipt["schema"] == "portal-mcd-command-receipt-v1"
+    assert receipt["status"] == "failed"
+    assert receipt["payload"]["reason"] == reason
+
+
+def test_noop_terminal_receipt_survives_delivery_outage_and_restart(tmp_path):
+    expected = "sha256:" + "a" * 64
+
+    class Portal:
+        def __init__(self):
+            self.receipts = []
+            self.receipt_calls = 0
+            self.fail_once = True
+
+        def pull_job(self, **_kwargs):
+            return {
+                "cursor": "cursor-1",
+                "commands": [{
+                    "schema": "portal-mcd-command-noop-v1",
+                    "command_id": "noop-outage",
+                    "delivery_cursor": 1,
+                    "request_id": "request-outage",
+                    "idempotency_key": "noop-key-outage",
+                    "issued_at": "1970-01-01T00:00:00Z",
+                    "expires_at": "2099-01-01T00:00:00Z",
+                    "expected_standalone_etag": expected,
+                    "command": {"primitive": "connection.noop", "version": "1.0"},
+                }],
+            }
+
+        def send_receipt(self, payload, **_kwargs):
+            self.receipt_calls += 1
+            if self.fail_once:
+                self.fail_once = False
+                raise OSError("Portal offline")
+            if not any(item["idempotency_key"] == payload["idempotency_key"] for item in self.receipts):
+                self.receipts.append(payload)
+            return {}
+
+    portal = Portal()
+    worker, state, _executor = _worker(tmp_path, portal, _Clock())
+    first = worker.run_once()
+    assert first["status"] == "receipt_pending"
+    assert state.get("commercial_self_hosted_pending_delivery_v1") is not None
+    assert state.get("commercial_self_hosted_pending_receipts")[0]["idempotency_key"] == "noop-key-outage"
+
+    restarted = _worker(tmp_path, portal, _Clock())[0]
+    second = restarted.run_once()
+    assert second["status"] == "failed"
+    assert state.get("commercial_portal_cursor") == "cursor-1"
+    assert state.get("commercial_self_hosted_pending_delivery_v1") is None
+    assert state.get("commercial_self_hosted_pending_receipts") == []
+    assert portal.receipt_calls == 3
+    assert len(portal.receipts) == 1
+    assert portal.receipts[0]["idempotency_key"] == "noop-key-outage"

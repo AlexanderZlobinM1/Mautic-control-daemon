@@ -29,8 +29,11 @@ from mcd_agent.commercial_portal import (
     SELF_HOSTED_MCD_TERMINAL_STATUSES,
     SELF_HOSTED_MCD_ROLLBACK_STATUSES,
     CommercialState,
+    STANDALONE_SETTINGS_SNAPSHOT_SCHEMA,
+    build_standalone_settings_snapshot,
     canonical_json,
     download_external_artifact,
+    standalone_settings_etag,
     verify_self_hosted_external_artifact,
     verify_self_hosted_mcd_job,
 )
@@ -431,7 +434,7 @@ class SelfHostedPortalWorker:
         values = self.context.get("runtime_overrides") if isinstance(self.context.get("runtime_overrides"), Mapping) else {}
         revision = int(self.executor.state.get("commercial_standalone_settings_revision") or 0)
         sync = {"desired_state_sync_protocol": 3, "pending_intent": self.executor.state.get("commercial_pending_sync_intent"), "conflict": self.executor.state.get("commercial_runtime_conflict")}
-        settings = {"values": dict(values), "revision": revision, "etag": "sha256:" + hashlib.sha256(canonical_json(dict(values))).hexdigest(), "sync": sync}
+        settings = build_standalone_settings_snapshot(values, revision=revision, sync=sync)
         binding = {"agent_id": self.agent_id, "installation_id": installation_id, "host_fingerprint": self.host_fingerprint, "commercial_key_id": self.commercial_key_id}
         return {"schema": "portal-mcd-inventory-snapshot-v1", "contract_version": "1.0", "request_id": f"inventory-{int(self._clock() * 1000)}", "binding": binding, "snapshot_revision": str(self.executor.state.get("commercial_inventory_revision") or revision), "observed_at": _utc(), "complete": True, "host": {"mcd_version": str(self.context.get("mcd_version") or "runtime"), "profile": str(self.context.get("profile") or "commercial"), "service_status": "active", "scheduler_paused": bool(self.context.get("scheduler_paused", False)), "settings": settings}, "instances": []}
 
@@ -440,8 +443,23 @@ class SelfHostedPortalWorker:
             value = self.inventory_provider(installation_id)
             if not isinstance(value, Mapping):
                 raise ValueError("commercial_inventory_provider_invalid")
-            return dict(value)
-        return self._minimal_inventory(installation_id)
+            inventory = dict(value)
+        else:
+            inventory = self._minimal_inventory(installation_id)
+        host = inventory.get("host") if isinstance(inventory.get("host"), Mapping) else None
+        settings = host.get("settings") if isinstance(host, Mapping) and isinstance(host.get("settings"), Mapping) else None
+        values = settings.get("values") if isinstance(settings, Mapping) and isinstance(settings.get("values"), Mapping) else None
+        etag = str(settings.get("etag") or "") if isinstance(settings, Mapping) else ""
+        if values is None or etag != standalone_settings_etag(values):
+            raise ValueError("commercial_standalone_settings_etag_invalid")
+        # The inventory snapshot and noop consumer must use the same durable
+        # value across restart; do not recompute a second hash in the worker.
+        self.executor.state.put(
+            "commercial_standalone_settings_snapshot_v1",
+            {"schema": STANDALONE_SETTINGS_SNAPSHOT_SCHEMA, **dict(settings)},
+        )
+        self.executor.state.put("commercial_standalone_etag", etag)
+        return inventory
 
     def _ensure_adopted(self, installation_id: str) -> bool:
         if not callable(getattr(self.client, "adopt", None)):
@@ -484,11 +502,40 @@ class SelfHostedPortalWorker:
         text = str(value or "")
         return len(text) == 71 and text.startswith("sha256:") and all(char in "0123456789abcdef" for char in text[7:])
 
+    def _noop_failure(self, command: Mapping[str, Any], *, cursor_next: str, reason: str, expected: str = "", actual: str = "", expires_at: str = "") -> dict[str, Any]:
+        payload: dict[str, Any] = {"reason": reason}
+        if expected:
+            payload["expected_standalone_etag"] = expected
+        if actual:
+            payload["actual_standalone_etag"] = actual
+        if expires_at:
+            payload["expires_at"] = expires_at
+        receipt = self._command_receipt(command, status="failed", payload=payload)
+        if not self._send_or_queue(receipt):
+            return {"status": "receipt_pending", "command_id": receipt["command_id"], "reason": reason}
+        self._finish_command(cursor_next=cursor_next)
+        return {"status": "failed", "command_id": receipt["command_id"], "reason": reason}
+
     def _run_noop(self, command: Mapping[str, Any], *, cursor_next: str) -> dict[str, Any]:
         expected = str(command.get("expected_standalone_etag") or "")
-        actual = str(self.context.get("standalone_etag") or self.executor.state.get("commercial_standalone_etag") or "")
-        if not self._valid_etag(expected) or not self._valid_etag(actual):
-            return {"status": "rejected", "reason": "commercial_standalone_etag_unavailable"}
+        durable_snapshot = self.executor.state.get("commercial_standalone_settings_snapshot_v1")
+        durable_etag = durable_snapshot.get("etag") if isinstance(durable_snapshot, Mapping) else None
+        actual = str(self.context.get("standalone_etag") or self.executor.state.get("commercial_standalone_etag") or durable_etag or "")
+        expires_at = str(command.get("expires_at") or "")
+        if not expires_at:
+            return self._noop_failure(command, cursor_next=cursor_next, reason="commercial_noop_command_invalid", expected=expected, actual=actual)
+        try:
+            expires = datetime.fromisoformat(expires_at.replace("Z", "+00:00")).timestamp()
+        except (TypeError, ValueError, OverflowError):
+            return self._noop_failure(command, cursor_next=cursor_next, reason="commercial_noop_command_invalid", expected=expected, actual=actual, expires_at=expires_at)
+        if expires <= float(self._clock()):
+            return self._noop_failure(command, cursor_next=cursor_next, reason="commercial_noop_command_expired", expected=expected, actual=actual, expires_at=expires_at)
+        if not self._valid_etag(expected):
+            return self._noop_failure(command, cursor_next=cursor_next, reason="commercial_noop_command_invalid", expected=expected, actual=actual)
+        if not self._valid_etag(actual):
+            return self._noop_failure(command, cursor_next=cursor_next, reason="commercial_standalone_etag_unavailable", expected=expected, actual=actual)
+        if actual != expected:
+            return self._noop_failure(command, cursor_next=cursor_next, reason="commercial_standalone_etag_mismatch", expected=expected, actual=actual)
         unchanged = actual == expected
         receipt = {
             "schema": _PORTAL_NOOP_RECEIPT_SCHEMA,
