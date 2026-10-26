@@ -6,8 +6,8 @@ COMMAND = "docker_runtime_preflight_v1"
 def validate_preflight_job(job: Mapping[str, Any], *, agent_id: str, host_fingerprint: str) -> dict[str, Any]:
     if job.get("command") != COMMAND or job.get("agent_id") != agent_id or job.get("host_fingerprint") != host_fingerprint:
         raise ValueError("docker_preflight_job_binding_invalid")
-    required = ("job_id", "probe_id", "request_id", "image_ref", "image_digest", "adapter", "ttl_seconds")
-    if any(not job.get(k) for k in required) or not str(job["image_digest"]).startswith("sha256:") or int(job["ttl_seconds"]) < 1 or int(job["ttl_seconds"]) > 300:
+    required = ("job_id", "probe_id", "request_id", "image_ref", "runtime_image_digest", "adapter", "ttl_seconds")
+    if any(not job.get(k) for k in required) or not str(job["runtime_image_digest"]).startswith("sha256:") or int(job["ttl_seconds"]) < 1 or int(job["ttl_seconds"]) > 300:
         raise ValueError("docker_preflight_job_fields_invalid")
     if any(k in job for k in ("shell", "command_line", "argv", "script")):
         raise ValueError("docker_preflight_job_arbitrary_payload_forbidden")

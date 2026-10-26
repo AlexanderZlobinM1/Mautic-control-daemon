@@ -429,6 +429,14 @@ config на его profile baseline и только после этого при
   terminal receipt. A missing digest image is therefore an actionable
   `docker_preflight_image_unavailable` evidence result, not an opaque
   `RuntimeError`; no pull, arbitrary command or host mutation is attempted.
+  The normal `mcd-state-v1` payload also exposes a signed generic
+  `mcd-docker-runtime-image-inventory-v1`: each local image carries its
+  repository tag, fixed `image_ref@runtime_image_digest`, Docker `image_id`,
+  actual RepoDigests, bounded semantic labels and normalized `files_sha256`,
+  bound to `agent_id` and `host_fingerprint`. The inventory is read-only and
+  never pulls or stages images. `docker_runtime_preflight_v1` accepts only
+  this explicit `runtime_image_digest`; an MCC artifact-pair/files digest is
+  not a runtime image identity.
    Self-update сначала публикует persisted `scheduler.pause` под общим
    межпроцессным `scheduler.pause.lock`. Каждый новый запуск, включая
    ordinary, priority, super-priority, manual, import и retry, перед

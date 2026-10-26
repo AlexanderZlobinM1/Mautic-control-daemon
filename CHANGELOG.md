@@ -1,3 +1,11 @@
+## 1.5.225 - 2026-10-26
+
+- Add signed, read-only `mcd-docker-runtime-image-inventory-v1` to normal
+  state payloads with actual Docker RepoDigest/ID, fixed runtime ref and
+  bounded semantic labels including `files_sha256`.
+- Require explicit `runtime_image_digest` for Docker preflight execution;
+  MCC artifact-pair/files digests are not accepted as runtime identities.
+
 ## 1.5.224 - 2026-10-26
 
 - Classify fixed Docker preflight failures with bounded, redacted evidence:

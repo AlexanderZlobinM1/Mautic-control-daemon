@@ -54,7 +54,9 @@ class DockerRuntimePreflightRunner:
         self.run, self.timeout_sec = run, max(1, min(300, int(timeout_sec)))
 
     def __call__(self, request: dict[str, Any]) -> dict[str, Any]:
-        digest, adapter = str(request.get("image_digest") or ""), str(request.get("adapter") or "")
+        # Only the actual Docker RepoDigest is accepted; MCC asset-pair/files
+        # digests are never valid runtime image identities.
+        digest, adapter = str(request.get("runtime_image_digest") or ""), str(request.get("adapter") or "")
         if not _DIGEST.fullmatch(digest) or not _ADAPTER.fullmatch(adapter):
             raise ValueError("docker_preflight_runner_identity_invalid")
         name = "mcd-preflight-" + uuid.uuid4().hex
