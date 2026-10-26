@@ -459,9 +459,10 @@ config на его profile baseline и только после этого при
   That one `conflict_acknowledged` row is omitted from subsequent outbound
   `control_receipts`; no SQLite row is deleted, no MCC row is changed, and
   other jobs remain eligible. Reconciliation requires a machine-readable MCC
-  envelope with `code=immutable_terminal_conflict` and an exact `job_id`; a
-  missing or mismatched identifier remains untouched. An unrelated 409 is
-  never treated as this reconciliation.
+  envelope with `code=immutable_terminal_conflict` and an exact `job_id`
+  (including MCC's canonical nested `detail` object); a missing or mismatched
+  identifier remains untouched. An unrelated 409 is never treated as this
+  reconciliation.
   The safe semantic label set preserves the `com.sales-snap.mauticrfp.*`
   image selector/runtime metadata and OCI labels while excluding
   secret-shaped keys.

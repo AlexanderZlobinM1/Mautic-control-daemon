@@ -227,15 +227,16 @@ def _ingest_control_response(
 def _reconcile_control_receipt_conflict(state_db_path: str, response_text: str) -> int:
     """Retire only terminal receipts rejected by MCC's immutable-row 409."""
     text = str(response_text or "")
-    if "control receipt conflicts with immutable terminal command" not in text.lower():
-        return 0
     try:
         envelope = json.loads(text)
     except (TypeError, json.JSONDecodeError):
         return 0
-    if not isinstance(envelope, dict) or envelope.get("code") != "immutable_terminal_conflict":
+    if not isinstance(envelope, dict):
         return 0
-    job_id = envelope.get("job_id")
+    detail = envelope.get("detail") if isinstance(envelope.get("detail"), dict) else envelope
+    if detail.get("code") != "immutable_terminal_conflict":
+        return 0
+    job_id = detail.get("job_id")
     if not isinstance(job_id, str) or not re.fullmatch(r"docker-preflight-[A-Za-z0-9._-]+", job_id):
         return 0
     store = ControlStore(state_db_path)

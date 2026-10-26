@@ -1,3 +1,8 @@
+## 1.5.234 - 2026-10-26
+
+- Accept the canonical MCC immutable-terminal conflict envelope when its
+  machine-readable `code` and exact `job_id` are nested under `detail`.
+
 ## 1.5.233 - 2026-10-26
 
 - Require a machine-readable MCC immutable-terminal conflict envelope with
