@@ -322,11 +322,17 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
         agent_id = str(state.get("agent_id") or "")
         installations = state.get("installation_ids")
         portal_keys = state.get("portal_job_signing_keys")
-        publisher_keys = state.get("portal_mcc_publisher_keys")
+        # MCC publisher keys are operation-scoped trust material.  They are
+        # needed only when a delivered scenario's external artifacts are
+        # verified; they are not activation material for the outbound Portal
+        # channel.  In particular, poll/adopt/inventory/settings/noop and
+        # receipt delivery must remain available when no scenario is queued.
+        publisher_keys_raw = state.get("portal_mcc_publisher_keys")
+        publisher_keys = publisher_keys_raw if isinstance(publisher_keys_raw, dict) else {}
         key_metadata = state.get("commercial_key_metadata")
         commercial_key_id = str(state.get("commercial_key_id") or (key_metadata.get("commercial_key_id") if isinstance(key_metadata, dict) else "") or "")
         host_fingerprint = str(state.get("host_fingerprint") or "")
-        if not base.startswith("https://") or not credential or not agent_id or not commercial_key_id or not host_fingerprint or not isinstance(installations, dict) or not installations or not isinstance(portal_keys, dict) or not portal_keys or not isinstance(publisher_keys, dict) or not publisher_keys:
+        if not base.startswith("https://") or not credential or not agent_id or not commercial_key_id or not host_fingerprint or not isinstance(installations, dict) or not installations or not isinstance(portal_keys, dict) or not portal_keys:
             disabled("portal_runtime_material_incomplete")
             return None
         try:

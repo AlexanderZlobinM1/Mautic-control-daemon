@@ -44,7 +44,9 @@ def _worker(tmp_path: Path, client: object, clock: _Clock) -> tuple[SelfHostedPo
         executor,
         installation_id="installation-1",
         portal_keys={"portal-1": "key"},
-        publisher_keys={"publisher-1": "key"},
+        # Portal transport and noop/settings commands do not need MCC
+        # artifact trust; that trust is checked only at scenario execution.
+        publisher_keys={},
         context={},
         commercial_key_id="commercial-key-1",
         agent_id="agent-1",

@@ -90,11 +90,11 @@ def test_default_factory_validates_material_and_constructs_one_worker(tmp_path, 
     state, config = _eligible_state(tmp_path, monkeypatch)
     state.put("installation_ids", {"local-1": "inst-1", "local-2": "inst-2"})
     state.put("portal_job_signing_keys", {"portal-1": "key"})
-    state.put("portal_mcc_publisher_keys", {"mcc-1": "key"})
     factory = _default_commercial_worker_factory(config)
     worker = factory(None)
     assert worker is not None
     assert worker.installation_ids == ["inst-1", "inst-2"]
+    assert worker.publisher_keys == {}
     assert state.get("commercial_worker_status")["status"] == "enabled"
 
 

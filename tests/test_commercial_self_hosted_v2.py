@@ -13,6 +13,7 @@ from mcd_agent.commercial_portal import (
     SELF_HOSTED_MCD_JOB_SCHEMA,
     SELF_HOSTED_MCD_CONTRACT_VERSION,
     canonical_json,
+    verify_self_hosted_external_artifact,
 )
 from mcd_agent.commercial_self_hosted import (
     SelfHostedPortalWorker,
@@ -149,6 +150,77 @@ def test_v2_external_artifact_execution_has_exact_binding_and_no_handlers() -> N
         )
         assert replay == terminal
         assert events == [scenario]
+
+
+def test_v2_external_artifact_requires_publisher_trust_only_at_operation_boundary() -> None:
+    portal = Ed25519PrivateKey.generate()
+    publisher = Ed25519PrivateKey.generate()
+    job, _bootstrap, scenario, keys = _job(portal, publisher)
+    pin = job["scenario_artifact"]
+
+    for publisher_keys in ({}, {"other-publisher": keys["publisher-1"]}):
+        try:
+            verify_self_hosted_external_artifact(
+                pin,
+                scenario,
+                publisher_keys,
+                kind="scenario",
+            )
+        except ValueError as exc:
+            assert str(exc) == "self_hosted_mcd_artifact_signer_unknown"
+        else:
+            raise AssertionError("scenario artifact without its publisher key must fail closed")
+
+
+def test_v2_worker_emits_typed_failed_terminal_for_missing_publisher_trust_and_keeps_polling(monkeypatch) -> None:
+    portal_key = Ed25519PrivateKey.generate()
+    publisher_key = Ed25519PrivateKey.generate()
+    job, bootstrap, scenario, keys = _job(portal_key, publisher_key)
+
+    class Portal:
+        def __init__(self) -> None:
+            self.receipts: list[dict[str, object]] = []
+            self.polls = 0
+
+        def pull_job(self, **_: object):
+            self.polls += 1
+            return {"cursor": "cursor-1", "job": job}
+
+        def send_receipt(self, receipt: dict[str, object], **_: object):
+            self.receipts.append(receipt)
+            return {}
+
+    with TemporaryDirectory() as directory:
+        state = CommercialState(str(Path(directory) / "commercial.sqlite"))
+        executor = SelfHostedScenarioExecutor(
+            state,
+            facts_reader=lambda **_: job["applicability"]["facts"],
+            runner=lambda **_: (_ for _ in ()).throw(AssertionError("publisher rejection must precede runner")),
+        )
+        monkeypatch.setattr(
+            "mcd_agent.commercial_self_hosted.download_external_artifact",
+            lambda uri, expected_size: bootstrap if "bootstrap" in uri else scenario,
+        )
+        portal = Portal()
+        worker = SelfHostedPortalWorker(
+            portal,
+            executor,
+            installation_id="installation-1",
+            portal_keys={"portal-1": keys["portal-1"]},
+            publisher_keys={},
+            context={},
+            commercial_key_id="commercial-key-1",
+            agent_id="agent-1",
+            host_fingerprint="sha256:" + "b" * 64,
+        )
+
+        result = worker.run_once()
+
+        assert result == {"status": "failed", "job_id": "job-1"}
+        assert portal.polls == 1
+        assert portal.receipts[-1]["status"] == "failed"
+        assert portal.receipts[-1]["error"]["type"] == "self_hosted_mcd_artifact_signer_unknown"
+        assert state.get("commercial_self_hosted_pending_delivery_v1") is None
 
 
 def test_v2_status_and_binding_reject_legacy_passed_receipt() -> None:

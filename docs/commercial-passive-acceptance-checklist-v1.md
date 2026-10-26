@@ -64,8 +64,10 @@ the same `agent_id`; no active installation slot consumed.
 
 ## 3. Local safety gates
 
-The effective MCD profile must be `commercial`. The worker must report
-`mcd-commercial-worker-status-v1` with `status=enabled` and no secret fields.
+The base MCD profile may remain `passive`, `standalone`, or `corporate`; durable
+commercial enrollment independently enables the Portal worker. The worker
+must report `mcd-commercial-worker-status-v1` with `status=enabled` and no
+secret fields.
 The following must remain unchanged throughout acceptance:
 
 - native cron entries and cron ownership;
@@ -74,9 +76,14 @@ The following must remain unchanged throughout acceptance:
 - corporate MCC configuration and credentials;
 - standalone configuration and behavior.
 
-Any missing Portal URL, credential/host binding, agent/install identity,
-Portal job signing key, or MCC publisher key is a typed `disabled` status and
-blocks the test before a job is accepted.
+Any missing Portal URL, credential/host binding, agent/install identity, or
+Portal job signing key is a typed `disabled` status and blocks the outbound
+worker. MCC publisher keys are not activation material and their absence must
+not disable Portal polling, adoption, inventory, settings, noop, or receipt
+delivery. They are required only when MCD validates a delivered MCC-signed
+bootstrap or scenario artifact; a missing/unknown key must produce the typed
+`self_hosted_mcd_artifact_signer_unknown` operation failure and a durable
+failed terminal receipt.
 
 ## 4. Portal-only no-op job and receipt
 

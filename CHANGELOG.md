@@ -1,3 +1,11 @@
+## 1.5.253 - 2026-10-26
+
+- Keep the self-hosted commercial Portal worker available with valid durable
+  enrollment and Portal job-signing keys even when MCC publisher trust is not
+  provisioned. Require that trust only while validating a delivered
+  MCC-signed bootstrap or scenario artifact, returning a typed failed terminal
+  receipt for missing or unknown signer keys without stopping later polling.
+
 ## 1.5.252 - 2026-10-26
 
 - Start the commercial Portal worker from valid durable commercial enrollment,

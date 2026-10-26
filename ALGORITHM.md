@@ -1185,14 +1185,22 @@ billing or tariff semantics are not part of MCD.
 
 `daemon.run_loop` may start at most one Portal worker when the durable
 commercial enrollment is valid: HTTPS Portal base, credential, agent and
-commercial-key identity, host binding, and at least one installation binding
-must all be present. The base `passive`, `standalone`, or `corporate` profile is
-not an eligibility switch; the Portal worker is an independent capability
-alongside the existing scheduler. Missing or invalid state, including an
-explicit revoke/detach marker, fails closed. Single-cycle mode never starts
-the worker. The worker owns only its Portal stop event and bounded thread; it
-does not enter scheduler admission, locks, or task slots. On revoke, detach,
-or shutdown MCD stops and joins only this worker, leaving corporate MCC and
+commercial-key identity, host binding, at least one installation binding, and
+Portal job-signing keys must all be present. MCC publisher keys are not
+activation material and are not a worker-start gate: poll, adopt, inventory,
+settings, noop, and receipt operations use Portal-owned signing keys only. The
+publisher trust set is passed as an operation capability and is required only
+when a `scenario.apply` command verifies its MCC-signed external bootstrap or
+scenario artifact. If that key is missing or unknown, the operation fails
+closed with typed `self_hosted_mcd_artifact_signer_unknown` and a durable
+failed terminal receipt; the worker remains available for later outbound
+polling. The base `passive`, `standalone`, or `corporate` profile is not an
+eligibility switch; the Portal worker is an independent capability alongside
+the existing scheduler. Missing or invalid state, including an explicit
+revoke/detach marker, fails closed. Single-cycle mode never starts the worker.
+The worker owns only its Portal stop event and bounded thread; it does not
+enter scheduler admission, locks, or task slots. On revoke, detach, or
+shutdown MCD stops and joins only this worker, leaving corporate MCC and
 standalone work running. A restart re-reads the same durable registration and
 resumes without activation or token issuance; starting is idempotent and never
 creates a duplicate Portal worker.
