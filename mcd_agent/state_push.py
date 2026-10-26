@@ -194,6 +194,9 @@ def _ingest_control_response(
     control: dict[str, Any],
 ) -> None:
     """Persist MCC key ACKs even when no control-command envelope is present."""
+    nested = control.get("control")
+    if control.get("schema") != SCHEMA and isinstance(nested, dict):
+        control = nested
     if control.get("schema") != SCHEMA:
         return
     store = ControlStore(state_db_path)

@@ -78,3 +78,21 @@ def test_control_ack_is_persisted_without_command_envelope_contract_version(tmp_
     )
 
     assert ControlStore(db_path).active_key_ack("k1") == ack
+
+
+def test_control_ack_is_unwrapped_from_mcc_state_response(tmp_path):
+    db_path = str(Path(tmp_path) / "state.db")
+    payload = {
+        "agent_id": "mcd-agent-1",
+        "host_fingerprint": "sha256:" + "a" * 64,
+        "result_signing_key": {"key_id": "k1"},
+    }
+    ack = {"key_id": "k1", "status": "active"}
+
+    _ingest_control_response(
+        db_path,
+        payload,
+        {"status": "ok", "control": {"schema": "mcd-control-v1", "commands": [], "result_signing_key_ack": ack}},
+    )
+
+    assert ControlStore(db_path).active_key_ack("k1") == ack

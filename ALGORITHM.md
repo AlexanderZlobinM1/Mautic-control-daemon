@@ -404,9 +404,10 @@ config на его profile baseline и только после этого при
    derives a stable `mcd-agent-<sha256>` identity from the canonical MCC host
    name (or local hostname in standalone mode). The value is stable across
    restart and is sent together with the host fingerprint and result key.
-   MCD persists a matching MCC key ACK even when the response carries no
-   control commands; command-envelope validation remains independent and
-   invalid commands are never executed because an ACK was received.
+   MCD unwraps the MCC state response before processing its control envelope
+   and persists a matching key ACK even when the response carries no control
+   commands; command-envelope validation remains independent and invalid
+   commands are never executed because an ACK was received.
    Self-update сначала публикует persisted `scheduler.pause` под общим
    межпроцессным `scheduler.pause.lock`. Каждый новый запуск, включая
    ordinary, priority, super-priority, manual, import и retry, перед
