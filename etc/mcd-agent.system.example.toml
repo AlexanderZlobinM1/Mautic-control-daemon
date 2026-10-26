@@ -479,6 +479,9 @@ mysql_write_timeout_sec = 15
 mysql_snapshot_enabled = true
 
 [mcc]
+# Stable MCD identity. Empty/omitted derives deterministically from the
+# canonical MCC host name (or local hostname in standalone mode).
+agent_id = ""
 # Optional MCC URL for connected mode.
 url = ""
 # Optional MCC token for API auth.

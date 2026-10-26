@@ -180,6 +180,14 @@ def _runtime_overrides_for_state_push(cfg: AgentConfig) -> dict[str, Any]:
     return runtime
 
 
+def state_identity_payload(cfg: AgentConfig) -> dict[str, str]:
+    """Return the stable identity fields required by the mcd-state-v1 contract."""
+    return {
+        "agent_id": str(getattr(cfg, "agent_id", "") or "").strip(),
+        "host_fingerprint": _host_fingerprint(),
+    }
+
+
 def monitor_signals_change_payload(payload: dict[str, Any]) -> dict[str, Any]:
     details = payload.get("details") if isinstance(payload.get("details"), dict) else {}
     scheduler = details.get("scheduler") if isinstance(details.get("scheduler"), dict) else {}
@@ -2198,11 +2206,12 @@ class MCCStatePusher:
             except Exception:
                 result_key = None
         control_store = ControlStore(self.cfg.state_db_path)
+        state_identity = state_identity_payload(self.cfg)
         if result_key and key_path:
             try:
                 private_key, _ = ensure_result_key(key_path)
                 if control_store.active_key_ack(result_key["key_id"]):
-                    control_store.execute_pending(agent_id=str(getattr(self.cfg, "agent_id", "") or ""), host_fingerprint=_host_fingerprint(), active_key=(private_key, result_key["key_id"]), runner=DockerRuntimePreflightRunner(), signer=sign_result)
+                    control_store.execute_pending(agent_id=state_identity["agent_id"], host_fingerprint=state_identity["host_fingerprint"], active_key=(private_key, result_key["key_id"]), runner=DockerRuntimePreflightRunner(), signer=sign_result)
             except Exception:
                 pass
         from mcd_agent.mautic_release_authorization import runtime_capabilities as release_capabilities
@@ -2259,8 +2268,7 @@ class MCCStatePusher:
             "control_receipts": control_store.receipts(),
             "control_capabilities": {"schema": "mcd-control-capabilities-v1", "version": "1.0", "commands": ["docker_runtime_preflight_v1"]},
             "result_signing_key": result_key,
-            "agent_id": str(getattr(self.cfg, "agent_id", "") or ""),
-            "host_fingerprint": _host_fingerprint(),
+            **state_identity,
             "hostname": str(identity.get("effective_hostname") or ""),
             "mcc_host_name": str(identity.get("effective_mcc_host_name") or ""),
             "agent_hostname": str(identity.get("local_hostname") or ""),
