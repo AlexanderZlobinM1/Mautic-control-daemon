@@ -41,6 +41,7 @@ from mcd_agent.config import (
     reapply_profile_authority,
     recover_config_from_mcc,
     remove_runtime_values,
+    runtime_remote_allowed_keys,
     runtime_effective_map,
     upsert_runtime_values,
 )
@@ -1292,11 +1293,22 @@ def _persist_resolved_runtime_to_config(
     previous_runtime: Mapping[str, Any],
     resolved_runtime: Mapping[str, Any],
     resolved_metadata: Mapping[str, Any],
+    *,
+    full_snapshot: bool = False,
 ) -> None:
-    """Persist only resolved values and explicit MCC tombstones."""
+    """Persist resolved values and explicit MCC tombstones.
+
+    Normal polls retain the historical stable-key projection.  A post-update
+    recovery is different: the mutable runtime include may have been replaced
+    or truncated, so every MCC-allowed runtime key must be materialized back
+    to disk.  Keeping that distinction here prevents a partial recovery from
+    looking like a successful full restore while preserving the normal poll's
+    non-destructive behavior.
+    """
     previous = dict(previous_runtime)
     resolved = dict(resolved_runtime)
-    stable_keys = (_STABLE_RUNTIME_KEYS | set(previous) | set(resolved)) & _STABLE_RUNTIME_KEYS
+    persistable_keys = runtime_remote_allowed_keys() if full_snapshot else _STABLE_RUNTIME_KEYS
+    stable_keys = (persistable_keys | set(previous) | set(resolved)) & persistable_keys
     updates = {
         str(key): deepcopy(resolved[key])
         for key in stable_keys
@@ -1822,6 +1834,7 @@ def _bootstrap_remote_runtime_before_local_baseline(
         current_local_runtime,
         resolved_runtime,
         resolved_metadata,
+        full_snapshot=recover_after_update,
     )
     store.put_runtime_sync("local_runtime", resolved_runtime)
     store.put_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY, resolved_metadata)

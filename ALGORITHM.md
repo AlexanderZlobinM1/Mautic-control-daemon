@@ -824,7 +824,11 @@ bundle-registration, slot и resource guards.
 После смены версии/источника MCD первый запуск помечается как post-update
 recovery. Пропавшее или обнулённое mutable runtime include в этом запуске не
 является изменением оператора: MCD восстанавливает полный durable runtime
-snapshot и свежий MCC snapshot, причём явный MCC tombstone имеет приоритет.
+snapshot и свежий MCC snapshot, причём восстанавливаются все MCC-allowed
+runtime keys, а не только scheduler/plugin subset; явный MCC tombstone имеет
+приоритет. Этот полный snapshot материализуется обратно в mutable include до
+перезагрузки конфига и старта scheduler, поэтому потеря части файла не может
+выглядеть как намеренное удаление настроек.
 Этот режим включается до первого MCC poll: сброшенный локальный projection не
 может получить свежий `mcd` timestamp и победить canonical MCC snapshot.
 Реальное локальное изменение MCD по-прежнему фиксируется своим

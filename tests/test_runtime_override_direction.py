@@ -2314,11 +2314,24 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             })
             response = {
                 "status": "ok",
-                "runtime_overrides": {"plugin_operations": catalog},
+                "runtime_overrides": {
+                    "plugin_operations": catalog,
+                    # These are valid MCC runtime settings but intentionally
+                    # are not in daemon.py's ordinary stable-key projection.
+                    # Post-update recovery must still materialize them.
+                    "segment_full_scan_interval_sec": 47,
+                    "scheduler_elastic_slots_enabled": True,
+                    "db_watchdog": {"enabled": True, "max_connections": 120},
+                },
                 "desired_state": {
                     "revision": 201,
                     "updated_at": 500.0,
-                    "runtime_overrides": {"plugin_operations": catalog},
+                    "runtime_overrides": {
+                        "plugin_operations": catalog,
+                        "segment_full_scan_interval_sec": 47,
+                        "scheduler_elastic_slots_enabled": True,
+                        "db_watchdog": {"enabled": True, "max_connections": 120},
+                    },
                 },
             }
             with patch("mcd_agent.daemon.fetch_runtime_overrides", return_value=response):
@@ -2333,6 +2346,10 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
                 local_runtime_overrides(load_config(str(path), allow_recover_from_mcc=False))["plugin_operations"],
                 catalog,
             )
+            restored = local_runtime_overrides(load_config(str(path), allow_recover_from_mcc=False))
+            self.assertEqual(restored["segment_full_scan_interval_sec"], 47)
+            self.assertTrue(restored["scheduler_elastic_slots_enabled"])
+            self.assertEqual(restored["db_watchdog"], {"enabled": True, "max_connections": 120})
             self.assertEqual(store.get_runtime_sync("mcc_runtime")["plugin_operations"], catalog)
 
     def test_plugin_catalog_survives_partial_restart_and_authoritative_empty_clears(self) -> None:
