@@ -11,6 +11,16 @@ first-class фазой для patch records, которые должны зав�
 управления trigger-consumer; она не подменяется более широкой фазой
 `before_campaign_execution`. Контракт, runtime executor, fixture и receipt
 должны рекламировать и проверять один и тот же порядок.
+
+Каталоговая преднастройка перед native plugin reload остаётся fail-closed:
+MCD не применяет план при `agent_patch_contract_mismatch`,
+`agent_patch_contract_fields_mismatch` или `agent_version_below_minimum` и не
+подменяет строгую проверку MCC. Такой отказ совместимости не отменяет уже
+успешно применённые файлы и сброс кеша: MCD фиксирует предупреждение и
+продолжает штатный `mautic:plugin:install`, после чего обычный reload ACK и
+post-step могут завершиться. Следующая совместимая reconciliation повторяет
+только незавершённую каталоговую remediation; native plugin operation не
+переисполняется из-за этого отказа.
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
 Актуальная редакция этого канона — MCD 1.5.199 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной

@@ -486,6 +486,26 @@ class PluginConflictPathTests(unittest.TestCase):
         db.execute_sql_template.assert_not_called()
         run_template.assert_called_once()
 
+    def test_plugin_reload_ack_completes_after_catalog_contract_block(self) -> None:
+        cfg = SimpleNamespace(mcc_url="https://mcc.example")
+        install = SimpleNamespace(root="/var/www/ss/public_html", db=None, mautic_major=7)
+
+        with patch(
+            "mcd_agent.mautic_patch_runtime.run",
+            return_value={"status": "error", "reason": "agent_patch_contract_mismatch"},
+        ) as run_catalog, patch(
+            "mcd_agent.plugins._run_plugin_template", return_value=(0, "plugins reloaded")
+        ) as run_template:
+            _run_plugin_install_reload(cfg, install, expected_bundles={"SalesSnapEcommerceBundle"})
+
+        run_catalog.assert_called_once_with(
+            cfg,
+            install,
+            phase="before_plugin_reload",
+            trigger="plugin_reload_failure",
+        )
+        run_template.assert_called_once_with(cfg, install, "mautic:plugin:install")
+
     def test_mautic6_plugin_reload_retries_inactive_transaction_once(self) -> None:
         cfg = SimpleNamespace()
         install = SimpleNamespace(

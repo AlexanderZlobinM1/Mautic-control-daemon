@@ -62,6 +62,11 @@ _PLUGIN_SYNC_IGNORED_RE = re.compile(r"(sync-conflict|\.sync-conflict|\.syncthin
 _MAUTIC7_PLUGIN_RUNTIME_PACKAGES = {"nikic/php-parser:^5.0"}
 _PLUGIN_CACHE_RESET_SCHEMA = "mcd-plugin-cache-reset-v1"
 _PLUGIN_APPLY_RESULT_SCHEMA = "mcd-plugin-apply-result-v1"
+_CATALOG_COMPATIBILITY_BLOCK_REASONS = frozenset({
+    "agent_patch_contract_mismatch",
+    "agent_patch_contract_fields_mismatch",
+    "agent_version_below_minimum",
+})
 _GALERA_DANGEROUS_SQL_RE = re.compile(
     r"^\s*(ALTER|CREATE|DROP|RENAME|TRUNCATE|OPTIMIZE|ANALYZE|CHECK|REPAIR|LOCK|UNLOCK)\b",
     re.IGNORECASE,
@@ -1622,7 +1627,21 @@ def _run_plugin_install_reload(config: AgentConfig, install, expected_bundles: s
     if getattr(config, "mcc_url", ""):
         preflight = run_catalog(config, install, phase="before_plugin_reload", trigger="plugin_reload_failure")
         if preflight.get("status") == "error":
-            raise RuntimeError("Catalog plugin reload preflight failed: " + str(preflight.get("reason")))
+            reason = str(preflight.get("reason") or "catalog_preflight_failed")
+            if reason in _CATALOG_COMPATIBILITY_BLOCK_REASONS:
+                # The catalog admission remains strict and no unvalidated patch
+                # is applied.  A stale MCC/agent contract must not turn a
+                # completed plugin file/cache operation into a failed native
+                # plugin reload; the next catalog reconciliation can retry the
+                # optional remediation once compatibility is restored.
+                logging.warning(
+                    "[%s] catalog plugin reload preflight blocked by compatibility (%s); "
+                    "continuing native plugin reload",
+                    install.root,
+                    reason,
+                )
+            else:
+                raise RuntimeError("Catalog plugin reload preflight failed: " + reason)
     rc, out = _run_plugin_template(config, install, "mautic:plugin:install")
     if rc == 0:
         return

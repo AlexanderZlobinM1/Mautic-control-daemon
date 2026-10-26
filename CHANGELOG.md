@@ -1,3 +1,12 @@
+## 1.5.242 - 2026-10-26
+
+- Keep a completed native plugin reload from failing when the optional MCC
+  catalog preflight is strictly blocked by an agent/contract compatibility
+  mismatch. No unvalidated catalog patch is applied; the next compatible
+  reconciliation can retry the remediation.
+- Add regression coverage for the files-applied/cache-reset/plugin-reload
+  completion path.
+
 ## 1.5.241 - 2026-10-26
 
 - Restore every MCC-allowed runtime setting after an MCD update replaces or
