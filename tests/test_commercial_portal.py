@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import io
 import json
 import tempfile
 import time
@@ -8,12 +9,13 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import shutil
 import hmac
+from urllib.error import HTTPError, URLError
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives import serialization
 
-from mcd_agent.commercial_portal import CommercialState, PortalClient, canonical_json, verify_signed_job
+from mcd_agent.commercial_portal import CommercialPortalError, CommercialState, PORTAL_USER_AGENT, PortalClient, canonical_json, download_external_artifact, verify_signed_job
 
 
 def test_signed_job_is_verified_and_replay_state_is_durable():
@@ -87,6 +89,72 @@ def test_activation_uses_only_exact_unauthenticated_path_and_stores_validated_st
                 PortalClient(CommercialState(str(Path(td) / "other.sqlite")))._request("GET", "arbitrary")
     finally:
         server.shutdown()
+
+
+def test_all_portal_http_requests_use_product_user_agent(monkeypatch, tmp_path):
+    requests = []
+
+    class Response:
+        def __init__(self, body=b"{}"):
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit=-1):
+            return self.body
+
+    def fake_urlopen(req, **_kwargs):
+        requests.append(req)
+        return Response()
+
+    monkeypatch.setattr("mcd_agent.commercial_portal.request.urlopen", fake_urlopen)
+    state = CommercialState(str(tmp_path / "state.sqlite"))
+    state.put("portal_api_base", "https://portal.example/api/v1/commercial")
+    state.put("portal_agent_credential", "credential")
+    client = PortalClient(state)
+    client._request("GET", "jobs", extra_headers={"User-Agent": "spoofed-client"})
+    client.download_artifact(path="artifacts/a", grant="grant", expected_size=2)
+    client._activation_request("https://portal.example", {"idempotency_key": "activation-id"})
+    download_external_artifact("https://portal.example/artifacts/a", expected_size=2)
+
+    assert len(requests) == 4
+    assert all(req.get_header("User-agent") == PORTAL_USER_AGENT for req in requests)
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_code", "expected_status", "retryable"),
+    [
+        (HTTPError("https://portal.example/redeem", 403, "blocked", {}, io.BytesIO(b"activation-secret")), "commercial_activation_http_403", 403, False),
+        (HTTPError("https://portal.example/redeem", 502, "bad gateway", {}, io.BytesIO(b"secret-response")), "commercial_activation_http_502", 502, True),
+        (URLError("TLS handshake failed with secret-response"), "commercial_portal_transport_error", None, True),
+    ],
+)
+def test_activation_failures_are_typed_and_secret_free(monkeypatch, tmp_path, failure, expected_code, expected_status, retryable):
+    def fail_urlopen(_req, **_kwargs):
+        raise failure
+
+    monkeypatch.setattr("mcd_agent.commercial_portal.request.urlopen", fail_urlopen)
+    state = CommercialState(str(tmp_path / "state.sqlite"))
+    client = PortalClient(state)
+
+    with pytest.raises(CommercialPortalError) as raised:
+        client._activation_request("https://portal.example", {"idempotency_key": "activation-id"})
+
+    error = raised.value
+    assert error.as_dict() == {
+        "stage": "activation",
+        "code": expected_code,
+        "retryable": retryable,
+        **({"http_status": expected_status} if expected_status is not None else {}),
+    }
+    assert "activation-secret" not in str(error)
+    assert "secret-response" not in str(error)
+
+
 
 
 def test_https_and_strict_z_timestamps_are_required():

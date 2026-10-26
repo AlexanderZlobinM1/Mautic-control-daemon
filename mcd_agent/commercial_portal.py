@@ -17,10 +17,11 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Mapping
 from urllib import request
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
+from mcd_agent import __version__
 
 CONTRACT = "com.sales-snap.portal-commercial/1.0"
 CONTRACT_VERSION = "1.0"
@@ -39,6 +40,52 @@ PORTAL_MCD_MAX_LONG_POLL_MS = 30_000
 PORTAL_MCD_MAX_BACKOFF_MS = 300_000
 MCC_ARTIFACT_SIGNATURE_DOMAIN = b"com.sales-snap.portal-mcc/artifact-signature/1.0\n"
 MAX_ARTIFACT_BYTES = 512 * 1024 * 1024
+PORTAL_USER_AGENT = f"mcd-agent/{__version__} portal-commercial/{CONTRACT_VERSION}"
+
+
+class CommercialPortalError(RuntimeError):
+    """Safe, typed diagnostics for outbound Portal failures.
+
+    The exception deliberately carries only normalized stage/code/status data;
+    response bodies, URLs, query strings, credentials and activation material
+    are never retained or rendered.
+    """
+
+    def __init__(self, *, stage: str, code: str, http_status: int | None = None, retryable: bool = False):
+        self.stage = str(stage)
+        self.code = str(code)
+        self.http_status = int(http_status) if http_status is not None else None
+        self.retryable = bool(retryable)
+        detail = f" stage={self.stage}"
+        if self.http_status is not None:
+            detail += f" http_status={self.http_status}"
+        detail += f" retryable={str(self.retryable).lower()}"
+        super().__init__(f"{self.code}{detail}")
+
+    def as_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "stage": self.stage,
+            "code": self.code,
+            "retryable": self.retryable,
+        }
+        if self.http_status is not None:
+            payload["http_status"] = self.http_status
+        return payload
+
+
+def _portal_http_error(*, stage: str, status: int) -> CommercialPortalError:
+    normalized_stage = re.sub(r"[^a-z0-9]+", "_", str(stage).lower()).strip("_") or "request"
+    normalized_status = int(status)
+    return CommercialPortalError(
+        stage=stage,
+        code=f"commercial_{normalized_stage}_http_{normalized_status}",
+        http_status=normalized_status,
+        retryable=normalized_status in {408, 425, 429} or normalized_status >= 500,
+    )
+
+
+def _portal_transport_error(*, stage: str) -> CommercialPortalError:
+    return CommercialPortalError(stage=stage, code="commercial_portal_transport_error", retryable=True)
 
 
 def _b64(value: bytes) -> str:
@@ -437,14 +484,16 @@ def download_external_artifact(uri: str, *, expected_size: int, timeout_sec: int
     expected = int(expected_size)
     if expected <= 0 or expected > MAX_ARTIFACT_BYTES:
         raise ValueError("self_hosted_mcd_artifact_size_invalid")
-    req = request.Request(uri, headers={"Accept": "application/octet-stream"}, method="GET")
+    req = request.Request(uri, headers={"Accept": "application/octet-stream", "User-Agent": PORTAL_USER_AGENT}, method="GET")
     try:
         with request.urlopen(req, timeout=max(1, min(60, int(timeout_sec))), context=ssl.create_default_context()) as response:
             body = response.read(expected + 1)
     except HTTPError as exc:
-        raise RuntimeError(f"self_hosted_mcd_artifact_http_{exc.code}") from exc
+        raise _portal_http_error(stage="artifact.download", status=exc.code) from exc
+    except (URLError, TimeoutError, OSError) as exc:
+        raise _portal_transport_error(stage="artifact.download") from exc
     if len(body) != expected:
-        raise ValueError("self_hosted_mcd_artifact_size_mismatch")
+        raise CommercialPortalError(stage="artifact.download", code="self_hosted_mcd_artifact_size_mismatch")
     return body
 
 
@@ -505,22 +554,28 @@ class PortalClient:
             raise RuntimeError("commercial_portal_not_activated")
         _require_https(base)
         body = None if payload is None else canonical_json(payload)
-        headers = {"Authorization": "Bearer " + str(self.state.get("portal_agent_credential")), "X-Portal-Contract": CONTRACT, "X-Request-Id": _b64(os.urandom(16))}
+        headers = {"Authorization": "Bearer " + str(self.state.get("portal_agent_credential")), "X-Portal-Contract": CONTRACT, "X-Request-Id": _b64(os.urandom(16)), "User-Agent": PORTAL_USER_AGENT}
         if body is not None:
             headers["Content-Type"] = "application/json"
         if idempotency_key:
             headers["Idempotency-Key"] = idempotency_key
         if extra_headers:
             headers.update({str(k): str(v) for k, v in extra_headers.items()})
+        headers["User-Agent"] = PORTAL_USER_AGENT
         req = request.Request(base + "/" + path.lstrip("/"), data=body, headers=headers, method=method)
         try:
             with request.urlopen(req, timeout=self.timeout_sec, context=ssl.create_default_context()) as response:
                 raw = response.read(2 * 1024 * 1024 + 1)
         except HTTPError as exc:
-            raise RuntimeError(f"commercial_portal_http_{exc.code}") from exc
+            raise _portal_http_error(stage="portal.request", status=exc.code) from exc
+        except (URLError, TimeoutError, OSError) as exc:
+            raise _portal_transport_error(stage="portal.request") from exc
         if len(raw) > 2 * 1024 * 1024:
-            raise RuntimeError("commercial_portal_response_too_large")
-        return json.loads(raw.decode("utf-8")) if raw else {}
+            raise CommercialPortalError(stage="portal.request", code="commercial_portal_response_too_large")
+        try:
+            return json.loads(raw.decode("utf-8")) if raw else {}
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise CommercialPortalError(stage="portal.request", code="commercial_portal_response_invalid") from exc
 
     def ack_job(self, *, job_id: str, installation_id: str, status: str, reason: str | None, idempotency_key: str) -> dict[str, Any]:
         agent_id = str(self.state.get("agent_id") or "")
@@ -587,14 +642,16 @@ class PortalClient:
         expected = int(expected_size)
         if expected < 0 or expected > MAX_ARTIFACT_BYTES:
             raise ValueError("commercial_artifact_size_invalid")
-        req = request.Request(base + "/" + path.lstrip("/"), headers={"Authorization": "Bearer " + str(self.state.get("portal_agent_credential")), "X-Portal-Contract": CONTRACT, "X-Portal-Artifact-Grant": grant}, method="GET")
+        req = request.Request(base + "/" + path.lstrip("/"), headers={"Authorization": "Bearer " + str(self.state.get("portal_agent_credential")), "X-Portal-Contract": CONTRACT, "X-Portal-Artifact-Grant": grant, "User-Agent": PORTAL_USER_AGENT}, method="GET")
         try:
             with request.urlopen(req, timeout=self.timeout_sec, context=ssl.create_default_context()) as response:
                 body = response.read(expected + 1)
         except HTTPError as exc:
-            raise RuntimeError(f"commercial_artifact_http_{exc.code}") from exc
+            raise _portal_http_error(stage="artifact.download", status=exc.code) from exc
+        except (URLError, TimeoutError, OSError) as exc:
+            raise _portal_transport_error(stage="artifact.download") from exc
         if len(body) != expected:
-            raise RuntimeError("commercial_artifact_size_mismatch")
+            raise CommercialPortalError(stage="artifact.download", code="commercial_artifact_size_mismatch")
         return body
 
     def send_receipt(self, payload: dict[str, Any], *, installation_id: str | None = None) -> dict[str, Any]:
@@ -654,16 +711,21 @@ class PortalClient:
             return dict(self.activation_transport(base_url, payload))
         _require_https(base_url)
         body = canonical_json(payload)
-        headers = {"Content-Type": "application/json", "X-Portal-Contract": CONTRACT, "X-Request-Id": _b64(os.urandom(16)), "Idempotency-Key": payload["idempotency_key"]}
+        headers = {"Content-Type": "application/json", "X-Portal-Contract": CONTRACT, "X-Request-Id": _b64(os.urandom(16)), "Idempotency-Key": payload["idempotency_key"], "User-Agent": PORTAL_USER_AGENT}
         req = request.Request(base_url.rstrip("/") + "/api/v1/commercial/activations/redeem", data=body, headers=headers, method="POST")
         try:
             with request.urlopen(req, timeout=self.timeout_sec, context=ssl.create_default_context()) as response:
                 raw = response.read(2 * 1024 * 1024 + 1)
         except HTTPError as exc:
-            raise RuntimeError(f"commercial_activation_http_{exc.code}") from exc
+            raise _portal_http_error(stage="activation", status=exc.code) from exc
+        except (URLError, TimeoutError, OSError) as exc:
+            raise _portal_transport_error(stage="activation") from exc
         if len(raw) > 2 * 1024 * 1024:
-            raise RuntimeError("commercial_activation_response_too_large")
-        return json.loads(raw.decode("utf-8")) if raw else {}
+            raise CommercialPortalError(stage="activation", code="commercial_activation_response_too_large")
+        try:
+            return json.loads(raw.decode("utf-8")) if raw else {}
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise CommercialPortalError(stage="activation", code="commercial_activation_response_invalid") from exc
 
     def activate(self, base_url: str, activation_code: str, agent_version: str) -> dict[str, Any]:
         _require_https(base_url)
@@ -676,12 +738,12 @@ class PortalClient:
         payload = {"schema": "portal-mcd-activation-request-v1", "contract_version": CONTRACT_VERSION, "activation_code": activation_code, "agent": {"public_key": {"algorithm": "ed25519", "key_id": "agent-" + _b64(public)[:22], "value": _b64(public)}, "host_fingerprint": host_fingerprint, "agent_version": agent_version, "platform": normalized_platform}, "supported_contract_versions": [CONTRACT_VERSION], "idempotency_key": _b64(os.urandom(16))}
         result = self._activation_request(base_url, payload)
         if result.get("schema") != "portal-mcd-activation-response-v1" or result.get("contract_version") != CONTRACT_VERSION:
-            raise RuntimeError("commercial_activation_response_schema_invalid")
+            raise CommercialPortalError(stage="activation", code="commercial_activation_response_schema_invalid")
         if not result.get("agent_id") or not result.get("agent_credential") or not isinstance(result.get("portal"), dict):
-            raise RuntimeError("commercial_activation_response_fields_invalid")
+            raise CommercialPortalError(stage="activation", code="commercial_activation_response_fields_invalid")
         signing_keys = result["portal"].get("job_signing_keys")
         if not isinstance(signing_keys, list) or any(not isinstance(item, dict) or not item.get("key_id") or item.get("algorithm") != "ed25519" or not item.get("value") for item in signing_keys):
-            raise RuntimeError("commercial_activation_signing_keys_invalid")
+            raise CommercialPortalError(stage="activation", code="commercial_activation_signing_keys_invalid")
         self.state.put("portal_api_base", base_url.rstrip("/") + "/api/v1/commercial")
         self.state.put("portal_agent_credential", result["agent_credential"])
         self.state.put("agent_id", result["agent_id"])

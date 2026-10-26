@@ -1238,6 +1238,16 @@ receipts, local intents, inventory and state. Portal has no callback, webhook,
 SSH, reverse connection, inbound listener, bind, or public host reachability
 through this lane. The corporate MCC transport remains a separate path.
 
+Every commercial Portal HTTP request carries the stable product User-Agent
+`mcd-agent/<version> portal-commercial/1.0`, including activation, registration,
+adoption, polling, inventory, receipt, state and artifact requests. This is a
+product identity header for normal WAF classification; it is not an
+authentication credential and must not contain activation codes or secrets.
+Transport failures are surfaced as redacted typed diagnostics with `stage`,
+safe `code`, optional `http_status` and `retryable`. Response bodies, URLs
+with query data, credentials and activation material are never included in
+diagnostics.
+
 Before processing a delivery MCD durably records the delivery, its prior
 cursor, next cursor and installation binding. Stage2 uses the exact
 installation-scoped poll, adopt/inventory and adopt-receipts routes. The

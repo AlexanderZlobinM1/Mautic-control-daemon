@@ -1,3 +1,11 @@
+## 1.5.251 - 2026-10-26
+
+- Add an explicit product User-Agent to every commercial Portal request so
+  standard WAF/Cloudflare rules do not classify MCD as generic Python urllib.
+- Add typed, redacted commercial transport diagnostics with stage, safe code,
+  HTTP status and retryability; response bodies, URLs and credentials are not
+  exposed by the CLI.
+
 ## 1.5.250 - 2026-10-26
 
 - Restore the complete durable MCC-managed runtime snapshot after any local
