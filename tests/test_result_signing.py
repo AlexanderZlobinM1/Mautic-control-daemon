@@ -225,7 +225,7 @@ def test_state_push_reconciles_mcc_immutable_terminal_conflict(tmp_path):
     store.ingest({"schema":"mcd-control-v1","contract_version":"1.0","commands":[command]}, agent_id="a", host_fingerprint="sha256:h")
     store.execute_pending(agent_id="a", host_fingerprint="sha256:h", active_key=(object(), "k"), runner=lambda _request: {"status":"ready"}, signer=lambda value, *_args: value)
     cfg = SimpleNamespace(mcc_push_enabled=True, mcc_url="https://mcc.example.test", mcc_token="token", state_db_path=db_path)
-    conflict = b'{"detail":"control receipt conflicts with immutable terminal command"}'
+    conflict = b'{"code":"immutable_terminal_conflict","detail":"control receipt conflicts with immutable terminal command","job_id":"docker-preflight-worker02-15228"}'
     error = HTTPError("https://mcc.example.test", 409, "Conflict", {}, __import__("io").BytesIO(conflict))
     with patch("mcd_agent.state_push.request.urlopen", side_effect=error):
         with patch("mcd_agent.state_push.mark_state_snapshot_push_result_mysql"):
@@ -237,3 +237,21 @@ def test_state_push_reconciles_mcc_immutable_terminal_conflict(tmp_path):
     assert pusher._control_push_pending is False
     assert ControlStore(db_path).receipts() == []
     assert ControlStore(db_path).receipts(include_conflict_acknowledged=True)[0]["status"] == "conflict_acknowledged"
+
+
+def test_state_push_does_not_reconcile_unbound_immutable_conflict(tmp_path):
+    db_path = str(Path(tmp_path) / "state.db")
+    store = ControlStore(db_path)
+    command = {"command":"docker_runtime_preflight_v1","job_id":"docker-preflight-worker02-15228","request_id":"r","probe_id":"p","agent_id":"a","host_fingerprint":"sha256:h","image_ref":"playground7","runtime_image_digest":"sha256:"+"a"*64,"adapter":"mauticrfp-docker-v1","ttl_seconds":60}
+    store.ingest({"schema":"mcd-control-v1","contract_version":"1.0","commands":[command]}, agent_id="a", host_fingerprint="sha256:h")
+    store.execute_pending(agent_id="a", host_fingerprint="sha256:h", active_key=(object(), "k"), runner=lambda _request: {"status":"ready"}, signer=lambda value, *_args: value)
+    cfg = SimpleNamespace(mcc_push_enabled=True, mcc_url="https://mcc.example.test", mcc_token="token", state_db_path=db_path)
+    conflict = b'{"detail":"control receipt conflicts with immutable terminal command"}'
+    error = HTTPError("https://mcc.example.test", 409, "Conflict", {}, __import__("io").BytesIO(conflict))
+    with patch("mcd_agent.state_push.request.urlopen", side_effect=error):
+        with patch("mcd_agent.state_push.mark_state_snapshot_push_result_mysql"):
+            pusher = MCCStatePusher(cfg)
+            pusher._control_push_pending = True
+            pusher.send({"schema":"mcd-state-v1", "agent_id":"a", "host_fingerprint":"sha256:h"})
+    assert pusher._control_push_pending is True
+    assert ControlStore(db_path).receipts()[0]["status"] == "succeeded"

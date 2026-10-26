@@ -229,26 +229,21 @@ def _reconcile_control_receipt_conflict(state_db_path: str, response_text: str) 
     text = str(response_text or "")
     if "control receipt conflicts with immutable terminal command" not in text.lower():
         return 0
-    job_ids = set(re.findall(r"docker-preflight-[A-Za-z0-9._-]+", text))
+    try:
+        envelope = json.loads(text)
+    except (TypeError, json.JSONDecodeError):
+        return 0
+    if not isinstance(envelope, dict) or envelope.get("code") != "immutable_terminal_conflict":
+        return 0
+    job_id = envelope.get("job_id")
+    if not isinstance(job_id, str) or not re.fullmatch(r"docker-preflight-[A-Za-z0-9._-]+", job_id):
+        return 0
     store = ControlStore(state_db_path)
-    if not job_ids:
-        candidates = {
-            str(receipt.get("job_id") or "")
-            for receipt in store.receipts()
-            if receipt.get("status") == "succeeded"
-            and str(receipt.get("job_id") or "").startswith("docker-preflight-")
-        }
-        if len(candidates) != 1:
-            return 0
-        job_ids = candidates
-    return sum(
-        store.acknowledge_terminal_conflict(
-            job_id,
-            reason="control receipt conflicts with immutable terminal command",
-            remote_response=text,
-        )
-        for job_id in sorted(job_ids)
-    )
+    return int(store.acknowledge_terminal_conflict(
+        job_id,
+        reason="control receipt conflicts with immutable terminal command",
+        remote_response=text,
+    ))
 
 
 def monitor_signals_change_payload(payload: dict[str, Any]) -> dict[str, Any]:

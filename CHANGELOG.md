@@ -1,8 +1,14 @@
+## 1.5.233 - 2026-10-26
+
+- Require a machine-readable MCC immutable-terminal conflict envelope with
+  `code=immutable_terminal_conflict` and an exact `job_id` before reconciling
+  any local terminal receipt; unbound or ambiguous 409 responses are no-op.
+
 ## 1.5.232 - 2026-10-26
 
-- Safely reconcile an immutable-terminal 409 that omits `job_id` only when
-  exactly one successful MCD Docker preflight receipt is locally eligible;
-  ambiguous conflicts remain untouched.
+- Reconcile an immutable-terminal 409 only from a machine-readable MCC
+  envelope with `code=immutable_terminal_conflict` and an exact `job_id`;
+  missing or mismatched identifiers remain untouched.
 
 ## 1.5.231 - 2026-10-26
 
