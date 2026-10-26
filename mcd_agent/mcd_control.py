@@ -103,9 +103,15 @@ class ControlStore:
             return []
         private, key_id = active_key
         with sqlite3.connect(self.path) as db:
-            rows = db.execute("SELECT job_id,request_json,receipt_json FROM mcd_control_jobs WHERE receipt_json NOT LIKE '%\\\"status\\\": \\\"succeeded\\\"%' AND receipt_json NOT LIKE '%\\\"status\\\": \\\"failed\\\"%'").fetchall()
+            rows = db.execute("SELECT job_id,request_json,receipt_json FROM mcd_control_jobs").fetchall()
         out = []
-        for job_id, request_json, _receipt_json in rows:
+        for job_id, request_json, receipt_json in rows:
+            try:
+                receipt = json.loads(receipt_json)
+            except (TypeError, json.JSONDecodeError):
+                receipt = {}
+            if receipt.get("status") in {"succeeded", "failed", "conflict_acknowledged"}:
+                continue
             request = json.loads(request_json)
             with sqlite3.connect(self.path) as db:
                 db.execute("UPDATE mcd_control_jobs SET receipt_json=?,updated_at=? WHERE job_id=?", (json.dumps({"job_id": job_id, "status": "running", "idempotency_key": job_id}, sort_keys=True), time.time(), job_id)); db.commit()

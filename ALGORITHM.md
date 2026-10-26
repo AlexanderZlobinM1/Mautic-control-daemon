@@ -462,7 +462,9 @@ config на его profile baseline и только после этого при
   envelope with `code=immutable_terminal_conflict` and an exact `job_id`
   (including MCC's canonical nested `detail` object); a missing or mismatched
   identifier remains untouched. An unrelated 409 is never treated as this
-  reconciliation.
+  reconciliation. A reconciled local receipt is terminal audit state and is
+  excluded from execution even if MCC replays the same immutable command
+  envelope.
   The safe semantic label set preserves the `com.sales-snap.mauticrfp.*`
   image selector/runtime metadata and OCI labels while excluding
   secret-shaped keys.

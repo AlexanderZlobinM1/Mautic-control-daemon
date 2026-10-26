@@ -1,3 +1,8 @@
+## 1.5.235 - 2026-10-26
+
+- Never re-execute a locally reconciled `conflict_acknowledged` control
+  receipt when MCC replays the immutable command envelope.
+
 ## 1.5.234 - 2026-10-26
 
 - Accept the canonical MCC immutable-terminal conflict envelope when its
