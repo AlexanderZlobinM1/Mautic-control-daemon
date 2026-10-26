@@ -814,6 +814,13 @@ MCC; top-level `runtime_overrides` не является заменой desired 
 `desired.plugin_operations = {}` остаётся `{}` в evidence, даже если live
 effective `plugin_operations` содержит большой structured payload; digest/bytes
 вычисляются отдельно для каждого из этих двух значений.
+При частичном или instance-scoped runtime response пустой
+`plugin_operations` не считается командой удалить catalog: MCD сохраняет
+последний принятый непустой catalog, иначе сохранённые per-instance настройки
+(`enabled` и `interval_sec`) молча перестанут планироваться. Очистить catalog
+может только явно authoritative full snapshot или host tombstone; после
+восстановления catalog scheduler снова применяет обычные
+bundle-registration, slot и resource guards.
 Если отдельное `desired` или `effective` значение само превышает safety
 budget, оно заменяется строго проверяемой ссылкой
 `{encoding:"canonical-json-sha256",sha256,bytes}`; key не отбрасывается.
