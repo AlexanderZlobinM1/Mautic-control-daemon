@@ -423,6 +423,12 @@ config на его profile baseline и только после этого при
   of waiting for the normal 300-second heartbeat. This preserves the
   accepted-to-terminal lifecycle without shortening command TTLs or creating
   duplicate jobs.
+  Docker preflight failures are typed at the fixed argv boundary: image
+  availability, Docker access, timeout, PHP CLI/FPM observation, exit code,
+  bounded redacted stderr, argv stage and cleanup state are retained in the
+  terminal receipt. A missing digest image is therefore an actionable
+  `docker_preflight_image_unavailable` evidence result, not an opaque
+  `RuntimeError`; no pull, arbitrary command or host mutation is attempted.
    Self-update сначала публикует persisted `scheduler.pause` под общим
    межпроцессным `scheduler.pause.lock`. Каждый новый запуск, включая
    ordinary, priority, super-priority, manual, import и retry, перед

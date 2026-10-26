@@ -73,6 +73,13 @@ class ControlStore:
                 terminal = signer({"schema": "mcd-docker-runtime-preflight-terminal-v1", "contract_version": "1.0", "job_id": job_id, "request_id": request["request_id"], "probe_id": request["probe_id"], "status": "succeeded", "idempotency_key": job_id, "result": result}, private, key_id)
             except Exception as exc:
                 terminal = {"schema": "mcd-docker-runtime-preflight-terminal-v1", "contract_version": "1.0", "job_id": job_id, "request_id": request.get("request_id"), "probe_id": request.get("probe_id"), "status": "failed", "idempotency_key": job_id, "error": type(exc).__name__}
+                for field in ("error_code", "stage", "exit_code", "stderr", "cleanup"):
+                    value = getattr(exc, field, None)
+                    if value is not None and value != "":
+                        terminal[field] = value
+                argv = getattr(exc, "argv", None)
+                if isinstance(argv, list):
+                    terminal["argv"] = list(argv)
             with sqlite3.connect(self.path) as db:
                 db.execute("UPDATE mcd_control_jobs SET receipt_json=?,updated_at=? WHERE job_id=?", (json.dumps(terminal, sort_keys=True), time.time(), job_id)); db.commit()
             out.append(terminal)
