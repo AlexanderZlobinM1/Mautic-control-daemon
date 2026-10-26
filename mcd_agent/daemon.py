@@ -142,7 +142,17 @@ from mcd_agent.runtime_overrides import (
     merge_instance_desired_states,
     normalize_segment_special_rings,
     overrides_fingerprint,
+    push_runtime_sync_v3,
     push_runtime_overrides,
+)
+from mcd_agent.runtime_sync_v3 import (
+    STATE_KEY as _RUNTIME_SYNC_V3_KEY,
+    conflict_active as _runtime_sync_v3_conflict_active,
+    conflict_safe_runtime as _runtime_sync_v3_conflict_safe_runtime,
+    desired_runtime_from_response as _runtime_sync_v3_desired_runtime,
+    intent_id as _runtime_sync_v3_intent_id,
+    resolution_seen as _runtime_sync_v3_resolution_seen,
+    runtime_changes as _runtime_sync_v3_changes,
 )
 from mcd_agent.ring_utils import advance_ring_after_launch as _advance_ring_after_launch
 from mcd_agent.ring_utils import mark_ring_entity_executed as _mark_ring_entity_executed
@@ -383,6 +393,128 @@ def _iter_instances_with_root_dispatch_gate(
 _MCC_RUNTIME_METADATA_KEY = "mcc_runtime_metadata"
 _RUNTIME_METADATA_SCHEMA = "mcd-runtime-sync-metadata-v1"
 _PLUGIN_OPERATIONS_RUNTIME_KEY = "plugin_operations"
+
+
+def _runtime_sync_v3_state(store: object) -> dict[str, Any]:
+    try:
+        raw = store.get_runtime_sync(_RUNTIME_SYNC_V3_KEY)
+    except Exception:
+        raw = None
+    return dict(raw) if isinstance(raw, Mapping) else {}
+
+
+def _runtime_sync_v3_groups(config: AgentConfig, store: object) -> list[dict[str, Any]]:
+    raw = getattr(config, "mcc_runtime_sync_semantic_conflict_groups", None)
+    if raw is None:
+        raw = _runtime_sync_v3_state(store).get("semantic_conflict_groups", [])
+    return [dict(item) for item in raw if isinstance(item, Mapping)] if isinstance(raw, list) else []
+
+
+def _runtime_sync_v3_base(store: object) -> tuple[int | None, dict[str, Any]]:
+    state = _runtime_sync_v3_state(store)
+    base = state.get("base")
+    revision = state.get("base_revision")
+    if isinstance(base, Mapping) and isinstance(revision, int) and not isinstance(revision, bool):
+        return revision, dict(base)
+    stored = store.get_runtime_sync("mcc_runtime")
+    stored = dict(stored) if isinstance(stored, Mapping) else {}
+    desired = store.get_runtime_sync("mcc_runtime_desired_state")
+    desired = desired if isinstance(desired, Mapping) else {}
+    revision = desired.get("revision")
+    return (revision if isinstance(revision, int) and not isinstance(revision, bool) else None), stored
+
+
+def _runtime_sync_v3_mark(store: object, state: Mapping[str, Any]) -> None:
+    try:
+        store.put_runtime_sync(_RUNTIME_SYNC_V3_KEY, dict(state))
+    except Exception:
+        logging.warning("runtime-sync-v3 state persistence failed")
+
+
+def _runtime_sync_v3_attempt(
+    config: AgentConfig,
+    store: object,
+    current_runtime: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Produce one durable host intent, or explicitly decline to v2."""
+    state = _runtime_sync_v3_state(store)
+    if _runtime_sync_v3_conflict_active(state):
+        return {"handled": True, "status": "conflict", "response": {"status": "conflict", "conflict": state.get("conflict")}}
+    if (
+        str(state.get("status") or "").strip().lower() == "unsupported"
+        and isinstance(state.get("retry_after"), (int, float))
+        and time.time() < float(state["retry_after"])
+    ):
+        return {"handled": False, "reason": "runtime_sync_v3_unsupported"}
+    base_revision, base = _runtime_sync_v3_base(store)
+    if base_revision is None:
+        return {"handled": False, "reason": "runtime_sync_v3_base_unavailable"}
+    groups = _runtime_sync_v3_groups(config, store)
+    changes = _runtime_sync_v3_changes(base, current_runtime, allowed_keys=runtime_remote_allowed_keys())
+    if not changes:
+        return {"handled": False, "reason": "runtime_sync_v3_no_changes"}
+    current_digest = overrides_fingerprint(dict(current_runtime))
+    if (
+        str(state.get("status") or "").strip().lower() == "queued"
+        and str(state.get("current_digest") or "") == current_digest
+    ):
+        return {"handled": True, "status": "queued", "response": {"status": "queued", "v3_supported": True}}
+    key = str(state.get("idempotency_key") or "")
+    if not key or str(state.get("current_digest") or "") != current_digest:
+        key = _runtime_sync_v3_intent_id(
+            scope_key=str(getattr(config, "mcc_host_name", "") or ""),
+            base_revision=base_revision,
+            base=base,
+            changes=changes,
+            groups=groups,
+        )
+    response = push_runtime_sync_v3(
+        config,
+        base_revision=base_revision,
+        base=base,
+        changes=changes,
+        idempotency_key=key,
+        semantic_conflict_groups=groups,
+    )
+    supported = response.get("v3_supported")
+    next_state: dict[str, Any] = {
+        "schema": "mcd-runtime-sync-v3-state-v1",
+        "base_revision": base_revision,
+        "base": dict(base),
+        "changes": dict(changes),
+        "current_digest": current_digest,
+        "idempotency_key": key,
+        "semantic_conflict_groups": groups,
+    }
+    if supported is False:
+        next_state["status"] = "unsupported"
+        next_state["retry_after"] = time.time() + 3600
+        _runtime_sync_v3_mark(store, next_state)
+        return {"handled": False, "reason": response.get("reason", "runtime_sync_v3_unsupported")}
+    status = str(response.get("status") or "error").strip().lower()
+    if status in {"applied", "merged"}:
+        revision, canonical = _runtime_sync_v3_desired_runtime(response)
+        if revision is not None and isinstance(canonical, dict):
+            next_state.update({"status": "accepted", "base_revision": revision, "base": canonical, "changes": {}, "current_digest": overrides_fingerprint(canonical), "idempotency_key": ""})
+            _runtime_sync_v3_mark(store, next_state)
+            normalized = dict(response)
+            normalized["status"] = "ok"
+            normalized["runtime_overrides"] = canonical
+            normalized["desired_state"] = {**dict(normalized.get("desired_state") or {}), "revision": revision, "runtime_overrides": canonical}
+            return {"handled": True, "status": "ok", "response": normalized, "runtime": canonical}
+    if status == "conflict" or isinstance(response.get("conflict"), Mapping):
+        conflict = response.get("conflict")
+        next_state.update({"status": "conflict", "conflict": dict(conflict) if isinstance(conflict, Mapping) else {}})
+        _runtime_sync_v3_mark(store, next_state)
+        return {"handled": True, "status": "conflict", "response": {"status": "conflict", "conflict": next_state.get("conflict")}}
+    if status in {"queued", "idempotent"}:
+        next_state["status"] = "queued"
+        _runtime_sync_v3_mark(store, next_state)
+        return {"handled": True, "status": "queued", "response": {"status": "queued", "v3_supported": True}}
+    next_state["status"] = "error"
+    next_state["reason"] = response.get("reason", "runtime_sync_v3_failed")
+    _runtime_sync_v3_mark(store, next_state)
+    return {"handled": True, "status": "error", "response": response}
 
 
 def _runtime_response_is_authoritative_full_snapshot(response: Mapping[str, Any]) -> bool:
@@ -19344,7 +19476,8 @@ def run_loop(
         local_fp = overrides_fingerprint(local_runtime)
         pending_local_runtime = None
         local_runtime_push_accepted_this_tick = False
-        if config.mcc_url and config.mcc_token:
+        v3_conflict_active = _runtime_sync_v3_conflict_active(_runtime_sync_v3_state(store))
+        if config.mcc_url and config.mcc_token and not v3_conflict_active:
             pending_local_runtime = _queue_local_runtime_delta(
                 store,
                 local_runtime,
@@ -19384,15 +19517,57 @@ def run_loop(
                 # a fresh canonical snapshot instead of polling it over the
                 # local edit. The pending payload is durable so a remote poll
                 # or daemon restart cannot hide this edit.
-                pushed = _push_local_runtime_change(
-                    config,
-                    previous_local_runtime,
-                    local_runtime_to_push,
-                    installs,
-                    desired_revision=known_revision,
-                    instance_revisions=known_instance_revisions,
-                    runtime_metadata=push_metadata,
-                )
+                v3_result = _runtime_sync_v3_attempt(config, store, local_runtime_to_push)
+                v3_conflict_handled = bool(v3_result.get("handled") and v3_result.get("status") == "conflict")
+                if v3_result.get("handled"):
+                    pushed = dict(v3_result.get("response") or {"status": v3_result.get("status", "error")})
+                    v3_runtime = v3_result.get("runtime")
+                    if v3_result.get("status") == "ok" and isinstance(v3_runtime, Mapping):
+                        # A v3 merge may include an independent central edit;
+                        # materialize the canonical result before recording the
+                        # accepted baseline and emitting the normal ACK.
+                        _persist_resolved_runtime_to_config(
+                            config,
+                            local_runtime_overrides(config),
+                            v3_runtime,
+                            {},
+                            full_snapshot=True,
+                        )
+                        base_config = load_config(config.config_file_path, allow_recover_from_mcc=False)
+                        applied = apply_remote_overrides(base_config, dict(v3_runtime))
+                        if isinstance(applied.get("config"), AgentConfig):
+                            config = applied["config"]
+                            pusher.cfg = config
+                        local_runtime_to_push = dict(v3_runtime)
+                    elif v3_conflict_handled:
+                        conflict = v3_result.get("response", {}).get("conflict")
+                        safe_runtime = _runtime_sync_v3_conflict_safe_runtime(
+                            conflict if isinstance(conflict, Mapping) else {},
+                            local_runtime_to_push,
+                        )
+                        if safe_runtime:
+                            _persist_resolved_runtime_to_config(
+                                config,
+                                local_runtime_overrides(config),
+                                safe_runtime,
+                                {},
+                                full_snapshot=True,
+                            )
+                            base_config = load_config(config.config_file_path, allow_recover_from_mcc=False)
+                            applied = apply_remote_overrides(base_config, safe_runtime)
+                            if isinstance(applied.get("config"), AgentConfig):
+                                config = applied["config"]
+                                pusher.cfg = config
+                else:
+                    pushed = _push_local_runtime_change(
+                        config,
+                        previous_local_runtime,
+                        local_runtime_to_push,
+                        installs,
+                        desired_revision=known_revision,
+                        instance_revisions=known_instance_revisions,
+                        runtime_metadata=push_metadata,
+                    )
                 p_status = str(pushed.get("status", "")).strip().lower()
                 accepted = p_status == "ok" and _store_desired_runtime_push_result(
                     store,
@@ -19437,6 +19612,12 @@ def run_loop(
                     )
                     _sync_and_publish_form_embed_status(config, installs, reason="local_runtime_push")
                 elif p_status == "conflict":
+                    if v3_conflict_handled:
+                        local_runtime_push_pending = False
+                        last_local_runtime_fp = overrides_fingerprint(local_runtime_overrides(config))
+                        store.put_runtime_sync("local_runtime", local_runtime_overrides(config))
+                        logging.warning("runtime-sync-v3 durable conflict awaiting operator resolution")
+                        continue
                     local_runtime_push_pending = True
                     logging.warning(
                         "runtime-overrides local change rebase failed: %s",
@@ -19466,7 +19647,8 @@ def run_loop(
 
         runtime_poll_enabled = bool(getattr(config, "mcc_runtime_overrides_poll_enabled", False))
         should_runtime_poll = runtime_poll_enabled and now >= next_runtime_overrides_poll_at
-        if config.mcc_url and config.mcc_token and not local_runtime_push_pending:
+        v3_conflict_active = _runtime_sync_v3_conflict_active(_runtime_sync_v3_state(store))
+        if config.mcc_url and config.mcc_token and not local_runtime_push_pending and not v3_conflict_active:
             # Re-sample immediately before the remote fetch. A file edit can
             # arrive after the normal local-change block above; queue it
             # durably before the poll may refresh the baseline.
@@ -19484,6 +19666,12 @@ def run_loop(
             )
             status = str(ro.get("status", "")).strip().lower()
             poll_interval = max(15, min(300, int(config.mcc_push_interval_sec or config.poll_interval_sec or 60)))
+            v3_state = _runtime_sync_v3_state(store)
+            if _runtime_sync_v3_conflict_active(v3_state) and not _runtime_sync_v3_resolution_seen(v3_state, ro):
+                status = "v3_conflict_hold"
+                logging.warning("runtime-sync-v3 conflict remains unresolved; holding ambiguous runtime keys")
+            elif _runtime_sync_v3_conflict_active(v3_state):
+                _runtime_sync_v3_mark(store, {"schema": "mcd-runtime-sync-v3-state-v1", "status": "resolved", "resolved_revision": ro.get("desired_state", {}).get("revision") if isinstance(ro.get("desired_state"), Mapping) else None})
             if status == "ok" and not local_runtime_push_pending:
                 # Re-sample after the network round trip as well. If the
                 # operator edited runtime while MCC was responding, defer
@@ -19604,6 +19792,21 @@ def run_loop(
                     state_for_store = dict(desired_state)
                     state_for_store["instance_revisions"] = revisions
                     store.put_runtime_sync("mcc_runtime_desired_state", state_for_store)
+                    v3_state = _runtime_sync_v3_state(store)
+                    if (
+                        not _runtime_sync_v3_conflict_active(v3_state)
+                        and str(v3_state.get("status") or "").strip().lower() != "queued"
+                        and isinstance(desired_state.get("revision"), int)
+                    ):
+                        v3_state.update(
+                            {
+                                "schema": "mcd-runtime-sync-v3-state-v1",
+                                "status": v3_state.get("status", "accepted"),
+                                "base_revision": int(desired_state["revision"]),
+                                "base": deepcopy(remote_runtime),
+                            }
+                        )
+                        _runtime_sync_v3_mark(store, v3_state)
                 response_profile = canonical_profile_from_runtime_response(ro)
                 desired_response_profile = desired_profile_from_runtime_response(ro)
                 # An observed passive snapshot can be stale while a selected

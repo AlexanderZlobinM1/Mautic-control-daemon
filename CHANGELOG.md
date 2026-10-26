@@ -1,3 +1,11 @@
+## 1.5.248 - 2026-10-26
+
+- Add opt-in MCC desired-runtime sync v3 producer/consumer with durable common
+  base, host pending intent, semantic-group three-way merge, conflict hold and
+  operator-resolution readback while retaining the legacy v2 path.
+- Reuse existing runtime-overrides application and ACK/readback primitives;
+  v3 outages, restart and idempotent replay never drop a local intent.
+
 ## 1.5.247 - 2026-10-26
 
 - Add the exact Portal self-hosted MCD v2 lane: strict job binding, local-facts

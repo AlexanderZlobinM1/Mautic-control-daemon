@@ -1190,6 +1190,30 @@ instantiate or call the commercial worker.
 
 ### Managed-cloud versus self-hosted commercial boundary
 
+### Opt-in MCC desired-runtime sync v3
+
+MCD may negotiate the opt-in `desired_state_sync_protocol=3` endpoint without
+changing the legacy v2 transport. The producer keeps the complete acknowledged
+MCC snapshot and its revision as the common base in `runtime_sync`; a local
+change is sent as only the changed host keys plus a durable idempotency key and
+externally declared `semantic_conflict_groups`. A missing v3 endpoint records
+an explicit capability miss and falls back to v2; an existing endpoint never
+silently downgrades a rejected, queued, or conflicting v3 intent.
+
+The v3 consumer uses the canonical desired snapshot returned through the
+existing runtime-overrides/readback path. `applied` and `merged` results are
+materialized atomically through the existing runtime override primitives and
+then acknowledged by the normal chunked ACK. A `conflict` stores base,
+central, host, group metadata, and both values durably; non-ambiguous fields
+may be projected, but ambiguous fields remain held and are never resolved by
+last-writer-wins. Restart and Portal/MCC outage retry the same idempotency key.
+
+An operator resolution is accepted only after a newer canonical snapshot is
+read back with `source=sync_v3_operator_resolution`; the conflict hold is then
+cleared and the ordinary apply/ACK path verifies the actual local state. The
+legacy v2, corporate, and standalone paths remain unchanged when v3 is not
+negotiated.
+
 For managed-cloud installations under `name.sales-snap.com`, the single
 corporate MCD remains connected only to MCC. Portal reaches MCC through the
 MCC server-to-server projection/intents boundary; MCC continues to dispatch

@@ -687,6 +687,7 @@ class AgentConfig:
     mcc_push_alert_window_min: int
     mcc_push_apt_state_interval_sec: int
     mcc_runtime_overrides_poll_enabled: bool
+    mcc_runtime_sync_semantic_conflict_groups: list[dict[str, Any]]
     mcc_profile_guard_enabled: bool
     inventory_auto_rescan_enabled: bool
     inventory_auto_rescan_interval_sec: int
@@ -3517,6 +3518,11 @@ def _load_config_inner(path: str) -> AgentConfig:
         mcc_push_alert_window_min=int(mcc.get("push_alert_window_min", 5)),
         mcc_push_apt_state_interval_sec=int(mcc.get("push_apt_state_interval_sec", 120)),
         mcc_runtime_overrides_poll_enabled=bool(mcc.get("runtime_overrides_poll_enabled", True)),
+        mcc_runtime_sync_semantic_conflict_groups=(
+            [dict(item) for item in mcc.get("runtime_sync_semantic_conflict_groups", []) if isinstance(item, dict)]
+            if isinstance(mcc.get("runtime_sync_semantic_conflict_groups", []), list)
+            else []
+        ),
         mcc_profile_guard_enabled=profile_guard_enabled,
         inventory_auto_rescan_enabled=bool(runtime.get("inventory_auto_rescan_enabled", True)),
         inventory_auto_rescan_interval_sec=max(
