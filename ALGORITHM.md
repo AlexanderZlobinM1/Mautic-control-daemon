@@ -429,7 +429,15 @@ config на его profile baseline и только после этого при
   bounded `error_code`, `stage=identity`, empty `argv` and redacted `detail`;
   image availability, Docker access, timeout, PHP CLI/FPM observation, exit
   code, bounded redacted stderr, argv, stage and cleanup state are retained in
-  the terminal receipt. A missing digest image is therefore an actionable
+  the terminal receipt. PHP-FPM observation tries only a fixed allowlist of
+  unversioned and versioned `/usr/sbin`/`/usr/bin` binaries, so images exposing
+  `/usr/sbin/php-fpm8.4` are supported without shell, `find` or arbitrary argv;
+  stale `Created` containers matching the MCD preflight name prefix are
+  reconciled with fixed `docker ps`/`docker rm` argv before a new probe, and
+  the finally path marks transient-container cleanup `clean` or `failed` in
+  the receipt. An exhausted allowlist is the typed
+  `docker_preflight_php_fpm_binary_not_found` result. A missing digest image is
+  therefore an actionable
   `docker_preflight_image_unavailable` evidence result, not an opaque
   `RuntimeError` or `ValueError`; no pull, arbitrary command or host mutation
   is attempted.
