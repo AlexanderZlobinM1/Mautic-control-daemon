@@ -488,6 +488,7 @@ class AgentConfig:
     mautic_run_as_user: str | None
     command_timeout_sec: int
     state_db_path: str
+    result_signing_key_path: str
     state_backend: str
     state_mysql_host: str | None
     state_mysql_unix_socket: str | None
@@ -3028,6 +3029,9 @@ def _load_config_inner(path: str) -> AgentConfig:
         mautic_run_as_user=str(runtime.get("mautic_run_as_user")).strip() if runtime.get("mautic_run_as_user") else "www-data",
         command_timeout_sec=int(runtime.get("command_timeout_sec", 0)),
         state_db_path=str(runtime.get("state_db_path", "/opt/mcd/var/mcd-state.db")),
+        result_signing_key_path=str(
+            runtime.get("result_signing_key_path", "/opt/mcd/var/keys/result-signing.key")
+        ),
         state_backend=state_backend,
         state_mysql_host=(
             str(runtime.get("state_mysql_host", state.get("mysql_host", ""))).strip()

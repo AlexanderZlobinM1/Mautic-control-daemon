@@ -73,6 +73,10 @@ priority_segment_timeout_sec = 3600
 
 # SQLite file for task state / weight cache / inventory.
 state_db_path = "/opt/mcd/var/mcd-state.db"
+# MCD-owned Ed25519 result-signing identity. The key is generated with 0600
+# permissions on the first state push and is acknowledged by MCC before
+# control receipts are executed.
+result_signing_key_path = "/opt/mcd/var/keys/result-signing.key"
 # Historical task retention depth in days (non-running rows older than this are purged).
 tasks_history_keep_days = 2
 # Hard cap for historical non-running task rows.

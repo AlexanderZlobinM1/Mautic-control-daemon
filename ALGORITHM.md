@@ -394,6 +394,11 @@ config на его profile baseline и только после этого при
    switch, retains bounded rollback material, and records a bootstrap receipt.
    The sidecar must accept the complete valid split TOML graph, including
    array-of-table sections, while never writing configuration.
+   The MCD runtime always supplies an MCD-owned default
+   `runtime.result_signing_key_path` (`/opt/mcd/var/keys/result-signing.key`)
+   when the operator has not overridden it. The first state push creates the
+   Ed25519 key with mode `0600`; MCC must acknowledge the public key before
+   any signed control terminal receipt can execute.
    Self-update сначала публикует persisted `scheduler.pause` под общим
    межпроцессным `scheduler.pause.lock`. Каждый новый запуск, включая
    ordinary, priority, super-priority, manual, import и retry, перед
@@ -957,6 +962,7 @@ cycle без ручного `segments:update`, profile/capacity/data changes. Ad
 | heavy-plan deferral and durable pending guard | `mcd_agent/daemon.py` | `tests/test_segment_liveness.py`, live M6/M7 acceptance receipt |
 | self-update preserves ordinary application work and all durable queues | `mcd_agent/self_update.py`, `daemon.py`, systemd unit | `tests/test_self_update_version_reporting.py`, `tools/runtime_bridge_qa.py` (`mcd-runtime-bridge-qa-v1`) |
 | legacy source-tree to runtime-only transition is authority-safe and accepts complete split TOML config | `tools/mcd_runtime_bootstrap.py`, `tools/mcd_profile_authority_probe.py` | `tests/test_profile_authority_probe.py`, `tests/test_runtime_bootstrap_capture.py`, live `mcd-runtime-bootstrap-receipt-v1` |
+| result-signing identity bootstraps from MCD-owned config and gates signed control execution on MCC ACK | `mcd_agent/config.py`, `mcd_agent/result_signing.py`, `mcd_agent/state_push.py`, `mcd_agent/mcd_control.py` | `tests/test_result_signing.py`, `tests/test_mcd_control.py`, live key/ACK and terminal-receipt evidence |
 | authority-safe desired runtime projection | `mcd_agent/config.py`, `mcd_agent/runtime_overrides.py` | `tests/test_runtime_override_direction.py`, `tests/test_runtime_stable_keys.py`, `tests/test_runtime_migration_adapter.py` |
 | natural b2bss/Adonis evidence | runtime TaskStore/MCC receipts | rollout acceptance (после package/install) |
 
