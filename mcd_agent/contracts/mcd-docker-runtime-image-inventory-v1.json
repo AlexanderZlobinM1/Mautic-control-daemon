@@ -4,6 +4,7 @@
   "purpose": "Signed read-only inventory of locally staged Docker runtime images",
   "read_only": true,
   "pull": false,
+  "freshness_max_sec": 900,
   "binding": ["agent_id", "host_fingerprint", "signature.key_id"],
   "image_fields": [
     "image_ref",

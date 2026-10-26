@@ -1,3 +1,10 @@
+## 1.5.226 - 2026-10-26
+
+- Add strict inventory evidence validation for freshness, signature,
+  agent/host binding, digest consistency and tamper detection.
+- Export only bounded semantic image labels and normalized `files_sha256`,
+  excluding secret-shaped labels.
+
 ## 1.5.225 - 2026-10-26
 
 - Add signed, read-only `mcd-docker-runtime-image-inventory-v1` to normal
