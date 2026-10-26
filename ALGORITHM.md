@@ -417,6 +417,12 @@ config на его profile baseline и только после этого при
    and persists a matching key ACK even when the response carries no control
    commands; command-envelope validation remains independent and invalid
    commands are never executed because an ACK was received.
+  A valid command received in a successful state response is ingested and
+  executed in the same state-push cycle after the response is parsed; the
+  resulting signed terminal receipt is marked for the next state push instead
+  of waiting for the normal 300-second heartbeat. This preserves the
+  accepted-to-terminal lifecycle without shortening command TTLs or creating
+  duplicate jobs.
    Self-update сначала публикует persisted `scheduler.pause` под общим
    межпроцессным `scheduler.pause.lock`. Каждый новый запуск, включая
    ordinary, priority, super-priority, manual, import и retry, перед
