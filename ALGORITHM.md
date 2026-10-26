@@ -1296,3 +1296,16 @@ and records an exponential, durable retry deadline. The next outbound cycle
 drains receipts first, then resumes the saved batch or polls with the last
 cursor; no scheduler or standalone work is blocked. Backoff is applied only
 to transport failures, not to local signature/applicability rejection.
+
+Inventory publication has its own durable revision ledger per installation.
+MCD canonicalizes the complete inventory and removes only transport-volatility
+fields `request_id`, `observed_at`, and `agent_signature`; every other durable
+field (MCD version, profile, settings, instances, capabilities, binding and
+revision) participates in the hash. A changed durable hash increments
+`snapshot_revision` exactly once under the state-store transaction; unchanged
+content reuses the same revision across restart, outage, replay and concurrent
+workers. The state stores the durable snapshot/hash plus last published and
+acknowledged pins. A missing hash at legacy revision `0` performs one safe
+baseline migration; corrupted or regressive state fails closed. Portal acceptance
+pins the same hash/revision, and a failed publication retries that revision
+without creating a new one.

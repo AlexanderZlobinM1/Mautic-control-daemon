@@ -1,3 +1,8 @@
+## 1.5.256 - 2026-10-27
+
+- Persist canonical durable Portal inventory content, hash, and monotonic snapshot revision across restart, outage, replay, and concurrent workers.
+- Ignore only inventory transport volatility (`request_id`, `observed_at`, and `agent_signature`) when deciding whether to bump the revision.
+
 ## 1.5.255 - 2026-10-27
 
 - Persist one canonical standalone-settings ETag across inventory and noop processing.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import socket
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from mcd_agent.commercial_portal import (
     build_standalone_settings_snapshot,
     build_portal_mcd_poll_request,
     canonical_json,
+    inventory_durable_hash,
     standalone_settings_etag,
     verify_portal_mcd_poll_response,
 )
@@ -468,3 +470,176 @@ def test_noop_terminal_receipt_survives_delivery_outage_and_restart(tmp_path):
     assert portal.receipt_calls == 3
     assert len(portal.receipts) == 1
     assert portal.receipts[0]["idempotency_key"] == "noop-key-outage"
+
+
+def _inventory_fixture(*, version="1.5.255", settings=None, instances=None, request_id="volatile-1", observed_at="2026-10-27T00:00:00Z"):
+    values = settings or {"jobs_max_workers": 2, "scheduler_paused": False}
+    return {
+        "schema": "portal-mcd-inventory-snapshot-v1",
+        "contract_version": "1.0",
+        "request_id": request_id,
+        "observed_at": observed_at,
+        "binding": {
+            "agent_id": "agent-1",
+            "installation_id": "installation-1",
+            "host_fingerprint": "sha256:" + "a" * 64,
+            "commercial_key_id": "commercial-key-1",
+        },
+        "snapshot_revision": "0",
+        "complete": True,
+        "host": {
+            "mcd_version": version,
+            "profile": "commercial",
+            "service_status": "active",
+            "scheduler_paused": False,
+            "settings": build_standalone_settings_snapshot(values, revision=0, sync={}),
+        },
+        "instances": instances or [],
+    }
+
+
+def test_inventory_revision_ignores_transport_fields_and_bumps_once_per_durable_change(tmp_path):
+    class Portal:
+        def __init__(self):
+            self.inventories = []
+
+        def send_inventory(self, **kwargs):
+            self.inventories.append(kwargs["inventory"])
+            return {"status": "accepted"}
+
+        def pull_job(self, **_kwargs):
+            return None
+
+    current = {"value": _inventory_fixture()}
+    portal = Portal()
+    clock = _Clock()
+    worker, state, _executor = _worker(tmp_path, portal, clock)
+    worker.inventory_provider = lambda _installation: dict(current["value"])
+
+    assert worker.run_once()["status"] == "idle"
+    first = portal.inventories[-1]
+    assert first["snapshot_revision"] == "1"
+    assert state.get("commercial_inventory_state_v1")["installations"]["installation-1"]["snapshot_revision"] == 1
+
+    current["value"] = _inventory_fixture(request_id="volatile-2", observed_at="2026-10-27T00:01:00Z")
+    current["value"]["agent_signature"] = {"algorithm": "ed25519", "key_id": "volatile-2", "value": "sig-2"}
+    assert worker.run_once()["status"] == "idle"
+    assert len(portal.inventories) == 1
+
+    current["value"] = _inventory_fixture(version="1.5.256", request_id="volatile-3")
+    assert worker.run_once()["status"] == "idle"
+    assert portal.inventories[-1]["snapshot_revision"] == "2"
+    assert len(portal.inventories) == 2
+
+    restarted, restarted_state, _ = _worker(tmp_path, portal, _Clock())
+    restarted.inventory_provider = lambda _installation: dict(current["value"])
+    assert restarted.run_once()["status"] == "idle"
+    assert restarted_state.get("commercial_inventory_state_v1")["installations"]["installation-1"]["snapshot_revision"] == 2
+    assert len(portal.inventories) == 2
+
+
+def test_inventory_revision_changes_for_settings_and_instances_and_replays_same_revision_after_outage(tmp_path):
+    class Portal:
+        def __init__(self):
+            self.inventories = []
+            self.fail_once = True
+
+        def send_inventory(self, **kwargs):
+            if self.fail_once:
+                self.fail_once = False
+                raise OSError("Portal offline")
+            self.inventories.append(kwargs["inventory"])
+            return {"status": "accepted"}
+
+        def pull_job(self, **_kwargs):
+            return None
+
+    current = {"value": _inventory_fixture()}
+    portal = Portal()
+    clock = _Clock()
+    worker, state, _executor = _worker(tmp_path, portal, clock)
+    worker.inventory_provider = lambda _installation: dict(current["value"])
+    assert worker.run_once()["status"] == "backoff"
+    assert state.get("commercial_inventory_state_v1")["installations"]["installation-1"]["snapshot_revision"] == 1
+
+    clock.value = 102.0
+    replay, _, _ = _worker(tmp_path, portal, clock)
+    replay.inventory_provider = lambda _installation: dict(current["value"])
+    assert replay.run_once()["status"] == "idle"
+    assert portal.inventories[-1]["snapshot_revision"] == "1"
+    record = state.get("commercial_inventory_state_v1")["installations"]["installation-1"]
+    assert record["last_published"] == {"durable_hash": record["durable_hash"], "snapshot_revision": 1}
+    assert record["last_acknowledged"] == record["last_published"]
+
+    current["value"] = _inventory_fixture(settings={"jobs_max_workers": 4, "scheduler_paused": False})
+    assert replay.run_once()["status"] == "idle"
+    assert portal.inventories[-1]["snapshot_revision"] == "2"
+
+    current["value"] = _inventory_fixture(instances=[{"instance_id": "site-1", "status": "active"}])
+    assert replay.run_once()["status"] == "idle"
+    assert portal.inventories[-1]["snapshot_revision"] == "3"
+
+
+def test_inventory_revision_assignment_is_atomic_across_concurrent_workers(tmp_path):
+    class Portal:
+        def send_inventory(self, **_kwargs):
+            return {"status": "accepted"}
+
+        def pull_job(self, **_kwargs):
+            return None
+
+    portal = Portal()
+    worker, state, _executor = _worker(tmp_path, portal, _Clock())
+    inventory = _inventory_fixture()
+    worker.inventory_provider = lambda _installation: dict(inventory)
+
+    def prepare():
+        return worker._inventory("installation-1")["snapshot_revision"]
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        revisions = sorted(pool.map(lambda _unused: prepare(), range(2)))
+    assert revisions == ["1", "1"]
+    record = state.get("commercial_inventory_state_v1")["installations"]["installation-1"]
+    assert record["snapshot_revision"] == 1
+    assert record["durable_hash"] == inventory_durable_hash({**inventory, "snapshot_revision": "1"})
+
+
+def test_inventory_state_corruption_fails_closed_without_revision_rollback(tmp_path):
+    class Portal:
+        def pull_job(self, **_kwargs):
+            return None
+
+    worker, state, _executor = _worker(tmp_path, Portal(), _Clock())
+    state.put(
+        "commercial_inventory_state_v1",
+        {"schema": "mcd-commercial-inventory-state-v1", "installations": {"installation-1": {"snapshot_revision": "corrupt"}}},
+    )
+    worker.inventory_provider = lambda _installation: _inventory_fixture()
+    with pytest.raises(ValueError, match="commercial_inventory_state_invalid"):
+        worker._inventory("installation-1")
+
+
+def test_inventory_revision_never_rolls_back_from_stale_durable_state(tmp_path):
+    class Portal:
+        def pull_job(self, **_kwargs):
+            return None
+
+    worker, state, _executor = _worker(tmp_path, Portal(), _Clock())
+    inventory = _inventory_fixture()
+    stale = {**inventory, "snapshot_revision": "5"}
+    state.put(
+        "commercial_inventory_state_v1",
+        {
+            "schema": "mcd-commercial-inventory-state-v1",
+            "installations": {
+                "installation-1": {
+                    "snapshot_revision": 5,
+                    "durable_hash": inventory_durable_hash(stale),
+                    "durable_snapshot": {key: value for key, value in stale.items() if key not in {"request_id", "observed_at", "agent_signature"}},
+                }
+            },
+        },
+    )
+    worker.inventory_provider = lambda _installation: _inventory_fixture(version="1.5.256")
+    prepared = worker._inventory("installation-1")
+    assert prepared["snapshot_revision"] == "6"

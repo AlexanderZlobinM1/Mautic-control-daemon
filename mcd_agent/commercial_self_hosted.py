@@ -432,7 +432,8 @@ class SelfHostedPortalWorker:
 
     def _minimal_inventory(self, installation_id: str) -> dict[str, Any]:
         values = self.context.get("runtime_overrides") if isinstance(self.context.get("runtime_overrides"), Mapping) else {}
-        revision = int(self.executor.state.get("commercial_standalone_settings_revision") or 0)
+        inventory_revision = getattr(self.executor.state, "inventory_revision", None)
+        revision = int(inventory_revision(installation_id)) if callable(inventory_revision) else int(self.executor.state.get("commercial_inventory_revision") or 0)
         sync = {"desired_state_sync_protocol": 3, "pending_intent": self.executor.state.get("commercial_pending_sync_intent"), "conflict": self.executor.state.get("commercial_runtime_conflict")}
         settings = build_standalone_settings_snapshot(values, revision=revision, sync=sync)
         binding = {"agent_id": self.agent_id, "installation_id": installation_id, "host_fingerprint": self.host_fingerprint, "commercial_key_id": self.commercial_key_id}
@@ -452,8 +453,18 @@ class SelfHostedPortalWorker:
         etag = str(settings.get("etag") or "") if isinstance(settings, Mapping) else ""
         if values is None or etag != standalone_settings_etag(values):
             raise ValueError("commercial_standalone_settings_etag_invalid")
-        # The inventory snapshot and noop consumer must use the same durable
-        # value across restart; do not recompute a second hash in the worker.
+        prepare = getattr(self.executor.state, "prepare_inventory_snapshot", None)
+        if not callable(prepare):
+            raise ValueError("commercial_inventory_state_unavailable")
+        inventory, record = prepare(installation_id=installation_id, inventory=inventory)
+        durable_hash = str(record.get("durable_hash") or "")
+        revision = int(record.get("snapshot_revision") or 0)
+        # Keep request identity stable for retries of the same durable
+        # revision, while excluding it from the durable content hash.
+        inventory["request_id"] = f"inventory-{revision}-{durable_hash[7:]}"
+        inventory.pop("agent_signature", None)
+        # The inventory snapshot and noop consumer must use durable values
+        # across restart; do not recompute a second settings hash in the worker.
         self.executor.state.put(
             "commercial_standalone_settings_snapshot_v1",
             {"schema": STANDALONE_SETTINGS_SNAPSHOT_SCHEMA, **dict(settings)},
@@ -476,6 +487,9 @@ class SelfHostedPortalWorker:
             self._outbound("adopt", lambda: self.client.adopt(installation_id=installation_id, inventory=inventory))
         except _PortalTransportError:
             return False
+        acknowledge = getattr(self.executor.state, "acknowledge_inventory", None)
+        if callable(acknowledge):
+            acknowledge(installation_id=installation_id, inventory=inventory)
         adopted[installation_id] = {"request_id": inventory.get("request_id"), "snapshot_revision": inventory.get("snapshot_revision"), "adopted_at": _utc()}
         self.executor.state.put(_ADOPTED_KEY, adopted)
         return True
@@ -487,15 +501,38 @@ class SelfHostedPortalWorker:
         signer = getattr(self.client, "_agent_signed", None)
         if callable(signer) and not inventory.get("agent_signature"):
             inventory = signer(inventory)
-        digest = hashlib.sha256(canonical_json(inventory)).hexdigest()
-        if self.executor.state.get("commercial_inventory_digest") == digest:
+        state = self.executor.state.get("commercial_inventory_state_v1")
+        installations = state.get("installations") if isinstance(state, Mapping) else None
+        record = installations.get(str(installation_id)) if isinstance(installations, Mapping) else None
+        pinned = record.get("last_published") if isinstance(record, Mapping) else None
+        durable_hash = str(record.get("durable_hash") or "") if isinstance(record, Mapping) else ""
+        try:
+            revision = int(record.get("snapshot_revision") or 0) if isinstance(record, Mapping) else 0
+            pinned_revision = int(pinned.get("snapshot_revision") or -1) if isinstance(pinned, Mapping) else -1
+        except (TypeError, ValueError):
+            raise ValueError("commercial_inventory_state_invalid")
+        if isinstance(pinned, Mapping) and str(pinned.get("durable_hash") or "") == durable_hash and pinned_revision == revision:
             return True
         try:
-            self._outbound("inventory", lambda: self.client.send_inventory(installation_id=installation_id, inventory=inventory))
+            self._outbound("inventory", lambda: self._send_inventory(installation_id, inventory))
         except _PortalTransportError:
             return False
-        self.executor.state.put("commercial_inventory_digest", digest)
+        acknowledge = getattr(self.executor.state, "acknowledge_inventory", None)
+        if callable(acknowledge):
+            acknowledge(installation_id=installation_id, inventory=inventory)
         return True
+
+    def _send_inventory(self, installation_id: str, inventory: Mapping[str, Any]) -> Any:
+        """Use stable inventory idempotency while retaining narrow test clients."""
+        try:
+            return self.client.send_inventory(
+                installation_id=installation_id,
+                inventory=dict(inventory),
+                request_id=str(inventory.get("request_id") or ""),
+                idempotency_key=str(inventory.get("request_id") or ""),
+            )
+        except TypeError:
+            return self.client.send_inventory(installation_id=installation_id, inventory=dict(inventory))
 
     @staticmethod
     def _valid_etag(value: object) -> bool:

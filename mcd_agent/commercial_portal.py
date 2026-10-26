@@ -39,6 +39,8 @@ PORTAL_MCD_POLL_RESPONSE_SCHEMA = "portal-mcd-poll-response-v1"
 PORTAL_MCD_MAX_LONG_POLL_MS = 30_000
 PORTAL_MCD_MAX_BACKOFF_MS = 300_000
 STANDALONE_SETTINGS_SNAPSHOT_SCHEMA = "mcd-standalone-settings-snapshot-v1"
+INVENTORY_STATE_SCHEMA = "mcd-commercial-inventory-state-v1"
+INVENTORY_VOLATILE_FIELDS = frozenset({"request_id", "observed_at", "agent_signature"})
 MCC_ARTIFACT_SIGNATURE_DOMAIN = b"com.sales-snap.portal-mcc/artifact-signature/1.0\n"
 MAX_ARTIFACT_BYTES = 512 * 1024 * 1024
 PORTAL_USER_AGENT = f"mcd-agent/{__version__} portal-commercial/{CONTRACT_VERSION}"
@@ -131,6 +133,26 @@ def build_standalone_settings_snapshot(
         "etag": standalone_settings_etag(clean),
         "sync": dict(sync),
     }
+
+
+def canonical_inventory_content(inventory: Mapping[str, Any]) -> dict[str, Any]:
+    """Return durable inventory content with only transport volatility removed."""
+    if not isinstance(inventory, Mapping):
+        raise ValueError("commercial_inventory_invalid")
+    content = dict(inventory)
+    for key in INVENTORY_VOLATILE_FIELDS:
+        content.pop(key, None)
+    return content
+
+
+def inventory_durable_hash(inventory: Mapping[str, Any]) -> str:
+    """Hash the complete durable inventory, excluding only volatile transport fields."""
+    return _sha256(canonical_json(canonical_inventory_content(inventory)))
+
+
+def _valid_inventory_hash(value: object) -> bool:
+    text = str(value or "")
+    return len(text) == 71 and text.startswith("sha256:") and all(char in "0123456789abcdef" for char in text[7:])
 
 
 def _host_fingerprint() -> str:
@@ -550,6 +572,129 @@ class CommercialState:
     def put(self, key: str, value: Any) -> None:
         with sqlite3.connect(self.path) as db:
             db.execute("INSERT INTO commercial_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, json.dumps(value, ensure_ascii=True, sort_keys=True)))
+
+    @staticmethod
+    def _inventory_state_record(raw: object) -> dict[str, Any]:
+        if not isinstance(raw, Mapping):
+            return {"schema": INVENTORY_STATE_SCHEMA, "installations": {}}
+        installations = raw.get("installations")
+        return {
+            "schema": INVENTORY_STATE_SCHEMA,
+            "installations": dict(installations) if isinstance(installations, Mapping) else {},
+        }
+
+    def inventory_revision(self, installation_id: str) -> int:
+        """Read the durable per-installation inventory revision."""
+        raw = self.get("commercial_inventory_state_v1")
+        state = self._inventory_state_record(raw)
+        record = state["installations"].get(str(installation_id))
+        if isinstance(record, Mapping):
+            value = record.get("snapshot_revision", record.get("revision", 0))
+            if isinstance(value, int) and not isinstance(value, bool):
+                return max(0, value)
+            try:
+                return max(0, int(value or 0))
+            except (TypeError, ValueError):
+                return 0
+        legacy = self.get("commercial_inventory_revision")
+        try:
+            return max(0, int(legacy or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def prepare_inventory_snapshot(self, *, installation_id: str, inventory: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Atomically assign a monotonic revision to changed durable inventory."""
+        installation = str(installation_id)
+        with sqlite3.connect(self.path, timeout=30) as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT value FROM commercial_meta WHERE key=?", ("commercial_inventory_state_v1",)).fetchone()
+            state = self._inventory_state_record(json.loads(row[0]) if row else None)
+            installations = state["installations"]
+            previous = installations.get(installation)
+            previous = dict(previous) if isinstance(previous, Mapping) else {}
+            raw_revision = previous.get("snapshot_revision", previous.get("revision", 0))
+            try:
+                if isinstance(raw_revision, bool):
+                    raise ValueError
+                revision = int(raw_revision or 0)
+            except (TypeError, ValueError):
+                raise ValueError("commercial_inventory_state_invalid")
+            if revision < 0:
+                raise ValueError("commercial_inventory_state_invalid")
+            previous_hash = str(previous.get("durable_hash") or "")
+            if previous_hash and not _valid_inventory_hash(previous_hash):
+                raise ValueError("commercial_inventory_state_invalid")
+            if revision > 0 and not previous_hash and not isinstance(previous.get("durable_snapshot"), Mapping):
+                raise ValueError("commercial_inventory_state_invalid")
+
+            candidate = dict(inventory)
+            candidate["snapshot_revision"] = str(revision)
+            candidate_hash = inventory_durable_hash(candidate)
+            if previous_hash:
+                changed = previous_hash != candidate_hash
+            elif isinstance(previous.get("durable_snapshot"), Mapping):
+                changed = inventory_durable_hash(previous["durable_snapshot"]) != candidate_hash
+            else:
+                # Existing 1.5.254 state has revision=0 but no durable hash.
+                # A one-time bump makes the first post-upgrade publication
+                # unambiguously newer without relying on volatile fields.
+                changed = True
+            if changed:
+                revision += 1
+                candidate["snapshot_revision"] = str(revision)
+                candidate_hash = inventory_durable_hash(candidate)
+
+            durable_snapshot = canonical_inventory_content(candidate)
+            record = {
+                "schema": INVENTORY_STATE_SCHEMA,
+                "snapshot_revision": revision,
+                "durable_hash": candidate_hash,
+                "durable_snapshot": durable_snapshot,
+                "last_published": previous.get("last_published"),
+                "last_acknowledged": previous.get("last_acknowledged"),
+            }
+            installations[installation] = record
+            state["installations"] = installations
+            encoded = json.dumps(state, ensure_ascii=True, sort_keys=True)
+            db.execute(
+                "INSERT INTO commercial_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                ("commercial_inventory_state_v1", encoded),
+            )
+            db.execute(
+                "INSERT INTO commercial_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                ("commercial_inventory_revision", json.dumps(revision)),
+            )
+        return candidate, record
+
+    def acknowledge_inventory(self, *, installation_id: str, inventory: Mapping[str, Any]) -> bool:
+        """Pin the last successfully published inventory without regressing state."""
+        installation = str(installation_id)
+        durable_hash = inventory_durable_hash(inventory)
+        try:
+            revision = int(inventory.get("snapshot_revision") or 0)
+        except (TypeError, ValueError):
+            return False
+        with sqlite3.connect(self.path, timeout=30) as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT value FROM commercial_meta WHERE key=?", ("commercial_inventory_state_v1",)).fetchone()
+            state = self._inventory_state_record(json.loads(row[0]) if row else None)
+            record = state["installations"].get(installation)
+            try:
+                record_revision = int(record.get("snapshot_revision") or -1) if isinstance(record, Mapping) else -1
+            except (TypeError, ValueError):
+                return False
+            if not isinstance(record, Mapping) or str(record.get("durable_hash") or "") != durable_hash or record_revision != revision:
+                return False
+            next_record = dict(record)
+            pin = {"durable_hash": durable_hash, "snapshot_revision": revision}
+            next_record["last_published"] = pin
+            next_record["last_acknowledged"] = pin
+            state["installations"][installation] = next_record
+            db.execute(
+                "INSERT INTO commercial_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                ("commercial_inventory_state_v1", json.dumps(state, ensure_ascii=True, sort_keys=True)),
+            )
+        return True
 
     @property
     def commercial_enabled(self) -> bool:
