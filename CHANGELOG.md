@@ -1,3 +1,11 @@
+## 1.5.224 - 2026-10-26
+
+- Classify fixed Docker preflight failures with bounded, redacted evidence:
+  image availability, Docker access, timeout, PHP observation stage, exit
+  code, fixed argv and cleanup state.
+- Preserve this evidence in the durable signed-control terminal receipt so a
+  missing digest image is distinguishable from an MCD runtime defect.
+
 ## 1.5.223 - 2026-10-26
 
 - Ingest and execute a valid MCC control command immediately after the
