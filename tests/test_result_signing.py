@@ -225,7 +225,7 @@ def test_state_push_reconciles_mcc_immutable_terminal_conflict(tmp_path):
     store.ingest({"schema":"mcd-control-v1","contract_version":"1.0","commands":[command]}, agent_id="a", host_fingerprint="sha256:h")
     store.execute_pending(agent_id="a", host_fingerprint="sha256:h", active_key=(object(), "k"), runner=lambda _request: {"status":"ready"}, signer=lambda value, *_args: value)
     cfg = SimpleNamespace(mcc_push_enabled=True, mcc_url="https://mcc.example.test", mcc_token="token", state_db_path=db_path)
-    conflict = b'{"detail":"control receipt conflicts with immutable terminal command","job_id":"docker-preflight-worker02-15228"}'
+    conflict = b'{"detail":"control receipt conflicts with immutable terminal command"}'
     error = HTTPError("https://mcc.example.test", 409, "Conflict", {}, __import__("io").BytesIO(conflict))
     with patch("mcd_agent.state_push.request.urlopen", side_effect=error):
         with patch("mcd_agent.state_push.mark_state_snapshot_push_result_mysql"):
