@@ -258,13 +258,50 @@ _LOCAL_RUNTIME_ACCEPTED_KEY = "local_runtime_accepted"
 _MCD_RUNTIME_AGENT_VERSION_KEY = "mcd_runtime_agent_version"
 
 
+def _commercial_state_eligibility(config: AgentConfig) -> tuple[bool, str]:
+    """Determine Portal capability from durable commercial state only.
+
+    The base MCD profile remains independent: a passive/standalone config may
+    run the outbound Portal capability when a valid persistent enrollment is
+    present, while a commercial-looking profile without that enrollment must
+    fail closed.
+    """
+    state_path = str(getattr(config, "state_db_path", "") or "").strip()
+    if not state_path:
+        return False, "commercial_state_path_missing"
+    try:
+        state = CommercialState(state_path)
+        connection_state = str(state.get("commercial_portal_connection_state") or "").strip().lower()
+        if bool(state.get("commercial_revoked")) or bool(state.get("commercial_detached")) or connection_state in {"revoked", "detached"}:
+            return False, "commercial_state_revoked"
+        if not state.commercial_enabled:
+            return False, "commercial_state_not_enabled"
+        base = str(state.get("portal_api_base") or "").strip()
+        credential = str(state.get("portal_agent_credential") or "").strip()
+        agent_id = str(state.get("agent_id") or "").strip()
+        key_metadata = state.get("commercial_key_metadata")
+        commercial_key_id = str(state.get("commercial_key_id") or (key_metadata.get("commercial_key_id") if isinstance(key_metadata, dict) else "") or "").strip()
+        host_fingerprint = str(state.get("host_fingerprint") or "").strip()
+        installations = state.get("installation_ids")
+        if (
+            not base.startswith("https://")
+            or not credential
+            or not agent_id
+            or not commercial_key_id
+            or not host_fingerprint
+            or not isinstance(installations, dict)
+            or not installations
+        ):
+            return False, "commercial_state_binding_incomplete"
+    except Exception:
+        return False, "commercial_state_unreadable"
+    return True, ""
+
+
 def _commercial_worker_allowed(config: AgentConfig, *, single_cycle: bool, factory: object) -> bool:
-    """Keep the Portal lane outside corporate/standalone scheduler paths."""
-    return (
-        not single_cycle
-        and callable(factory)
-        and str(getattr(config, "profile_name", "") or "").strip().lower() == "commercial"
-    )
+    """Start Portal as an independent capability, never by profile name."""
+    eligible, _reason = _commercial_state_eligibility(config)
+    return not single_cycle and callable(factory) and eligible
 
 
 def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threading.Event], SelfHostedPortalWorker | None]:
@@ -275,6 +312,10 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
             state.put("commercial_worker_status", {"schema": "mcd-commercial-worker-status-v1", "status": "disabled", "reason": reason, "secret": None})
         if not state.commercial_enabled:
             disabled("portal_credential_or_host_binding_invalid")
+            return None
+        connection_state = str(state.get("commercial_portal_connection_state") or "").strip().lower()
+        if bool(state.get("commercial_revoked")) or bool(state.get("commercial_detached")) or connection_state in {"revoked", "detached"}:
+            disabled("commercial_state_revoked")
             return None
         base = str(state.get("portal_api_base") or "")
         credential = str(state.get("portal_agent_credential") or "")
@@ -17119,7 +17160,7 @@ def run_loop(
     pusher = MCCStatePusher(config, runtime_store=store)
     commercial_stop_event = threading.Event()
     commercial_thread: threading.Thread | None = None
-    commercial_mode = str(getattr(config, "profile_name", "") or "").strip().lower() == "commercial"
+    commercial_mode, commercial_mode_reason = _commercial_state_eligibility(config)
     if commercial_mode and _commercial_worker_factory is None:
         _commercial_worker_factory = _default_commercial_worker_factory(config)
     if commercial_mode and _commercial_worker_allowed(config, single_cycle=single_cycle, factory=_commercial_worker_factory):
@@ -17137,7 +17178,10 @@ def run_loop(
             commercial_thread.start()
         except Exception as exc:
             logging.warning("commercial Portal worker was not started: %s", exc)
+    elif not commercial_mode:
+        logging.info("commercial Portal worker capability inactive: %s", commercial_mode_reason)
     commercial_profile_seen = commercial_mode
+    commercial_reason_seen = commercial_mode_reason
 
     priority_executor = _PriorityTaskExecutor()
     _ACTIVE_PRIORITY_EXECUTOR = priority_executor
@@ -19589,7 +19633,7 @@ def run_loop(
         ).start()
 
     while _test_stop_event is None or not _test_stop_event.is_set():
-        current_commercial_mode = str(getattr(config, "profile_name", "") or "").strip().lower() == "commercial"
+        current_commercial_mode, current_commercial_reason = _commercial_state_eligibility(config)
         if current_commercial_mode != commercial_profile_seen and not single_cycle:
             if not current_commercial_mode and commercial_thread is not None:
                 commercial_stop_event.set()
@@ -19605,7 +19649,14 @@ def run_loop(
                         commercial_thread.start()
                 except Exception as exc:
                     logging.warning("commercial Portal worker reload start failed: %s", exc)
+            elif current_commercial_mode and commercial_thread is not None:
+                logging.debug("commercial Portal worker already running; no duplicate start")
             commercial_profile_seen = current_commercial_mode
+        elif not current_commercial_mode and commercial_reason_seen != current_commercial_reason:
+            logging.info("commercial Portal worker capability inactive: %s", current_commercial_reason)
+            commercial_reason_seen = current_commercial_reason
+        elif current_commercial_mode:
+            commercial_reason_seen = current_commercial_reason
         if single_cycle:
             _monitor_authoritative_runtime()
         now = time.time()

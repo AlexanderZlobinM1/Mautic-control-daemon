@@ -1,3 +1,11 @@
+## 1.5.252 - 2026-10-26
+
+- Start the commercial Portal worker from valid durable commercial enrollment,
+  independently of the passive, standalone, or corporate base profile.
+- Keep single-cycle execution and the corporate MCC lane unchanged; invalid,
+  revoked, detached, or incomplete commercial state fails closed and stops only
+  the commercial worker.
+
 ## 1.5.251 - 2026-10-26
 
 - Add an explicit product User-Agent to every commercial Portal request so
