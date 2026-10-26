@@ -1,3 +1,8 @@
+## 1.5.239 - 2026-10-26
+
+- Fail the runtime-only archive builder and bridge QA when required import
+  closure files, including `mcd_agent/mcd_control.py`, are absent.
+
 ## 1.5.238 - 2026-10-26
 
 - Run post-update runtime recovery before the first MCC poll so a previously

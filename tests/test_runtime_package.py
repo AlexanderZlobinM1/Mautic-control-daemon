@@ -21,6 +21,11 @@ class RuntimePackageTests(unittest.TestCase):
             package.mkdir()
             init = package / "__init__.py"
             init.write_text('__version__ = "1.5.134"\n', encoding="utf-8")
+            required_runtime_files = []
+            for name in ("daemon.py", "mcd_control.py", "state_push.py"):
+                path = package / name
+                path.write_text(f"# {name}\n", encoding="utf-8")
+                required_runtime_files.append(path)
             requirements = root / "requirements.txt"
             requirements.write_text("PyMySQL>=1.1.1\n", encoding="utf-8")
             wheel_dir = root / "wheel"
@@ -29,7 +34,7 @@ class RuntimePackageTests(unittest.TestCase):
             with zipfile.ZipFile(wheel, "w") as archive:
                 archive.writestr("mcd_agent/__init__.py", init.read_bytes())
             payload = {}
-            for path in (init, requirements, wheel):
+            for path in (init, *required_runtime_files, requirements, wheel):
                 payload[path.relative_to(root).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
             (root / "mcd-runtime-manifest.json").write_text(
                 json.dumps(
@@ -85,6 +90,8 @@ class RuntimePackageTests(unittest.TestCase):
                 names = tar.getnames()
                 self.assertIn("mcd-runtime-manifest.json", names)
                 self.assertIn("mcd_agent/__init__.py", names)
+                self.assertIn("mcd_agent/mcd_control.py", names)
+                self.assertIn("mcd_agent/state_push.py", names)
                 wheel_names = [name for name in names if name.startswith("wheel/") and name.endswith(".whl")]
                 self.assertEqual(len(wheel_names), 1)
                 forbidden = {

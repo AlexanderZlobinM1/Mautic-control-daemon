@@ -131,6 +131,15 @@ def main(argv: list[str] | None = None) -> int:
     archive_has_no_pyproject = not any(Path(name).name == "pyproject.toml" for name in archive_names)
     if not archive_has_no_pyproject:
         raise RuntimeError("runtime-only archive unexpectedly contains pyproject.toml")
+    required_runtime_files = {
+        "mcd_agent/__init__.py",
+        "mcd_agent/daemon.py",
+        "mcd_agent/state_push.py",
+        "mcd_agent/mcd_control.py",
+    }
+    missing_runtime_files = sorted(required_runtime_files - set(archive_names))
+    if missing_runtime_files:
+        raise RuntimeError(f"runtime-only archive is missing required import files: {missing_runtime_files}")
 
     bridge = _load_bridge()
     worker: subprocess.Popen[str] | None = None

@@ -51,6 +51,12 @@ _CLUSTER_UPDATE_INSTALL_LOCK_TTL_SEC = 900
 _CLUSTER_UPDATE_HEALTH_STALE_SEC = 300
 _RUNTIME_MANIFEST_NAME = "mcd-runtime-manifest.json"
 _RUNTIME_MANIFEST_SCHEMA = "mcd-runtime-package-v1"
+_RUNTIME_REQUIRED_FILES = {
+    "mcd_agent/__init__.py",
+    "mcd_agent/daemon.py",
+    "mcd_agent/state_push.py",
+    "mcd_agent/mcd_control.py",
+}
 _RUNTIME_FORBIDDEN_TOP_LEVEL = {
     ".git",
     ".pytest_cache",
@@ -386,6 +392,9 @@ def _runtime_manifest(source_dir: Path) -> dict[str, Any] | None:
     unlisted = sorted(actual_files - listed_files)
     if unlisted:
         raise RuntimeError(f"runtime manifest has unlisted payload files: {unlisted[:8]}")
+    missing_required = sorted(_RUNTIME_REQUIRED_FILES - listed_files)
+    if missing_required:
+        raise RuntimeError(f"runtime manifest is missing required import files: {missing_required}")
 
     for forbidden in _RUNTIME_FORBIDDEN_TOP_LEVEL:
         if (source_dir / forbidden).exists():

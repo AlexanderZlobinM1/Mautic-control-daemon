@@ -830,6 +830,9 @@ snapshot и свежий MCC snapshot, причём явный MCC tombstone и�
 Реальное локальное изменение MCD по-прежнему фиксируется своим
 timestamp/event и проходит через тот же LWW: более новый источник становится
 истиной и синхронизируется в обратную сторону.
+Runtime-only release gate также проверяет обязательный import closure
+(`daemon.py`, `state_push.py`, `mcd_control.py`); архив без любого из них не
+может пройти bridge QA и не допускается до host switch.
 Если отдельное `desired` или `effective` значение само превышает safety
 budget, оно заменяется строго проверяемой ссылкой
 `{encoding:"canonical-json-sha256",sha256,bytes}`; key не отбрасывается.

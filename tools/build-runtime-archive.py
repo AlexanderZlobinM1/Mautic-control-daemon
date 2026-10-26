@@ -27,6 +27,12 @@ from datetime import datetime, timezone
 
 MANIFEST_NAME = "mcd-runtime-manifest.json"
 MANIFEST_SCHEMA = "mcd-runtime-package-v1"
+REQUIRED_RUNTIME_FILES = {
+    "mcd_agent/__init__.py",
+    "mcd_agent/daemon.py",
+    "mcd_agent/state_push.py",
+    "mcd_agent/mcd_control.py",
+}
 FORBIDDEN_TOP_LEVEL = {
     ".git",
     ".pytest_cache",
@@ -107,6 +113,13 @@ def _copy_runtime_resources(source: Path, stage: Path) -> None:
 
     shutil.copytree(package, stage / "mcd_agent", symlinks=True, ignore=_ignore_runtime_artifacts)
     shutil.copy2(requirements, stage / "requirements.txt")
+    missing = sorted(
+        relative
+        for relative in REQUIRED_RUNTIME_FILES
+        if not (stage / relative).is_file()
+    )
+    if missing:
+        raise RuntimeError(f"runtime package is missing required import files: {missing}")
 
     etc_src = source / "etc"
     if etc_src.is_dir():
