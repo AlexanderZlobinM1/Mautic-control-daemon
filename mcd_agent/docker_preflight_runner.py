@@ -18,6 +18,7 @@ class DockerPreflightError(RuntimeError):
         argv: list[str],
         exit_code: int | None = None,
         stderr: str = "",
+        detail: str = "",
         cleanup: str = "not_started",
     ) -> None:
         super().__init__(error_code)
@@ -26,6 +27,7 @@ class DockerPreflightError(RuntimeError):
         self.argv = list(argv)
         self.exit_code = exit_code
         self.stderr = _safe_stderr(stderr)
+        self.detail = _safe_stderr(detail)
         self.cleanup = cleanup
 
 
@@ -56,9 +58,29 @@ class DockerRuntimePreflightRunner:
     def __call__(self, request: dict[str, Any]) -> dict[str, Any]:
         # Only the actual Docker RepoDigest is accepted; MCC asset-pair/files
         # digests are never valid runtime image identities.
-        digest, adapter = str(request.get("runtime_image_digest") or ""), str(request.get("adapter") or "")
-        if not _DIGEST.fullmatch(digest) or not _ADAPTER.fullmatch(adapter):
-            raise ValueError("docker_preflight_runner_identity_invalid")
+        digest = str(request.get("runtime_image_digest") or "")
+        adapter = str(request.get("adapter") or "")
+        if not digest:
+            raise DockerPreflightError(
+                "docker_preflight_runtime_image_digest_missing",
+                stage="identity",
+                argv=[],
+                detail="runtime_image_digest is required; image_digest is not accepted",
+            )
+        if not _DIGEST.fullmatch(digest):
+            raise DockerPreflightError(
+                "docker_preflight_runtime_image_digest_invalid",
+                stage="identity",
+                argv=[],
+                detail="runtime_image_digest must match sha256:<64 lowercase hex>",
+            )
+        if not _ADAPTER.fullmatch(adapter):
+            raise DockerPreflightError(
+                "docker_preflight_adapter_invalid",
+                stage="identity",
+                argv=[],
+                detail="adapter must be a bounded lowercase identifier",
+            )
         name = "mcd-preflight-" + uuid.uuid4().hex
         image = str(request.get("image_ref") or "") + "@" + digest
         container = None

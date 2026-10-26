@@ -1,10 +1,16 @@
 from __future__ import annotations
-import json, sqlite3, time
+import json, re, sqlite3, time
 from pathlib import Path
 from typing import Any, Mapping
 
 SCHEMA = "mcd-control-v1"
 COMMAND = "docker_runtime_preflight_v1"
+
+
+def _safe_error_detail(value: object) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"(?i)(authorization|password|passwd|token|secret)=\S+", r"\1=<redacted>", text)
+    return text[-512:]
 
 class ControlStore:
     def __init__(self, path: str):
@@ -72,7 +78,7 @@ class ControlStore:
                 result = dict(runner(request))
                 terminal = signer({"schema": "mcd-docker-runtime-preflight-terminal-v1", "contract_version": "1.0", "job_id": job_id, "request_id": request["request_id"], "probe_id": request["probe_id"], "status": "succeeded", "idempotency_key": job_id, "result": result}, private, key_id)
             except Exception as exc:
-                terminal = {"schema": "mcd-docker-runtime-preflight-terminal-v1", "contract_version": "1.0", "job_id": job_id, "request_id": request.get("request_id"), "probe_id": request.get("probe_id"), "status": "failed", "idempotency_key": job_id, "error": type(exc).__name__}
+                terminal = {"schema": "mcd-docker-runtime-preflight-terminal-v1", "contract_version": "1.0", "job_id": job_id, "request_id": request.get("request_id"), "probe_id": request.get("probe_id"), "status": "failed", "idempotency_key": job_id, "error": type(exc).__name__, "error_code": str(getattr(exc, "error_code", "") or "docker_preflight_runner_failure"), "stage": str(getattr(exc, "stage", "") or "runner"), "detail": _safe_error_detail(getattr(exc, "detail", "") or getattr(exc, "stderr", "") or exc)}
                 for field in ("error_code", "stage", "exit_code", "stderr", "cleanup"):
                     value = getattr(exc, field, None)
                     if value is not None and value != "":

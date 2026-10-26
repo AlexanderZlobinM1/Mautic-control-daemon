@@ -1,5 +1,6 @@
 import pytest
 from mcd_agent.mcd_control import ControlStore
+from mcd_agent.docker_preflight_runner import DockerRuntimePreflightRunner
 
 def test_control_response_is_durable_and_replay_safe(tmp_path):
     store = ControlStore(str(tmp_path / "state.sqlite"))
@@ -44,3 +45,25 @@ def test_control_receipt_preserves_structured_runner_failure(tmp_path):
     assert output[0]["stage"] == "create"
     assert output[0]["exit_code"] == 1
     assert output[0]["argv"][0] == "/usr/bin/docker"
+
+
+def test_control_receipt_explains_legacy_artifact_digest_mismatch(tmp_path):
+    store = ControlStore(str(tmp_path / "state.sqlite"))
+    command = {"command":"docker_runtime_preflight_v1","job_id":"j-legacy-digest","request_id":"r","probe_id":"p","agent_id":"a","host_fingerprint":"sha256:h","image_ref":"playground7","image_digest":"sha256:"+"a"*64,"adapter":"mauticrfp-docker-v1","ttl_seconds":60}
+    store.ingest({"schema":"mcd-control-v1","contract_version":"1.0","commands":[command]}, agent_id="a", host_fingerprint="sha256:h")
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append(argv)
+
+    output = store.execute_pending(
+        agent_id="a",
+        host_fingerprint="sha256:h",
+        active_key=(object(), "k"),
+        runner=DockerRuntimePreflightRunner(run=run),
+        signer=lambda value, *_args: value,
+    )
+    assert output[0]["error_code"] == "docker_preflight_runtime_image_digest_missing"
+    assert output[0]["stage"] == "identity"
+    assert output[0]["detail"] == "runtime_image_digest is required; image_digest is not accepted"
+    assert calls == []
