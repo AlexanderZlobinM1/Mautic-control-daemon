@@ -59,7 +59,7 @@ def _safe_labels(raw: object) -> tuple[dict[str, str], str | None]:
         key = str(raw_key or "")
         value = str(raw_value or "")
         normalized = re.sub(r"[^a-z0-9]+", "_", key.lower()).strip("_")
-        safe_namespace = normalized.startswith("org_opencontainers_image_") or normalized.startswith("mcc_") or normalized.endswith("files_sha256") or normalized.endswith("files_sha")
+        safe_namespace = normalized.startswith("org_opencontainers_image_") or normalized.startswith("mcc_") or normalized.startswith("com_sales_snap_mauticrfp_") or normalized.endswith("files_sha256") or normalized.endswith("files_sha")
         secret_shaped = any(token in normalized for token in ("secret", "token", "password", "passwd", "credential", "private", "authorization"))
         if not _LABEL_KEY.fullmatch(key) or len(value) > 512 or not safe_namespace or secret_shaped:
             continue

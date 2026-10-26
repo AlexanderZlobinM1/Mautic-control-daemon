@@ -440,6 +440,9 @@ config на его profile baseline и только после этого при
   Consumers validate the observed timestamp/freshness window, signature,
   agent/host binding, inventory hash and `fixed_runtime_ref`↔digest equality;
   ambiguous or tampered rows are rejected before any runtime decision.
+  The safe semantic label set preserves the `com.sales-snap.mauticrfp.*`
+  image selector/runtime metadata and OCI labels while excluding
+  secret-shaped keys.
    Self-update сначала публикует persisted `scheduler.pause` под общим
    межпроцессным `scheduler.pause.lock`. Каждый новый запуск, включая
    ordinary, priority, super-priority, manual, import и retry, перед
