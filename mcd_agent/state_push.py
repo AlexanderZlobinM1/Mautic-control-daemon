@@ -224,6 +224,25 @@ def _ingest_control_response(
         store.record_key_ack(ack)
 
 
+def _reconcile_control_receipt_conflict(state_db_path: str, response_text: str) -> int:
+    """Retire only terminal receipts rejected by MCC's immutable-row 409."""
+    text = str(response_text or "")
+    if "control receipt conflicts with immutable terminal command" not in text.lower():
+        return 0
+    job_ids = set(re.findall(r"docker-preflight-[A-Za-z0-9._-]+", text))
+    if not job_ids:
+        return 0
+    store = ControlStore(state_db_path)
+    return sum(
+        store.acknowledge_terminal_conflict(
+            job_id,
+            reason="control receipt conflicts with immutable terminal command",
+            remote_response=text,
+        )
+        for job_id in sorted(job_ids)
+    )
+
+
 def monitor_signals_change_payload(payload: dict[str, Any]) -> dict[str, Any]:
     details = payload.get("details") if isinstance(payload.get("details"), dict) else {}
     scheduler = details.get("scheduler") if isinstance(details.get("scheduler"), dict) else {}
@@ -2459,6 +2478,9 @@ class MCCStatePusher:
                 msg = (e.read() or b"").decode("utf-8", errors="replace").strip()
             except Exception:
                 msg = ""
+            reconciled = _reconcile_control_receipt_conflict(self.cfg.state_db_path, msg) if e.code == 409 else 0
+            if reconciled:
+                self._control_push_pending = False
             mark_state_snapshot_push_result_mysql(
                 self.cfg,
                 payload_hash=payload_hash,

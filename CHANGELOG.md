@@ -1,3 +1,10 @@
+## 1.5.231 - 2026-10-26
+
+- Reconcile an MCC immutable-terminal 409 through the normal state-push path:
+  preserve the original local receipt and hashes in an audit record, stop
+  replaying only the conflicted job, and keep all MCC rows and other jobs
+  untouched.
+
 ## 1.5.230 - 2026-10-26
 
 - Probe fixed, versioned PHP-FPM binary paths such as `php-fpm8.4` and

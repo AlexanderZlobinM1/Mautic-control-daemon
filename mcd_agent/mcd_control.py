@@ -1,5 +1,5 @@
 from __future__ import annotations
-import json, re, sqlite3, time
+import hashlib, json, re, sqlite3, time
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -20,10 +20,45 @@ class ControlStore:
             db.execute("CREATE TABLE IF NOT EXISTS mcd_control_jobs (job_id TEXT PRIMARY KEY, request_json TEXT NOT NULL, receipt_json TEXT NOT NULL, updated_at REAL NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS mcd_result_key_ack (key_id TEXT PRIMARY KEY, ack_json TEXT NOT NULL, updated_at REAL NOT NULL)")
 
-    def receipts(self) -> list[dict[str, Any]]:
+    def receipts(self, *, include_conflict_acknowledged: bool = False) -> list[dict[str, Any]]:
         with sqlite3.connect(self.path) as db:
             rows = db.execute("SELECT receipt_json FROM mcd_control_jobs ORDER BY updated_at DESC LIMIT 100").fetchall()
-        return [json.loads(row[0]) for row in rows]
+        values = [json.loads(row[0]) for row in rows]
+        if include_conflict_acknowledged:
+            return values
+        return [value for value in values if value.get("status") != "conflict_acknowledged"]
+
+    def acknowledge_terminal_conflict(self, job_id: str, *, reason: str, remote_response: str) -> bool:
+        """Retire one locally stale terminal receipt without deleting its audit."""
+        with sqlite3.connect(self.path) as db:
+            row = db.execute("SELECT receipt_json FROM mcd_control_jobs WHERE job_id=?", (job_id,)).fetchone()
+            if not row:
+                return False
+            original = json.loads(row[0])
+            if original.get("status") == "conflict_acknowledged":
+                return True
+            if original.get("status") not in {"succeeded", "failed"}:
+                return False
+            original_bytes = json.dumps(original, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()
+            response_text = str(remote_response or "")
+            audit = {
+                "schema": "mcd-control-conflict-reconciliation-v1",
+                "contract_version": "1.0",
+                "job_id": str(job_id),
+                "idempotency_key": str(job_id),
+                "status": "conflict_acknowledged",
+                "original_status": original.get("status"),
+                "original_receipt": original,
+                "original_receipt_sha256": hashlib.sha256(original_bytes).hexdigest(),
+                "conflict": {
+                    "reason": _safe_error_detail(reason),
+                    "remote_response_sha256": hashlib.sha256(response_text.encode("utf-8", "replace")).hexdigest(),
+                    "acknowledged_at": int(time.time()),
+                },
+            }
+            db.execute("UPDATE mcd_control_jobs SET receipt_json=?,updated_at=? WHERE job_id=?", (json.dumps(audit, ensure_ascii=True, sort_keys=True), time.time(), job_id))
+            db.commit()
+        return True
 
     def ingest(self, envelope: Mapping[str, Any], *, agent_id: str, host_fingerprint: str) -> list[dict[str, Any]]:
         if envelope.get("schema") != SCHEMA or envelope.get("contract_version") != "1.0":
