@@ -3,8 +3,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from mcd_agent.config import load_config
+from mcd_agent.mcd_control import ControlStore
 from mcd_agent.result_signing import ensure_result_key, sign_result
-from mcd_agent.state_push import state_identity_payload
+from mcd_agent.state_push import _ingest_control_response, state_identity_payload
 
 def test_result_key_is_private_and_rotation_identity_is_stable(tmp_path):
     path = tmp_path / "result.key"
@@ -54,3 +55,26 @@ def test_mcd_state_payload_carries_agent_id_with_host_fingerprint(monkeypatch):
     assert payload["agent_id"] == "mcd-agent-1"
     assert payload["host_fingerprint"] == "sha256:" + "a" * 64
     assert payload["result_signing_key"]["key_id"] == "k1"
+
+
+def test_control_ack_is_persisted_without_command_envelope_contract_version(tmp_path):
+    db_path = str(Path(tmp_path) / "state.db")
+    payload = {
+        "agent_id": "mcd-agent-1",
+        "host_fingerprint": "sha256:" + "a" * 64,
+        "result_signing_key": {"key_id": "k1"},
+    }
+    ack = {
+        "key_id": "k1",
+        "status": "active",
+        "agent_id": "mcd-agent-1",
+        "host_fingerprint": payload["host_fingerprint"],
+    }
+
+    _ingest_control_response(
+        db_path,
+        payload,
+        {"schema": "mcd-control-v1", "commands": [], "result_signing_key_ack": ack},
+    )
+
+    assert ControlStore(db_path).active_key_ack("k1") == ack

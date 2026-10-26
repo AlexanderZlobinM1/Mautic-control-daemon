@@ -188,6 +188,37 @@ def state_identity_payload(cfg: AgentConfig) -> dict[str, str]:
     }
 
 
+def _ingest_control_response(
+    state_db_path: str,
+    payload: dict[str, Any],
+    control: dict[str, Any],
+) -> None:
+    """Persist MCC key ACKs even when no control-command envelope is present."""
+    if control.get("schema") != SCHEMA:
+        return
+    store = ControlStore(state_db_path)
+    commands = control.get("commands")
+    if isinstance(commands, list) and control.get("contract_version") == "1.0":
+        try:
+            store.ingest(
+                control,
+                agent_id=str(payload.get("agent_id") or ""),
+                host_fingerprint=str(payload.get("host_fingerprint") or ""),
+            )
+        except ValueError:
+            # Invalid command envelopes must not suppress an otherwise valid key ACK.
+            pass
+    ack = control.get("result_signing_key_ack")
+    result_key = payload.get("result_signing_key")
+    if (
+        isinstance(ack, dict)
+        and ack.get("status") in {"active", "retired", "revoked"}
+        and isinstance(result_key, dict)
+        and ack.get("key_id") == result_key.get("key_id")
+    ):
+        store.record_key_ack(ack)
+
+
 def monitor_signals_change_payload(payload: dict[str, Any]) -> dict[str, Any]:
     details = payload.get("details") if isinstance(payload.get("details"), dict) else {}
     scheduler = details.get("scheduler") if isinstance(details.get("scheduler"), dict) else {}
@@ -2351,10 +2382,7 @@ class MCCStatePusher:
                         try:
                             control = json.loads(body)
                             if isinstance(control, dict) and control.get("schema") == SCHEMA:
-                                ControlStore(self.cfg.state_db_path).ingest(control, agent_id=str(payload.get("agent_id") or ""), host_fingerprint=str(payload.get("host_fingerprint") or ""))
-                                ack = control.get("result_signing_key_ack")
-                                if isinstance(ack, dict) and ack.get("status") in {"active", "retired", "revoked"} and ack.get("key_id") == (payload.get("result_signing_key") or {}).get("key_id"):
-                                    ControlStore(self.cfg.state_db_path).record_key_ack(ack)
+                                _ingest_control_response(self.cfg.state_db_path, payload, control)
                         except (ValueError, json.JSONDecodeError):
                             pass
                     mark_state_snapshot_push_result_mysql(
