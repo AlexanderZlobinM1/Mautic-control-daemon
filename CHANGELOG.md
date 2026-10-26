@@ -1,3 +1,13 @@
+## 1.5.250 - 2026-10-26
+
+- Restore the complete durable MCC-managed runtime snapshot after any local
+  reset or update, covering every host and instance setting rather than only
+  instance rows; false/zero values remain valid settings and only explicit
+  local or MCC tombstones delete values.
+- Align the self-hosted commercial lane with the installation-scoped Portal
+  Stage2 poll, adopt/inventory, signed receipt/state, batch command and cursor
+  contract while preserving the legacy v2, corporate and standalone paths.
+
 ## 1.5.249 - 2026-10-26
 
 - Enforce the commercial Portal network boundary as an outbound-only MCD

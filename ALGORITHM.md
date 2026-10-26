@@ -869,13 +869,16 @@ effective `plugin_operations` содержит большой structured payload
 восстановления catalog scheduler снова применяет обычные
 bundle-registration, slot и resource guards.
 После смены версии/источника MCD первый запуск помечается как post-update
-recovery. Пропавшее или обнулённое mutable runtime include в этом запуске не
-является изменением оператора: MCD восстанавливает полный durable runtime
-snapshot и свежий MCC snapshot, причём восстанавливаются все MCC-allowed
-runtime keys, а не только scheduler/plugin subset; явный MCC tombstone имеет
-приоритет. Этот полный snapshot материализуется обратно в mutable include до
-перезагрузки конфига и старта scheduler, поэтому потеря части файла не может
-выглядеть как намеренное удаление настроек.
+recovery. Пропавший или обнулённый mutable runtime include в этом запуске и
+при обычном восстановлении после сброса не является изменением оператора: MCD
+восстанавливает полный durable runtime snapshot и свежий MCC snapshot,
+причём восстанавливаются все MCC-allowed host- и instance-runtime keys, а не
+только scheduler/plugin subset; false/zero остаются валидными значениями,
+пустой контейнер считается потерянной projection-частью, если нет явного
+локального tombstone. Явный MCC tombstone имеет приоритет. Этот полный snapshot
+материализуется обратно в mutable include до перезагрузки конфига и старта
+scheduler, поэтому потеря части файла не может выглядеть как намеренное
+удаление настроек.
 Этот режим включается до первого MCC poll: сброшенный локальный projection не
 может получить свежий `mcd` timestamp и победить canonical MCC snapshot.
 Реальное локальное изменение MCD по-прежнему фиксируется своим
@@ -1236,12 +1239,15 @@ SSH, reverse connection, inbound listener, bind, or public host reachability
 through this lane. The corporate MCC transport remains a separate path.
 
 Before processing a delivery MCD durably records the delivery, its prior
-cursor, next cursor and installation binding. The cursor advances only after
-the terminal receipt and all earlier receipts are accepted by Portal. A daemon
-restart therefore resumes the saved delivery or the durable receipt queue;
-replay uses the existing job and stage idempotency keys and never re-runs a
-completed scenario. A Portal/network failure leaves the command queued at
-Portal and records an exponential, durable retry deadline. The next outbound
-cycle drains receipts first, then resumes the saved delivery or polls with the
-last cursor; no scheduler or standalone work is blocked. Backoff is applied
-only to transport failures, not to local signature/applicability rejection.
+cursor, next cursor and installation binding. Stage2 uses the exact
+installation-scoped poll, adopt/inventory and adopt-receipts routes. The
+complete signed inventory is sent on adoption and on subsequent changes. Every
+returned command is retained in order; the cursor advances only after the
+terminal receipt for each command and all earlier receipts are accepted by
+Portal. A daemon restart therefore resumes the saved batch or the durable
+receipt queue; replay uses command/job idempotency keys and never re-runs a
+completed scenario. A Portal/network failure leaves commands queued at Portal
+and records an exponential, durable retry deadline. The next outbound cycle
+drains receipts first, then resumes the saved batch or polls with the last
+cursor; no scheduler or standalone work is blocked. Backoff is applied only
+to transport failures, not to local signature/applicability rejection.

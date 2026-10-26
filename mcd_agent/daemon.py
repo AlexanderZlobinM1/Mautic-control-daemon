@@ -153,6 +153,7 @@ from mcd_agent.runtime_sync_v3 import (
     intent_id as _runtime_sync_v3_intent_id,
     resolution_seen as _runtime_sync_v3_resolution_seen,
     runtime_changes as _runtime_sync_v3_changes,
+    three_way_merge as _runtime_sync_v3_three_way_merge,
 )
 from mcd_agent.ring_utils import advance_ring_after_launch as _advance_ring_after_launch
 from mcd_agent.ring_utils import mark_ring_entity_executed as _mark_ring_entity_executed
@@ -232,7 +233,7 @@ from mcd_agent.state_backend import (
     normalized_state_backend,
 )
 from mcd_agent.commercial_self_hosted import ExternalProcessPolicy, SelfHostedPortalWorker, SelfHostedScenarioExecutor
-from mcd_agent.commercial_portal import CommercialState, PortalClient
+from mcd_agent.commercial_portal import CommercialState, PortalClient, canonical_json
 
 _CMD_SEP = "\x1f"
 _M4_CAMPAIGN_DELETED_CLAUSE_RE = re.compile(r"\s+AND\s*\(?\s*c\.deleted\s+IS\s+NULL\s*\)?", re.IGNORECASE)
@@ -293,6 +294,155 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
                 runner_argv if isinstance(runner_argv, list) else None,
                 timeout_sec=int(state.get("commercial_scenario_runner_timeout_sec") or 1800),
             )
+            runtime_store = TaskStore(config.state_db_path)
+
+            def handle_runtime_command(command: Mapping[str, Any]) -> Mapping[str, Any]:
+                """Apply Portal's generic v3 intent through MCD primitives."""
+                local_cfg = load_config(config.config_file_path, allow_recover_from_mcc=False)
+                current = local_runtime_overrides(local_cfg)
+                choice = str(command.get("choice") or command.get("resolution") or "").strip().lower()
+                value = command.get("value")
+                if choice in {"host", "keep_host"}:
+                    resolved = dict(current)
+                elif choice in {"central", "keep_central", "merged"} and isinstance(value, Mapping):
+                    resolved = dict(value)
+                else:
+                    base = command.get("base") if isinstance(command.get("base"), Mapping) else {}
+                    changes = command.get("changes") if isinstance(command.get("changes"), Mapping) else {}
+                    central = dict(base)
+                    central.update(dict(changes))
+                    merge = _runtime_sync_v3_three_way_merge(
+                        base,
+                        central,
+                        current,
+                        semantic_groups=command.get("semantic_conflict_groups", []),
+                    )
+                    if merge["status"] == "conflict":
+                        runtime_store.put_runtime_sync(
+                            _RUNTIME_SYNC_V3_KEY,
+                            {
+                                "schema": "mcd-runtime-sync-v3-state-v1",
+                                "status": "conflict",
+                                "conflict": merge,
+                                "base_revision": command.get("base_revision"),
+                            },
+                        )
+                        return {"status": "conflict", "conflict": merge["conflicts"]}
+                    resolved = dict(merge["merged"])
+                _persist_resolved_runtime_to_config(
+                    local_cfg,
+                    current,
+                    resolved,
+                    {},
+                    full_snapshot=True,
+                )
+                applied = apply_remote_overrides(
+                    load_config(config.config_file_path, allow_recover_from_mcc=False),
+                    resolved,
+                )
+                runtime_store.put_runtime_sync("mcc_runtime", resolved)
+                runtime_store.put_runtime_sync("local_runtime", resolved)
+                runtime_store.put_runtime_sync(
+                    _RUNTIME_SYNC_V3_KEY,
+                    {
+                        "schema": "mcd-runtime-sync-v3-state-v1",
+                        "status": "accepted",
+                        "base_revision": command.get("result_revision") or command.get("base_revision"),
+                        "base": resolved,
+                        "changes": {},
+                    },
+                )
+                return {
+                    "status": "succeeded",
+                    "applied_keys": list(applied.get("applied_keys", [])),
+                    "blocked_keys": list(applied.get("blocked_keys", [])),
+                }
+
+            def inventory_snapshot(_installation_id: str) -> Mapping[str, Any]:
+                """Build the complete secret-free host/instance inventory."""
+                local_cfg = load_config(config.config_file_path, allow_recover_from_mcc=False)
+                runtime = local_runtime_overrides(local_cfg)
+                instances = InstanceInventory(config.state_db_path).list_instances()
+                desired_state = runtime_store.get_runtime_sync("mcc_runtime_desired_state")
+                host_revision = int(desired_state.get("revision") or 0) if isinstance(desired_state, Mapping) else 0
+                sync_state = runtime_store.get_runtime_sync(_RUNTIME_SYNC_V3_KEY)
+                pending_intent = None
+                conflict = None
+                if isinstance(sync_state, Mapping):
+                    if str(sync_state.get("status") or "").lower() == "queued":
+                        candidate = {
+                            key: sync_state.get(key)
+                            for key in (
+                                "desired_state_sync_protocol",
+                                "scope",
+                                "scope_key",
+                                "origin",
+                                "base_revision",
+                                "base",
+                                "changes",
+                                "idempotency_key",
+                                "semantic_conflict_groups",
+                            )
+                        }
+                        if all(candidate.get(key) is not None for key in ("scope", "scope_key", "base_revision", "base", "changes", "idempotency_key", "semantic_conflict_groups")):
+                            pending_intent = candidate
+                    candidate_conflict = sync_state.get("conflict")
+                    if isinstance(candidate_conflict, Mapping) and all(key in candidate_conflict for key in ("id", "scope", "scope_key", "base_revision", "base", "central", "host", "conflicts", "semantic_conflict_groups", "status")):
+                        conflict = dict(candidate_conflict)
+                sync = {
+                    "desired_state_sync_protocol": 3,
+                    "pending_intent": pending_intent,
+                    "conflict": conflict,
+                }
+                def settings(values: Mapping[str, Any]) -> dict[str, Any]:
+                    clean = dict(values)
+                    return {
+                        "values": clean,
+                        "revision": host_revision,
+                        "etag": "sha256:" + hashlib.sha256(canonical_json(clean)).hexdigest(),
+                        "sync": sync,
+                    }
+                scoped = instance_desired_states(runtime, instances)
+                rows = []
+                for inst in instances:
+                    uid = str(getattr(inst, "instance_uid", "") or "").strip()
+                    if not uid:
+                        continue
+                    rows.append(
+                        {
+                            "instance_id": uid,
+                            "display_name": str(getattr(inst, "name", "") or uid),
+                            "root": str(getattr(inst, "root", "") or uid),
+                            "mautic_version": str(getattr(inst, "mautic_major", None) or "unknown"),
+                            "status": "active" if Path(str(getattr(inst, "root", "") or "")).exists() else "missing",
+                            "capabilities": sorted(str(item) for item in (getattr(inst, "runtime_capabilities", []) or [])),
+                            "settings": settings(scoped.get(uid, {})),
+                        }
+                    )
+                rows.sort(key=lambda item: str(item["instance_id"]))
+                return {
+                    "schema": "portal-mcd-inventory-snapshot-v1",
+                    "contract_version": "1.0",
+                    "request_id": f"inventory-{int(time.time() * 1000)}",
+                    "binding": {
+                        "agent_id": agent_id,
+                        "installation_id": _installation_id,
+                        "host_fingerprint": host_fingerprint,
+                        "commercial_key_id": commercial_key_id,
+                    },
+                    "snapshot_revision": str(host_revision),
+                    "observed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "complete": True,
+                    "host": {
+                        "mcd_version": __version__,
+                        "profile": str(local_cfg.profile_name or "commercial"),
+                        "service_status": "active",
+                        "scheduler_paused": False,
+                        "settings": settings(runtime),
+                    },
+                    "instances": rows,
+                }
+
             worker = SelfHostedPortalWorker(
                 PortalClient(state),
                 SelfHostedScenarioExecutor(state, runner=runner.run),
@@ -303,6 +453,8 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
                 commercial_key_id=commercial_key_id,
                 agent_id=agent_id,
                 host_fingerprint=host_fingerprint,
+                inventory_provider=inventory_snapshot,
+                runtime_command_handler=handle_runtime_command,
             )
         except Exception:
             disabled("commercial_worker_material_invalid")
@@ -861,6 +1013,64 @@ def _merge_missing_runtime_values(
             merged[text_key] = next_entries
         elif text_key not in merged:
             merged[text_key] = deepcopy(value)
+    return merged
+
+
+def _runtime_value_looks_reset(value: object) -> bool:
+    """Recognize a storage/config reset without treating false/zero as loss."""
+    return value is None or (
+        isinstance(value, (str, bytes, Mapping, list, tuple, set)) and len(value) == 0
+    )
+
+
+def _merge_recovered_runtime_values(
+    current_runtime: Mapping[str, Any],
+    fallback_runtime: Mapping[str, Any],
+    metadata: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Restore every missing/reset field while preserving explicit local deletes.
+
+    A mutable runtime include can be replaced by an update or truncated by a
+    failed write.  The durable snapshot is therefore authoritative for fields
+    that disappeared or became empty.  A real local deletion is represented by
+    a non-bootstrap MCD tombstone and must not be resurrected here.
+    """
+    merged = deepcopy(dict(current_runtime))
+    for raw_key, fallback_value in fallback_runtime.items():
+        key = str(raw_key)
+        if _is_instance_runtime_map_key(key) and isinstance(fallback_value, Mapping):
+            current_rows = merged.get(key)
+            current_rows = dict(current_rows) if isinstance(current_rows, Mapping) else {}
+            next_rows = dict(current_rows)
+            for raw_uid, value in fallback_value.items():
+                uid = str(raw_uid)
+                existing_uid = _matching_instance_runtime_entry(next_rows, uid)
+                existing_value = next_rows.get(existing_uid) if existing_uid is not None else None
+                stamp = _runtime_metadata_get(metadata, "instance", key, uid)
+                local_delete = (
+                    isinstance(stamp, Mapping)
+                    and str(stamp.get("source") or "").lower() == "mcd"
+                    and bool(stamp.get("tombstone"))
+                    and not str(stamp.get("event_id") or "").startswith("bootstrap:")
+                )
+                if local_delete:
+                    continue
+                if existing_uid is None or _runtime_value_looks_reset(existing_value):
+                    next_rows[uid] = deepcopy(value)
+            if next_rows:
+                merged[key] = next_rows
+            continue
+        stamp = _runtime_metadata_get(metadata, "host", key)
+        local_delete = (
+            isinstance(stamp, Mapping)
+            and str(stamp.get("source") or "").lower() == "mcd"
+            and bool(stamp.get("tombstone"))
+            and not str(stamp.get("event_id") or "").startswith("bootstrap:")
+        )
+        if local_delete:
+            continue
+        if key not in merged or _runtime_value_looks_reset(merged.get(key)):
+            merged[key] = deepcopy(fallback_value)
     return merged
 
 
@@ -1826,31 +2036,20 @@ def _initialize_local_runtime_baseline(
         current = recovered_after_update
         stored = recovered_after_update
 
-    # A package/update may leave the mutable file without an instance row even
-    # though the durable local baseline still has it. Restore only rows that
-    # are also absent from the last known MCC/accepted snapshot; an explicit
-    # local deletion against a present remote row remains a real local delta.
-    recoverable = deepcopy(stored)
-    for key, rows in _missing_instance_runtime_values(stored, remote_for_recovery).items():
-        current_entries = current.get(key)
-        if not isinstance(current_entries, dict):
-            recoverable[str(key)] = deepcopy(stored.get(key, {}))
-            continue
-        missing_rows = {
-            str(uid): deepcopy(value)
-            for uid, value in rows.items()
-            if _matching_instance_runtime_entry(current_entries, uid) is None
-        }
-        if missing_rows:
-            existing = recoverable.get(key)
-            existing = dict(existing) if isinstance(existing, dict) else {}
-            existing.update(missing_rows)
-            recoverable[str(key)] = existing
-    recovered = _merge_missing_instance_runtime_values(current, recoverable)
-    _persist_recovered_instance_runtime(config, current, recovered)
+    # A package/update or failed config write may remove any part of the
+    # mutable file, not just an instance row. Restore the complete durable
+    # baseline, then fill from the latest MCC snapshot. Empty containers are
+    # treated as reset projections; false/zero values remain real settings.
+    raw_metadata = _runtime_metadata_normalize(store.get_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY))
+    recoverable = _merge_recovered_runtime_values(current, stored, raw_metadata)
+    recoverable = _merge_recovered_runtime_values(recoverable, remote_for_recovery, raw_metadata)
+    remote_metadata = _runtime_metadata_normalize(store.get_runtime_sync(_MCC_RUNTIME_METADATA_KEY))
+    recoverable = _remove_remote_tombstoned_runtime_values(recoverable, remote_metadata)
+    if recoverable != current:
+        _persist_recovered_runtime_values(config, current, recoverable)
+    recovered = recoverable
     current = recovered
 
-    raw_metadata = _runtime_metadata_normalize(store.get_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY))
     local_edit = _has_authoritative_local_runtime_edit(raw_metadata, stored, current)
     metadata = _runtime_metadata_for_snapshot(raw_metadata, stored, source="mcd")
     if current != stored and local_edit:

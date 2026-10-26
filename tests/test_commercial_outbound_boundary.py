@@ -226,7 +226,103 @@ def test_portal_client_posts_poll_envelope_and_keeps_cursor_until_worker_commit(
     client._request = fake_request
     assert client.pull_job(installation_id="installation-1", cursor="", wait_seconds=30) is None
     assert captured["method"] == "POST"
-    assert captured["path"] == "agents/agent-1/poll"
+    assert captured["path"] == "agents/agent-1/installations/installation-1/poll"
     assert captured["payload"]["direction"] == "mcd_to_portal"
     assert captured["payload"]["wait_ms"] == 30_000
-    assert state.get("commercial_portal_cursor") == "cursor-1"
+    assert state.get("commercial_portal_cursor") is None
+
+
+def test_stage2_adoption_and_batch_commands_are_durable_and_ordered(tmp_path):
+    clock = _Clock()
+    etag = "sha256:" + "a" * 64
+
+    class Portal:
+        def __init__(self):
+            self.polls = 0
+            self.adoptions = []
+            self.receipts = []
+
+        def adopt(self, **kwargs):
+            self.adoptions.append(kwargs)
+            return {"status": "adopted"}
+
+        def pull_job(self, **kwargs):
+            self.polls += 1
+            assert kwargs["installation_id"] == "installation-1"
+            assert kwargs["cursor"] == "" if self.polls == 1 else False
+            if self.polls > 1:
+                raise AssertionError("the next command must come from the saved batch")
+            return {
+                "cursor": "cursor-batch-1",
+                "commands": [
+                    {
+                        "schema": "portal-mcd-command-noop-v1",
+                        "command_id": "noop-1",
+                        "request_id": "request-1",
+                        "idempotency_key": "noop-key-1",
+                        "expected_standalone_etag": etag,
+                    },
+                    {
+                        "schema": "portal-mcd-command-noop-v1",
+                        "command_id": "noop-2",
+                        "request_id": "request-2",
+                        "idempotency_key": "noop-key-2",
+                        "expected_standalone_etag": etag,
+                    },
+                ],
+            }
+
+        def send_receipt(self, payload, **kwargs):
+            self.receipts.append((payload, kwargs))
+            return {}
+
+    portal = Portal()
+    worker, state, _executor = _worker(tmp_path, portal, clock)
+    worker.context["standalone_etag"] = etag
+
+    first = worker.run_once()
+    assert first["status"] == "succeeded"
+    assert state.get("commercial_portal_cursor") is None
+    assert state.get("commercial_self_hosted_pending_delivery_v1")["job"]["commands"][0]["command_id"] == "noop-2"
+    assert portal.adoptions and portal.adoptions[0]["installation_id"] == "installation-1"
+
+    second = worker.run_once()
+    assert second["status"] == "succeeded"
+    assert state.get("commercial_portal_cursor") == "cursor-batch-1"
+    assert state.get("commercial_self_hosted_pending_delivery_v1") is None
+    assert [item[0]["command_id"] for item in portal.receipts if item[0].get("schema") == "portal-mcd-command-noop-receipt-v1"] == ["noop-1", "noop-2"]
+
+
+def test_stage2_v3_command_is_handled_and_receipted(tmp_path):
+    class Portal:
+        def __init__(self):
+            self.receipts = []
+
+        def pull_job(self, **_kwargs):
+            return {
+                "cursor": "cursor-v3-1",
+                "commands": [{
+                    "schema": "mcc-desired-runtime-sync-v3",
+                    "desired_state_sync_protocol": 3,
+                    "command_id": "sync-1",
+                    "request_id": "sync-request-1",
+                    "idempotency_key": "sync-key-1",
+                    "runtime_overrides": {"scheduler_host_max_parallel": 8},
+                }],
+            }
+
+        def send_receipt(self, payload, **_kwargs):
+            self.receipts.append(payload)
+            return {}
+
+    portal = Portal()
+    worker, state, _executor = _worker(tmp_path, portal, _Clock())
+    worker.runtime_command_handler = lambda command: {"status": "succeeded", "applied_keys": sorted(command["runtime_overrides"])}
+
+    result = worker.run_once()
+
+    assert result["status"] == "succeeded"
+    assert state.get("commercial_portal_cursor") == "cursor-v3-1"
+    receipt = next(item for item in portal.receipts if item.get("schema") == "portal-mcd-command-receipt-v1")
+    assert receipt["command_id"] == "sync-1"
+    assert receipt["status"] == "succeeded"

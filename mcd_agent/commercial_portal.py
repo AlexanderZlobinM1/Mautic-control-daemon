@@ -105,11 +105,11 @@ def verify_portal_mcd_poll_response(response: Mapping[str, Any], *, public_keys:
     binding = response.get("binding")
     if not isinstance(binding, Mapping) or any(str(binding.get(key) or "") != str(expected_binding.get(key) or "") for key in ("agent_id", "installation_id", "host_fingerprint", "commercial_key_id")):
         raise ValueError("portal_mcd_poll_response_binding_mismatch")
-    next_cursor = response.get("next_cursor")
+    next_cursor = response.get("next_command_cursor", response.get("next_cursor"))
     commands = response.get("commands")
     retry_after_ms = response.get("retry_after_ms")
     signature = response.get("portal_signature")
-    if not isinstance(next_cursor, str) or not next_cursor or not isinstance(commands, list) or any(not isinstance(command, Mapping) for command in commands) or isinstance(retry_after_ms, bool) or not isinstance(retry_after_ms, int) or retry_after_ms < 0 or retry_after_ms > PORTAL_MCD_MAX_BACKOFF_MS or not isinstance(signature, Mapping):
+    if not ((isinstance(next_cursor, str) and next_cursor) or (isinstance(next_cursor, int) and not isinstance(next_cursor, bool) and next_cursor >= 0)) or not isinstance(commands, list) or any(not isinstance(command, Mapping) for command in commands) or isinstance(retry_after_ms, bool) or not isinstance(retry_after_ms, int) or retry_after_ms < 0 or retry_after_ms > PORTAL_MCD_MAX_BACKOFF_MS or not isinstance(signature, Mapping):
         raise ValueError("portal_mcd_poll_response_invalid")
     key_id = str(signature.get("key_id") or "")
     key = public_keys.get(key_id)
@@ -122,7 +122,35 @@ def verify_portal_mcd_poll_response(response: Mapping[str, Any], *, public_keys:
     except Exception as exc:
         raise ValueError("portal_mcd_poll_response_signature_invalid") from exc
     _assert_no_contract_secrets(response)
-    return {"next_cursor": next_cursor, "commands": [dict(command) for command in commands], "retry_after_ms": retry_after_ms}
+    return {"next_cursor": str(next_cursor), "commands": [dict(command) for command in commands], "retry_after_ms": retry_after_ms}
+
+
+def verify_portal_mcd_attach_response(response: Mapping[str, Any], *, public_keys: Mapping[str, str], expected_request_id: str, expected_idempotency_key: str, expected_binding: Mapping[str, str]) -> dict[str, Any]:
+    """Validate the signed installation binding returned by Portal adoption."""
+    if response.get("schema") != "portal-mcd-attach-v1" or response.get("contract_version") != PORTAL_MCD_ADOPT_CONTRACT_VERSION:
+        raise ValueError("portal_mcd_attach_response_invalid")
+    if response.get("request_id") != expected_request_id or response.get("idempotency_key") != expected_idempotency_key:
+        raise ValueError("portal_mcd_attach_response_idempotency_mismatch")
+    binding = response.get("binding")
+    if not isinstance(binding, Mapping) or any(str(binding.get(key) or "") != str(expected_binding.get(key) or "") for key in ("agent_id", "installation_id", "host_fingerprint", "commercial_key_id")):
+        raise ValueError("portal_mcd_attach_response_binding_mismatch")
+    connection = response.get("connection")
+    inventory = response.get("inventory")
+    signature = response.get("portal_signature")
+    if response.get("status") not in {"attached", "already_attached"} or not isinstance(connection, Mapping) or connection.get("status") != "active" or connection.get("channel_contract") != PORTAL_MCD_ADOPT_CONTRACT_VERSION or not isinstance(inventory, Mapping) or inventory.get("schema") != "portal-mcd-inventory-snapshot-v1" or inventory.get("complete") is not True or not isinstance(signature, Mapping):
+        raise ValueError("portal_mcd_attach_response_invalid")
+    key_id = str(signature.get("key_id") or "")
+    key = public_keys.get(key_id)
+    if not key or signature.get("algorithm") != "ed25519":
+        raise ValueError("portal_mcd_attach_response_signer_unknown")
+    unsigned = dict(response)
+    unsigned.pop("portal_signature", None)
+    try:
+        Ed25519PublicKey.from_public_bytes(_unb64(key)).verify(_unb64(str(signature.get("value") or "")), canonical_json(unsigned))
+    except Exception as exc:
+        raise ValueError("portal_mcd_attach_response_signature_invalid") from exc
+    _assert_no_contract_secrets(response)
+    return dict(response)
 
 
 def verify_signed_job(job: Mapping[str, Any], public_keys: Mapping[str, str], *, now: float | None = None) -> dict[str, Any]:
@@ -528,7 +556,7 @@ class PortalClient:
             wait_ms=max(0, min(PORTAL_MCD_MAX_LONG_POLL_MS, int(wait_seconds) * 1000)),
             backoff_ms=backoff_ms,
         )
-        result = self._request("POST", f"agents/{agent_id}/poll", payload, idempotency_key=str(request_state["idempotency_key"]))
+        result = self._request("POST", f"agents/{agent_id}/installations/{installation_id}/poll", payload, idempotency_key=str(request_state["idempotency_key"]))
         keys = self.state.get("portal_job_signing_keys")
         verified = verify_portal_mcd_poll_response(
             result,
@@ -542,14 +570,16 @@ class PortalClient:
         self.state.put("commercial_portal_server_retry_after", time.time() + (retry_after_ms / 1000.0))
         commands = verified["commands"]
         if not commands:
-            self.state.put("commercial_portal_cursor", verified["next_cursor"])
+            # Poll/lease is observational. The local ACK cursor advances only
+            # after the worker has delivered contiguous command receipts.
             return None
-        command = commands[0]
-        if command.get("schema") == SELF_HOSTED_MCD_JOB_SCHEMA and command.get("contract_version") == SELF_HOSTED_MCD_CONTRACT_VERSION:
-            return {"cursor": verified["next_cursor"], "job": command}
-        if command.get("schema") == "portal-mcd-job-delivery-v1" and command.get("contract_version") == CONTRACT_VERSION:
-            return {"cursor": verified["next_cursor"], "job": command.get("job") if isinstance(command.get("job"), dict) else command}
-        return {"cursor": verified["next_cursor"], "command": command}
+        delivery_cursors = [
+            int(command["delivery_cursor"])
+            for command in commands
+            if isinstance(command.get("delivery_cursor"), int) and not isinstance(command.get("delivery_cursor"), bool)
+        ]
+        cursor_next = str(delivery_cursors[-1]) if len(delivery_cursors) == len(commands) else verified["next_cursor"]
+        return {"cursor": cursor_next, "commands": commands}
 
     def download_artifact(self, *, path: str, grant: str, expected_size: int) -> bytes:
         base = str(self.state.get("portal_api_base") or "").rstrip("/")
@@ -567,14 +597,57 @@ class PortalClient:
             raise RuntimeError("commercial_artifact_size_mismatch")
         return body
 
-    def send_receipt(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def send_receipt(self, payload: dict[str, Any], *, installation_id: str | None = None) -> dict[str, Any]:
         agent_id = str(self.state.get("agent_id") or "")
         private = Ed25519PrivateKey.from_private_bytes(_unb64(str(self.state.get("agent_private_key") or "")))
         signed = dict(payload)
         signed.pop("agent_signature", None)
         payload = dict(payload)
         payload["agent_signature"] = {"algorithm": "ed25519", "key_id": str(self.state.get("agent_key_id") or ""), "value": _b64(private.sign(canonical_json(signed)))}
-        return self._request("POST", f"agents/{agent_id}/receipts", payload, idempotency_key=str(payload.get("idempotency_key") or payload.get("job_id") or ""))
+        installation = str(installation_id or payload.get("installation_id") or self.state.get("commercial_active_installation_id") or "")
+        adopt_schema = {"portal-mcd-command-noop-receipt-v1", "portal-mcd-command-receipt-v1", "portal-mcd-connection-state-v1"}
+        if str(payload.get("schema") or "") in adopt_schema:
+            if not installation:
+                raise RuntimeError("commercial_installation_id_missing")
+            path = f"agents/{agent_id}/installations/{installation}/adopt-receipts"
+        else:
+            path = f"agents/{agent_id}/receipts"
+        return self._request("POST", path, payload, idempotency_key=str(payload.get("idempotency_key") or payload.get("job_id") or ""))
+
+    def _agent_signed(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        private = Ed25519PrivateKey.from_private_bytes(_unb64(str(self.state.get("agent_private_key") or "")))
+        signed = dict(payload)
+        signed.pop("agent_signature", None)
+        signed["agent_signature"] = {"algorithm": "ed25519", "key_id": str(self.state.get("agent_key_id") or ""), "value": _b64(private.sign(canonical_json({key: value for key, value in payload.items() if key != "agent_signature"})))}
+        return signed
+
+    def _commercial_binding(self, installation_id: str) -> dict[str, str]:
+        return {
+            "agent_id": str(self.state.get("agent_id") or ""),
+            "installation_id": str(installation_id),
+            "host_fingerprint": str(self.state.get("host_fingerprint") or _host_fingerprint()),
+            "commercial_key_id": str(self.state.get("commercial_key_id") or ""),
+        }
+
+    def adopt(self, *, installation_id: str, inventory: Mapping[str, Any], request_id: str | None = None, idempotency_key: str | None = None) -> dict[str, Any]:
+        request_id = str(request_id or _b64(os.urandom(16)))
+        idempotency_key = str(idempotency_key or _b64(os.urandom(16)))
+        body = {"schema": "portal-mcd-adopt-request-v1", "contract_version": PORTAL_MCD_ADOPT_CONTRACT_VERSION, "request_id": request_id, "idempotency_key": idempotency_key, "binding": self._commercial_binding(installation_id), "inventory": dict(inventory)}
+        response = self._request("POST", f"agents/{body['binding']['agent_id']}/installations/{installation_id}/adopt", body, idempotency_key=idempotency_key)
+        portal_keys = self.state.get("portal_job_signing_keys")
+        return verify_portal_mcd_attach_response(
+            response,
+            public_keys=portal_keys if isinstance(portal_keys, dict) else {},
+            expected_request_id=request_id,
+            expected_idempotency_key=idempotency_key,
+            expected_binding=body["binding"],
+        )
+
+    def send_inventory(self, *, installation_id: str, inventory: Mapping[str, Any], request_id: str | None = None, idempotency_key: str | None = None) -> dict[str, Any]:
+        request_id = str(request_id or inventory.get("request_id") or _b64(os.urandom(16)))
+        idempotency_key = str(idempotency_key or request_id)
+        body = {"request_id": request_id, "idempotency_key": idempotency_key, "binding": self._commercial_binding(installation_id), "inventory": dict(inventory)}
+        return self._request("POST", f"agents/{body['binding']['agent_id']}/installations/{installation_id}/inventory", body, idempotency_key=idempotency_key)
 
     def _activation_request(self, base_url: str, payload: dict[str, Any]) -> dict[str, Any]:
         if self.activation_transport is not None:

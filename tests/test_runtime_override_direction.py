@@ -705,6 +705,45 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             )
         self.assertNotIn("scheduler_host_max_parallel", baseline)
 
+    def test_runtime_reset_restores_all_durable_settings_not_only_instance_rows(self) -> None:
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        class MemoryStore:
+            def __init__(self, values=None):
+                self.values = dict(values or {})
+
+            def get_runtime_sync(self, key):
+                return self.values.get(key)
+
+            def put_runtime_sync(self, key, value):
+                self.values[key] = dict(value)
+
+        desired = {
+            "plugin_operations": {
+                "/var/www/neodent/public_html": [{"operation_key": "stats", "interval_sec": 600}]
+            },
+            "scheduler_host_max_parallel": 8,
+            "segment_full_scan_interval_sec": 47,
+            "scheduler_elastic_slots_enabled": True,
+            "db_watchdog": {"enabled": True, "max_connections": 120},
+        }
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "mcd.toml"
+            # The update/reset left a valid but empty runtime projection.
+            path.write_text(
+                '[profile]\nname = "farm-hiload"\n\n[runtime]\nplugin_operations = {}\n',
+                encoding="utf-8",
+            )
+            cfg = SimpleNamespace(config_file_path=str(path))
+            store = MemoryStore({"local_runtime": desired, "mcc_runtime": desired})
+
+            baseline, _ = daemon._initialize_local_runtime_baseline(cfg, store)
+
+            self.assertEqual(baseline, desired)
+            restored = local_runtime_overrides(load_config(str(path), allow_recover_from_mcc=False))
+            self.assertEqual(restored, desired)
+
     def test_restart_profile_snapshot_without_local_provenance_does_not_push(self) -> None:
         class MemoryStore:
             def __init__(self):
