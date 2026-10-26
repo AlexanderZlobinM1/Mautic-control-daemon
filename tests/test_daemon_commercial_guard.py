@@ -21,6 +21,7 @@ def test_default_factory_validates_material_and_constructs_one_worker(tmp_path, 
     state.put("host_fingerprint", "sha256:" + "a" * 64)
     state.put("portal_api_base", "https://portal.example/api/v1/commercial")
     state.put("agent_id", "agent-1")
+    state.put("commercial_key_id", "commercial-key-1")
     state.put("installation_ids", {"local-1": "inst-1", "local-2": "inst-2"})
     state.put("portal_job_signing_keys", {"portal-1": "key"})
     state.put("portal_mcc_publisher_keys", {"mcc-1": "key"})

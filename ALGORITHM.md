@@ -22,7 +22,7 @@ post-step могут завершиться. Следующая совмести
 только незавершённую каталоговую remediation; native plugin operation не
 переисполняется из-за этого отказа.
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.246 (follow-up после immutable
+Актуальная редакция этого канона — MCD 1.5.247 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам
@@ -51,9 +51,10 @@ require Docker or alter native runtime execution.
 
 Commercial scenario failures are terminally observable: after a validated job
 has an execution error, MCD creates a bounded, secret-free
-`mcd-onboarding-terminal-receipt-v1` with `status=failed` before sending the
-rejected job ACK. If Portal receipt delivery fails, the exact signed receipt is
-stored as the durable pending receipt and retried after restart; exception text,
+`mcd-self-hosted-terminal-receipt-v2` with `status=failed` and explicit
+`rollback` before advancing the Portal cursor. If Portal receipt delivery
+fails, the exact unsigned receipt payload is stored in the ordered durable
+pending queue and retried after restart; exception text,
 subprocess output, SSH credentials and DNS credentials are never copied into
 the receipt. This is only transport/execution/retry behavior; external Portal
 artifacts remain the sole owner of bootstrap, OS, Mautic and scenario policy.
@@ -1146,36 +1147,38 @@ overrides such as `[backup]` and `[backup.schedule]`. Startup and reload must
 therefore preserve `backup.enabled` and schedule enablement from the effective
 local file when the entrypoint only supplies defaults or MCC bootstrap fields.
 
-### Commercial Portal scenario admission
+### Commercial Portal self-hosted scenario admission
 
-Commercial MCD is an outbound-only Portal lane. A delivered job is admitted
-only after Portal envelope, scope, expiry, nonce, command, applicability and
-Portal signature validation. The complete artifact is then hashed and checked
-against the Portal-delivered artifact signature and any separately referenced
-MCC publisher statement; MCD never fetches MCC directly and MCC is not the
-scenario authority.
-The artifact may contain only `portal-mcd-scenario-v1` with declared stages.
-Stage handlers are an injected registry: an unknown stage, schema, contract or
-compatibility value fails closed before execution.
+Commercial MCD is an outbound-only Portal lane. A delivered
+`portal-self-hosted-mcd-job-v2` is admitted only after exact account, commercial
+key, agent, installation, host, scenario and applicability binding, local-facts
+revalidation, expiry, nonce, idempotency and Portal signature validation. The
+bootstrap and scenario artifacts are separate HTTPS pins; each is downloaded,
+size/digest checked and verified against the MCC publisher signature. MCD never
+fetches MCC directly and MCC is not the scenario authority.
 
-Scenario progress is checkpointed by `job_id` and completed `stage_id` in the
-commercial state store. Re-delivery resumes from the checkpoint and does not
-repeat completed stages. A failed run executes registered rollback handlers in
-reverse order and writes a failed checkpoint. A successful run produces a
-monotonic Portal receipt payload signed by the host agent. This lane does not
-alter corporate MCC↔MCD, standalone mode, scheduler ownership, cron, or Mautic
-state semantics; existing-server discovery/registration and new-server
-bootstrap are scenario stages supplied by the owning operation, not hardcoded
-commercial policy in MCD.
+The only MCD execution primitive is the contract's `scenario.apply` v1.0. MCD
+passes the verified external scenario artifact to an allowlisted, non-shell
+runner process and owns no installer, OS, Mautic, scenario or primitive recipe.
+No fixed onboarding stage registry is constructed on this path. Progress is
+checkpointed by immutable `job_id`; replay of the same signed job returns the
+durable terminal receipt without re-executing the runner.
+
+Stage receipts use `mcd-self-hosted-stage-receipt-v2` with only
+`scenario_dispatch` and `execution`, statuses `queued|running|waiting|succeeded|failed`,
+mandatory installation binding and unique idempotency keys. Terminal receipts
+use `mcd-self-hosted-terminal-receipt-v2`, `succeeded|failed`, explicit
+`rollback`, the same binding and a monotonic sequence. Failed terminals are
+bounded and secret-free. Every unsent stage or terminal receipt is durable and
+retried in order after Portal outage or MCD restart.
 
 The commercial transport worker is a separate non-blocking Portal lane:
-`pull_job` → exact artifact download/admission → accepted acknowledgement →
-stage execution/checkpoint receipts → one terminal receipt. Its cursor and
-pending terminal receipt are durable in the commercial state store, so a
-restart retries the same receipt and resumes completed stages without
-re-executing them. Network/Portal failure never pauses corporate or standalone
-scheduler work. Onboarding stage and terminal receipt schemas are validated
-before they are sent.
+`pull_job` → exact v2 job admission → both pinned artifact downloads → local
+facts guard → generic runner → ordered stage/terminal receipts. Its cursor and
+pending receipt queue are durable in the commercial state store. Network/Portal
+failure never pauses corporate or standalone scheduler work. The commercial
+key is durable identity metadata only; raw credentials and future quota,
+billing or tariff semantics are not part of MCD.
 
 `daemon.run_loop` may start at most one Portal worker only when the effective
 profile is `commercial`, the caller supplies a validated commercial worker

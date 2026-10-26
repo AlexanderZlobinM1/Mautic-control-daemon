@@ -221,8 +221,7 @@ from mcd_agent.state_backend import (
     mysql_state_table_names,
     normalized_state_backend,
 )
-from mcd_agent.commercial_execution import CommercialPortalWorker, CommercialScenarioExecutor
-from mcd_agent.commercial_onboarding import build_onboarding_primitive_registry
+from mcd_agent.commercial_self_hosted import ExternalProcessPolicy, SelfHostedPortalWorker, SelfHostedScenarioExecutor
 from mcd_agent.commercial_portal import CommercialState, PortalClient
 
 _CMD_SEP = "\x1f"
@@ -257,9 +256,9 @@ def _commercial_worker_allowed(config: AgentConfig, *, single_cycle: bool, facto
     )
 
 
-def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threading.Event], CommercialPortalWorker | None]:
+def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threading.Event], SelfHostedPortalWorker | None]:
     """Build the commercial worker from protected local state only."""
-    def build(_stop_event: threading.Event) -> CommercialPortalWorker | None:
+    def build(_stop_event: threading.Event) -> SelfHostedPortalWorker | None:
         state = CommercialState(config.state_db_path)
         def disabled(reason: str) -> None:
             state.put("commercial_worker_status", {"schema": "mcd-commercial-worker-status-v1", "status": "disabled", "reason": reason, "secret": None})
@@ -272,19 +271,28 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
         installations = state.get("installation_ids")
         portal_keys = state.get("portal_job_signing_keys")
         publisher_keys = state.get("portal_mcc_publisher_keys")
-        if not base.startswith("https://") or not credential or not agent_id or not isinstance(installations, dict) or not installations or not isinstance(portal_keys, dict) or not portal_keys or not isinstance(publisher_keys, dict) or not publisher_keys:
+        key_metadata = state.get("commercial_key_metadata")
+        commercial_key_id = str(state.get("commercial_key_id") or (key_metadata.get("commercial_key_id") if isinstance(key_metadata, dict) else "") or "")
+        host_fingerprint = str(state.get("host_fingerprint") or "")
+        if not base.startswith("https://") or not credential or not agent_id or not commercial_key_id or not host_fingerprint or not isinstance(installations, dict) or not installations or not isinstance(portal_keys, dict) or not portal_keys or not isinstance(publisher_keys, dict) or not publisher_keys:
             disabled("portal_runtime_material_incomplete")
             return None
         try:
-            worker = CommercialPortalWorker(
+            runner_argv = state.get("commercial_scenario_runner_argv")
+            runner = ExternalProcessPolicy(
+                runner_argv if isinstance(runner_argv, list) else None,
+                timeout_sec=int(state.get("commercial_scenario_runner_timeout_sec") or 1800),
+            )
+            worker = SelfHostedPortalWorker(
                 PortalClient(state),
-                CommercialScenarioExecutor(state, stage_handlers=build_onboarding_primitive_registry()),
+                SelfHostedScenarioExecutor(state, runner=runner.run),
                 installation_id=sorted(str(value) for value in installations.values()),
                 portal_keys={str(key): str(value) for key, value in portal_keys.items()},
                 publisher_keys={str(key): str(value) for key, value in publisher_keys.items()},
-                context={"platform": "linux-arm64" if platform.machine().lower() in {"aarch64", "arm64"} else "linux-amd64", "runtime": "host", "cron_ownership": "none"},
-                capabilities={"portal_scenario_execution_v1", "mcd_passive_activation_v1"},
-                preflight_required=True,
+                context={"platform": "linux-arm64" if platform.machine().lower() in {"aarch64", "arm64"} else "linux-amd64", "runtime": "host", "cron_ownership": "none", "local_facts_capabilities": ["package_manager.query", "portal_scenario_execution_v1", "mcd_passive_activation_v1"]},
+                commercial_key_id=commercial_key_id,
+                agent_id=agent_id,
+                host_fingerprint=host_fingerprint,
             )
         except Exception:
             disabled("commercial_worker_material_invalid")
@@ -16434,7 +16442,7 @@ def run_loop(
     single_cycle: bool = False,
     *,
     _test_stop_event: threading.Event | None = None,
-    _commercial_worker_factory: Callable[[threading.Event], CommercialPortalWorker | None] | None = None,
+    _commercial_worker_factory: Callable[[threading.Event], SelfHostedPortalWorker | None] | None = None,
 ) -> None:
     """Run the daemon."""
 
@@ -16786,7 +16794,7 @@ def run_loop(
     if commercial_mode and _commercial_worker_allowed(config, single_cycle=single_cycle, factory=_commercial_worker_factory):
         try:
             commercial_worker = _commercial_worker_factory(commercial_stop_event)
-            if not isinstance(commercial_worker, CommercialPortalWorker):
+            if not isinstance(commercial_worker, SelfHostedPortalWorker):
                 raise TypeError("commercial_worker_factory_invalid")
             commercial_thread = threading.Thread(
                 target=commercial_worker.run_forever,

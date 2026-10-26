@@ -1,3 +1,12 @@
+## 1.5.247 - 2026-10-26
+
+- Add the exact Portal self-hosted MCD v2 lane: strict job binding, local-facts
+  revalidation, separately pinned and signed external artifacts, bounded
+  external runner execution, v2 stage/terminal receipts, and durable receipt
+  retry across restart/outage.
+- Keep installer, OS, Mautic, scenario and primitive recipes outside MCD; the
+  commercial worker no longer constructs the fixed onboarding handler registry.
+
 ## 1.5.246 - 2026-10-26
 
 - Emit a bounded, secret-free durable terminal failure receipt for commercial

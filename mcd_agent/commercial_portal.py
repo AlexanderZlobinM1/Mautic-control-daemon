@@ -25,6 +25,15 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey,
 
 CONTRACT = "com.sales-snap.portal-commercial/1.0"
 CONTRACT_VERSION = "1.0"
+SELF_HOSTED_MCD_JOB_SCHEMA = "portal-self-hosted-mcd-job-v2"
+SELF_HOSTED_MCD_STAGE_RECEIPT_SCHEMA = "mcd-self-hosted-stage-receipt-v2"
+SELF_HOSTED_MCD_TERMINAL_RECEIPT_SCHEMA = "mcd-self-hosted-terminal-receipt-v2"
+SELF_HOSTED_MCD_CONTRACT_VERSION = "2.0"
+SELF_HOSTED_MCD_STAGE_IDS = frozenset({"scenario_dispatch", "execution"})
+SELF_HOSTED_MCD_STAGE_STATUSES = frozenset({"queued", "running", "waiting", "succeeded", "failed"})
+SELF_HOSTED_MCD_TERMINAL_STATUSES = frozenset({"succeeded", "failed"})
+SELF_HOSTED_MCD_ROLLBACK_STATUSES = frozenset({"not_attempted", "succeeded", "failed"})
+MCC_ARTIFACT_SIGNATURE_DOMAIN = b"com.sales-snap.portal-mcc/artifact-signature/1.0\n"
 MAX_ARTIFACT_BYTES = 512 * 1024 * 1024
 
 
@@ -145,6 +154,215 @@ def verify_mcc_artifact(job: Mapping[str, Any], artifact: bytes, publisher_keys:
     return {"kind": kind, "revision": str(package["revision"]), "sha256": "sha256:" + digest, "size_bytes": len(artifact), "media_type": str(package["media_type"])}
 
 
+def _require_sha256_digest(value: object, code: str) -> str:
+    digest = str(value or "").lower()
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        raise ValueError(code)
+    return digest
+
+
+def _require_contract_string(value: object, code: str, *, maximum: int = 512) -> str:
+    if not isinstance(value, str) or not value.strip() or len(value) > maximum:
+        raise ValueError(code)
+    return value.strip()
+
+
+def _assert_no_contract_secrets(value: object) -> None:
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            if re.search(r"password|private.?key|secret|activation.?code|agent.?credential|enrollment.?token|access.?token", str(key), re.I):
+                raise ValueError("self_hosted_mcd_secret_in_contract")
+            _assert_no_contract_secrets(child)
+    elif isinstance(value, list):
+        for child in value:
+            _assert_no_contract_secrets(child)
+
+
+def _public_commercial_key_metadata(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Persist only non-secret commercial-key identity metadata."""
+    def clean(item: object) -> object:
+        if isinstance(item, Mapping):
+            return {
+                str(key): clean(child)
+                for key, child in item.items()
+                if not re.search(r"password|private.?key|secret|activation.?code|agent.?credential|enrollment.?token|access.?token", str(key), re.I)
+            }
+        if isinstance(item, list):
+            return [clean(child) for child in item]
+        return item
+    result = clean(value)
+    return result if isinstance(result, dict) else {}
+
+
+def _self_hosted_facts_digest(facts: Mapping[str, Any]) -> str:
+    normalized = dict(facts)
+    normalized["capabilities"] = sorted(set(str(item) for item in normalized.get("capabilities", [])))
+    return _sha256(canonical_json(normalized))
+
+
+def _validate_self_hosted_facts(value: object) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("self_hosted_mcd_facts_invalid")
+    required = ("os_id", "os_version", "architecture", "package_manager", "capabilities", "target_kind")
+    if any(not isinstance(value.get(key), str) or not str(value.get(key)).strip() for key in required[:4]):
+        raise ValueError("self_hosted_mcd_facts_invalid")
+    if value.get("target_kind") not in {"new_server", "existing_server"}:
+        raise ValueError("self_hosted_mcd_facts_invalid")
+    capabilities = value.get("capabilities")
+    if not isinstance(capabilities, list) or any(not isinstance(item, str) or not item.strip() for item in capabilities):
+        raise ValueError("self_hosted_mcd_facts_invalid")
+    normalized = {
+        "os_id": str(value["os_id"]).strip(),
+        "os_version": str(value["os_version"]).strip(),
+        "architecture": str(value["architecture"]).strip(),
+        "package_manager": str(value["package_manager"]).strip(),
+        "capabilities": sorted(set(str(item).strip() for item in capabilities)),
+        "target_kind": str(value["target_kind"]),
+    }
+    if set(value) != set(normalized):
+        raise ValueError("self_hosted_mcd_facts_invalid")
+    return normalized
+
+
+def _validate_self_hosted_scenario(value: object) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("self_hosted_mcd_scenario_binding_invalid")
+    mode = value.get("mode")
+    if mode not in {"bootstrap", "scan"}:
+        raise ValueError("self_hosted_mcd_scenario_binding_invalid")
+    return {
+        "scenario_id": _require_contract_string(value.get("scenario_id"), "self_hosted_mcd_scenario_binding_invalid"),
+        "revision": _require_contract_string(value.get("revision"), "self_hosted_mcd_scenario_binding_invalid"),
+        "mode": mode,
+        "artifact_digest": _require_sha256_digest(value.get("artifact_digest"), "self_hosted_mcd_scenario_binding_invalid"),
+    }
+
+
+def _validate_self_hosted_artifact_pin(value: object, code: str) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError(code)
+    uri = value.get("artifact_uri")
+    if not isinstance(uri, str) or not uri.startswith("https://"):
+        raise ValueError(f"{code}_uri")
+    size = value.get("artifact_size_bytes")
+    if isinstance(size, bool) or not isinstance(size, int) or size <= 0 or size > MAX_ARTIFACT_BYTES:
+        raise ValueError(f"{code}_size")
+    signature = value.get("signature")
+    if not isinstance(signature, Mapping) or signature.get("algorithm") != "ed25519":
+        raise ValueError(f"{code}_signature")
+    return {
+        "artifact_uri": uri,
+        "artifact_digest": _require_sha256_digest(value.get("artifact_digest"), f"{code}_digest"),
+        "artifact_size_bytes": size,
+        "artifact_media_type": _require_contract_string(value.get("artifact_media_type"), f"{code}_media_type"),
+        "artifact_revision": _require_contract_string(value.get("artifact_revision"), f"{code}_revision"),
+        "signature": {
+            "algorithm": "ed25519",
+            "key_id": _require_contract_string(signature.get("key_id"), f"{code}_signature"),
+            "value": _require_contract_string(signature.get("value"), f"{code}_signature"),
+        },
+    }
+
+
+def verify_self_hosted_mcd_job(
+    job: Mapping[str, Any],
+    portal_keys: Mapping[str, str],
+    *,
+    expected_agent_id: str | None = None,
+    expected_installation_id: str | None = None,
+    expected_commercial_key_id: str | None = None,
+    expected_host_fingerprint: str | None = None,
+    now: float | None = None,
+) -> dict[str, Any]:
+    """Validate the exact Portal self-hosted MCD v2 envelope."""
+    if not isinstance(job, Mapping):
+        raise ValueError("self_hosted_mcd_job_invalid")
+    _assert_no_contract_secrets(job)
+    if job.get("schema") != SELF_HOSTED_MCD_JOB_SCHEMA or job.get("contract_version") != SELF_HOSTED_MCD_CONTRACT_VERSION:
+        raise ValueError("self_hosted_mcd_job_invalid")
+    required = ("job_id", "request_id", "idempotency_key", "account_id", "commercial_key_id", "agent_id", "installation_id", "host_fingerprint", "scenario", "applicability", "bootstrap_artifact", "scenario_artifact", "execution", "issued_at", "expires_at", "nonce", "portal_signature")
+    if any(not job.get(key) for key in required):
+        raise ValueError("self_hosted_mcd_job_fields_missing")
+    identity = {key: _require_contract_string(job.get(key), "self_hosted_mcd_job_invalid") for key in ("job_id", "request_id", "idempotency_key", "account_id", "commercial_key_id", "agent_id", "installation_id", "nonce")}
+    host_fingerprint = _require_sha256_digest(job.get("host_fingerprint"), "self_hosted_mcd_host_fingerprint_invalid")
+    for key, expected in (("agent_id", expected_agent_id), ("installation_id", expected_installation_id), ("commercial_key_id", expected_commercial_key_id), ("host_fingerprint", expected_host_fingerprint)):
+        if expected and identity.get(key, host_fingerprint if key == "host_fingerprint" else None) != expected:
+            raise ValueError("self_hosted_mcd_binding_mismatch")
+    scenario = _validate_self_hosted_scenario(job.get("scenario"))
+    applicability = job.get("applicability")
+    if not isinstance(applicability, Mapping):
+        raise ValueError("self_hosted_mcd_applicability_invalid")
+    facts = _validate_self_hosted_facts(applicability.get("facts"))
+    if _require_sha256_digest(applicability.get("facts_digest"), "self_hosted_mcd_facts_digest_invalid") != _self_hosted_facts_digest(facts):
+        raise ValueError("self_hosted_mcd_facts_digest_invalid")
+    bootstrap = _validate_self_hosted_artifact_pin(job.get("bootstrap_artifact"), "self_hosted_mcd_bootstrap_artifact_invalid")
+    scenario_artifact = _validate_self_hosted_artifact_pin(job.get("scenario_artifact"), "self_hosted_mcd_scenario_artifact_invalid")
+    if scenario_artifact["artifact_digest"] != scenario["artifact_digest"]:
+        raise ValueError("self_hosted_mcd_scenario_digest_mismatch")
+    execution = job.get("execution")
+    if not isinstance(execution, Mapping) or execution.get("primitive") != "scenario.apply" or execution.get("version") != "1.0":
+        raise ValueError("self_hosted_mcd_execution_invalid")
+    issued_text = _require_contract_string(job.get("issued_at"), "self_hosted_mcd_job_time_invalid")
+    expires_text = _require_contract_string(job.get("expires_at"), "self_hosted_mcd_job_time_invalid")
+    try:
+        issued = datetime.fromisoformat(issued_text.replace("Z", "+00:00")).timestamp()
+        expires = datetime.fromisoformat(expires_text.replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("self_hosted_mcd_job_time_invalid") from exc
+    current = time.time() if now is None else float(now)
+    if expires <= issued or current < issued - 60 or current >= expires:
+        raise ValueError("self_hosted_mcd_job_expired_or_not_yet_valid")
+    signature = job.get("portal_signature")
+    if not isinstance(signature, Mapping) or signature.get("algorithm") != "ed25519":
+        raise ValueError("self_hosted_mcd_signature_invalid")
+    key_id = _require_contract_string(signature.get("key_id"), "self_hosted_mcd_signature_invalid")
+    key = portal_keys.get(key_id)
+    if not key:
+        raise ValueError("self_hosted_mcd_signer_unknown")
+    try:
+        unsigned = dict(job)
+        unsigned.pop("portal_signature", None)
+        Ed25519PublicKey.from_public_bytes(_unb64(str(key))).verify(_unb64(str(signature.get("value") or "")), canonical_json(unsigned))
+    except Exception as exc:
+        raise ValueError("self_hosted_mcd_signature_invalid") from exc
+    return {"job": dict(job), "scenario": scenario, "facts": facts, "bootstrap_artifact": bootstrap, "scenario_artifact": scenario_artifact, "job_id": identity["job_id"], "idempotency_key": identity["idempotency_key"], "host_fingerprint": host_fingerprint}
+
+
+def verify_self_hosted_external_artifact(pin: Mapping[str, Any], artifact: bytes, publisher_keys: Mapping[str, str], *, kind: str) -> dict[str, Any]:
+    """Verify exact bytes and the Portal/MCC catalog signature for one pin."""
+    normalized = _validate_self_hosted_artifact_pin(pin, f"self_hosted_mcd_{kind}_artifact_invalid")
+    if len(artifact) != normalized["artifact_size_bytes"] or hashlib.sha256(artifact).hexdigest() != normalized["artifact_digest"][7:]:
+        raise ValueError("self_hosted_mcd_artifact_integrity_invalid")
+    signature = normalized["signature"]
+    key = publisher_keys.get(signature["key_id"])
+    if not key:
+        raise ValueError("self_hosted_mcd_artifact_signer_unknown")
+    statement = {"kind": kind, "revision": normalized["artifact_revision"], "sha256": normalized["artifact_digest"][7:], "media_type": normalized["artifact_media_type"], "size_bytes": normalized["artifact_size_bytes"]}
+    try:
+        Ed25519PublicKey.from_public_bytes(_unb64(str(key))).verify(_unb64(signature["value"]), MCC_ARTIFACT_SIGNATURE_DOMAIN + canonical_json(statement))
+    except Exception as exc:
+        raise ValueError("self_hosted_mcd_artifact_signature_invalid") from exc
+    return normalized
+
+
+def download_external_artifact(uri: str, *, expected_size: int, timeout_sec: int = 35) -> bytes:
+    """Fetch one pinned HTTPS artifact with a strict bounded response size."""
+    if not isinstance(uri, str) or not uri.startswith("https://"):
+        raise ValueError("self_hosted_mcd_artifact_uri_invalid")
+    expected = int(expected_size)
+    if expected <= 0 or expected > MAX_ARTIFACT_BYTES:
+        raise ValueError("self_hosted_mcd_artifact_size_invalid")
+    req = request.Request(uri, headers={"Accept": "application/octet-stream"}, method="GET")
+    try:
+        with request.urlopen(req, timeout=max(1, min(60, int(timeout_sec))), context=ssl.create_default_context()) as response:
+            body = response.read(expected + 1)
+    except HTTPError as exc:
+        raise RuntimeError(f"self_hosted_mcd_artifact_http_{exc.code}") from exc
+    if len(body) != expected:
+        raise ValueError("self_hosted_mcd_artifact_size_mismatch")
+    return body
+
+
 class CommercialState:
     """Small durable Portal state store, isolated from corporate MCC state."""
 
@@ -246,6 +464,11 @@ class PortalClient:
         if len(raw) > 2 * 1024 * 1024:
             raise RuntimeError("commercial_portal_response_too_large")
         result = json.loads(raw.decode("utf-8")) if raw else {}
+        if result.get("schema") == SELF_HOSTED_MCD_JOB_SCHEMA and result.get("contract_version") == SELF_HOSTED_MCD_CONTRACT_VERSION:
+            return result
+        nested = result.get("job") if isinstance(result.get("job"), dict) else None
+        if isinstance(nested, dict) and nested.get("schema") == SELF_HOSTED_MCD_JOB_SCHEMA and nested.get("contract_version") == SELF_HOSTED_MCD_CONTRACT_VERSION:
+            return result
         if result.get("schema") != "portal-mcd-job-delivery-v1" or result.get("contract_version") != CONTRACT_VERSION:
             raise RuntimeError("commercial_job_delivery_schema_invalid")
         return result
@@ -315,6 +538,12 @@ class PortalClient:
         self.state.put("agent_private_key", _b64(private))
         self.state.put("agent_key_id", payload["agent"]["public_key"]["key_id"])
         self.state.put("portal_job_signing_keys", {x["key_id"]: x["value"] for x in signing_keys})
+        commercial_key = result.get("commercial_key") or result.get("commercial_key_metadata")
+        if isinstance(commercial_key, dict) and commercial_key.get("commercial_key_id"):
+            self.state.put("commercial_key_id", str(commercial_key["commercial_key_id"]))
+            self.state.put("commercial_key_metadata", _public_commercial_key_metadata(commercial_key))
+        elif result.get("commercial_key_id"):
+            self.state.put("commercial_key_id", str(result["commercial_key_id"]))
         return {"status": "activated", "agent_id": result["agent_id"], "contract_version": CONTRACT_VERSION}
 
     def register_installation(self, *, local_identity: str, display_name: str, mautic_version: str, application_root_fingerprint: str, activation_state: str = "passive") -> dict[str, Any]:

@@ -1,0 +1,358 @@
+"""Generic Portal self-hosted MCD v2 execution boundary.
+
+This module deliberately knows only the v2 wire contract and a bounded external
+runner process.  It contains no installer, OS, Mautic, scenario, or primitive
+recipes.  Those belong to the signed external artifact and its Portal-owned
+runner.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import sqlite3
+import subprocess
+from datetime import datetime, timezone
+from typing import Any, Callable, Mapping
+
+from mcd_agent.commercial_detector import read_normalized_local_facts
+from mcd_agent.commercial_portal import (
+    SELF_HOSTED_MCD_CONTRACT_VERSION,
+    SELF_HOSTED_MCD_STAGE_RECEIPT_SCHEMA,
+    SELF_HOSTED_MCD_TERMINAL_RECEIPT_SCHEMA,
+    SELF_HOSTED_MCD_STAGE_IDS,
+    SELF_HOSTED_MCD_STAGE_STATUSES,
+    SELF_HOSTED_MCD_TERMINAL_STATUSES,
+    SELF_HOSTED_MCD_ROLLBACK_STATUSES,
+    CommercialState,
+    canonical_json,
+    download_external_artifact,
+    verify_self_hosted_external_artifact,
+    verify_self_hosted_mcd_job,
+)
+
+
+_RUNS_TABLE = "commercial_self_hosted_runs"
+_PENDING_KEY = "commercial_self_hosted_pending_receipts"
+_MAX_RECEIPT_RESULT_BYTES = 16 * 1024
+_MAX_PROCESS_OUTPUT_BYTES = 64 * 1024
+
+
+def _utc() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _secret_free_result(value: object) -> object:
+    """Keep runner evidence bounded and reject secret-shaped fields."""
+    if isinstance(value, Mapping):
+        out: dict[str, object] = {}
+        for key, child in value.items():
+            text = str(key)
+            if any(token in text.lower() for token in ("password", "secret", "token", "private", "credential", "key")):
+                continue
+            out[text[:96]] = _secret_free_result(child)
+        return out
+    if isinstance(value, list):
+        return [_secret_free_result(item) for item in value[:64]]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return str(value)[:1024] if isinstance(value, str) else value
+    return str(value)[:1024]
+
+
+def _bounded_result(value: object) -> object:
+    safe = _secret_free_result(value)
+    try:
+        encoded = canonical_json(safe)
+    except Exception:
+        return {"status": "completed"}
+    if len(encoded) > _MAX_RECEIPT_RESULT_BYTES:
+        return {"status": "completed", "evidence": "bounded"}
+    return safe
+
+
+def _error_code(error: BaseException) -> str:
+    return (type(error).__name__ or "scenario_execution_failed")[:80]
+
+
+def _binding_from_verified(verified: Mapping[str, Any]) -> dict[str, Any]:
+    job = verified["job"]
+    return {
+        "job_id": str(job["job_id"]),
+        "request_id": str(job["request_id"]),
+        "account_id": str(job["account_id"]),
+        "commercial_key_id": str(job["commercial_key_id"]),
+        "agent_id": str(job["agent_id"]),
+        "installation_id": str(job["installation_id"]),
+        "host_fingerprint": str(job["host_fingerprint"]),
+        "scenario": dict(verified["scenario"]),
+        "facts_digest": str(job["applicability"]["facts_digest"]),
+    }
+
+
+def _validate_binding(receipt: Mapping[str, Any], binding: Mapping[str, Any]) -> None:
+    for key in ("job_id", "request_id", "account_id", "commercial_key_id", "agent_id", "installation_id", "host_fingerprint", "facts_digest"):
+        if receipt.get(key) != binding.get(key):
+            raise ValueError("self_hosted_mcd_receipt_binding_mismatch")
+    if receipt.get("scenario") != binding.get("scenario"):
+        raise ValueError("self_hosted_mcd_receipt_scenario_mismatch")
+
+
+def validate_self_hosted_stage_receipt(receipt: Mapping[str, Any], *, binding: Mapping[str, Any]) -> None:
+    if receipt.get("schema") != SELF_HOSTED_MCD_STAGE_RECEIPT_SCHEMA or receipt.get("contract_version") != SELF_HOSTED_MCD_CONTRACT_VERSION:
+        raise ValueError("self_hosted_mcd_stage_receipt_invalid")
+    if receipt.get("stage_id") not in SELF_HOSTED_MCD_STAGE_IDS or receipt.get("status") not in SELF_HOSTED_MCD_STAGE_STATUSES:
+        raise ValueError("self_hosted_mcd_stage_receipt_invalid")
+    if isinstance(receipt.get("sequence"), bool) or not isinstance(receipt.get("sequence"), int) or receipt["sequence"] < 1:
+        raise ValueError("self_hosted_mcd_stage_receipt_invalid")
+    if not isinstance(receipt.get("idempotency_key"), str) or not receipt["idempotency_key"].strip():
+        raise ValueError("self_hosted_mcd_stage_receipt_invalid")
+    _validate_binding(receipt, binding)
+    for key in ("observed_at",):
+        if not isinstance(receipt.get(key), str) or not receipt[key]:
+            raise ValueError("self_hosted_mcd_stage_receipt_invalid")
+
+
+def validate_self_hosted_terminal_receipt(receipt: Mapping[str, Any], *, binding: Mapping[str, Any]) -> None:
+    if receipt.get("schema") != SELF_HOSTED_MCD_TERMINAL_RECEIPT_SCHEMA or receipt.get("contract_version") != SELF_HOSTED_MCD_CONTRACT_VERSION:
+        raise ValueError("self_hosted_mcd_terminal_receipt_invalid")
+    if receipt.get("status") not in SELF_HOSTED_MCD_TERMINAL_STATUSES or receipt.get("rollback") not in SELF_HOSTED_MCD_ROLLBACK_STATUSES:
+        raise ValueError("self_hosted_mcd_terminal_receipt_invalid")
+    if isinstance(receipt.get("sequence"), bool) or not isinstance(receipt.get("sequence"), int) or receipt["sequence"] < 1:
+        raise ValueError("self_hosted_mcd_terminal_receipt_invalid")
+    if not isinstance(receipt.get("idempotency_key"), str) or not receipt["idempotency_key"].strip():
+        raise ValueError("self_hosted_mcd_terminal_receipt_invalid")
+    _validate_binding(receipt, binding)
+    for key in ("observed_at", "started_at", "completed_at"):
+        if not isinstance(receipt.get(key), str) or not receipt[key]:
+            raise ValueError("self_hosted_mcd_terminal_receipt_invalid")
+    if receipt["status"] == "failed" and not isinstance(receipt.get("error"), Mapping):
+        raise ValueError("self_hosted_mcd_terminal_receipt_error_required")
+
+
+def _failed_terminal_receipt(verified: Mapping[str, Any], *, error: BaseException, sequence: int, started_at: str, completed: int = 0, total: int = 1, rollback: str = "not_attempted") -> dict[str, Any]:
+    binding = _binding_from_verified(verified)
+    result = {
+        **binding,
+        "schema": SELF_HOSTED_MCD_TERMINAL_RECEIPT_SCHEMA,
+        "contract_version": SELF_HOSTED_MCD_CONTRACT_VERSION,
+        "sequence": max(1, int(sequence)),
+        "idempotency_key": f"{binding['job_id']}:terminal:{max(1, int(sequence))}",
+        "status": "failed",
+        "observed_at": _utc(),
+        "started_at": started_at,
+        "completed_at": _utc(),
+        "result": {"executor": "mcd-self-hosted-external", "completed": max(0, int(completed)), "total": max(0, int(total))},
+        "error": {"code": "self_hosted_mcd_execution_failed", "type": _error_code(error)},
+        "rollback": rollback if rollback in SELF_HOSTED_MCD_ROLLBACK_STATUSES else "not_attempted",
+    }
+    validate_self_hosted_terminal_receipt(result, binding=binding)
+    return result
+
+
+class ExternalProcessPolicy:
+    """Run one externally supplied runner with no shell or inherited secrets."""
+
+    def __init__(self, argv: list[str] | tuple[str, ...] | None, *, timeout_sec: int = 1800):
+        self.argv = tuple(str(item) for item in (argv or ()))
+        self.timeout_sec = max(1, min(3600, int(timeout_sec)))
+        if self.argv:
+            if not os.path.isabs(self.argv[0]) or not os.path.isfile(self.argv[0]) or not os.access(self.argv[0], os.X_OK):
+                raise ValueError("self_hosted_mcd_runner_not_allowlisted")
+            if any(not item or "\x00" in item for item in self.argv):
+                raise ValueError("self_hosted_mcd_runner_argv_invalid")
+
+    def run(self, *, artifact: bytes, job: Mapping[str, Any], facts: Mapping[str, Any]) -> dict[str, Any]:
+        if not self.argv:
+            raise ValueError("self_hosted_mcd_runner_unconfigured")
+        env = {"LC_ALL": "C", "LANG": "C"}
+        payload = {"job_id": str(job["job_id"]), "scenario": dict(job["scenario"]), "facts": dict(facts)}
+        try:
+            completed = subprocess.run(
+                [*self.argv, "--mcd-scenario-apply"],
+                input=artifact,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd="/",
+                env=env,
+                timeout=self.timeout_sec,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise TimeoutError("self_hosted_mcd_runner_timeout") from exc
+        if completed.returncode != 0:
+            raise RuntimeError("self_hosted_mcd_runner_failed")
+        stdout = completed.stdout[:_MAX_PROCESS_OUTPUT_BYTES]
+        if not stdout:
+            return {"status": "succeeded"}
+        try:
+            parsed = json.loads(stdout.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return {"status": "succeeded", "evidence": "runner_completed"}
+        return {"status": "succeeded", "runner": _bounded_result(parsed), "binding": hashlib.sha256(canonical_json(payload)).hexdigest()}
+
+
+class SelfHostedScenarioExecutor:
+    def __init__(self, state: CommercialState, *, runner: Callable[..., Any] | None = None, facts_reader: Callable[..., Mapping[str, Any]] | None = None):
+        self.state = state
+        self.runner = runner
+        self.facts_reader = facts_reader or read_normalized_local_facts
+        with sqlite3.connect(self.state.path) as db:
+            db.execute(f"CREATE TABLE IF NOT EXISTS {_RUNS_TABLE} (job_id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
+
+    def _load(self, job_id: str) -> dict[str, Any] | None:
+        with sqlite3.connect(self.state.path) as db:
+            row = db.execute(f"SELECT payload FROM {_RUNS_TABLE} WHERE job_id=?", (job_id,)).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def _save(self, job_id: str, payload: Mapping[str, Any]) -> None:
+        with sqlite3.connect(self.state.path) as db:
+            db.execute(f"INSERT INTO {_RUNS_TABLE}(job_id,payload) VALUES(?,?) ON CONFLICT(job_id) DO UPDATE SET payload=excluded.payload", (job_id, json.dumps(payload, sort_keys=True)))
+
+    def _local_facts(self, expected: Mapping[str, Any], context: Mapping[str, Any]) -> dict[str, Any]:
+        target_kind = str(expected.get("target_kind") or context.get("target_kind") or "existing_server")
+        capabilities = list(context.get("local_facts_capabilities") or ["package_manager.query"])
+        observed = dict(self.facts_reader(target_kind=target_kind, capabilities=capabilities))
+        observed.pop("detector_schema", None)
+        observed["capabilities"] = sorted(set(str(item) for item in observed.get("capabilities", [])))
+        normalized_expected = dict(expected)
+        normalized_expected["capabilities"] = sorted(set(str(item) for item in expected.get("capabilities", [])))
+        if observed != normalized_expected:
+            raise ValueError("self_hosted_mcd_applicability_facts_mismatch")
+        return observed
+
+    def run(self, job: Mapping[str, Any], *, portal_keys: Mapping[str, str], publisher_keys: Mapping[str, str], context: Mapping[str, Any], expected_agent_id: str, expected_installation_id: str, expected_commercial_key_id: str, expected_host_fingerprint: str, bootstrap_artifact: bytes, scenario_artifact: bytes, receipt_sink: Callable[[dict[str, Any]], Any] | None = None) -> dict[str, Any]:
+        verified = verify_self_hosted_mcd_job(job, portal_keys, expected_agent_id=expected_agent_id, expected_installation_id=expected_installation_id, expected_commercial_key_id=expected_commercial_key_id, expected_host_fingerprint=expected_host_fingerprint)
+        binding = _binding_from_verified(verified)
+        verify_self_hosted_external_artifact(verified["bootstrap_artifact"], bootstrap_artifact, publisher_keys, kind="bootstrap")
+        verify_self_hosted_external_artifact(verified["scenario_artifact"], scenario_artifact, publisher_keys, kind="scenario")
+        facts = self._local_facts(verified["facts"], context)
+        job_id = binding["job_id"]
+        prior = self._load(job_id)
+        if isinstance(prior, dict) and prior.get("job_digest") == hashlib.sha256(canonical_json(dict(job))).hexdigest() and isinstance(prior.get("terminal"), dict):
+            return dict(prior["terminal"])
+        started_at = _utc()
+        sequence = 0
+
+        def emit(stage_id: str, status: str, result: object = None, error: Mapping[str, Any] | None = None) -> None:
+            nonlocal sequence
+            sequence += 1
+            receipt = {**binding, "schema": SELF_HOSTED_MCD_STAGE_RECEIPT_SCHEMA, "contract_version": SELF_HOSTED_MCD_CONTRACT_VERSION, "stage_id": stage_id, "sequence": sequence, "status": status, "idempotency_key": f"{binding['job_id']}:{stage_id}:{sequence}", "observed_at": _utc()}
+            if result is not None:
+                receipt["result"] = _bounded_result(result)
+            if error is not None:
+                receipt["error"] = {"code": str(error.get("code") or "self_hosted_mcd_stage_failed")[:120]}
+            validate_self_hosted_stage_receipt(receipt, binding=binding)
+            if receipt_sink:
+                receipt_sink(receipt)
+
+        try:
+            emit("scenario_dispatch", "succeeded", {"status": "accepted"})
+            if self.runner is None:
+                raise ValueError("self_hosted_mcd_runner_unconfigured")
+            result = self.runner(artifact=scenario_artifact, job=verified["job"], facts=facts)
+            emit("execution", "succeeded", result)
+            terminal = {**binding, "schema": SELF_HOSTED_MCD_TERMINAL_RECEIPT_SCHEMA, "contract_version": SELF_HOSTED_MCD_CONTRACT_VERSION, "sequence": sequence + 1, "idempotency_key": f"{binding['job_id']}:terminal:{sequence + 1}", "status": "succeeded", "observed_at": _utc(), "started_at": started_at, "completed_at": _utc(), "result": _bounded_result(result), "rollback": "not_attempted"}
+            validate_self_hosted_terminal_receipt(terminal, binding=binding)
+        except Exception as exc:
+            emit("execution", "failed", error={"code": "self_hosted_mcd_execution_failed"})
+            terminal = _failed_terminal_receipt(verified, error=exc, sequence=sequence + 1, started_at=started_at, completed=0, total=1)
+        self._save(job_id, {"job_digest": hashlib.sha256(canonical_json(dict(job))).hexdigest(), "terminal": terminal, "status": terminal["status"], "sequence": terminal["sequence"]})
+        if receipt_sink:
+            receipt_sink(terminal)
+        return terminal
+
+
+class SelfHostedPortalWorker:
+    """Durable, non-blocking v2 Portal poll/verify/execute/receipt loop."""
+
+    def __init__(self, client: Any, executor: SelfHostedScenarioExecutor, *, installation_id: str | list[str], portal_keys: Mapping[str, str], publisher_keys: Mapping[str, str], context: Mapping[str, Any], commercial_key_id: str, agent_id: str, host_fingerprint: str):
+        self.client = client
+        self.executor = executor
+        self.installation_ids = [installation_id] if isinstance(installation_id, str) else [str(value) for value in installation_id]
+        self.installation_ids = [value for value in self.installation_ids if value]
+        if not self.installation_ids or not commercial_key_id or not agent_id or not host_fingerprint:
+            raise ValueError("self_hosted_mcd_identity_missing")
+        self.portal_keys = dict(portal_keys)
+        self.publisher_keys = dict(publisher_keys)
+        self.context = dict(context)
+        self.commercial_key_id = commercial_key_id
+        self.agent_id = agent_id
+        self.host_fingerprint = host_fingerprint
+
+    def _pending(self) -> list[dict[str, Any]]:
+        raw = self.executor.state.get(_PENDING_KEY)
+        return [dict(item) for item in raw] if isinstance(raw, list) and all(isinstance(item, Mapping) for item in raw) else []
+
+    def _queue(self, receipt: Mapping[str, Any]) -> None:
+        pending = self._pending()
+        identity = str(receipt.get("idempotency_key") or "")
+        if not any(str(item.get("idempotency_key") or "") == identity for item in pending):
+            pending.append(dict(receipt))
+        self.executor.state.put(_PENDING_KEY, pending)
+
+    def _send_or_queue(self, receipt: dict[str, Any]) -> bool:
+        if self._pending():
+            self._queue(receipt)
+            return False
+        try:
+            self.client.send_receipt(receipt)
+            return True
+        except Exception:
+            self._queue(receipt)
+            return False
+
+    def _drain(self) -> bool:
+        pending = self._pending()
+        while pending:
+            try:
+                self.client.send_receipt(pending[0])
+            except Exception:
+                self.executor.state.put(_PENDING_KEY, pending)
+                return False
+            pending.pop(0)
+            self.executor.state.put(_PENDING_KEY, pending)
+        return True
+
+    def run_once(self) -> dict[str, Any]:
+        if not self._drain():
+            return {"status": "receipt_pending"}
+        cursor = str(self.executor.state.get("commercial_portal_cursor") or "")
+        delivery = None
+        active_installation_id = self.installation_ids[0]
+        for active_installation_id in self.installation_ids:
+            delivery = self.client.pull_job(installation_id=active_installation_id, cursor=cursor, wait_seconds=0, limit=1)
+            if delivery:
+                break
+        if not delivery:
+            return {"status": "idle"}
+        cursor_next = str(delivery.get("cursor", cursor)) if isinstance(delivery, Mapping) else cursor
+        job = delivery.get("job") if isinstance(delivery, Mapping) and isinstance(delivery.get("job"), Mapping) else delivery
+        if not isinstance(job, Mapping):
+            return {"status": "rejected", "reason": "self_hosted_mcd_job_delivery_missing"}
+        try:
+            verified = verify_self_hosted_mcd_job(job, self.portal_keys, expected_agent_id=self.agent_id, expected_installation_id=active_installation_id, expected_commercial_key_id=self.commercial_key_id, expected_host_fingerprint=self.host_fingerprint)
+        except ValueError as exc:
+            return {"status": "rejected", "reason": str(exc)}
+        try:
+            bootstrap_pin = verified["bootstrap_artifact"]
+            scenario_pin = verified["scenario_artifact"]
+            bootstrap = download_external_artifact(bootstrap_pin["artifact_uri"], expected_size=bootstrap_pin["artifact_size_bytes"])
+            scenario = download_external_artifact(scenario_pin["artifact_uri"], expected_size=scenario_pin["artifact_size_bytes"])
+            terminal = self.executor.run(job, portal_keys=self.portal_keys, publisher_keys=self.publisher_keys, context=self.context, expected_agent_id=self.agent_id, expected_installation_id=str(job["installation_id"]), expected_commercial_key_id=self.commercial_key_id, expected_host_fingerprint=self.host_fingerprint, bootstrap_artifact=bootstrap, scenario_artifact=scenario, receipt_sink=self._send_or_queue)
+            self.executor.state.put("commercial_portal_cursor", cursor_next)
+            return {"status": terminal.get("status"), "job_id": str(job["job_id"])}
+        except Exception as exc:
+            failed = _failed_terminal_receipt(verified, error=exc, sequence=1, started_at=_utc(), completed=0, total=1)
+            delivered = self._send_or_queue(failed)
+            if delivered:
+                self.executor.state.put("commercial_portal_cursor", cursor_next)
+            return {"status": "failed" if delivered else "receipt_pending", "job_id": str(job["job_id"])}
+
+    def run_forever(self, stop_event: Any, *, interval_sec: float = 1.0) -> None:
+        while not stop_event.is_set():
+            try:
+                self.run_once()
+            except Exception:
+                pass
+            stop_event.wait(max(0.1, float(interval_sec)))
