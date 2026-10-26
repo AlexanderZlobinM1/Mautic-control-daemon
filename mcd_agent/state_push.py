@@ -1747,8 +1747,15 @@ def sync_plugin_inventory_after_operation(
     runtime_store: Any | None = None,
 ) -> dict[str, Any]:
     """Persist an operation's inventory before its terminal receipt is emitted."""
-    store, owned = _store_for_plugin_inventory(cfg, runtime_store)
+    store = None
+    owned = False
     try:
+        # Production AgentConfig always provides state_db_path. Keep the
+        # terminal plugin-operation contract compatible with narrow callers and
+        # unit fixtures that intentionally provide no daemon persistence
+        # config: report the sync limitation in the receipt instead of
+        # aborting an otherwise successful plugin operation.
+        store, owned = _store_for_plugin_inventory(cfg, runtime_store)
         observed = _plugin_inventory_observation(
             install,
             store,
@@ -1789,7 +1796,7 @@ def sync_plugin_inventory_after_operation(
             "last_error": f"{type(exc).__name__}: {exc}"[:500],
         }
     finally:
-        if owned:
+        if owned and store is not None:
             store.close()
 
 
