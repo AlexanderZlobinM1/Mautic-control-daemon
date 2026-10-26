@@ -10,6 +10,8 @@
 - Add the versioned `mcd-plugin-inventory-sync-v1` wire contract and regression
   coverage for manual changes, multi-instance deduplication, removals,
   restart/retry/ACK, and stable change detection.
+- Synchronize the guarded Mautic patch-resolution contract with the released
+  agent version so the full upgrade/patch regression suite remains executable.
 
 ## 1.5.244 - 2026-10-26
 
