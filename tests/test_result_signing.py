@@ -1,11 +1,12 @@
 import os, stat
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from mcd_agent.config import load_config
 from mcd_agent.mcd_control import ControlStore
 from mcd_agent.result_signing import ensure_result_key, sign_result
-from mcd_agent.state_push import _ingest_control_response, state_identity_payload
+from mcd_agent.state_push import MCCStatePusher, _ingest_control_response, state_identity_payload
 
 def test_result_key_is_private_and_rotation_identity_is_stable(tmp_path):
     path = tmp_path / "result.key"
@@ -96,3 +97,47 @@ def test_control_ack_is_unwrapped_from_mcc_state_response(tmp_path):
     )
 
     assert ControlStore(db_path).active_key_ack("k1") == ack
+
+
+def test_state_push_send_persists_wrapped_mcc_ack(tmp_path):
+    db_path = str(Path(tmp_path) / "state.db")
+    payload = {
+        "schema": "mcd-state-v1",
+        "agent_id": "mcd-agent-1",
+        "host_fingerprint": "sha256:" + "a" * 64,
+        "result_signing_key": {"key_id": "k1"},
+    }
+    body = {
+        "status": "ok",
+        "control": {
+            "schema": "mcd-control-v1",
+            "commands": [],
+            "result_signing_key_ack": {"key_id": "k1", "status": "active"},
+        },
+    }
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def read(self):
+            import json
+
+            return json.dumps(body).encode("utf-8")
+
+    cfg = SimpleNamespace(
+        mcc_push_enabled=True,
+        mcc_url="https://mcc.example.test",
+        mcc_token="token",
+        state_db_path=db_path,
+    )
+    with patch("mcd_agent.state_push.request.urlopen", return_value=Response()):
+        with patch("mcd_agent.state_push.mark_state_snapshot_push_result_mysql"):
+            assert MCCStatePusher(cfg).send(payload)[0] is True
+
+    assert ControlStore(db_path).active_key_ack("k1") == {"key_id": "k1", "status": "active"}
