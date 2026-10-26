@@ -230,9 +230,17 @@ def _reconcile_control_receipt_conflict(state_db_path: str, response_text: str) 
     if "control receipt conflicts with immutable terminal command" not in text.lower():
         return 0
     job_ids = set(re.findall(r"docker-preflight-[A-Za-z0-9._-]+", text))
-    if not job_ids:
-        return 0
     store = ControlStore(state_db_path)
+    if not job_ids:
+        candidates = {
+            str(receipt.get("job_id") or "")
+            for receipt in store.receipts()
+            if receipt.get("status") == "succeeded"
+            and str(receipt.get("job_id") or "").startswith("docker-preflight-")
+        }
+        if len(candidates) != 1:
+            return 0
+        job_ids = candidates
     return sum(
         store.acknowledge_terminal_conflict(
             job_id,
