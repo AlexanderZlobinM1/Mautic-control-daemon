@@ -46,6 +46,7 @@ from mcd_agent.apt_profile import (
 )
 from mcd_agent.admin_user import clear_hostnet_auth_mfa, hostnet_auth_mfa_status, reset_admin_password
 from mcd_agent.config import load_config
+from mcd_agent.commercial_portal import CommercialState, PortalClient
 from mcd_agent.cluster_assets import (
     collect_cluster_assets_status,
     fix_cluster_asset_permissions,
@@ -2102,6 +2103,18 @@ def _build_parser() -> argparse.ArgumentParser:
     ro.add_argument("--target", choices=["observed", "desired"], default="observed", help="push target for runtime map")
     ro.add_argument("--json", action="store_true")
 
+    commercial = sub.add_parser("commercial", help="Portal commercial transport (explicit activation only)")
+    commercial.add_argument("--config", default=default_cfg)
+    commercial.add_argument("op", choices=["status", "activate", "register"])
+    commercial.add_argument("--portal-url", default="")
+    commercial.add_argument("--activation-code", default="")
+    commercial.add_argument("--local-identity", default="")
+    commercial.add_argument("--display-name", default="")
+    commercial.add_argument("--mautic-version", default="")
+    commercial.add_argument("--application-root-fingerprint", default="")
+    commercial.add_argument("--activation-state", choices=["passive", "active"], default="passive")
+    commercial.add_argument("--json", action="store_true")
+
     scheduler = sub.add_parser("scheduler", help="Pause/resume scheduler launches")
     scheduler.add_argument("--config", default=default_cfg)
     scheduler.add_argument("op", choices=["pause", "resume", "status"])
@@ -2439,6 +2452,30 @@ def main() -> int:
             else:
                 print(f"config error: {e}")
             return 1
+
+    if args.cmd == "commercial":
+        cfg = load_config(args.config, allow_recover_from_mcc=False)
+        state = CommercialState(cfg.state_db_path)
+        if args.op == "status":
+            payload = {
+                "schema": "mcd-commercial-status-v1",
+                "commercial_enabled": state.commercial_enabled,
+                "agent_id": state.get("agent_id"),
+                "contract_version": "1.0" if state.commercial_enabled else None,
+                "portal_api_base": state.get("portal_api_base") if state.commercial_enabled else None,
+                "mcc_configured": bool(cfg.mcc_url and cfg.mcc_token),
+            }
+        elif args.op == "activate":
+            if not args.portal_url or not args.activation_code:
+                parser.error("commercial activate requires --portal-url and --activation-code")
+            payload = PortalClient(state).activate(args.portal_url, args.activation_code, __version__)
+        else:
+            required = (args.local_identity, args.display_name, args.mautic_version, args.application_root_fingerprint)
+            if not all(required):
+                parser.error("commercial register requires installation fields")
+            payload = PortalClient(state).register_installation(local_identity=args.local_identity, display_name=args.display_name, mautic_version=args.mautic_version, application_root_fingerprint=args.application_root_fingerprint, activation_state=args.activation_state)
+        print(json.dumps(payload, ensure_ascii=True, indent=2 if args.json else None))
+        return 0
 
     if args.cmd == "discover":
         cfg = load_config(args.config)

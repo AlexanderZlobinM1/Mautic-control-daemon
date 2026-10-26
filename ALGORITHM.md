@@ -155,6 +155,15 @@ round-trip и непосредственно перед baseline refresh; pendin
 разрешает сохранить новый local baseline и удалить pending; conflict/error или
 неполный ответ оставляют delta для следующего ровно одного rebased push.
 
+После принятого local runtime push MCD не выполняет remote poll в том же
+main-loop tick. Принятый ответ уже является canonical результатом записи;
+немедленный poll может вернуть lagging/неполный snapshot, снова положить
+`previous` в baseline и превратить один delta в бесконечный повторный push.
+Startup-флаг и ручной poll-trigger сбрасываются, а следующий poll назначается
+по обычному `mcc_push_interval_sec` (с теми же границами 15--300 секунд).
+Таким образом, durable pending сохраняется при реальном втором локальном
+изменении, а независимые изменения MCC будут приняты следующим штатным poll.
+
 ## 1. Область и границы
 
 Планирование выполняется по каждому instance root, но capacity и защита
@@ -385,7 +394,29 @@ config на его profile baseline и только после этого при
    not an active production runtime or duplicate test tree. The manifest binds
    payload hashes while an external receipt binds archive/source/wheel
    identity, avoiding self-referential provenance. See
-   `docs/mcd-update-invariants-v1.md` for the release evidence contract.
+   `docs/mcd-update-invariants-v1.md` for the release evidence contract. A
+   host running the pre-runtime-only updater transitions through the
+   separately transported `tools/mcd_runtime_bootstrap.py` bridge and its
+   read-only `tools/mcd_profile_authority_probe.py` sidecar: the bridge
+   verifies the exact archive/manifest, uses the same update lease and
+   scheduler barrier, installs and imports the wheel before the atomic source
+   switch, retains bounded rollback material, and records a bootstrap receipt.
+   The sidecar must accept the complete valid split TOML graph, including
+   array-of-table sections, while never writing configuration.
+   The MCD runtime always supplies an MCD-owned default
+   `runtime.result_signing_key_path` (`/opt/mcd/var/keys/result-signing.key`)
+   when the operator has not overridden it. The first state push creates the
+   Ed25519 key with mode `0600`; MCC must acknowledge the public key before
+   any signed control terminal receipt can execute.
+   The `mcd-state-v1` payload also always carries a typed, non-empty
+   `agent_id`: an explicit `[mcc].agent_id` is authoritative; otherwise MCD
+   derives a stable `mcd-agent-<sha256>` identity from the canonical MCC host
+   name (or local hostname in standalone mode). The value is stable across
+   restart and is sent together with the host fingerprint and result key.
+   MCD unwraps the MCC state response before processing its control envelope
+   and persists a matching key ACK even when the response carries no control
+   commands; command-envelope validation remains independent and invalid
+   commands are never executed because an ACK was received.
    Self-update сначала публикует persisted `scheduler.pause` под общим
    межпроцессным `scheduler.pause.lock`. Каждый новый запуск, включая
    ordinary, priority, super-priority, manual, import и retry, перед
@@ -947,7 +978,9 @@ cycle без ручного `segments:update`, profile/capacity/data changes. Ad
 | import admission baseline, partial-batch pending и terminal monitor distinction | `mcd_agent/config.py`, `mcd_agent/daemon.py` | `tests/test_campaign_due_sql.py`, `tests/test_campaign_ring_dispatch.py`, `tests/test_import_liveness.py` |
 | monitor queued/running/done/error receipt | `mcd_agent/daemon.py` | `tests/test_scheduler_monitor_cycle.py`, `tests/test_signals_scheduler_history.py` |
 | heavy-plan deferral and durable pending guard | `mcd_agent/daemon.py` | `tests/test_segment_liveness.py`, live M6/M7 acceptance receipt |
-| self-update preserves ordinary application work and all durable queues | `mcd_agent/self_update.py`, `daemon.py`, systemd unit | `tests/test_self_update_version_reporting.py` |
+| self-update preserves ordinary application work and all durable queues | `mcd_agent/self_update.py`, `daemon.py`, systemd unit | `tests/test_self_update_version_reporting.py`, `tools/runtime_bridge_qa.py` (`mcd-runtime-bridge-qa-v1`) |
+| legacy source-tree to runtime-only transition is authority-safe and accepts complete split TOML config | `tools/mcd_runtime_bootstrap.py`, `tools/mcd_profile_authority_probe.py` | `tests/test_profile_authority_probe.py`, `tests/test_runtime_bootstrap_capture.py`, live `mcd-runtime-bootstrap-receipt-v1` |
+| result-signing identity bootstraps from MCD-owned config and gates signed control execution on MCC ACK | `mcd_agent/config.py`, `mcd_agent/result_signing.py`, `mcd_agent/state_push.py`, `mcd_agent/mcd_control.py` | `tests/test_result_signing.py`, `tests/test_mcd_control.py`, live `mcd-state-v1` identity/key/ACK and terminal-receipt evidence |
 | authority-safe desired runtime projection | `mcd_agent/config.py`, `mcd_agent/runtime_overrides.py` | `tests/test_runtime_override_direction.py`, `tests/test_runtime_stable_keys.py`, `tests/test_runtime_migration_adapter.py` |
 | natural b2bss/Adonis evidence | runtime TaskStore/MCC receipts | rollout acceptance (после package/install) |
 
@@ -989,3 +1022,56 @@ files are applied in order; the last existing local include is authoritative for
 overrides such as `[backup]` and `[backup.schedule]`. Startup and reload must
 therefore preserve `backup.enabled` and schedule enablement from the effective
 local file when the entrypoint only supplies defaults or MCC bootstrap fields.
+
+### Commercial Portal scenario admission
+
+Commercial MCD is an outbound-only Portal lane. A delivered job is admitted
+only after Portal envelope, scope, expiry, nonce, command, applicability and
+Portal signature validation. The complete artifact is then hashed and checked
+against the Portal-delivered artifact signature and any separately referenced
+MCC publisher statement; MCD never fetches MCC directly and MCC is not the
+scenario authority.
+The artifact may contain only `portal-mcd-scenario-v1` with declared stages.
+Stage handlers are an injected registry: an unknown stage, schema, contract or
+compatibility value fails closed before execution.
+
+Scenario progress is checkpointed by `job_id` and completed `stage_id` in the
+commercial state store. Re-delivery resumes from the checkpoint and does not
+repeat completed stages. A failed run executes registered rollback handlers in
+reverse order and writes a failed checkpoint. A successful run produces a
+monotonic Portal receipt payload signed by the host agent. This lane does not
+alter corporate MCC↔MCD, standalone mode, scheduler ownership, cron, or Mautic
+state semantics; existing-server discovery/registration and new-server
+bootstrap are scenario stages supplied by the owning operation, not hardcoded
+commercial policy in MCD.
+
+The commercial transport worker is a separate non-blocking Portal lane:
+`pull_job` → exact artifact download/admission → accepted acknowledgement →
+stage execution/checkpoint receipts → one terminal receipt. Its cursor and
+pending terminal receipt are durable in the commercial state store, so a
+restart retries the same receipt and resumes completed stages without
+re-executing them. Network/Portal failure never pauses corporate or standalone
+scheduler work. Onboarding stage and terminal receipt schemas are validated
+before they are sent.
+
+`daemon.run_loop` may start at most one Portal worker only when the effective
+profile is `commercial`, the caller supplies a validated commercial worker
+factory, and the daemon is not in single-cycle mode. The worker owns only its
+Portal stop event and bounded thread; it does not enter scheduler admission,
+locks, or task slots. Shutdown sets that event and joins the worker with a
+bounded grace period. Corporate, standalone, and single-cycle paths do not
+instantiate or call the commercial worker.
+
+### Managed-cloud versus self-hosted commercial boundary
+
+For managed-cloud installations under `name.sales-snap.com`, the single
+corporate MCD remains connected only to MCC. Portal reaches MCC through the
+MCC server-to-server projection/intents boundary; MCC continues to dispatch
+work and receive receipts through the corporate MCD. A second Portal key or
+control plane must not be added to that host.
+
+The Portal↔commercial-MCD lane is reserved for self-hosted installations. It
+uses the outbound Portal contract and a host-level commercial agent, separate
+from the corporate MCD identity. Passive commercial acceptance is held until
+Portal completes the approved “Установки” flow; this hold authorizes no host,
+source, credential, or tenant mutation.

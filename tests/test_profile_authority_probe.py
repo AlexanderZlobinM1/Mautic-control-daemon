@@ -104,3 +104,29 @@ def test_probe_fails_closed_for_malformed_declared_include(tmp_path):
     with pytest.raises(probe.ProbeError, match="include.files"):
         probe.capture(install_dir=install, config=entrypoint)
 
+
+def test_probe_accepts_array_of_table_sections_in_split_system_config(tmp_path):
+    probe = _probe_module()
+    install = tmp_path / "mcd"
+    entrypoint = install / "etc" / "mcd.toml"
+    system = install / "etc" / "mcd-agent.system.example.toml"
+    local = install / "etc" / "mcd.local.toml"
+    selection = install / "var" / "hardware-profile-selection.json"
+    entrypoint.parent.mkdir(parents=True)
+    selection.parent.mkdir(parents=True)
+    entrypoint.write_text(
+        '# MCD_CONFIG_ENTRYPOINT v1\n[include]\nfiles = ["mcd-agent.system.example.toml", "mcd.local.toml"]\n',
+        encoding="utf-8",
+    )
+    system.write_text("[[jobs]]\nname = \"scheduler\"\n[[instances]]\nroot = \"/var/www\"\n", encoding="utf-8")
+    local.write_text('[profile]\nname = "midi"\n', encoding="utf-8")
+    selection.write_text('{"mode":"manual","profile":"midi"}\n', encoding="utf-8")
+
+    result = probe.capture(install_dir=install, config=entrypoint)
+
+    assert result["config_files"] == [
+        {"path": str(entrypoint.resolve()), "exists": True},
+        {"path": str(system.resolve()), "exists": True},
+        {"path": str(local.resolve()), "exists": True},
+    ]
+

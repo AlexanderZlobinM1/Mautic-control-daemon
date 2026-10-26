@@ -32,6 +32,11 @@ from mcd_agent.cluster_assets import collect_cluster_assets_status
 from mcd_agent.config import AgentConfig
 from mcd_agent.form_embed import load_form_embed_state
 from mcd_agent.host_identity import resolve_agent_identity
+from mcd_agent.mcd_control import ControlStore, SCHEMA
+from mcd_agent.result_signing import ensure_result_key
+from mcd_agent.result_signing import sign_result
+from mcd_agent.docker_preflight_runner import DockerRuntimePreflightRunner
+from mcd_agent.commercial_portal import _host_fingerprint
 from mcd_agent.install_readiness import collect_mautic_install_readiness
 from mcd_agent.instance_size import collect_instance_sizes
 from mcd_agent.install_type import detect_install_type, is_complete_plugin_bundle, plugin_dir_candidates
@@ -173,6 +178,48 @@ def _runtime_overrides_for_state_push(cfg: AgentConfig) -> dict[str, Any]:
     statuses = state.get("instances", {}) if isinstance(state, dict) else {}
     runtime["form_embed_instance_status"] = statuses if isinstance(statuses, dict) else {}
     return runtime
+
+
+def state_identity_payload(cfg: AgentConfig) -> dict[str, str]:
+    """Return the stable identity fields required by the mcd-state-v1 contract."""
+    return {
+        "agent_id": str(getattr(cfg, "agent_id", "") or "").strip(),
+        "host_fingerprint": _host_fingerprint(),
+    }
+
+
+def _ingest_control_response(
+    state_db_path: str,
+    payload: dict[str, Any],
+    control: dict[str, Any],
+) -> None:
+    """Persist MCC key ACKs even when no control-command envelope is present."""
+    nested = control.get("control")
+    if control.get("schema") != SCHEMA and isinstance(nested, dict):
+        control = nested
+    if control.get("schema") != SCHEMA:
+        return
+    store = ControlStore(state_db_path)
+    commands = control.get("commands")
+    if isinstance(commands, list) and control.get("contract_version") == "1.0":
+        try:
+            store.ingest(
+                control,
+                agent_id=str(payload.get("agent_id") or ""),
+                host_fingerprint=str(payload.get("host_fingerprint") or ""),
+            )
+        except ValueError:
+            # Invalid command envelopes must not suppress an otherwise valid key ACK.
+            pass
+    ack = control.get("result_signing_key_ack")
+    result_key = payload.get("result_signing_key")
+    if (
+        isinstance(ack, dict)
+        and ack.get("status") in {"active", "retired", "revoked"}
+        and isinstance(result_key, dict)
+        and ack.get("key_id") == result_key.get("key_id")
+    ):
+        store.record_key_ack(ack)
 
 
 def monitor_signals_change_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -2185,6 +2232,22 @@ class MCCStatePusher:
         instances_snapshot_complete: bool = True,
     ) -> dict[str, Any]:
         identity = resolve_agent_identity(self.cfg)
+        result_key = None
+        key_path = str(getattr(self.cfg, "result_signing_key_path", "") or "")
+        if key_path:
+            try:
+                _private, result_key = ensure_result_key(key_path)
+            except Exception:
+                result_key = None
+        control_store = ControlStore(self.cfg.state_db_path)
+        state_identity = state_identity_payload(self.cfg)
+        if result_key and key_path:
+            try:
+                private_key, _ = ensure_result_key(key_path)
+                if control_store.active_key_ack(result_key["key_id"]):
+                    control_store.execute_pending(agent_id=state_identity["agent_id"], host_fingerprint=state_identity["host_fingerprint"], active_key=(private_key, result_key["key_id"]), runner=DockerRuntimePreflightRunner(), signer=sign_result)
+            except Exception:
+                pass
         from mcd_agent.mautic_release_authorization import runtime_capabilities as release_capabilities
         instances = []
         for i in installs:
@@ -2216,6 +2279,7 @@ class MCCStatePusher:
                     "runtime_capabilities": release_capabilities(i.runtime, install_type, runtime_profile.capabilities),
                     "runtime_adapter": str(i.runtime_adapter or ""),
                     "runtime_image_ref": str(i.runtime_image_ref or ""),
+                    "docker_runtime_capability": getattr(i, "docker_runtime_capability", None) if str(i.runtime or "").strip().lower() == "docker" else None,
                     "runtime_profile": runtime_profile.safe_dict(),
                     "plugins": plugins,
                     "sender_type": str(sender.get("sender_type", "") or "").strip() or "unknown",
@@ -2235,6 +2299,10 @@ class MCCStatePusher:
 
         payload: dict[str, Any] = {
             "schema": "mcd-state-v1",
+            "control_receipts": control_store.receipts(),
+            "control_capabilities": {"schema": "mcd-control-capabilities-v1", "version": "1.0", "commands": ["docker_runtime_preflight_v1"]},
+            "result_signing_key": result_key,
+            **state_identity,
             "hostname": str(identity.get("effective_hostname") or ""),
             "mcc_host_name": str(identity.get("effective_mcc_host_name") or ""),
             "agent_hostname": str(identity.get("local_hostname") or ""),
@@ -2313,6 +2381,15 @@ class MCCStatePusher:
                 code = int(getattr(resp, "status", 200))
                 body = (resp.read() or b"").decode("utf-8", errors="replace")
                 if 200 <= code < 300:
+                    if body.strip():
+                        try:
+                            control = json.loads(body)
+                            if isinstance(control, dict) and (
+                                control.get("schema") == SCHEMA or isinstance(control.get("control"), dict)
+                            ):
+                                _ingest_control_response(self.cfg.state_db_path, payload, control)
+                        except (ValueError, json.JSONDecodeError):
+                            pass
                     mark_state_snapshot_push_result_mysql(
                         self.cfg,
                         payload_hash=payload_hash,

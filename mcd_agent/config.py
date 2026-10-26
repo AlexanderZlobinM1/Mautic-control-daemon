@@ -488,6 +488,7 @@ class AgentConfig:
     mautic_run_as_user: str | None
     command_timeout_sec: int
     state_db_path: str
+    result_signing_key_path: str
     state_backend: str
     state_mysql_host: str | None
     state_mysql_unix_socket: str | None
@@ -676,6 +677,7 @@ class AgentConfig:
     cmd_import_template: str
     cmd_cache_clear_template: str
     cmd_cache_warm_template: str
+    agent_id: str
     mcc_url: str | None
     mcc_token: str | None
     mcc_push_enabled: bool
@@ -2828,6 +2830,13 @@ def _load_config_inner(path: str) -> AgentConfig:
     sql = data.get("sql", {})
     commands = data.get("commands", {})
     mcc = data.get("mcc", {})
+    if not isinstance(mcc, dict):
+        mcc = {}
+    configured_agent_id = str(mcc.get("agent_id") or "").strip()
+    canonical_agent_source = str(mcc.get("host_name") or socket.gethostname() or "localhost").strip()
+    agent_id = configured_agent_id or (
+        "mcd-agent-" + hashlib.sha256(canonical_agent_source.encode("utf-8")).hexdigest()[:24]
+    )
     plugins = data.get("plugins", {})
     custom = data.get("custom", {}) if isinstance(data.get("custom", {}), dict) else {}
     state = data.get("state", {}) if isinstance(data.get("state", {}), dict) else {}
@@ -3028,6 +3037,9 @@ def _load_config_inner(path: str) -> AgentConfig:
         mautic_run_as_user=str(runtime.get("mautic_run_as_user")).strip() if runtime.get("mautic_run_as_user") else "www-data",
         command_timeout_sec=int(runtime.get("command_timeout_sec", 0)),
         state_db_path=str(runtime.get("state_db_path", "/opt/mcd/var/mcd-state.db")),
+        result_signing_key_path=str(
+            runtime.get("result_signing_key_path", "/opt/mcd/var/keys/result-signing.key")
+        ),
         state_backend=state_backend,
         state_mysql_host=(
             str(runtime.get("state_mysql_host", state.get("mysql_host", ""))).strip()
@@ -3495,6 +3507,7 @@ def _load_config_inner(path: str) -> AgentConfig:
         ),
         cmd_cache_clear_template=str(commands.get("cache_clear_template", "cache:clear")),
         cmd_cache_warm_template=str(commands.get("cache_warm_template", "cache:warmup")),
+        agent_id=agent_id,
         mcc_url=str(mcc.get("url")) if mcc.get("url") else None,
         mcc_token=str(mcc.get("token")) if mcc.get("token") else None,
         mcc_push_enabled=bool(mcc.get("push_enabled", True)),

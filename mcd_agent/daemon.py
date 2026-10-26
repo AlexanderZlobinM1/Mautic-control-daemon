@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import os
+import platform
 import re
 import shlex
 import signal
@@ -217,6 +218,9 @@ from mcd_agent.state_backend import (
     mysql_state_table_names,
     normalized_state_backend,
 )
+from mcd_agent.commercial_execution import CommercialPortalWorker, CommercialScenarioExecutor
+from mcd_agent.commercial_onboarding import build_onboarding_primitive_registry
+from mcd_agent.commercial_portal import CommercialState, PortalClient
 
 _CMD_SEP = "\x1f"
 _M4_CAMPAIGN_DELETED_CLAUSE_RE = re.compile(r"\s+AND\s*\(?\s*c\.deleted\s+IS\s+NULL\s*\)?", re.IGNORECASE)
@@ -238,6 +242,52 @@ _CAMPAIGN_NATIVE_FALLBACK_TIMEOUT_SEC = 30 * 60
 _CAMPAIGN_EMAIL_COUNTER_RECONCILE_MIN_INTERVAL_SEC = 6 * 3600
 _LOCAL_RUNTIME_PUSH_PENDING_KEY = "local_runtime_push_pending"
 _LOCAL_RUNTIME_ACCEPTED_KEY = "local_runtime_accepted"
+
+
+def _commercial_worker_allowed(config: AgentConfig, *, single_cycle: bool, factory: object) -> bool:
+    """Keep the Portal lane outside corporate/standalone scheduler paths."""
+    return (
+        not single_cycle
+        and callable(factory)
+        and str(getattr(config, "profile_name", "") or "").strip().lower() == "commercial"
+    )
+
+
+def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threading.Event], CommercialPortalWorker | None]:
+    """Build the commercial worker from protected local state only."""
+    def build(_stop_event: threading.Event) -> CommercialPortalWorker | None:
+        state = CommercialState(config.state_db_path)
+        def disabled(reason: str) -> None:
+            state.put("commercial_worker_status", {"schema": "mcd-commercial-worker-status-v1", "status": "disabled", "reason": reason, "secret": None})
+        if not state.commercial_enabled:
+            disabled("portal_credential_or_host_binding_invalid")
+            return None
+        base = str(state.get("portal_api_base") or "")
+        credential = str(state.get("portal_agent_credential") or "")
+        agent_id = str(state.get("agent_id") or "")
+        installations = state.get("installation_ids")
+        portal_keys = state.get("portal_job_signing_keys")
+        publisher_keys = state.get("portal_mcc_publisher_keys")
+        if not base.startswith("https://") or not credential or not agent_id or not isinstance(installations, dict) or not installations or not isinstance(portal_keys, dict) or not portal_keys or not isinstance(publisher_keys, dict) or not publisher_keys:
+            disabled("portal_runtime_material_incomplete")
+            return None
+        try:
+            worker = CommercialPortalWorker(
+                PortalClient(state),
+                CommercialScenarioExecutor(state, stage_handlers=build_onboarding_primitive_registry()),
+                installation_id=sorted(str(value) for value in installations.values()),
+                portal_keys={str(key): str(value) for key, value in portal_keys.items()},
+                publisher_keys={str(key): str(value) for key, value in publisher_keys.items()},
+                context={"platform": "linux-arm64" if platform.machine().lower() in {"aarch64", "arm64"} else "linux-amd64", "runtime": "host", "cron_ownership": "none"},
+                capabilities={"portal_scenario_execution_v1", "mcd_passive_activation_v1"},
+                preflight_required=True,
+            )
+        except Exception:
+            disabled("commercial_worker_material_invalid")
+            return None
+        state.put("commercial_worker_status", {"schema": "mcd-commercial-worker-status-v1", "status": "enabled", "installations": len(worker.installation_ids), "secret": None})
+        return worker
+    return build
 _LOCAL_RUNTIME_METADATA_KEY = "local_runtime_metadata"
 _BACKUP_SCHEDULE_STATE_KEY = "backup_schedule_state"
 _BACKUP_SCHEDULE_STATE_LOCK = threading.RLock()
@@ -16181,6 +16231,7 @@ def run_loop(
     single_cycle: bool = False,
     *,
     _test_stop_event: threading.Event | None = None,
+    _commercial_worker_factory: Callable[[threading.Event], CommercialPortalWorker | None] | None = None,
 ) -> None:
     """Run the daemon."""
 
@@ -16505,6 +16556,27 @@ def run_loop(
     scheduler_last_promoted_roots: frozenset[str] = frozenset()
     scheduler_next_fairness_log_at = 0.0
     pusher = MCCStatePusher(config, runtime_store=store)
+    commercial_stop_event = threading.Event()
+    commercial_thread: threading.Thread | None = None
+    commercial_mode = str(getattr(config, "profile_name", "") or "").strip().lower() == "commercial"
+    if commercial_mode and _commercial_worker_factory is None:
+        _commercial_worker_factory = _default_commercial_worker_factory(config)
+    if commercial_mode and _commercial_worker_allowed(config, single_cycle=single_cycle, factory=_commercial_worker_factory):
+        try:
+            commercial_worker = _commercial_worker_factory(commercial_stop_event)
+            if not isinstance(commercial_worker, CommercialPortalWorker):
+                raise TypeError("commercial_worker_factory_invalid")
+            commercial_thread = threading.Thread(
+                target=commercial_worker.run_forever,
+                args=(commercial_stop_event,),
+                kwargs={"interval_sec": max(0.1, float(getattr(config, "poll_interval_sec", 1) or 1))},
+                name="mcd-commercial-portal-worker",
+                daemon=True,
+            )
+            commercial_thread.start()
+        except Exception as exc:
+            logging.warning("commercial Portal worker was not started: %s", exc)
+    commercial_profile_seen = commercial_mode
 
     priority_executor = _PriorityTaskExecutor()
     _ACTIVE_PRIORITY_EXECUTOR = priority_executor
@@ -18956,6 +19028,23 @@ def run_loop(
         ).start()
 
     while _test_stop_event is None or not _test_stop_event.is_set():
+        current_commercial_mode = str(getattr(config, "profile_name", "") or "").strip().lower() == "commercial"
+        if current_commercial_mode != commercial_profile_seen and not single_cycle:
+            if not current_commercial_mode and commercial_thread is not None:
+                commercial_stop_event.set()
+                commercial_thread.join(timeout=2.0)
+                commercial_thread = None
+            elif current_commercial_mode and commercial_thread is None:
+                commercial_stop_event = threading.Event()
+                try:
+                    worker_factory = _default_commercial_worker_factory(config) if _commercial_worker_factory is None else _commercial_worker_factory
+                    worker = worker_factory(commercial_stop_event)
+                    if worker is not None:
+                        commercial_thread = threading.Thread(target=worker.run_forever, args=(commercial_stop_event,), kwargs={"interval_sec": max(0.1, float(getattr(config, "poll_interval_sec", 1) or 1))}, name="mcd-commercial-portal-worker", daemon=True)
+                        commercial_thread.start()
+                except Exception as exc:
+                    logging.warning("commercial Portal worker reload start failed: %s", exc)
+            commercial_profile_seen = current_commercial_mode
         if single_cycle:
             _monitor_authoritative_runtime()
         now = time.time()
@@ -19024,6 +19113,7 @@ def run_loop(
         local_runtime = local_runtime_overrides(config)
         local_fp = overrides_fingerprint(local_runtime)
         pending_local_runtime = None
+        local_runtime_push_accepted_this_tick = False
         if config.mcc_url and config.mcc_token:
             pending_local_runtime = _queue_local_runtime_delta(
                 store,
@@ -19081,6 +19171,7 @@ def run_loop(
                     runtime_metadata=push_metadata,
                 )
                 if accepted:
+                    local_runtime_push_accepted_this_tick = True
                     after_push_runtime = local_runtime_overrides(config)
                     store.put_runtime_sync("local_runtime", local_runtime_to_push)
                     if after_push_runtime != local_runtime_to_push:
@@ -19101,6 +19192,18 @@ def run_loop(
                     logging.info(
                         "runtime-overrides local change pushed to MCC (keys=%s)",
                         ",".join(sorted(local_runtime_to_push.keys())) if local_runtime_to_push else "-",
+                    )
+                    # The accepted response is already the canonical result
+                    # of this write. Do not start the startup/periodic remote
+                    # poll in the same tick: a lagging response can otherwise
+                    # move the durable baseline back to `previous` and make
+                    # the identical local delta push forever. A later normal
+                    # poll still reconciles any independent MCC changes.
+                    startup_runtime_sync_pending = False
+                    runtime_overrides_sync_requested = False
+                    next_runtime_overrides_poll_at = now + max(
+                        15,
+                        min(300, int(config.mcc_push_interval_sec or config.poll_interval_sec or 60)),
                     )
                     _sync_and_publish_form_embed_status(config, installs, reason="local_runtime_push")
                 elif p_status == "conflict":
@@ -19142,6 +19245,7 @@ def run_loop(
                 local_runtime_push_pending = True
         if config.mcc_url and config.mcc_token and (
             (startup_runtime_sync_pending or runtime_overrides_sync_requested or should_runtime_poll)
+            and not local_runtime_push_accepted_this_tick
             and not local_runtime_push_pending
         ):
             ro = fetch_runtime_overrides(
@@ -24419,9 +24523,16 @@ def run_loop(
                     last_monitor_signals_push_error = reason
 
         if single_cycle:
+            commercial_stop_event.set()
+            if commercial_thread is not None:
+                commercial_thread.join(timeout=2.0)
             _ACTIVE_PRIORITY_EXECUTOR = None
             _SEGMENT_DISPATCH_WAKEUP = None
             _ORDINARY_REFILL_WAKEUP = None
             return
         segment_dispatch_wakeup.wait(timeout=max(0.1, float(config.dispatch_interval_sec)))
         segment_dispatch_wakeup.clear()
+
+    commercial_stop_event.set()
+    if commercial_thread is not None:
+        commercial_thread.join(timeout=2.0)

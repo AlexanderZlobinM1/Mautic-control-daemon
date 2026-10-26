@@ -250,6 +250,7 @@ def collect_mautic_install_readiness() -> dict[str, Any]:
         "npm": {"installed": bool(npm_exists), "version": npm_version, "path": shutil.which("npm") or ""},
         "certbot": {"installed": bool(certbot_exists), "version": certbot_version},
         "docker": _docker_state(),
+        "docker_runtime_capability": {"schema": "mcd-docker-runtime-capability-v1", "status": "unobserved", "reason": "requires selected instance container context"},
         "runtime_migration_adapters": installed_runtime_adapters(),
         "database": _database_state(),
         "zabbix_agent": collect_zabbix_agent_state(profile={"zabbix_agent_enabled": True}),
