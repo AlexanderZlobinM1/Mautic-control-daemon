@@ -1298,11 +1298,12 @@ def _persist_resolved_runtime_to_config(
 ) -> None:
     """Persist resolved values and explicit MCC tombstones.
 
-    Normal polls retain the historical stable-key projection.  A post-update
-    recovery is different: the mutable runtime include may have been replaced
-    or truncated, so every MCC-allowed runtime key must be materialized back
-    to disk.  Keeping that distinction here prevents a partial recovery from
-    looking like a successful full restore while preserving the normal poll's
+    Normal stable polls retain the historical stable-key projection. A
+    startup/update recovery, or any normal poll where MCC wins a non-stable
+    field, is different: the mutable runtime include may have been replaced or
+    truncated, so every MCC-allowed runtime key must be materialized back to
+    disk. Keeping that distinction here prevents a partial recovery from
+    looking like a successful full restore while preserving normal poll
     non-destructive behavior.
     """
     previous = dict(previous_runtime)
@@ -1758,17 +1759,24 @@ def _store_runtime_fetch_snapshot(
     store.put_runtime_sync("mcc_runtime_desired_state", state_for_store)
 
 
-def _runtime_bootstrap_needs_full_snapshot(
+def _runtime_resolution_needs_full_snapshot(
     resolution: Mapping[str, Any],
     *,
     recover_after_update: bool,
 ) -> bool:
-    """Materialize every MCC-managed key when recovery filled a local gap."""
+    """Materialize every MCC-managed key when MCC fills a local gap.
+
+    The same rule is required on startup and on a normal runtime poll. A
+    reset include can happen while the daemon is already running; limiting the
+    full projection to update bootstrap would leave non-stable MCC keys only
+    in memory and lose them again on the next restart.
+    """
     if recover_after_update:
         return True
-    # Ordinary polls persist only the stable projection.  If MCC won any
-    # non-stable field, the local file was incomplete (or lost that field), so
-    # persist the complete allowed snapshot, including false/zero/empty values.
+    # Stable-only persistence remains sufficient for ordinary stable updates.
+    # If MCC won any non-stable field, the local file was incomplete, changed,
+    # or lost that field, so persist the complete allowed snapshot, including
+    # false/zero/empty values.
     for path in resolution.get("remote_wins", []):
         if isinstance(path, (tuple, list)) and len(path) >= 2:
             if str(path[1]) not in _STABLE_RUNTIME_KEYS:
@@ -1852,7 +1860,7 @@ def _bootstrap_remote_runtime_before_local_baseline(
         current_local_runtime,
         resolved_runtime,
         resolved_metadata,
-        full_snapshot=_runtime_bootstrap_needs_full_snapshot(
+        full_snapshot=_runtime_resolution_needs_full_snapshot(
             resolution,
             recover_after_update=recover_after_update,
         ),
@@ -19615,6 +19623,10 @@ def run_loop(
                             local_runtime_overrides(config),
                             overrides,
                             resolved_metadata,
+                            full_snapshot=_runtime_resolution_needs_full_snapshot(
+                                resolution,
+                                recover_after_update=False,
+                            ),
                         )
                     base_config = load_config(config.config_file_path, allow_recover_from_mcc=False)
                     if profile_authority:
@@ -19696,6 +19708,10 @@ def run_loop(
                             local_runtime_overrides(config),
                             overrides,
                             resolved_metadata,
+                            full_snapshot=_runtime_resolution_needs_full_snapshot(
+                                resolution,
+                                recover_after_update=False,
+                            ),
                         )
                     # Persisted MCC values are not a new local operator edit.
                     # Refresh the local fingerprint so the next tick does not

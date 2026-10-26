@@ -1,3 +1,10 @@
+## 1.5.244 - 2026-10-26
+
+- Apply the complete MCC-managed runtime snapshot on normal runtime polls as
+  well as startup/update recovery whenever MCC wins a non-stable field, so a
+  runtime include lost while MCD is running cannot leave settings only in
+  memory or restore only a partial projection.
+
 ## 1.5.243 - 2026-10-26
 
 - Restore the complete MCC-managed runtime snapshot after any local runtime

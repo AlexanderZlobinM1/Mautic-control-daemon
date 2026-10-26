@@ -2310,6 +2310,20 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             self.assertEqual(restored, desired_runtime)
             self.assertEqual(store.get_runtime_sync("local_runtime"), desired_runtime)
 
+    def test_runtime_poll_full_snapshot_is_required_for_nonstable_mcc_winner(self) -> None:
+        self.assertTrue(
+            daemon._runtime_resolution_needs_full_snapshot(
+                {"remote_wins": [("host", "db_watchdog", "")]},
+                recover_after_update=False,
+            )
+        )
+        self.assertFalse(
+            daemon._runtime_resolution_needs_full_snapshot(
+                {"remote_wins": [("host", "backup_enabled", "")]},
+                recover_after_update=False,
+            )
+        )
+
     def test_post_update_bootstrap_prefers_canonical_catalog_over_reset_local_projection(self) -> None:
         from pathlib import Path
         from tempfile import TemporaryDirectory

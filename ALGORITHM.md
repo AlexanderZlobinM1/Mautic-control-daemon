@@ -22,7 +22,7 @@ post-step могут завершиться. Следующая совмести
 только незавершённую каталоговую remediation; native plugin operation не
 переисполняется из-за этого отказа.
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.199 (follow-up после immutable
+Актуальная редакция этого канона — MCD 1.5.244 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам
@@ -158,13 +158,14 @@ Qualified UID и его priority/super-priority lane maps сначала materia
 MCC.
 
 Если локальный runtime include потерян или обнулён, любой remote winner вне
-stable-проекции переводит bootstrap в full-snapshot режим: в config
-materialize-ся весь `runtime_remote_allowed_keys()` MCC snapshot, включая
-`false`, `0`, пустые структуры и явные tombstone. Такое materialize-ние не
-создаёт локальную revision и не отправляет потерю обратно в MCC. После MCD
-update этот режим включается всегда: reset локального файла не считается
-изменением настроек, а источником истины остаётся полный сохранённый snapshot
-MCC.
+stable-проекции переводит startup или обычный poll в full-snapshot режим: в
+config materialize-ся весь `runtime_remote_allowed_keys()` MCC snapshot,
+включая `false`, `0`, пустые структуры и явные tombstone. Такое
+materialize-ние не создаёт локальную revision и не отправляет потерю обратно в
+MCC. После MCD update этот режим включается всегда: reset локального файла не
+считается изменением настроек, а источником истины остаётся полный
+сохранённый snapshot MCC. Поэтому восстановление после потери не ограничено
+стабильной частью runtime и одинаково работает до и после перезапуска.
 
 Если локальный config-файл изменился во время remote poll/apply, MCD сначала
 сохраняет пару `previous/current` в durable `local_runtime_push_pending`, а
