@@ -14,6 +14,7 @@ from mcd_agent.commercial_portal import (
     CommercialState,
     PortalClient,
     canonical_json,
+    portal_artifact_trust_keys,
     validate_portal_artifact_trust,
     validate_portal_artifact_trust_update,
     verify_portal_mcd_poll_response,
@@ -156,6 +157,42 @@ def test_worker_applies_signed_poll_update_across_outage_and_restart() -> None:
         assert state.get("commercial_self_hosted_pending_receipts") == []
         assert state.get("commercial_portal_cursor") == "12"
         assert portal.receipts[-1]["schema"] == "portal-mcd-command-receipt-v1"
+
+
+def test_trust_update_refreshes_live_worker_and_restart_reloads_for_scenario_verify() -> None:
+    from mcd_agent.commercial_portal import _b64
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    class Portal:
+        def send_receipt(self, receipt, **_kwargs):
+            return receipt
+
+    with TemporaryDirectory() as directory:
+        state = CommercialState(str(Path(directory) / "commercial.sqlite"))
+        worker = SelfHostedPortalWorker(
+            Portal(),
+            SelfHostedScenarioExecutor(state),
+            installation_id=FIXTURE["update_command"]["binding"]["installation_id"],
+            portal_keys={},
+            publisher_keys={},
+            context={},
+            commercial_key_id=FIXTURE["update_command"]["binding"]["commercial_key_id"],
+            agent_id=FIXTURE["update_command"]["binding"]["agent_id"],
+            host_fingerprint=FIXTURE["update_command"]["binding"]["host_fingerprint"],
+            clock=lambda: 1793059260.0,
+        )
+        assert worker._run_artifact_trust_update(FIXTURE["update_command"], cursor_next="12")["status"] == "succeeded"
+        assert "portal-artifact-fixture-1" in worker.publisher_keys
+
+        private = Ed25519PrivateKey.from_private_bytes(bytes(range(0x40, 0x60)))
+        body = b"scenario-after-trust-update"
+        digest = hashlib.sha256(body).hexdigest()
+        statement = {"kind": "scenario", "revision": "scenario-after-update-r1", "sha256": digest, "media_type": "application/json", "size_bytes": len(body)}
+        pin = {"artifact_uri": "https://artifacts.example.test/scenario-after-update-r1", "artifact_digest": "sha256:" + digest, "artifact_size_bytes": len(body), "artifact_media_type": "application/json", "artifact_revision": "scenario-after-update-r1", "signature": {"algorithm": "ed25519", "key_id": "portal-artifact-fixture-1", "value": _b64(private.sign(PORTAL_ARTIFACT_SIGNATURE_DOMAIN + canonical_json(statement)))}}
+        assert verify_self_hosted_external_artifact(pin, body, worker.publisher_keys, kind="scenario")["artifact_revision"] == "scenario-after-update-r1"
+
+        restarted_keys = portal_artifact_trust_keys(state.get("portal_artifact_trust_v1"))
+        assert verify_self_hosted_external_artifact(pin, body, restarted_keys, kind="scenario")["artifact_revision"] == "scenario-after-update-r1"
 
 
 def test_portal_artifact_verifier_rejects_revoked_key_with_typed_operation_error() -> None:

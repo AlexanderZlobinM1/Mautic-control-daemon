@@ -1,3 +1,11 @@
+## 1.5.258 - 2026-10-27
+
+- Refresh the live self-hosted worker's Portal artifact-trust capability
+  immediately after a durable trust update, so a following scenario command in
+  the same process verifies with the new key set without requiring a restart.
+- Keep unknown/revoked signer failures operation-scoped with typed, secret-free
+  terminal evidence including `rollback=not_attempted` and bounded progress.
+
 ## 1.5.257 - 2026-10-27
 
 - Separate Portal-owned artifact signing trust from Portal job signing trust;

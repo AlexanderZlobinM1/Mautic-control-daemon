@@ -1198,7 +1198,9 @@ Portal trust is absent and is deprecated. Artifact trust is passed as an
 operation capability; missing or unknown/revoked key fails only that operation
 with typed `self_hosted_mcd_artifact_signer_unknown` or
 `self_hosted_mcd_artifact_signer_revoked` and a durable failed terminal
-receipt. The worker remains available for later outbound polling. The base
+receipt. The live worker refreshes this capability immediately after a
+successful durable trust update; a restart reloads the same canonical state.
+The worker remains available for later outbound polling. The base
 `passive`, `standalone`, or `corporate` profile is not an
 eligibility switch; the Portal worker is an independent capability alongside
 the existing scheduler. Missing or invalid state, including an explicit

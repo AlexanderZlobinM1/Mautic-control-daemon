@@ -37,6 +37,7 @@ from mcd_agent.commercial_portal import (
     standalone_settings_etag,
     verify_self_hosted_external_artifact,
     verify_self_hosted_mcd_job,
+    portal_artifact_trust_keys,
     validate_portal_artifact_trust_update,
 )
 
@@ -623,6 +624,11 @@ class SelfHostedPortalWorker:
             if expires <= issued or now < issued - 60 or now >= expires:
                 raise ValueError("portal_artifact_trust_update_expired_or_not_yet_valid")
             result = self.executor.state.apply_portal_artifact_trust_update(update)
+            # The worker may receive the trust update and the next
+            # scenario.apply command in the same long-lived process. Refresh
+            # the in-memory capability immediately; restart persistence is
+            # handled by the daemon factory reading the same durable state.
+            self.publisher_keys = portal_artifact_trust_keys(self.executor.state.get("portal_artifact_trust_v1"))
             status = "succeeded"
         except Exception as exc:
             reason = str(exc).strip()

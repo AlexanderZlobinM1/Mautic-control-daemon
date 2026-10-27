@@ -244,6 +244,8 @@ def test_v2_worker_emits_typed_failed_terminal_for_missing_publisher_trust_and_k
         assert portal.polls == 1
         assert portal.receipts[-1]["status"] == "failed"
         assert portal.receipts[-1]["error"]["type"] == "self_hosted_mcd_artifact_signer_unknown"
+        assert portal.receipts[-1]["rollback"] == "not_attempted"
+        assert portal.receipts[-1]["result"] == {"executor": "mcd-self-hosted-external", "completed": 0, "total": 1}
         assert state.get("commercial_self_hosted_pending_delivery_v1") is None
 
 
