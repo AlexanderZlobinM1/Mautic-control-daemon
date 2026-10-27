@@ -2125,8 +2125,9 @@ def _initialize_local_runtime_baseline(
     if recover_after_update:
         # A package/source transition may leave the mutable runtime include
         # empty or partially rebuilt. That is not an operator deletion. Start
-        # from the complete durable baseline and overlay non-empty MCC values;
-        # an explicit MCC tombstone is the only destructive signal.
+        # from the complete durable baseline and overlay the complete MCC
+        # snapshot, including intentionally empty containers; an explicit MCC
+        # tombstone is the only destructive signal.
         remote_metadata = _runtime_metadata_normalize(
             store.get_runtime_sync(_MCC_RUNTIME_METADATA_KEY)
         )
@@ -2135,8 +2136,6 @@ def _initialize_local_runtime_baseline(
             text_key = str(key)
             if _runtime_metadata_has_remote_tombstone(remote_metadata, text_key):
                 recovered_after_update.pop(text_key, None)
-                continue
-            if isinstance(value, Mapping) and not value:
                 continue
             recovered_after_update[text_key] = deepcopy(value)
         recovered_after_update = _persist_recovered_runtime_values(

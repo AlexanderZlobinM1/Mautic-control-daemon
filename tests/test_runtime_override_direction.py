@@ -705,6 +705,45 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             )
         self.assertNotIn("scheduler_host_max_parallel", baseline)
 
+    def test_mcd_update_recovery_applies_empty_values_from_complete_mcc_snapshot(self) -> None:
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        class MemoryStore:
+            def __init__(self, values=None):
+                self.values = dict(values or {})
+
+            def get_runtime_sync(self, key):
+                return self.values.get(key)
+
+            def put_runtime_sync(self, key, value):
+                self.values[key] = dict(value)
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "mcd.toml"
+            path.write_text('[profile]\nname = "farm-hiload"\n', encoding="utf-8")
+            cfg = SimpleNamespace(config_file_path=str(path))
+            store = MemoryStore(
+                {
+                    # The local durable copy is stale and non-empty.
+                    "local_runtime": {"db_watchdog": {"enabled": True, "max_connections": 120}},
+                    # MCC explicitly stores an empty value in the complete snapshot.
+                    "mcc_runtime": {"db_watchdog": {}},
+                }
+            )
+
+            baseline, _ = daemon._initialize_local_runtime_baseline(
+                cfg,
+                store,
+                recover_after_update=True,
+            )
+
+            self.assertEqual(baseline, {"db_watchdog": {}})
+            self.assertEqual(
+                local_runtime_overrides(load_config(str(path), allow_recover_from_mcc=False)),
+                {"db_watchdog": {}},
+            )
+
     def test_runtime_reset_restores_all_durable_settings_not_only_instance_rows(self) -> None:
         from pathlib import Path
         from tempfile import TemporaryDirectory
