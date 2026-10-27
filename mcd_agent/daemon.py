@@ -258,6 +258,11 @@ _LOCAL_RUNTIME_ACCEPTED_KEY = "local_runtime_accepted"
 _MCD_RUNTIME_AGENT_VERSION_KEY = "mcd_runtime_agent_version"
 
 
+def _commercial_pending_delivery(state: CommercialState) -> bool:
+    pending = state.get("commercial_self_hosted_pending_delivery_v1")
+    return isinstance(pending, Mapping) and isinstance(pending.get("job"), Mapping)
+
+
 def _commercial_state_eligibility(config: AgentConfig) -> tuple[bool, str]:
     """Determine Portal capability from durable commercial state only.
 
@@ -272,10 +277,14 @@ def _commercial_state_eligibility(config: AgentConfig) -> tuple[bool, str]:
     try:
         state = CommercialState(state_path)
         connection_state = str(state.get("commercial_portal_connection_state") or "").strip().lower()
-        if bool(state.get("commercial_revoked")) or bool(state.get("commercial_detached")) or connection_state in {"revoked", "detached"}:
+        revoked = bool(state.get("commercial_revoked")) or bool(state.get("commercial_detached")) or connection_state in {"revoked", "detached"}
+        if revoked and not _commercial_pending_delivery(state):
             return False, "commercial_state_revoked"
-        if not state.commercial_enabled:
-            return False, "commercial_state_not_enabled"
+        if not state.portal_enrollment_enabled:
+            # A saved delivery must still be drained after a state transition;
+            # the worker will emit a typed terminal receipt and then stop.
+            if not _commercial_pending_delivery(state):
+                return False, "commercial_state_not_enabled"
         base = str(state.get("portal_api_base") or "").strip()
         credential = str(state.get("portal_agent_credential") or "").strip()
         agent_id = str(state.get("agent_id") or "").strip()
@@ -310,11 +319,12 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
         state = CommercialState(config.state_db_path)
         def disabled(reason: str) -> None:
             state.put("commercial_worker_status", {"schema": "mcd-commercial-worker-status-v1", "status": "disabled", "reason": reason, "secret": None})
-        if not state.commercial_enabled:
+        pending_delivery = _commercial_pending_delivery(state)
+        if not state.portal_enrollment_enabled and not pending_delivery:
             disabled("portal_credential_or_host_binding_invalid")
             return None
         connection_state = str(state.get("commercial_portal_connection_state") or "").strip().lower()
-        if bool(state.get("commercial_revoked")) or bool(state.get("commercial_detached")) or connection_state in {"revoked", "detached"}:
+        if (bool(state.get("commercial_revoked")) or bool(state.get("commercial_detached")) or connection_state in {"revoked", "detached"}) and not pending_delivery:
             disabled("commercial_state_revoked")
             return None
         base = str(state.get("portal_api_base") or "")

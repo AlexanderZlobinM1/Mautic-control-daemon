@@ -1184,8 +1184,16 @@ failure never pauses corporate or standalone scheduler work. The commercial
 key is durable identity metadata only; raw credentials and future quota,
 billing or tariff semantics are not part of MCD.
 
+Once Portal has leased and MCD has durably accepted a delivery, every local
+outcome closes through a signed terminal receipt: expiry, malformed or failed
+admission, revoked/disabled Portal state, artifact unavailability, and runner
+exceptions are typed and bounded. A receipt that cannot be sent immediately is
+queued durably before the delivery is considered complete; the runner is never
+re-run just to deliver a receipt after restart. A poll/network failure before a
+delivery exists remains a transport retry and has no command to acknowledge.
+
 `daemon.run_loop` may start at most one Portal worker when the durable
-commercial enrollment is valid: HTTPS Portal base, credential, agent and
+Portal enrollment is valid: HTTPS Portal base, credential, agent and
 commercial-key identity, host binding, at least one installation binding, and
 Portal job-signing keys must all be present. Portal artifact trust is not
 activation material and is not a worker-start gate: poll, adopt, inventory,
@@ -1203,7 +1211,8 @@ successful durable trust update; a restart reloads the same canonical state.
 The worker remains available for later outbound polling. The base
 `passive`, `standalone`, or `corporate` profile is not an
 eligibility switch; the Portal worker is an independent capability alongside
-the existing scheduler. Missing or invalid state, including an explicit
+the existing scheduler. The corporate MCC URL/token and base profile are not
+Portal eligibility switches. Missing or invalid Portal state, including an explicit
 revoke/detach marker, fails closed. Single-cycle mode never starts the worker.
 The worker owns only its Portal stop event and bounded thread; it does not
 enter scheduler admission, locks, or task slots. On revoke, detach, or

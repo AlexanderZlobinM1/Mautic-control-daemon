@@ -20,6 +20,8 @@ def _eligible_state(tmp_path, monkeypatch):
 def test_commercial_worker_guard_uses_persistent_state_not_base_profile(tmp_path, monkeypatch):
     _state, config = _eligible_state(tmp_path, monkeypatch)
     factory = lambda _stop: None
+    config.mcc_url = ""
+    config.mcc_token = ""
     for profile in ("passive", "standalone", "corporate", "commercial"):
         config.profile_name = profile
         assert _commercial_worker_allowed(config, single_cycle=False, factory=factory)

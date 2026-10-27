@@ -897,8 +897,18 @@ class CommercialState:
         return True
 
     @property
-    def commercial_enabled(self) -> bool:
+    def portal_enrollment_enabled(self) -> bool:
+        """Whether the independent Portal enrollment is locally usable.
+
+        This is deliberately unrelated to the corporate MCC configuration or
+        profile. The Portal lane has its own credential and host binding.
+        """
         return bool(self.get("portal_agent_credential")) and self.get("host_fingerprint") == _host_fingerprint()
+
+    @property
+    def commercial_enabled(self) -> bool:
+        """Backward-compatible alias for the Portal enrollment state."""
+        return self.portal_enrollment_enabled
 
     def remember_nonce(self, nonce: str, now: float) -> bool:
         with sqlite3.connect(self.path) as db:

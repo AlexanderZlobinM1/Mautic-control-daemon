@@ -104,6 +104,44 @@ def _error_code(error: BaseException) -> str:
     return (type(error).__name__ or "scenario_execution_failed")[:80]
 
 
+def _delivery_job(command: Mapping[str, Any]) -> dict[str, Any]:
+    """Unwrap the Portal delivery envelope without validating its contents."""
+    nested = command.get("job") if command.get("schema") == "portal-mcd-job-delivery-v1" else None
+    return dict(nested) if isinstance(nested, Mapping) else dict(command)
+
+
+def _verified_shape_for_terminal(command: Mapping[str, Any], *, expected_agent_id: str, expected_installation_id: str, expected_commercial_key_id: str, expected_host_fingerprint: str) -> dict[str, Any] | None:
+    """Recover only binding fields needed to close an accepted delivery.
+
+    This is not an admission path and never authorizes execution. It exists so
+    an expired, malformed, or locally disabled leased command can still receive
+    a signed, bounded terminal receipt when Portal supplied enough binding
+    material to identify it.
+    """
+    job = _delivery_job(command)
+    required = ("job_id", "request_id", "account_id", "commercial_key_id", "agent_id", "installation_id", "host_fingerprint", "scenario", "applicability")
+    if any(not str(job.get(key) or "").strip() for key in required[:7]):
+        return None
+    if any(str(job.get(key) or "") != expected for key, expected in (("agent_id", expected_agent_id), ("installation_id", expected_installation_id), ("commercial_key_id", expected_commercial_key_id), ("host_fingerprint", expected_host_fingerprint))):
+        return None
+    scenario = job.get("scenario")
+    applicability = job.get("applicability")
+    facts_digest = applicability.get("facts_digest") if isinstance(applicability, Mapping) else None
+    if not isinstance(scenario, Mapping) or not isinstance(facts_digest, str) or not facts_digest:
+        return None
+    return {"job": job, "scenario": dict(scenario), "facts": dict(applicability.get("facts") or {}) if isinstance(applicability, Mapping) and isinstance(applicability.get("facts"), Mapping) else {}, "facts_digest": facts_digest}
+
+
+def _failed_terminal_for_delivery(command: Mapping[str, Any], *, error: BaseException, sequence: int, expected_agent_id: str, expected_installation_id: str, expected_commercial_key_id: str, expected_host_fingerprint: str) -> dict[str, Any] | None:
+    verified = _verified_shape_for_terminal(command, expected_agent_id=expected_agent_id, expected_installation_id=expected_installation_id, expected_commercial_key_id=expected_commercial_key_id, expected_host_fingerprint=expected_host_fingerprint)
+    if verified is None:
+        return None
+    try:
+        return _failed_terminal_receipt(verified, error=error, sequence=sequence, started_at=_utc(), completed=0, total=1)
+    except (TypeError, ValueError, KeyError):
+        return None
+
+
 def _binding_from_verified(verified: Mapping[str, Any]) -> dict[str, Any]:
     job = verified["job"]
     return {
@@ -689,6 +727,39 @@ class SelfHostedPortalWorker:
             return None
         return installation_id, cursor_next, dict(job)
 
+    def _delivery_failure(self, command: Mapping[str, Any], *, cursor_next: str, error: BaseException, sequence: int = 1) -> dict[str, Any]:
+        """Close an accepted delivery with a typed terminal receipt.
+
+        Poll/transport failures happen before a delivery exists and are
+        retried normally. Once Portal has leased and MCD has durably saved a
+        delivery, local rejection, expiry, disabled state, and artifact
+        unavailability must not leave that lease silent.
+        """
+        failed = _failed_terminal_for_delivery(
+            command,
+            error=error,
+            sequence=sequence,
+            expected_agent_id=self.agent_id,
+            expected_installation_id=self._active_installation_id,
+            expected_commercial_key_id=self.commercial_key_id,
+            expected_host_fingerprint=self.host_fingerprint,
+        )
+        if failed is None:
+            return {"status": "rejected", "reason": _error_code(error), "job_id": str(_delivery_job(command).get("job_id") or "")}
+        delivered = self._send_or_queue(failed)
+        if delivered:
+            self._finish_command(cursor_next=cursor_next)
+        return {"status": "failed" if delivered else "receipt_pending", "job_id": str(failed["job_id"]), **({"receipt_pending": True} if not delivered else {})}
+
+    def _local_delivery_state_error(self) -> ValueError | None:
+        state = self.executor.state
+        connection_state = str(state.get("commercial_portal_connection_state") or "").strip().lower()
+        if bool(state.get("commercial_revoked")) or bool(state.get("commercial_detached")) or connection_state in {"revoked", "detached"}:
+            return ValueError("self_hosted_mcd_commercial_state_revoked")
+        if bool(state.get("commercial_disabled")) or connection_state in {"disabled", "inactive"}:
+            return ValueError("self_hosted_mcd_commercial_state_disabled")
+        return None
+
     def run_once(self) -> dict[str, Any]:
         if not self._drain():
             return {"status": "receipt_pending"}
@@ -756,12 +827,18 @@ class SelfHostedPortalWorker:
         try:
             verified = verify_self_hosted_mcd_job(command, self.portal_keys, expected_agent_id=self.agent_id, expected_installation_id=active_installation_id, expected_commercial_key_id=self.commercial_key_id, expected_host_fingerprint=self.host_fingerprint)
         except ValueError as exc:
-            return {"status": "rejected", "reason": str(exc)}
+            return self._delivery_failure(command, cursor_next=cursor_next, error=exc)
+        local_state_error = self._local_delivery_state_error()
+        if local_state_error is not None:
+            return self._delivery_failure(command, cursor_next=cursor_next, error=local_state_error)
         try:
             bootstrap_pin = verified["bootstrap_artifact"]
             scenario_pin = verified["scenario_artifact"]
-            bootstrap = self._outbound("bootstrap_download", lambda: download_external_artifact(bootstrap_pin["artifact_uri"], expected_size=bootstrap_pin["artifact_size_bytes"]))
-            scenario = self._outbound("scenario_download", lambda: download_external_artifact(scenario_pin["artifact_uri"], expected_size=scenario_pin["artifact_size_bytes"]))
+            try:
+                bootstrap = self._outbound("bootstrap_download", lambda: download_external_artifact(bootstrap_pin["artifact_uri"], expected_size=bootstrap_pin["artifact_size_bytes"]))
+                scenario = self._outbound("scenario_download", lambda: download_external_artifact(scenario_pin["artifact_uri"], expected_size=scenario_pin["artifact_size_bytes"]))
+            except _PortalTransportError as exc:
+                return self._delivery_failure(command, cursor_next=cursor_next, error=ValueError("self_hosted_mcd_artifact_unavailable"))
             terminal = self.executor.run(command, portal_keys=self.portal_keys, publisher_keys=self.publisher_keys, context=self.context, expected_agent_id=self.agent_id, expected_installation_id=str(command["installation_id"]), expected_commercial_key_id=self.commercial_key_id, expected_host_fingerprint=self.host_fingerprint, bootstrap_artifact=bootstrap, scenario_artifact=scenario, receipt_sink=self._send_or_queue)
             if self._pending():
                 # Keep the delivery and cursor pending until the next outbound
@@ -770,8 +847,6 @@ class SelfHostedPortalWorker:
                 return {"status": terminal.get("status"), "job_id": str(command["job_id"]), "receipt_pending": True}
             self._finish_command(cursor_next=cursor_next)
             return {"status": terminal.get("status"), "job_id": str(command["job_id"])}
-        except _PortalTransportError:
-            return {"status": "backoff", "job_id": str(command.get("job_id") or ""), "retry_after": float(self._transport_state().get("retry_after") or 0.0)}
         except Exception as exc:
             failed = _failed_terminal_receipt(verified, error=exc, sequence=1, started_at=_utc(), completed=0, total=1)
             delivered = self._send_or_queue(failed)

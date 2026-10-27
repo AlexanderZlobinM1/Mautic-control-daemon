@@ -249,6 +249,92 @@ def test_v2_worker_emits_typed_failed_terminal_for_missing_publisher_trust_and_k
         assert state.get("commercial_self_hosted_pending_delivery_v1") is None
 
 
+def test_v2_worker_command6_shape_expiry_emits_terminal_and_advances(monkeypatch) -> None:
+    portal_key = Ed25519PrivateKey.generate()
+    publisher_key = Ed25519PrivateKey.generate()
+    job, _bootstrap, _scenario, keys = _job(portal_key, publisher_key)
+    job["job_id"] = "job-command6"
+    job["expires_at"] = "2020-01-01T00:00:00Z"
+    unsigned = dict(job)
+    unsigned.pop("portal_signature")
+    job["portal_signature"] = {"algorithm": "ed25519", "key_id": "portal-1", "value": _b64(portal_key.sign(canonical_json(unsigned)))}
+
+    class Portal:
+        def __init__(self) -> None:
+            self.receipts: list[dict[str, object]] = []
+
+        def pull_job(self, **_: object):
+            return {"cursor": "6", "commands": [job]}
+
+        def send_receipt(self, receipt: dict[str, object], **_: object):
+            self.receipts.append(receipt)
+            return {}
+
+    with TemporaryDirectory() as directory:
+        state = CommercialState(str(Path(directory) / "commercial.sqlite"))
+        executor = SelfHostedScenarioExecutor(state, facts_reader=lambda **_: job["applicability"]["facts"], runner=lambda **_: (_ for _ in ()).throw(AssertionError("expired job must not execute")))
+        portal = Portal()
+        worker = SelfHostedPortalWorker(
+            portal,
+            executor,
+            installation_id="installation-1",
+            portal_keys={"portal-1": keys["portal-1"]},
+            publisher_keys={"publisher-1": keys["publisher-1"]},
+            context={},
+            commercial_key_id="commercial-key-1",
+            agent_id="agent-1",
+            host_fingerprint="sha256:" + "b" * 64,
+        )
+
+        result = worker.run_once()
+
+        assert result == {"status": "failed", "job_id": "job-command6"}
+        assert len(portal.receipts) == 1
+        assert portal.receipts[0]["schema"] == "mcd-self-hosted-terminal-receipt-v2"
+        assert portal.receipts[0]["error"]["type"] == "self_hosted_mcd_job_expired_or_not_yet_valid"
+        assert state.get("commercial_self_hosted_pending_delivery_v1") is None
+
+
+def test_v2_worker_revoked_state_closes_already_accepted_delivery(monkeypatch) -> None:
+    portal_key = Ed25519PrivateKey.generate()
+    publisher_key = Ed25519PrivateKey.generate()
+    job, _bootstrap, _scenario, keys = _job(portal_key, publisher_key)
+
+    class Portal:
+        def __init__(self) -> None:
+            self.receipts: list[dict[str, object]] = []
+
+        def pull_job(self, **_: object):
+            return {"cursor": "6", "commands": [job]}
+
+        def send_receipt(self, receipt: dict[str, object], **_: object):
+            self.receipts.append(receipt)
+            return {}
+
+    with TemporaryDirectory() as directory:
+        state = CommercialState(str(Path(directory) / "commercial.sqlite"))
+        state.put("commercial_portal_connection_state", "revoked")
+        executor = SelfHostedScenarioExecutor(state, facts_reader=lambda **_: job["applicability"]["facts"], runner=lambda **_: (_ for _ in ()).throw(AssertionError("revoked job must not execute")))
+        portal = Portal()
+        worker = SelfHostedPortalWorker(
+            portal,
+            executor,
+            installation_id="installation-1",
+            portal_keys={"portal-1": keys["portal-1"]},
+            publisher_keys={"publisher-1": keys["publisher-1"]},
+            context={},
+            commercial_key_id="commercial-key-1",
+            agent_id="agent-1",
+            host_fingerprint="sha256:" + "b" * 64,
+        )
+
+        result = worker.run_once()
+
+        assert result == {"status": "failed", "job_id": "job-1"}
+        assert portal.receipts[0]["error"]["type"] == "self_hosted_mcd_commercial_state_revoked"
+        assert state.get("commercial_self_hosted_pending_delivery_v1") is None
+
+
 def test_v2_status_and_binding_reject_legacy_passed_receipt() -> None:
     binding = {
         "job_id": "job-1",

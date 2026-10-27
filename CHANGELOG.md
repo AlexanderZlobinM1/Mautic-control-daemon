@@ -1,3 +1,17 @@
+## 1.5.259 - 2026-10-27
+
+- Keep the self-hosted Portal executor independent from corporate MCC
+  profile/URL state; valid Portal enrollment remains usable in standalone and
+  passive modes.
+- Close every accepted self-hosted delivery with a typed signed terminal
+  receipt on local expiry, malformed or invalid admission, revoked/disabled
+  local Portal state, and artifact unavailability; retain durable receipt
+  delivery across restart/outage without re-running the runner.
+- Make the recovery contract explicit: after update, reset, or partial runtime
+  loss, restore the complete MCC-authoritative runtime snapshot, including all
+  host and instance settings; an omitted field is not deletion and only an
+  explicit tombstone may remove it.
+
 ## 1.5.258 - 2026-10-27
 
 - Refresh the live self-hosted worker's Portal artifact-trust capability
