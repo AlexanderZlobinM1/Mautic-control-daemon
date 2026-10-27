@@ -1,3 +1,13 @@
+## 1.6.0 - 2026-10-28 (dev-only candidate)
+
+- Add the generic prepared-target Mautic apply path: MCC-built Composer/ZIP
+  skeletons are delivered through the existing authenticated MCC HTTPS API,
+  verified by exact artifact and manifest SHA-256, applied without invoking
+  Composer on the host, with `config`/`var` preservation and existing
+  migration, health and rollback receipts. The approved 1.5.268 line remains
+  unchanged; the legacy hardcoded upgrade path is retained until sandbox
+  prepared-skeleton parity is accepted.
+
 ## 1.5.268 - 2026-10-27
 
 - Use the authenticated MCC catalog/API path for scenario delivery: require

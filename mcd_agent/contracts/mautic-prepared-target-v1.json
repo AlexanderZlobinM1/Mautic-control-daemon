@@ -1,5 +1,11 @@
 {
   "schema": "mcd-mautic-prepared-target-input-v1",
+  "candidate": {
+    "agent_version": "1.6.0",
+    "lineage": "prepared-target",
+    "approved_baseline": "1.5.268",
+    "publication_status": "dev-only"
+  },
   "purpose": "MCC-built Composer or ZIP skeleton delivered to MCD without invoking Composer on the host",
   "transport": "MCD fetches only the bound artifact path from the configured HTTPS MCC URL with the existing MCC Bearer API key; no GitHub, DNS or alternate network fallback",
   "artifact": {

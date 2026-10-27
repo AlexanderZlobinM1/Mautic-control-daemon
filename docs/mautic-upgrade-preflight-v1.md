@@ -1,5 +1,20 @@
 # Guarded Mautic upgrade preflight v1
 
+## Dev candidate 1.6.0: prepared target input
+
+The prepared-target candidate keeps the existing `mautic-upgrade apply`
+contract and accepts an optional `mcd-mautic-prepared-target-input-v1` value.
+MCC builds the Composer/ZIP skeleton; MCD downloads it only from the configured
+HTTPS MCC endpoint with the existing Bearer API key, verifies exact size and
+SHA-256 plus the embedded file manifest, and applies the verified tree without
+invoking Composer on the host. `config`, `app/config`, and `var` remain from
+the live installation. Existing migration, health and full-tree rollback
+receipts are reused, and the receipt records `host_composer_invoked=false`.
+
+This is a dev-only 1.6.0 candidate. Approved/test/latest remain 1.5.268 until
+the MCC sandbox accepts prepared-skeleton parity. The legacy hardcoded upgrade
+path remains present until that acceptance.
+
 `mcd-cli mautic-upgrade preflight --root INSTANCE --mode composer --target VERSION --json`
 emits one compact `MCD_UPGRADE_PREFLIGHT_EVIDENCE=` line with schema
 `mcd-mautic-upgrade-preflight-v1`. The evidence includes `run_id`, `root`,

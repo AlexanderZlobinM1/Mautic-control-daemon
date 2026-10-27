@@ -63,6 +63,20 @@ def _version(root: Path):
 
 
 class PreparedTargetTests(unittest.TestCase):
+  def test_dev_candidate_metadata_keeps_approved_baseline(self):
+    from mcd_agent import __version__
+
+    contract = json.loads(
+        (Path(__file__).parents[1] / "mcd_agent/contracts/mautic-prepared-target-v1.json").read_text()
+    )
+    self.assertEqual(__version__, "1.6.0")
+    self.assertEqual(contract["candidate"], {
+        "agent_version": "1.6.0",
+        "lineage": "prepared-target",
+        "approved_baseline": "1.5.268",
+        "publication_status": "dev-only",
+    })
+
   def test_prepared_target_verifies_manifest_and_preserves_config_var(self):
     from tempfile import TemporaryDirectory
     with TemporaryDirectory() as raw:
