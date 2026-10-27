@@ -1,3 +1,11 @@
+## 1.5.261 - 2026-10-27
+
+- Publish the complete MCC-authoritative runtime snapshot after a local
+  settings loss or update reset: restore every allowed host and instance
+  setting, including false, zero, and empty values, before scheduler startup.
+- Keep explicit MCC tombstones and newer local MCD events authoritative so a
+  recovery cannot turn a real deletion into an accidental restore.
+
 ## 1.5.260 - 2026-10-27
 
 - Continue same-job Portal recovery terminals with the next sequence and
