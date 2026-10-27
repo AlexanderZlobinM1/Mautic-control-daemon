@@ -32,7 +32,7 @@
   },
   "artifact": {
     "required": ["revision", "digest", "media_type", "size"],
-    "digest_semantics": "digest and revision must equal the verified signed scenario_artifact pin; size is the exact delivered artifact byte length.",
+    "digest_semantics": "digest and revision must equal the verified active MCC catalog scenario_artifact pin; size is the exact delivered artifact byte length. The trusted MCC path verifies SHA-256 equality and does not claim artifact-author authentication.",
     "allowed_media_types": ["application/x-sh", "application/x-elf"]
   },
   "backup": {
@@ -65,7 +65,7 @@
   },
   "mcd_ownership": {
     "mcd": ["signed job admission", "host/artifact binding", "timeout", "transport", "durable stage and terminal receipts", "idempotency", "rollback state"],
-    "portal_or_mcc": ["scenario policy", "artifact bytes and signature", "selected primitive fields", "applicability facts and pins"],
+    "portal_or_mcc": ["scenario policy", "artifact bytes and active catalog metadata", "selected primitive fields", "applicability facts and pins"],
     "excluded": ["installer recipe", "Mautic version selection", "raw credentials", "upgrade-version branching"]
   }
 }

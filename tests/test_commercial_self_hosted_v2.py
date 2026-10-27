@@ -12,6 +12,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from mcd_agent.commercial_portal import (
     MCC_ARTIFACT_SIGNATURE_DOMAIN,
+    MCC_AUTHENTICATED_ARTIFACT_TRANSPORT,
+    MCC_CATALOG_SHA256_TRUST_MODE,
     SELF_HOSTED_MCD_JOB_SCHEMA,
     SELF_HOSTED_MCD_LEGACY_CONTRACT_VERSION,
     SELF_HOSTED_MCD_CONTRACT_VERSION,
@@ -56,6 +58,27 @@ def _artifact(pin_kind: str, revision: str, body: bytes, key: Ed25519PrivateKey)
             "algorithm": "ed25519",
             "key_id": "publisher-1",
             "value": _b64(key.sign(MCC_ARTIFACT_SIGNATURE_DOMAIN + canonical_json(statement))),
+        },
+    }
+
+
+def _mcc_catalog_artifact(revision: str, body: bytes, *, status: str = "active") -> dict[str, object]:
+    digest = _digest(body)
+    return {
+        "artifact_trust_mode": MCC_CATALOG_SHA256_TRUST_MODE,
+        "artifact_transport": MCC_AUTHENTICATED_ARTIFACT_TRANSPORT,
+        "artifact_path": f"/api/v1/commercial/artifacts/{revision}",
+        "artifact_grant": "mcc-grant-1",
+        "artifact_digest": digest,
+        "artifact_size_bytes": len(body),
+        "artifact_media_type": "application/x-sh",
+        "artifact_revision": revision,
+        "trusted_catalog": {
+            "source": "mcc",
+            "transport": MCC_AUTHENTICATED_ARTIFACT_TRANSPORT,
+            "status": status,
+            "revision": revision,
+            "artifact_digest": digest,
         },
     }
 
@@ -175,6 +198,98 @@ def test_v21_portal_fixture_matches_signed_cross_component_vector() -> None:
     assert verified["contract_version"] == SELF_HOSTED_MCD_CONTRACT_VERSION
     assert "bootstrap_artifact" not in job
     assert hashlib.sha256(canonical_json(job)).hexdigest() == expected_hash
+
+
+def test_mcc_catalog_sha_only_pin_requires_active_catalog_and_exact_bytes() -> None:
+    portal = Ed25519PrivateKey.generate()
+    publisher = Ed25519PrivateKey.generate()
+    job, _bootstrap, scenario, keys = _job(portal, publisher, contract_version=SELF_HOSTED_MCD_CONTRACT_VERSION)
+    pin = _mcc_catalog_artifact("scenario-r1", scenario)
+    job["scenario_artifact"] = pin
+    job["scenario"]["artifact_digest"] = pin["artifact_digest"]
+    _resign(job, portal)
+
+    verified = verify_self_hosted_mcd_job(
+        job,
+        {"portal-1": keys["portal-1"]},
+        expected_agent_id="agent-1",
+        expected_installation_id="installation-1",
+        expected_commercial_key_id="commercial-key-1",
+        expected_host_fingerprint="sha256:" + "b" * 64,
+    )
+    assert verified["scenario_artifact"]["artifact_trust_mode"] == MCC_CATALOG_SHA256_TRUST_MODE
+    assert verify_self_hosted_external_artifact(pin, scenario, {}, kind="scenario")["artifact_digest"] == pin["artifact_digest"]
+
+    stale = dict(pin)
+    stale["trusted_catalog"] = {**pin["trusted_catalog"], "status": "stale"}
+    job["scenario_artifact"] = stale
+    _resign(job, portal)
+    try:
+        verify_self_hosted_mcd_job(
+            job,
+            {"portal-1": keys["portal-1"]},
+            expected_agent_id="agent-1",
+            expected_installation_id="installation-1",
+            expected_commercial_key_id="commercial-key-1",
+            expected_host_fingerprint="sha256:" + "b" * 64,
+        )
+    except ValueError as exc:
+        assert str(exc) == "self_hosted_mcd_scenario_artifact_invalid_catalog"
+    else:
+        raise AssertionError("stale MCC catalog must fail closed")
+
+
+def test_v21_worker_uses_authenticated_mcc_api_for_sha_only_catalog() -> None:
+    portal_key = Ed25519PrivateKey.generate()
+    publisher_key = Ed25519PrivateKey.generate()
+    job, _bootstrap, scenario, keys = _job(portal_key, publisher_key, contract_version=SELF_HOSTED_MCD_CONTRACT_VERSION)
+    pin = _mcc_catalog_artifact("scenario-r1", scenario)
+    job["scenario_artifact"] = pin
+    job["scenario"]["artifact_digest"] = pin["artifact_digest"]
+    _resign(job, portal_key)
+
+    class Portal:
+        def __init__(self) -> None:
+            self.receipts: list[dict[str, object]] = []
+            self.downloads: list[tuple[str, str, int]] = []
+
+        def pull_job(self, **_: object):
+            return {"cursor": "cursor-mcc-sha", "commands": [job]}
+
+        def download_artifact(self, *, path: str, grant: str, expected_size: int) -> bytes:
+            self.downloads.append((path, grant, expected_size))
+            return scenario
+
+        def send_receipt(self, receipt: dict[str, object], **_: object):
+            self.receipts.append(receipt)
+            return {}
+
+    with TemporaryDirectory() as directory:
+        state = CommercialState(str(Path(directory) / "commercial.sqlite"))
+        events: list[bytes] = []
+        executor = SelfHostedScenarioExecutor(
+            state,
+            facts_reader=lambda **_: job["applicability"]["facts"],
+            runner=lambda **kwargs: events.append(kwargs["artifact"]) or {"status": "succeeded"},
+        )
+        client = Portal()
+        worker = SelfHostedPortalWorker(
+            client,
+            executor,
+            installation_id="installation-1",
+            portal_keys={"portal-1": keys["portal-1"]},
+            publisher_keys={},
+            context={},
+            commercial_key_id="commercial-key-1",
+            agent_id="agent-1",
+            host_fingerprint="sha256:" + "b" * 64,
+        )
+
+        result = worker.run_once()
+
+    assert result == {"status": "succeeded", "job_id": "job-1"}
+    assert client.downloads == [(pin["artifact_path"], pin["artifact_grant"], len(scenario))]
+    assert events == [scenario]
 
 
 def test_v21_registered_scenario_job_rejects_mixed_bootstrap_artifact() -> None:

@@ -1,11 +1,19 @@
 {
   "schema": "mcd-scenario-artifact-delivery-v1",
   "contract_version": "1.0",
-  "ownership": "MCD owns local staging, object store, active pointer, cleanup and verified delivery receipt. The connector owns transport and authentication only.",
+  "ownership": "MCD owns local staging, object store, active pointer, cleanup and verified delivery receipt. The connector owns authenticated MCC API transport only; MCC catalog metadata supplies the trusted artifact digest.",
+  "trusted_mcc_path": {
+    "transport": "mcc_authenticated_api",
+    "authentication": "HTTPS with the existing MCC/Portal API credential; an exact FQDN/IP allowlist is optional and enforced when configured",
+    "integrity": "SHA-256 equality against the active trusted MCC catalog entry",
+    "authorship": "SHA-only does not authenticate the artifact author and must not be used for an untrusted external source",
+    "required_catalog_status": "active",
+    "required_binding": ["catalog.source=mcc", "catalog.transport=mcc_authenticated_api", "catalog.status=active", "catalog.revision=artifact_revision", "catalog.artifact_digest=artifact_digest"]
+  },
   "sequence": [
-    "read signed metadata revision/version/media_type/size/digest/signature/trust",
+    "read trusted MCC catalog metadata revision/media_type/size/digest and transport binding",
     "download exact bytes into isolated staging",
-    "verify transport/auth, schema, version/revision, size, SHA-256, signature/trust and context compatibility",
+    "verify authenticated MCC transport, schema, revision, size, SHA-256, active catalog binding and context compatibility",
     "fsync staged bytes and atomically move the object",
     "fsync and atomically switch the active pointer",
     "emit the verified delivery receipt",

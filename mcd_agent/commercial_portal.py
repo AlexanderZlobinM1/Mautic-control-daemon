@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from typing import Any, Mapping
 from urllib import request
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
@@ -49,6 +50,8 @@ PORTAL_ARTIFACT_TRUST_SCHEMA = "portal-artifact-trust-v1"
 PORTAL_ARTIFACT_TRUST_UPDATE_SCHEMA = "portal-mcd-artifact-trust-update-v1"
 PORTAL_ARTIFACT_TRUST_CONTRACT_VERSION = "1.0"
 PORTAL_ARTIFACT_TRUST_DOMAIN = "portal_self_host_scenario_artifact"
+MCC_CATALOG_SHA256_TRUST_MODE = "mcc_catalog_sha256"
+MCC_AUTHENTICATED_ARTIFACT_TRANSPORT = "mcc_authenticated_api"
 MAX_ARTIFACT_BYTES = 512 * 1024 * 1024
 PORTAL_USER_AGENT = f"mcd-agent/{__version__} portal-commercial/{CONTRACT_VERSION}"
 
@@ -175,6 +178,37 @@ def _without_signature(job: Mapping[str, Any]) -> dict[str, Any]:
 def _require_https(url: str) -> None:
     if not str(url).lower().startswith("https://"):
         raise ValueError("commercial_portal_https_required")
+
+
+def _require_allowed_portal_host(url: str, state: "CommercialState") -> None:
+    """Enforce an optional exact FQDN/IP allowlist for authenticated API calls."""
+    raw = state.get("portal_api_allowed_hosts")
+    if raw in (None, "", []):
+        return
+    if isinstance(raw, str):
+        allowed = {raw.strip().lower()} if raw.strip() else set()
+    elif isinstance(raw, (list, tuple, set)):
+        allowed = {str(item).strip().lower() for item in raw if str(item).strip()}
+    else:
+        raise ValueError("commercial_portal_allowed_hosts_invalid")
+    if not allowed:
+        return
+    parsed = urlparse(str(url))
+    hostname = str(parsed.hostname or "").strip().lower()
+    if not hostname:
+        raise ValueError("commercial_portal_host_not_allowlisted")
+    if hostname in allowed:
+        return
+    try:
+        resolved = {
+            str(item[4][0]).strip().lower()
+            for item in socket.getaddrinfo(hostname, parsed.port or 443, type=socket.SOCK_STREAM)
+            if item[4] and item[4][0]
+        }
+    except OSError as exc:
+        raise ValueError("commercial_portal_host_not_allowlisted") from exc
+    if not resolved.intersection(allowed):
+        raise ValueError("commercial_portal_host_not_allowlisted")
 
 
 def build_portal_mcd_poll_request(*, request_id: str, idempotency_key: str, binding: Mapping[str, str], cursor: str | None, wait_ms: int, backoff_ms: int) -> dict[str, Any]:
@@ -315,33 +349,6 @@ def verify_signed_job(job: Mapping[str, Any], public_keys: Mapping[str, str], *,
     if not isinstance(applicability, dict):
         raise ValueError("commercial_package_applicability_missing")
     return {"job_id": str(item["job_id"]), "idempotency_key": str(item["idempotency_key"]), "command": str(item["command"]), "package_id": str(package["package_id"]), "revision": str(package["revision"]), "digest": "sha256:" + digest, "size_bytes": size, "media_type": str(package["media_type"]), "applicability": applicability}
-
-
-def verify_mcc_artifact(job: Mapping[str, Any], artifact: bytes, publisher_keys: Mapping[str, str]) -> dict[str, Any]:
-    """Verify exact Portal-delivered bytes against the MCC publisher statement."""
-    item = job.get("job") if isinstance(job.get("job"), dict) else job
-    package = item.get("package") if isinstance(item, dict) else None
-    if not isinstance(package, dict):
-        raise ValueError("commercial_package_missing")
-    digest = str(package.get("sha256") or "").lower().removeprefix("sha256:")
-    if len(digest) != 64 or hashlib.sha256(artifact).hexdigest() != digest:
-        raise ValueError("commercial_artifact_digest_invalid")
-    if len(artifact) != int(package.get("size_bytes") or -1):
-        raise ValueError("commercial_artifact_size_invalid")
-    signature = package.get("signature")
-    if not isinstance(signature, dict) or signature.get("algorithm") != "ed25519":
-        raise ValueError("commercial_artifact_signature_missing")
-    key = publisher_keys.get(str(signature.get("key_id") or ""))
-    kind = str(package.get("kind") or "scenario")
-    statement = {"kind": kind, "revision": str(package.get("revision") or ""), "sha256": digest, "media_type": str(package.get("media_type") or ""), "size_bytes": int(package.get("size_bytes") or 0)}
-    signed = b"com.sales-snap.portal-mcc/artifact-signature/1.0\n" + canonical_json(statement) + b"\n"
-    if not key:
-        raise ValueError("commercial_artifact_signer_unknown")
-    try:
-        Ed25519PublicKey.from_public_bytes(_unb64(key)).verify(_unb64(str(signature.get("value") or "")), signed)
-    except Exception as exc:
-        raise ValueError("commercial_artifact_signature_invalid") from exc
-    return {"kind": kind, "revision": str(package["revision"]), "sha256": "sha256:" + digest, "size_bytes": len(artifact), "media_type": str(package["media_type"])}
 
 
 def _require_sha256_digest(value: object, code: str) -> str:
@@ -545,21 +552,67 @@ def _validate_self_hosted_scenario(value: object) -> dict[str, Any]:
 def _validate_self_hosted_artifact_pin(value: object, code: str) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise ValueError(code)
-    uri = value.get("artifact_uri")
-    if not isinstance(uri, str) or not uri.startswith("https://"):
-        raise ValueError(f"{code}_uri")
     size = value.get("artifact_size_bytes")
     if isinstance(size, bool) or not isinstance(size, int) or size <= 0 or size > MAX_ARTIFACT_BYTES:
         raise ValueError(f"{code}_size")
+    digest = _require_sha256_digest(value.get("artifact_digest"), f"{code}_digest")
+    media_type = _require_contract_string(value.get("artifact_media_type"), f"{code}_media_type")
+    revision = _require_contract_string(value.get("artifact_revision"), f"{code}_revision")
+    trust_mode = str(value.get("artifact_trust_mode") or "ed25519").strip()
+    if trust_mode == MCC_CATALOG_SHA256_TRUST_MODE:
+        if media_type not in {"application/x-sh", "application/x-elf"}:
+            raise ValueError(f"{code}_media_type")
+        if value.get("artifact_transport") != MCC_AUTHENTICATED_ARTIFACT_TRANSPORT:
+            raise ValueError(f"{code}_transport")
+        path = value.get("artifact_path")
+        if (
+            not isinstance(path, str)
+            or not path.startswith("/")
+            or "://" in path
+            or "\x00" in path
+            or any(part in {"", ".", ".."} for part in path.split("/")[1:])
+        ):
+            raise ValueError(f"{code}_path")
+        grant = value.get("artifact_grant")
+        if not isinstance(grant, str) or not grant.strip() or len(grant) > 512:
+            raise ValueError(f"{code}_grant")
+        catalog = value.get("trusted_catalog")
+        if not isinstance(catalog, Mapping) or set(catalog) != {"source", "transport", "status", "revision", "artifact_digest"}:
+            raise ValueError(f"{code}_catalog")
+        if catalog.get("source") != "mcc" or catalog.get("transport") != MCC_AUTHENTICATED_ARTIFACT_TRANSPORT or catalog.get("status") != "active":
+            raise ValueError(f"{code}_catalog")
+        catalog_revision = _require_contract_string(catalog.get("revision"), f"{code}_catalog")
+        catalog_digest = _require_sha256_digest(catalog.get("artifact_digest"), f"{code}_catalog")
+        if catalog_revision != revision or catalog_digest != digest:
+            raise ValueError(f"{code}_catalog_binding_mismatch")
+        if "signature" in value:
+            raise ValueError(f"{code}_signature_forbidden")
+        return {
+            "artifact_trust_mode": MCC_CATALOG_SHA256_TRUST_MODE,
+            "artifact_transport": MCC_AUTHENTICATED_ARTIFACT_TRANSPORT,
+            "artifact_path": path,
+            "artifact_grant": grant,
+            "trusted_catalog": dict(catalog),
+            "artifact_digest": digest,
+            "artifact_size_bytes": size,
+            "artifact_media_type": media_type,
+            "artifact_revision": revision,
+        }
+    if trust_mode != "ed25519":
+        raise ValueError(f"{code}_trust_mode")
+    uri = value.get("artifact_uri")
+    if not isinstance(uri, str) or not uri.startswith("https://"):
+        raise ValueError(f"{code}_uri")
     signature = value.get("signature")
     if not isinstance(signature, Mapping) or signature.get("algorithm") != "ed25519":
         raise ValueError(f"{code}_signature")
     return {
+        "artifact_trust_mode": "ed25519",
         "artifact_uri": uri,
-        "artifact_digest": _require_sha256_digest(value.get("artifact_digest"), f"{code}_digest"),
+        "artifact_digest": digest,
         "artifact_size_bytes": size,
-        "artifact_media_type": _require_contract_string(value.get("artifact_media_type"), f"{code}_media_type"),
-        "artifact_revision": _require_contract_string(value.get("artifact_revision"), f"{code}_revision"),
+        "artifact_media_type": media_type,
+        "artifact_revision": revision,
         "signature": {
             "algorithm": "ed25519",
             "key_id": _require_contract_string(signature.get("key_id"), f"{code}_signature"),
@@ -647,15 +700,18 @@ def verify_self_hosted_external_artifact(
     kind: str,
     signature_domain: bytes | None = None,
 ) -> dict[str, Any]:
-    """Verify exact bytes and a Portal artifact-trust signature for one pin.
+    """Verify exact bytes for a trusted MCC catalog or legacy signed pin.
 
-    Raw string values remain a deliberately narrow legacy alias for the old
-    MCC publisher store. Canonical Portal trust values are structured key
-    records, which also preserve revoked status and use the Portal domain.
+    The trusted MCC catalog path is authenticated by the MCC API transport and
+    catalog/job metadata; it deliberately verifies SHA-256 only and does not
+    claim that the digest authenticates an artifact author. Legacy Portal and
+    publisher signature pins remain supported for compatibility.
     """
     normalized = _validate_self_hosted_artifact_pin(pin, f"self_hosted_mcd_{kind}_artifact_invalid")
     if len(artifact) != normalized["artifact_size_bytes"] or hashlib.sha256(artifact).hexdigest() != normalized["artifact_digest"][7:]:
         raise ValueError("self_hosted_mcd_artifact_integrity_invalid")
+    if normalized.get("artifact_trust_mode") == MCC_CATALOG_SHA256_TRUST_MODE:
+        return normalized
     signature = normalized["signature"]
     key_record = publisher_keys.get(signature["key_id"])
     if not key_record:
@@ -951,6 +1007,7 @@ class PortalClient:
         if not base or not self.state.get("portal_agent_credential"):
             raise RuntimeError("commercial_portal_not_activated")
         _require_https(base)
+        _require_allowed_portal_host(base, self.state)
         body = None if payload is None else canonical_json(payload)
         headers = {"Authorization": "Bearer " + str(self.state.get("portal_agent_credential")), "X-Portal-Contract": CONTRACT, "X-Request-Id": _b64(os.urandom(16)), "User-Agent": PORTAL_USER_AGENT}
         if body is not None:
@@ -1036,7 +1093,10 @@ class PortalClient:
 
     def download_artifact(self, *, path: str, grant: str, expected_size: int) -> bytes:
         base = str(self.state.get("portal_api_base") or "").rstrip("/")
+        if not base or not self.state.get("portal_agent_credential"):
+            raise RuntimeError("commercial_portal_not_activated")
         _require_https(base)
+        _require_allowed_portal_host(base, self.state)
         expected = int(expected_size)
         if expected < 0 or expected > MAX_ARTIFACT_BYTES:
             raise ValueError("commercial_artifact_size_invalid")

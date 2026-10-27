@@ -125,6 +125,23 @@ def test_all_portal_http_requests_use_product_user_agent(monkeypatch, tmp_path):
     assert all(req.get_header("User-agent") == PORTAL_USER_AGENT for req in requests)
 
 
+def test_authenticated_artifact_download_requires_api_key_and_optional_host_allowlist(tmp_path):
+    state = CommercialState(str(tmp_path / "state.sqlite"))
+    state.put("portal_api_base", "https://portal.example/api/v1/commercial")
+    client = PortalClient(state)
+    with pytest.raises(RuntimeError, match="commercial_portal_not_activated"):
+        client.download_artifact(path="artifacts/a", grant="grant", expected_size=2)
+
+    state.put("portal_agent_credential", "credential")
+    state.put("portal_api_allowed_hosts", ["mcc.example", "65.21.54.91"])
+    with pytest.raises(ValueError, match="commercial_portal_host_not_allowlisted"):
+        client.download_artifact(path="artifacts/a", grant="grant", expected_size=2)
+
+    state.put("portal_api_allowed_hosts", ["portal.example"])
+    # The allowlist is optional; once the exact FQDN is allowed, the normal
+    # authenticated request path is reached (the network is not exercised).
+
+
 @pytest.mark.parametrize(
     ("failure", "expected_code", "expected_status", "retryable"),
     [

@@ -1,3 +1,11 @@
+## 1.5.268 - 2026-10-27
+
+- Use the authenticated MCC catalog/API path for scenario delivery: require
+  the existing API credential, optionally enforce the configured exact FQDN/IP
+  allowlist, verify exact artifact size and SHA-256 against active catalog metadata, then run
+  the existing generic MCD executor and receipts without an artifact signer
+  operation. Legacy signed pins remain compatibility-only.
+
 ## 1.5.267 - 2026-10-27
 
 - Restore the complete MCC-authoritative runtime settings snapshot after

@@ -51,7 +51,7 @@ post-step могут завершиться. Следующая совмести
 только незавершённую каталоговую remediation; native plugin operation не
 переисполняется из-за этого отказа.
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.267 (follow-up после immutable
+Актуальная редакция этого канона — MCD 1.5.268 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам
@@ -1187,13 +1187,16 @@ key, agent, installation, host, scenario and applicability binding, local-facts
 revalidation, expiry, nonce, idempotency and Portal signature validation. The
 additive contract version `2.1` is the registered-installation path: its
 `execution.primitive` is `scenario.apply`, it requires the signed scenario
-artifact, and `bootstrap_artifact` must be absent. MCD downloads, size/digest
-checks, and verifies only that scenario artifact against the Portal-owned
-artifact trust set. Legacy contract `2.0` remains accepted with its required
-bootstrap and scenario pins for compatibility; bootstrap is not part of the
-registered scenario operation. MCD never fetches MCC directly, never imports
-MCC credentials or scenario rules, and Portal is the self-hosted scenario
-authority.
+artifact, and `bootstrap_artifact` must be absent. The trusted internal MCC
+catalog path carries an active catalog revision, executable artifact metadata
+and SHA-256 through the authenticated MCC/Portal API; MCD downloads through
+that API and accepts bytes only when size and SHA-256 match the immutable
+catalog entry. SHA-only integrity does not authenticate an artifact author and
+is never accepted for an unknown or untrusted external source. Legacy
+contract `2.0` and legacy publisher-signed artifact pins remain accepted only
+for compatibility; bootstrap is not part of the registered scenario
+operation. MCD never imports MCC credentials or scenario rules, and Portal
+remains only the connector/UI for this lane.
 
 The signed `portal-mcd-inventory-snapshot-v1` also carries the additive
 `applicability_facts` coordinate (`mcd-portal-applicability-facts-v1`, contract
@@ -1238,16 +1241,18 @@ not execute PHP, choose versions, restore a backup, or synthesize a recipe.
 
 Scenario delivery is a separate MCD-owned boundary described by
 `mcd-scenario-artifact-delivery-v1` and implemented by
-`mcd_agent/scenario_artifact_store.py`. MCD reads signed metadata first,
-downloads into an isolated staging file, verifies exact revision/media/size/
-digest/signature/trust and frame compatibility, fsyncs the object, atomically
-switches the active pointer, and emits a verified delivery receipt before
-cleaning the previous local object. A failed verification, partial download,
-disk-full condition, outage, restart or concurrent delivery removes only the
-new staging material and keeps the previous active pointer. Pending cleanup is
-replayed after the durable receipt queue drains. The catalog is immutable and
-is never deleted by MCD; rollback re-downloads a pinned old revision. No
-scenario runner starts during this delivery sequence.
+`mcd_agent/scenario_artifact_store.py`. On the trusted internal path MCD reads
+active MCC catalog metadata first, downloads through the authenticated API into
+an isolated staging file, verifies exact revision/media/size/SHA-256 and
+catalog binding, fsyncs the object, atomically switches the active pointer,
+and emits a verified delivery receipt before cleaning the previous local
+object. This path has no artifact signer operation. A failed verification,
+unknown/stale/mismatched catalog, partial download, disk-full condition,
+outage, restart or concurrent delivery removes only the new staging material
+and keeps the previous active pointer. Pending cleanup is replayed after the
+durable receipt queue drains. The catalog is immutable and is never deleted by
+MCD; rollback re-downloads a pinned old revision. No scenario runner starts
+during this delivery sequence.
 
 The executable scenario bridge follows the generic
 `mcd-scenario-executable-context-v1` contract. The old
@@ -1270,9 +1275,11 @@ output fail closed. MCD also captures only bounded stderr and persists a
 redacted preview, output SHA-256 values, truncation flags, exit code/signal,
 timeout state, admission stage, and any already-valid progress frames as typed
 runner evidence. Raw stderr, artifact bytes, and executable context never enter
-receipts or run state. The delivery authority owns the executable artifact and
-scenario policy; MCD owns local staging/activation, execution admission,
-timeout, rollback state and durable receipts.
+receipts or run state. MCC owns the executable artifact, active catalog
+metadata and scenario policy; MCD owns authenticated download admission, local
+staging/activation, execution admission, timeout, rollback state and durable
+receipts. The legacy artifact-trust capability remains only for compatibility
+and is not required by the trusted MCC SHA-only path.
 
 Stage receipts use `mcd-self-hosted-stage-receipt-v2` with only
 `scenario_dispatch` and `execution`, statuses `queued|running|waiting|succeeded|failed`,
@@ -1310,16 +1317,17 @@ commercial-key identity, host binding, at least one installation binding, and
 Portal job-signing keys must all be present. Portal artifact trust is not
 activation material and is not a worker-start gate: poll, adopt, inventory,
 settings, noop, and receipt operations use Portal job-signing keys only. The
+trusted MCC SHA-only path does not load or require artifact signer keys; it
+requires the authenticated API transport and active catalog binding. The
 canonical `portal_artifact_signing_keys` set is seeded by activation and can be
 replaced only by a bound, time-valid, monotonically increasing
 `portal-mcd-artifact-trust-update-v1` command delivered in the signed poll
 response. A legacy `portal_mcc_publisher_keys` map is read only while canonical
-Portal trust is absent and is deprecated. Artifact trust is passed as an
-operation capability; missing or unknown/revoked key fails only that operation
-with typed `self_hosted_mcd_artifact_signer_unknown` or
-`self_hosted_mcd_artifact_signer_revoked` and a durable failed terminal
-receipt. The live worker refreshes this capability immediately after a
-successful durable trust update; a restart reloads the same canonical state.
+Portal trust is absent and is deprecated for legacy signed artifact pins.
+Unknown/stale/mismatched SHA or an authenticated API failure rejects only that
+operation with a durable failed terminal receipt. The live worker remains
+available for later outbound polling; a restart reloads the same durable
+catalog/receipt state.
 The worker remains available for later outbound polling. The base
 `passive`, `standalone`, or `corporate` profile is not an
 eligibility switch; the Portal worker is an independent capability alongside

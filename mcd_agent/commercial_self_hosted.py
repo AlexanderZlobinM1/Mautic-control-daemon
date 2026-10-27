@@ -1321,6 +1321,22 @@ class SelfHostedPortalWorker:
             return ValueError("self_hosted_mcd_commercial_state_disabled")
         return None
 
+    def _download_scenario_artifact(self, pin: Mapping[str, Any]) -> bytes:
+        """Use authenticated MCC API transport for the catalog SHA-only path."""
+        if pin.get("artifact_trust_mode") == "mcc_catalog_sha256":
+            downloader = getattr(self.client, "download_artifact", None)
+            if not callable(downloader):
+                raise ValueError("self_hosted_mcd_authenticated_artifact_transport_unavailable")
+            return downloader(
+                path=str(pin["artifact_path"]),
+                grant=str(pin["artifact_grant"]),
+                expected_size=int(pin["artifact_size_bytes"]),
+            )
+        return download_external_artifact(
+            pin["artifact_uri"],
+            expected_size=pin["artifact_size_bytes"],
+        )
+
     def run_once(self) -> dict[str, Any]:
         self._normalize_pending_recovery_receipt()
         if not self._drain():
@@ -1399,8 +1415,8 @@ class SelfHostedPortalWorker:
             try:
                 bootstrap = None
                 if bootstrap_pin is not None:
-                    bootstrap = self._outbound("bootstrap_download", lambda: download_external_artifact(bootstrap_pin["artifact_uri"], expected_size=bootstrap_pin["artifact_size_bytes"]))
-                scenario = self._outbound("scenario_download", lambda: download_external_artifact(scenario_pin["artifact_uri"], expected_size=scenario_pin["artifact_size_bytes"]))
+                    bootstrap = self._outbound("bootstrap_download", lambda: self._download_scenario_artifact(bootstrap_pin))
+                scenario = self._outbound("scenario_download", lambda: self._download_scenario_artifact(scenario_pin))
             except _PortalTransportError as exc:
                 return self._delivery_failure(command, cursor_next=cursor_next, error=ValueError("self_hosted_mcd_artifact_unavailable"))
             terminal = self.executor.run(command, portal_keys=self.portal_keys, publisher_keys=self.publisher_keys, context=self.context, expected_agent_id=self.agent_id, expected_installation_id=str(command["installation_id"]), expected_commercial_key_id=self.commercial_key_id, expected_host_fingerprint=self.host_fingerprint, bootstrap_artifact=bootstrap, scenario_artifact=scenario, receipt_sink=self._send_or_queue)
