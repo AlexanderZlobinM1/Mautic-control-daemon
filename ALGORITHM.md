@@ -1195,7 +1195,11 @@ fixed `--mcd-scenario-apply` argv, no shell/eval, and a bounded process group.
 Child stdout is a length-prefixed canonical JSON stream with at most 256
 progress frames and one terminal result; unknown fields, secret-shaped values,
 non-contiguous progress, malformed frames, timeouts, signals, and oversized
-output fail closed. Portal owns the executable artifact and scenario policy;
+output fail closed. MCD also captures only bounded stderr and persists a
+redacted preview, output SHA-256 values, truncation flags, exit code/signal,
+timeout state, admission stage, and any already-valid progress frames as typed
+runner evidence. Raw stderr, artifact bytes, and executable context never enter
+receipts or run state. Portal owns the executable artifact and scenario policy;
 MCD owns only this transport, admission, timeout, and durable receipt boundary.
 
 Stage receipts use `mcd-self-hosted-stage-receipt-v2` with only
@@ -1269,7 +1273,10 @@ MCC хранит полный разрешённый runtime-снимок хос
 все instance-строки), сохраняет его в локальный mutable include и только затем
 перезагружает конфигурацию. Восстановление не ограничивается stable- или
 instance-ключами; false/zero/empty значения восстанавливаются как валидные
-значения, если они присутствуют в каноническом снимке.
+значения, если они присутствуют в каноническом снимке. MCD отдельно
+распознаёт потерю полного локального снимка по отсутствующим или сброшенным
+полям/instance-строкам и в этом случае всегда материализует весь разрешённый
+MCC-снимок, даже если текущий ответ содержит только stable-поля.
 
 Для каждого host/instance-поля применяется LWW по сохранённому `updated_at`,
 затем `revision`, с детерминированным MCC tie-break. Более новое изменение MCD

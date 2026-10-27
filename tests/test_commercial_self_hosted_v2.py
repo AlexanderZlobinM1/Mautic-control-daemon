@@ -17,6 +17,7 @@ from mcd_agent.commercial_portal import (
     verify_self_hosted_external_artifact,
 )
 from mcd_agent.commercial_self_hosted import (
+    RunnerExecutionError,
     SelfHostedPortalWorker,
     SelfHostedScenarioExecutor,
     validate_self_hosted_stage_receipt,
@@ -174,6 +175,73 @@ def test_v2_external_artifact_execution_has_exact_binding_and_no_handlers() -> N
         )
         assert replay == terminal
         assert events == [scenario]
+
+
+def test_v2_runner_failure_persists_bounded_evidence_and_replays_without_rerun() -> None:
+    portal = Ed25519PrivateKey.generate()
+    publisher = Ed25519PrivateKey.generate()
+    job, bootstrap, scenario, keys = _job(portal, publisher)
+    calls = 0
+
+    def fail_runner(**_kwargs):
+        nonlocal calls
+        calls += 1
+        raise RunnerExecutionError(
+            "self_hosted_mcd_runner_failed",
+            evidence={
+                "schema": "mcd-self-hosted-runner-evidence-v1",
+                "admission_stage": "completed",
+                "exit_code": 23,
+                "signal": None,
+                "timed_out": False,
+                "stdout_bytes": 0,
+                "stdout_sha256": hashlib.sha256(b"").hexdigest(),
+                "stdout_truncated": False,
+                "stderr_bytes": 5,
+                "stderr_sha256": hashlib.sha256(b"error").hexdigest(),
+                "stderr_truncated": False,
+                "stderr_preview": "error",
+            },
+        )
+
+    with TemporaryDirectory() as directory:
+        state = CommercialState(str(Path(directory) / "commercial.sqlite"))
+        executor = SelfHostedScenarioExecutor(
+            state,
+            facts_reader=lambda **_: job["applicability"]["facts"],
+            runner=fail_runner,
+        )
+        terminal = executor.run(
+            job,
+            portal_keys={"portal-1": keys["portal-1"]},
+            publisher_keys={"publisher-1": keys["publisher-1"]},
+            context={},
+            expected_agent_id="agent-1",
+            expected_installation_id="installation-1",
+            expected_commercial_key_id="commercial-key-1",
+            expected_host_fingerprint="sha256:" + "b" * 64,
+            bootstrap_artifact=bootstrap,
+            scenario_artifact=scenario,
+        )
+        assert terminal["status"] == "failed"
+        assert terminal["runner_evidence"]["exit_code"] == 23
+        assert terminal["error"]["runner_evidence"]["stderr_preview"] == "error"
+        saved = executor._load("job-1")
+        assert saved["runner_evidence"]["stderr_bytes"] == 5
+        replay = executor.run(
+            job,
+            portal_keys={"portal-1": keys["portal-1"]},
+            publisher_keys={"publisher-1": keys["publisher-1"]},
+            context={},
+            expected_agent_id="agent-1",
+            expected_installation_id="installation-1",
+            expected_commercial_key_id="commercial-key-1",
+            expected_host_fingerprint="sha256:" + "b" * 64,
+            bootstrap_artifact=bootstrap,
+            scenario_artifact=scenario,
+        )
+        assert replay == terminal
+        assert calls == 1
 
 
 def test_v2_external_artifact_requires_publisher_trust_only_at_operation_boundary() -> None:

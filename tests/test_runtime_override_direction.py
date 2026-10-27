@@ -744,6 +744,47 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             restored = local_runtime_overrides(load_config(str(path), allow_recover_from_mcc=False))
             self.assertEqual(restored, desired)
 
+    def test_runtime_loss_forces_full_snapshot_materialization_for_stable_only_response(self) -> None:
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        class MemoryStore:
+            def __init__(self):
+                self.values = {}
+
+            def get_runtime_sync(self, key):
+                return self.values.get(key)
+
+            def put_runtime_sync(self, key, value):
+                self.values[key] = dict(value)
+
+        desired = {
+            "plugin_operations": {
+                "/var/www/neodent/public_html": [{"operation_key": "stats", "interval_sec": 600}]
+            }
+        }
+        response = {
+            "status": "ok",
+            "runtime_overrides": desired,
+            "desired_state": {"revision": 203, "runtime_overrides": desired},
+        }
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "mcd.toml"
+            path.write_text('[profile]\nname = "custom"\n', encoding="utf-8")
+            cfg = replace(
+                load_config(str(path), allow_recover_from_mcc=False),
+                mcc_url="https://mcc.example",
+                mcc_token="token",
+            )
+            store = MemoryStore()
+            with patch("mcd_agent.daemon.fetch_runtime_overrides", return_value=response), patch(
+                "mcd_agent.daemon._persist_resolved_runtime_to_config"
+            ) as persist:
+                status = daemon._bootstrap_remote_runtime_before_local_baseline(cfg, store, [])
+
+        self.assertEqual(status, "applied")
+        self.assertTrue(persist.call_args.kwargs["full_snapshot"])
+
     def test_restart_profile_snapshot_without_local_provenance_does_not_push(self) -> None:
         class MemoryStore:
             def __init__(self):

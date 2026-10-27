@@ -1095,6 +1095,43 @@ def _runtime_value_looks_reset(value: object) -> bool:
     )
 
 
+def _runtime_snapshot_loss_detected(
+    current_runtime: Mapping[str, Any],
+    durable_runtime: Mapping[str, Any],
+) -> bool:
+    """Detect a missing or reset part of the durable MCC snapshot.
+
+    An empty/missing local projection is not a local delete.  It is a storage
+    loss signal when the durable MCC snapshot still contains that field.  The
+    check deliberately compares only fields present in the durable snapshot,
+    so it does not manufacture defaults for settings that MCC never stored.
+    False and zero remain valid values; empty containers are considered lost
+    only when the durable value is non-empty.
+    """
+    current = current_runtime if isinstance(current_runtime, Mapping) else {}
+    durable = durable_runtime if isinstance(durable_runtime, Mapping) else {}
+    for raw_key, durable_value in durable.items():
+        key = str(raw_key)
+        if key not in current:
+            return True
+        current_value = current.get(key)
+        if _is_instance_runtime_map_key(key) and isinstance(durable_value, Mapping):
+            current_rows = current_value if isinstance(current_value, Mapping) else {}
+            for uid, durable_row in durable_value.items():
+                current_uid = _matching_instance_runtime_entry(current_rows, uid)
+                if current_uid is None:
+                    return True
+                if (
+                    _runtime_value_looks_reset(current_rows.get(current_uid))
+                    and not _runtime_value_looks_reset(durable_row)
+                ):
+                    return True
+            continue
+        if _runtime_value_looks_reset(current_value) and not _runtime_value_looks_reset(durable_value):
+            return True
+    return False
+
+
 def _merge_recovered_runtime_values(
     current_runtime: Mapping[str, Any],
     fallback_runtime: Mapping[str, Any],
@@ -2175,6 +2212,7 @@ def _runtime_resolution_needs_full_snapshot(
     resolution: Mapping[str, Any],
     *,
     recover_after_update: bool,
+    local_runtime_was_reset: bool = False,
 ) -> bool:
     """Materialize every MCC-managed key when MCC fills a local gap.
 
@@ -2184,6 +2222,8 @@ def _runtime_resolution_needs_full_snapshot(
     in memory and lose them again on the next restart.
     """
     if recover_after_update:
+        return True
+    if local_runtime_was_reset:
         return True
     # Stable-only persistence remains sufficient for ordinary stable updates.
     # If MCC won any non-stable field, the local file was incomplete, changed,
@@ -2242,6 +2282,10 @@ def _bootstrap_remote_runtime_before_local_baseline(
     # LWW over the canonical MCC response; durable values are reconciled after
     # this fetch and explicit MCC tombstones remain destructive.
     current_local_runtime = {} if recover_after_update else local_runtime_overrides(config)
+    local_runtime_was_reset = _runtime_snapshot_loss_detected(
+        current_local_runtime,
+        remote_runtime,
+    )
     local_metadata = _runtime_metadata_for_snapshot(
         store.get_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY),
         current_local_runtime,
@@ -2275,6 +2319,7 @@ def _bootstrap_remote_runtime_before_local_baseline(
         full_snapshot=_runtime_resolution_needs_full_snapshot(
             resolution,
             recover_after_update=recover_after_update,
+            local_runtime_was_reset=local_runtime_was_reset,
         ),
     )
     store.put_runtime_sync("local_runtime", resolved_runtime)
@@ -20005,6 +20050,10 @@ def run_loop(
                         (accepted_runtime, previous_mcc_runtime),
                     )
                     current_local_runtime = local_runtime_overrides(config)
+                    local_runtime_was_reset = _runtime_snapshot_loss_detected(
+                        current_local_runtime,
+                        remote_runtime,
+                    )
                     local_metadata = _runtime_metadata_for_snapshot(
                         store.get_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY),
                         current_local_runtime,
@@ -20119,6 +20168,7 @@ def run_loop(
                             full_snapshot=_runtime_resolution_needs_full_snapshot(
                                 resolution,
                                 recover_after_update=False,
+                                local_runtime_was_reset=local_runtime_was_reset,
                             ),
                         )
                     base_config = load_config(config.config_file_path, allow_recover_from_mcc=False)
@@ -20204,6 +20254,7 @@ def run_loop(
                             full_snapshot=_runtime_resolution_needs_full_snapshot(
                                 resolution,
                                 recover_after_update=False,
+                                local_runtime_was_reset=local_runtime_was_reset,
                             ),
                         )
                     # Persisted MCC values are not a new local operator edit.

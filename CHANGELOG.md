@@ -1,3 +1,14 @@
+## 1.5.263 - 2026-10-27
+
+- Persist bounded, redacted external-runner evidence: stderr preview,
+  stdout/stderr digests, truncation flags, exit/signal/timeout state, admission
+  stage, and valid progress frames across stage receipts, terminal receipts,
+  and replay state without storing artifact bytes or execution context.
+- Restore the complete MCC-authoritative runtime snapshot after host settings
+  loss, including partial host fields and instance rows; stable-only responses
+  now also trigger full materialization while explicit tombstones and LWW
+  semantics remain unchanged.
+
 ## 1.5.262 - 2026-10-27
 
 - Add the Portal-owned executable scenario v1 launcher boundary: MCD validates

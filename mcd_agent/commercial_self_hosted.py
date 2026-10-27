@@ -63,10 +63,38 @@ _PORTAL_NOOP_RECEIPT_SCHEMA = "portal-mcd-command-noop-receipt-v1"
 _MAX_RUNNER_OUTPUT_BYTES = 256 * 1024
 _MAX_RUNNER_FRAME_BYTES = 64 * 1024
 _MAX_RUNNER_PROGRESS_FRAMES = 256
+_MAX_RUNNER_STDERR_BYTES = 16 * 1024
+_MAX_RUNNER_DIAGNOSTIC_PREVIEW_BYTES = 2048
+_RUNNER_EVIDENCE_SCHEMA = "mcd-self-hosted-runner-evidence-v1"
 
 
 def _nonnegative_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+class RunnerExecutionError(ValueError):
+    """A bounded, secret-free diagnostic for the external runner boundary."""
+
+    def __init__(self, code: str, *, evidence: Mapping[str, Any] | None = None):
+        super().__init__(code)
+        self.code = str(code)
+        self.evidence = dict(evidence or {})
+
+
+class RunnerTimeoutError(TimeoutError):
+    """A bounded timeout diagnostic that remains compatible with TimeoutError."""
+
+    def __init__(self, code: str, *, evidence: Mapping[str, Any] | None = None):
+        super().__init__(code)
+        self.code = str(code)
+        self.evidence = dict(evidence or {})
+
+
+def _runner_error_code(error: BaseException) -> str:
+    code = getattr(error, "code", None)
+    if isinstance(code, str) and code:
+        return code
+    return _error_code(error)
 
 
 def default_scenario_runner_argv() -> list[str]:
@@ -114,6 +142,85 @@ def _contains_secret_shape(value: object) -> bool:
         lowered = value.lower()
         return any(token in lowered for token in ("password=", "token=", "secret=", "private_key=", "credential="))
     return False
+
+
+def _redacted_stderr_preview(stderr: bytes) -> str:
+    """Keep only a small diagnostic preview; never persist raw child stderr."""
+    if not stderr:
+        return ""
+    text = stderr[:_MAX_RUNNER_DIAGNOSTIC_PREVIEW_BYTES].decode("utf-8", errors="replace")
+    text = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+", r"\1<redacted>", text)
+    text = re.sub(
+        r"(?i)(secret|password|token|private[ _-]?key|credential|access[ _-]?key)(\s*[:=]\s*)([^\s,;]+)",
+        r"\1\2<redacted>",
+        text,
+    )
+    text = re.sub(r"-----BEGIN [^-]+-----.*?-----END [^-]+-----", "<redacted-key>", text, flags=re.DOTALL)
+    # A runner must not be able to turn its artifact or context into durable
+    # receipt data by echoing arbitrary multiline output.  Keep only bounded,
+    # printable diagnostic text and mark truncation explicitly below.
+    text = "".join(char if char in "\t\n\r" or 32 <= ord(char) < 127 else "?" for char in text)
+    return text[:_MAX_RUNNER_DIAGNOSTIC_PREVIEW_BYTES]
+
+
+def _best_effort_progress(stdout: bytes) -> list[dict[str, Any]]:
+    """Recover only already-valid progress fields from a malformed stream."""
+    frames: list[dict[str, Any]] = []
+    offset = 0
+    while offset + 4 <= len(stdout) and len(frames) < _MAX_RUNNER_PROGRESS_FRAMES:
+        frame_size = struct.unpack("!I", stdout[offset : offset + 4])[0]
+        offset += 4
+        if frame_size <= 0 or frame_size > _MAX_RUNNER_FRAME_BYTES or frame_size > len(stdout) - offset:
+            break
+        raw = stdout[offset : offset + frame_size]
+        offset += frame_size
+        try:
+            value = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            break
+        if not isinstance(value, Mapping) or value.get("frame_type") != "progress" or value.get("status") not in {"running", "waiting"}:
+            break
+        sequence = value.get("sequence")
+        message_code = value.get("message_code")
+        if not _nonnegative_int(sequence) or sequence != len(frames) + 1 or not isinstance(message_code, str) or not re.fullmatch(r"[a-z0-9][a-z0-9_.:-]{0,127}", message_code):
+            break
+        item: dict[str, Any] = {"sequence": sequence, "status": value["status"], "message_code": message_code}
+        percent = value.get("percent")
+        if _nonnegative_int(percent) and percent <= 100:
+            item["percent"] = percent
+        frames.append(item)
+    return frames
+
+
+def _runner_evidence(
+    *,
+    stdout: bytes = b"",
+    stderr: bytes = b"",
+    admission_stage: str,
+    exit_code: int | None = None,
+    signal_number: int | None = None,
+    timed_out: bool = False,
+    stdout_truncated: bool = False,
+    stderr_truncated: bool = False,
+    progress: list[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    evidence: dict[str, Any] = {
+        "schema": _RUNNER_EVIDENCE_SCHEMA,
+        "admission_stage": str(admission_stage)[:64],
+        "exit_code": exit_code if isinstance(exit_code, int) and not isinstance(exit_code, bool) else None,
+        "signal": signal_number if isinstance(signal_number, int) and not isinstance(signal_number, bool) else None,
+        "timed_out": bool(timed_out),
+        "stdout_bytes": len(stdout),
+        "stdout_sha256": hashlib.sha256(stdout).hexdigest(),
+        "stdout_truncated": bool(stdout_truncated),
+        "stderr_bytes": len(stderr),
+        "stderr_sha256": hashlib.sha256(stderr).hexdigest(),
+        "stderr_truncated": bool(stderr_truncated),
+        "stderr_preview": _redacted_stderr_preview(stderr),
+    }
+    if progress:
+        evidence["progress"] = [dict(item) for item in progress[:_MAX_RUNNER_PROGRESS_FRAMES]]
+    return evidence
 
 
 def _bounded_result(value: object) -> object:
@@ -237,7 +344,7 @@ def validate_self_hosted_terminal_receipt(receipt: Mapping[str, Any], *, binding
         raise ValueError("self_hosted_mcd_terminal_receipt_error_required")
 
 
-def _failed_terminal_receipt(verified: Mapping[str, Any], *, error: BaseException, sequence: int, started_at: str, completed: int = 0, total: int = 1, rollback: str = "not_attempted") -> dict[str, Any]:
+def _failed_terminal_receipt(verified: Mapping[str, Any], *, error: BaseException, sequence: int, started_at: str, completed: int = 0, total: int = 1, rollback: str = "not_attempted", runner_evidence: Mapping[str, Any] | None = None) -> dict[str, Any]:
     binding = _binding_from_verified(verified)
     result = {
         **binding,
@@ -250,9 +357,15 @@ def _failed_terminal_receipt(verified: Mapping[str, Any], *, error: BaseExceptio
         "started_at": started_at,
         "completed_at": _utc(),
         "result": {"executor": "mcd-self-hosted-external", "completed": max(0, int(completed)), "total": max(0, int(total))},
-        "error": {"code": "self_hosted_mcd_execution_failed", "type": _error_code(error)},
+        "error": {"code": "self_hosted_mcd_execution_failed", "type": _runner_error_code(error)},
         "rollback": rollback if rollback in SELF_HOSTED_MCD_ROLLBACK_STATUSES else "not_attempted",
     }
+    evidence = runner_evidence
+    if evidence is None and isinstance(error, RunnerExecutionError):
+        evidence = error.evidence
+    if isinstance(evidence, Mapping):
+        result["runner_evidence"] = _bounded_result(dict(evidence))
+        result["error"] = {**result["error"], "runner_evidence": _bounded_result(dict(evidence))}
     validate_self_hosted_terminal_receipt(result, binding=binding)
     return result
 
@@ -282,7 +395,10 @@ class ExternalProcessPolicy:
         scenario_pin = job.get("scenario_artifact") if isinstance(job.get("scenario_artifact"), Mapping) else {}
         media_type = str(scenario_pin.get("artifact_media_type") or "")
         if media_type not in {"application/x-sh", "application/x-elf"}:
-            raise ValueError("self_hosted_mcd_runner_artifact_media_type_invalid")
+            raise RunnerExecutionError(
+                "self_hosted_mcd_runner_artifact_media_type_invalid",
+                evidence=_runner_evidence(admission_stage="artifact_metadata"),
+            )
         scenario["artifact_revision"] = str(scenario.get("artifact_revision") or scenario_pin.get("artifact_revision") or scenario.get("revision") or "")
         scenario["artifact_digest"] = str(scenario.get("artifact_digest") or scenario_pin.get("artifact_digest") or "")
         applicability = job.get("applicability") if isinstance(job.get("applicability"), Mapping) else {}
@@ -305,24 +421,62 @@ class ExternalProcessPolicy:
             "parameters": dict(parameters),
             "secret_references": [str(item) for item in secret_references],
         }
-        framed = encode_request_frame(artifact, payload)
+        try:
+            framed = encode_request_frame(artifact, payload)
+        except ValueError as exc:
+            raise RunnerExecutionError(
+                _runner_error_code(exc),
+                evidence=_runner_evidence(admission_stage="request_frame"),
+            ) from exc
         try:
             completed = self._run_bounded([*self.argv, "--mcd-scenario-apply"], framed, env)
-        except subprocess.TimeoutExpired as exc:
-            raise TimeoutError("self_hosted_mcd_runner_timeout") from exc
+        except (RunnerExecutionError, RunnerTimeoutError):
+            raise
+        stdout = completed.stdout or b""
+        stderr = completed.stderr or b""
+        signal_number = -completed.returncode if completed.returncode is not None and completed.returncode < 0 else None
+        evidence = _runner_evidence(
+            stdout=stdout,
+            stderr=stderr,
+            admission_stage="completed",
+            exit_code=completed.returncode,
+            signal_number=signal_number,
+            progress=_best_effort_progress(stdout),
+        )
         if completed.returncode < 0:
-            raise ValueError(f"self_hosted_mcd_runner_signal_{-completed.returncode}")
-        stdout = completed.stdout
+            raise RunnerExecutionError(
+                f"self_hosted_mcd_runner_signal_{-completed.returncode}",
+                evidence={**evidence, "admission_stage": "signal"},
+            )
         if completed.returncode != 0:
             code = self._child_error_code(stdout)
-            raise ValueError(code or "self_hosted_mcd_runner_failed")
-        frames = self._decode_output_frames(stdout)
+            raise RunnerExecutionError(code or "self_hosted_mcd_runner_failed", evidence=evidence)
+        try:
+            frames = self._decode_output_frames(stdout)
+        except ValueError as exc:
+            raise RunnerExecutionError(
+                _runner_error_code(exc),
+                evidence={
+                    **evidence,
+                    "admission_stage": "output_decode",
+                    "progress": _best_effort_progress(stdout),
+                },
+            ) from exc
         if not frames:
-            raise ValueError("self_hosted_mcd_runner_output_missing")
+            raise RunnerExecutionError("self_hosted_mcd_runner_output_missing", evidence=evidence)
         parsed = frames[-1]
         if str(parsed.get("status") or "") not in {"succeeded", "completed", "ok"}:
-            raise ValueError("self_hosted_mcd_runner_failed")
-        return {"status": "succeeded", "runner": _bounded_result(parsed), "binding": hashlib.sha256(canonical_json(payload)).hexdigest()}
+            raise RunnerExecutionError(
+                "self_hosted_mcd_runner_failed",
+                evidence={**evidence, "admission_stage": "result_decode", "progress": _best_effort_progress(stdout)},
+            )
+        evidence["progress"] = _best_effort_progress(stdout)
+        return {
+            "status": "succeeded",
+            "runner": _bounded_result(parsed),
+            "binding": hashlib.sha256(canonical_json(payload)).hexdigest(),
+            "runner_evidence": evidence,
+        }
 
     @staticmethod
     def _child_error_code(stdout: bytes) -> str | None:
@@ -397,7 +551,7 @@ class ExternalProcessPolicy:
                 argv,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
                 cwd="/",
                 env=dict(env),
                 start_new_session=True,
@@ -406,40 +560,107 @@ class ExternalProcessPolicy:
             raise ValueError("self_hosted_mcd_runner_not_allowlisted") from exc
         except PermissionError as exc:
             raise ValueError("self_hosted_mcd_runner_permissions") from exc
+        selector = selectors.DefaultSelector()
+        stdout = bytearray()
+        stderr = bytearray()
+        input_offset = 0
+        stdin_registered = False
         try:
             assert process.stdin is not None
-            process.stdin.write(framed)
-            process.stdin.close()
             assert process.stdout is not None
-            selector = selectors.DefaultSelector()
-            selector.register(process.stdout, selectors.EVENT_READ, "stdout")
-            output = bytearray()
+            assert process.stderr is not None
+            for stream, label in ((process.stdout, "stdout"), (process.stderr, "stderr")):
+                selector.register(stream, selectors.EVENT_READ, label)
+            if framed:
+                selector.register(process.stdin, selectors.EVENT_WRITE, "stdin")
+                stdin_registered = True
+            else:
+                process.stdin.close()
             deadline = time.monotonic() + self.timeout_sec
             while selector.get_map():
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     self._terminate_process_group(process)
-                    raise subprocess.TimeoutExpired(argv, self.timeout_sec)
-                for key, _ in selector.select(min(remaining, 0.25)):
-                    chunk = os.read(key.fileobj.fileno(), _MAX_RUNNER_OUTPUT_BYTES + 1)
-                    if not chunk:
-                        selector.unregister(key.fileobj)
+                    evidence = _runner_evidence(
+                        stdout=bytes(stdout), stderr=bytes(stderr), admission_stage="timeout",
+                        exit_code=process.returncode, timed_out=True,
+                    )
+                    raise RunnerTimeoutError("self_hosted_mcd_runner_timeout", evidence=evidence)
+                for key, mask in selector.select(min(remaining, 0.25)):
+                    label = key.data
+                    fileobj = key.fileobj
+                    if label == "stdin" and mask & selectors.EVENT_WRITE:
+                        try:
+                            written = os.write(fileobj.fileno(), framed[input_offset : input_offset + 64 * 1024])
+                        except BrokenPipeError as exc:
+                            self._terminate_process_group(process)
+                            evidence = _runner_evidence(
+                                stdout=bytes(stdout), stderr=bytes(stderr), admission_stage="stdin",
+                                exit_code=process.returncode,
+                            )
+                            raise RunnerExecutionError("self_hosted_mcd_runner_broken_pipe", evidence=evidence) from exc
+                        input_offset += written
+                        if input_offset >= len(framed):
+                            selector.unregister(fileobj)
+                            stdin_registered = False
+                            fileobj.close()
                         continue
-                    if len(output) + len(chunk) > _MAX_RUNNER_OUTPUT_BYTES:
+                    if label not in {"stdout", "stderr"} or not mask & selectors.EVENT_READ:
+                        continue
+                    chunk = os.read(fileobj.fileno(), (_MAX_RUNNER_OUTPUT_BYTES if label == "stdout" else _MAX_RUNNER_STDERR_BYTES) + 1)
+                    if not chunk:
+                        selector.unregister(fileobj)
+                        continue
+                    target = stdout if label == "stdout" else stderr
+                    limit = _MAX_RUNNER_OUTPUT_BYTES if label == "stdout" else _MAX_RUNNER_STDERR_BYTES
+                    if len(target) + len(chunk) > limit:
+                        target.extend(chunk[: max(0, limit - len(target))])
                         self._terminate_process_group(process)
-                        raise ValueError("self_hosted_mcd_runner_output_too_large")
-                    output.extend(chunk)
+                        evidence = _runner_evidence(
+                            stdout=bytes(stdout), stderr=bytes(stderr),
+                            admission_stage=f"{label}_capture",
+                            exit_code=process.returncode,
+                            stdout_truncated=label == "stdout",
+                            stderr_truncated=label == "stderr",
+                        )
+                        code = "self_hosted_mcd_runner_output_too_large" if label == "stdout" else "self_hosted_mcd_runner_stderr_too_large"
+                        raise RunnerExecutionError(code, evidence=evidence)
+                    target.extend(chunk)
             process.wait(timeout=5)
-            return subprocess.CompletedProcess(argv, process.returncode, bytes(output), None)
+            completed = subprocess.CompletedProcess(argv, process.returncode, bytes(stdout), bytes(stderr))
+            completed.stdout_truncated = False  # type: ignore[attr-defined]
+            completed.stderr_truncated = False  # type: ignore[attr-defined]
+            return completed
         except BrokenPipeError as exc:
             self._terminate_process_group(process)
-            raise ValueError("self_hosted_mcd_runner_failed") from exc
+            evidence = _runner_evidence(
+                stdout=bytes(stdout), stderr=bytes(stderr), admission_stage="stdin",
+                exit_code=process.returncode,
+            )
+            raise RunnerExecutionError("self_hosted_mcd_runner_broken_pipe", evidence=evidence) from exc
+        except subprocess.TimeoutExpired as exc:
+            self._terminate_process_group(process)
+            evidence = _runner_evidence(
+                stdout=bytes(stdout), stderr=bytes(stderr), admission_stage="wait",
+                exit_code=process.returncode, timed_out=True,
+            )
+            raise RunnerTimeoutError("self_hosted_mcd_runner_timeout", evidence=evidence) from exc
         finally:
             try:
-                if process.stdin is not None and not process.stdin.closed:
+                selector.close()
+            except Exception:
+                pass
+            try:
+                if stdin_registered and process.stdin is not None and not process.stdin.closed:
                     process.stdin.close()
             except OSError:
                 pass
+            for stream in (process.stdout, process.stderr):
+                try:
+                    if stream is not None and not stream.closed:
+                        stream.close()
+                except OSError:
+                    pass
 
     @staticmethod
     def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
@@ -507,6 +728,7 @@ class SelfHostedScenarioExecutor:
         facts = self._local_facts(verified["facts"], context)
         started_at = _utc()
         sequence = 0
+        runner_evidence: Mapping[str, Any] | None = None
 
         def emit(stage_id: str, status: str, result: object = None, error: Mapping[str, Any] | None = None) -> None:
             nonlocal sequence
@@ -515,7 +737,13 @@ class SelfHostedScenarioExecutor:
             if result is not None:
                 receipt["result"] = _bounded_result(result)
             if error is not None:
-                receipt["error"] = {"code": str(error.get("code") or "self_hosted_mcd_stage_failed")[:120]}
+                error_payload: dict[str, Any] = {
+                    "code": str(error.get("code") or "self_hosted_mcd_stage_failed")[:120]
+                }
+                details = error.get("details")
+                if isinstance(details, Mapping):
+                    error_payload["details"] = _bounded_result(details)
+                receipt["error"] = error_payload
             validate_self_hosted_stage_receipt(receipt, binding=binding)
             if receipt_sink:
                 receipt_sink(receipt)
@@ -529,9 +757,33 @@ class SelfHostedScenarioExecutor:
             terminal = {**binding, "schema": SELF_HOSTED_MCD_TERMINAL_RECEIPT_SCHEMA, "contract_version": SELF_HOSTED_MCD_CONTRACT_VERSION, "sequence": sequence + 1, "idempotency_key": f"{binding['job_id']}:terminal:{sequence + 1}", "status": "succeeded", "observed_at": _utc(), "started_at": started_at, "completed_at": _utc(), "result": _bounded_result(result), "rollback": "not_attempted"}
             validate_self_hosted_terminal_receipt(terminal, binding=binding)
         except Exception as exc:
-            emit("execution", "failed", error={"code": "self_hosted_mcd_execution_failed"})
-            terminal = _failed_terminal_receipt(verified, error=exc, sequence=sequence + 1, started_at=started_at, completed=0, total=1)
-        self._save(job_id, {"job_digest": job_digest, "terminal": terminal, "status": terminal["status"], "sequence": terminal["sequence"]})
+            evidence = getattr(exc, "evidence", None)
+            details = evidence if isinstance(evidence, Mapping) else None
+            runner_evidence = details
+            emit(
+                "execution",
+                "failed",
+                result={"runner_evidence": details} if details is not None else None,
+                error={"code": "self_hosted_mcd_execution_failed", "details": details} if details is not None else {"code": "self_hosted_mcd_execution_failed"},
+            )
+            terminal = _failed_terminal_receipt(
+                verified,
+                error=exc,
+                sequence=sequence + 1,
+                started_at=started_at,
+                completed=0,
+                total=1,
+                runner_evidence=details,
+            )
+        saved = {
+            "job_digest": job_digest,
+            "terminal": terminal,
+            "status": terminal["status"],
+            "sequence": terminal["sequence"],
+        }
+        if isinstance(runner_evidence, Mapping):
+            saved["runner_evidence"] = _bounded_result(runner_evidence)
+        self._save(job_id, saved)
         if receipt_sink:
             receipt_sink(terminal)
         return terminal

@@ -16,7 +16,7 @@ from mcd_agent.scenario_launcher import (
     FRAME_MAGIC,
     encode_request_frame,
 )
-from mcd_agent.commercial_self_hosted import ExternalProcessPolicy
+from mcd_agent.commercial_self_hosted import ExternalProcessPolicy, RunnerExecutionError
 
 
 def test_frame_is_binary_artifact_plus_separate_context() -> None:
@@ -129,7 +129,7 @@ def _runner_script(tmp_path: Path, body: str) -> str:
     return str(path)
 
 
-def _run_policy(path: str, *, timeout: int = 2) -> dict[str, object]:
+def _run_policy(path: str, *, timeout: int = 2, parameters: dict[str, object] | None = None) -> dict[str, object]:
     return ExternalProcessPolicy([path], timeout_sec=timeout).run(
         artifact=b"#! /bin/true\n",
         job={
@@ -139,6 +139,7 @@ def _run_policy(path: str, *, timeout: int = 2) -> dict[str, object]:
             "scenario": {"scenario_id": "scenario-1", "revision": "1", "artifact_digest": "sha256:" + "0" * 64},
             "scenario_artifact": {"artifact_revision": "1", "artifact_digest": "sha256:" + "0" * 64, "artifact_media_type": "application/x-sh"},
             "applicability": {"facts_digest": "sha256:" + "1" * 64},
+            "parameters": dict(parameters or {}),
         },
         facts={"os_id": "ubuntu"},
     )
@@ -149,12 +150,17 @@ def test_policy_maps_signal_and_bounds_output(tmp_path: Path) -> None:
     # The child script imports signal only when requested by the body.
     Path(signal_runner).write_text(f"#!{sys.executable}\nimport sys, os, signal\nsys.stdin.buffer.read(); os.kill(os.getpid(), signal.SIGTERM)\n", encoding="utf-8")
     Path(signal_runner).chmod(0o700)
-    with pytest.raises(ValueError, match="runner_signal_15"):
+    with pytest.raises(RunnerExecutionError, match="runner_signal_15") as signal_error:
         _run_policy(signal_runner)
+    assert signal_error.value.evidence["signal"] == 15
+    assert signal_error.value.evidence["admission_stage"] == "signal"
 
     output_runner = _runner_script(tmp_path, "sys.stdin.buffer.read(); sys.stdout.buffer.write((70000).to_bytes(4, 'big') + b'x' * 70000)")
-    with pytest.raises(ValueError, match="runner_output_frame_invalid"):
+    with pytest.raises(RunnerExecutionError, match="runner_output_frame_invalid") as output_error:
         _run_policy(output_runner)
+    assert output_error.value.evidence["admission_stage"] == "output_decode"
+    expected_output = (70000).to_bytes(4, "big") + b"x" * 70000
+    assert output_error.value.evidence["stdout_sha256"] == hashlib.sha256(expected_output).hexdigest()
 
 
 def test_policy_accepts_canonical_progress_and_terminal_frames(tmp_path: Path) -> None:
@@ -164,6 +170,10 @@ def test_policy_accepts_canonical_progress_and_terminal_frames(tmp_path: Path) -
     )
     result = _run_policy(runner)
     assert result["status"] == "succeeded"
+    assert result["runner_evidence"]["progress"] == [
+        {"sequence": 1, "status": "running", "message_code": "started", "percent": 5}
+    ]
+    assert result["runner_evidence"]["stderr_bytes"] == 0
 
 
 def test_policy_timeout_terminates_process_group(tmp_path: Path) -> None:
@@ -180,3 +190,36 @@ def test_policy_redacts_secret_shaped_runner_result(tmp_path: Path) -> None:
     runner = _runner_script(tmp_path, "import json, struct; sys.stdin.buffer.read(); p=json.dumps({'schema':'mcd-self-hosted-executable-output-v1','contract_version':'1.0','frame_type':'result','status':'succeeded','exit_code':0,'completed':1,'total':1,'rollback':'not_attempted','token':'do-not-persist'}, separators=(',',':'), sort_keys=True).encode(); sys.stdout.buffer.write(struct.pack('!I', len(p)) + p)")
     with pytest.raises(ValueError, match="runner_output_secret_detected"):
         _run_policy(runner)
+
+
+def test_policy_captures_redacted_stderr_and_typed_child_failure(tmp_path: Path) -> None:
+    runner = _runner_script(
+        tmp_path,
+        "sys.stdin.buffer.read(); sys.stderr.write('token=do-not-persist\\n'); sys.exit(23)",
+    )
+    with pytest.raises(RunnerExecutionError, match="runner_failed") as failure:
+        _run_policy(runner)
+    evidence = failure.value.evidence
+    assert evidence["exit_code"] == 23
+    assert evidence["stderr_bytes"] > 0
+    assert "do-not-persist" not in evidence["stderr_preview"]
+    assert "<redacted>" in evidence["stderr_preview"]
+    assert evidence["stderr_sha256"] == hashlib.sha256(b"token=do-not-persist\n").hexdigest()
+
+
+def test_policy_fails_closed_on_oversized_stderr(tmp_path: Path) -> None:
+    runner = _runner_script(
+        tmp_path,
+        "sys.stdin.buffer.read(); sys.stderr.buffer.write(b'x' * (16 * 1024 + 1)); sys.stderr.flush()",
+    )
+    with pytest.raises(RunnerExecutionError, match="runner_stderr_too_large") as failure:
+        _run_policy(runner)
+    assert failure.value.evidence["stderr_truncated"] is True
+    assert failure.value.evidence["admission_stage"] == "stderr_capture"
+
+
+def test_policy_reports_broken_pipe_without_persisting_child_output(tmp_path: Path) -> None:
+    runner = _runner_script(tmp_path, "import os, time; os.close(0); time.sleep(1)")
+    with pytest.raises(RunnerExecutionError, match="runner_broken_pipe") as failure:
+        _run_policy(runner, parameters={"payload": "x" * (240 * 1024)})
+    assert failure.value.evidence["admission_stage"] == "stdin"
