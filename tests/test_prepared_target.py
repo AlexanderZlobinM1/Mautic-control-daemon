@@ -91,7 +91,7 @@ class PreparedTargetTests(unittest.TestCase):
     zip_input["manifest"]["install_type"] = "zip"
     self.assertEqual(validate_prepared_target(zip_input)["prepared_target_id"], "mautic-7.1.4-zip")
     invalid = json.loads(json.dumps(prepared))
-    invalid["prepared_target_id"] = "mautic-7.1.3-to-7.1.4-composer-0123456789ab"
+    invalid["prepared_target_id"] = "mautic-7.1.4-composer"
     with self.assertRaisesRegex(PreparedTargetError, "prepared_target_id_invalid"):
         validate_prepared_target(invalid)
 
