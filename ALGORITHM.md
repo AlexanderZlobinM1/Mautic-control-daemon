@@ -12,6 +12,17 @@ first-class фазой для patch records, которые должны зав�
 `before_campaign_execution`. Контракт, runtime executor, fixture и receipt
 должны рекламировать и проверять один и тот же порядок.
 
+Каждый Mautic patch-plan v3 upgrade завершает lifecycle ровно одним
+plan-bound evidence receipt: `success`, `noop` или `error`. При ошибке
+target-stage, source/apply check или fixed-gate MCD сохраняет фактически
+наблюдённые gates и уже завершённые records, затем отправляет этот receipt в
+MCC через существующий `record_mautic_patch_evidence`; stdout marker является
+только диагностическим fallback. Для inline-плана MCD по исходному `run_id`
+читает уже выданный MCC envelope, проверяет canonical `plan_sha256` и точное
+соответствие плана, но никогда не выбирает второй catalog plan и не объявляет
+успех без фактической проверки. Повторный запуск использует тот же immutable
+plan и остаётся идемпотентным.
+
 Upgrade maintenance fencing is a cross-process admission barrier, not only a
 marker file. The upgrade owner acquires the exclusive
 `maintenance.dispatch.fence.lock` beside `scheduler.pause` before publishing
@@ -40,7 +51,7 @@ post-step могут завершиться. Следующая совмести
 только незавершённую каталоговую remediation; native plugin operation не
 переисполняется из-за этого отказа.
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.265 (follow-up после immutable
+Актуальная редакция этого канона — MCD 1.5.266 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам

@@ -6,6 +6,7 @@ import json
 import hashlib
 import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 import re
 import shutil
@@ -1155,6 +1156,117 @@ def _prepare_patch_target_stage(config, root: str, current: str, target: str, mo
     return staged
 
 
+def _patch_evidence_records(plan: dict[str, Any], outcomes: list[dict[str, Any]] | None = None,
+                            failure: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    """Build the contract-shaped record set without inventing a successful result."""
+    by_id: dict[str, dict[str, Any]] = {}
+    for row in outcomes or []:
+        if isinstance(row, dict) and str(row.get("id", "") or ""):
+            by_id[str(row["id"])] = row
+    failed_id = str((failure or {}).get("id", "") or "")
+    failed_gates = (failure or {}).get("gates", [])
+    records: list[dict[str, Any]] = []
+    for record in plan.get("patches", []):
+        identifier = str(record.get("id", "") or "")
+        row = by_id.get(identifier)
+        if row is not None:
+            decision = str(row.get("decision", "not_applied") or "not_applied")
+            gates = row.get("gates", [])
+            before = row.get("before_sha256")
+            after = row.get("after_sha256")
+        elif identifier == failed_id:
+            decision = "error"
+            gates = failed_gates if isinstance(failed_gates, list) else []
+            before = None
+            after = None
+        else:
+            decision = "not_applied" if failure is not None else "not_observed"
+            gates = []
+            before = None
+            after = None
+        records.append({
+            "id": identifier,
+            "execution_kind": record.get("execution_kind"),
+            "decision": decision,
+            "gates": gates if isinstance(gates, list) else [],
+            "before_sha256": before,
+            "after_sha256": after,
+        })
+    return records
+
+
+def _patch_resolution_for_upgrade_evidence(config: AgentConfig, install: MauticInstall, plan: dict[str, Any],
+                                           *, current: str, target: str, mode: str,
+                                           run_id: str | None) -> dict[str, Any] | None:
+    """Recover the already-issued envelope; never select a second catalog plan."""
+    if not getattr(config, "mcc_url", None) or not run_id:
+        return None
+    try:
+        from mcd_agent.mautic_patch_resolution import canonical_json_sha256, resolve_plan
+        result = resolve_plan(
+            config, install, trigger="upgrade_lifecycle", phase="dependency_update_preflight",
+            operation="apply", observed_version=current, observed_major=_parse_semver(current)[0],
+            target_version=target, install_type=mode, run_id=run_id,
+        )
+        if (result.get("status") != "selected"
+                or result.get("plan_sha256") != canonical_json_sha256(plan)
+                or result.get("plan") != plan):
+            return None
+        return result
+    except Exception as exc:
+        print(f"WARN MCD v3 evidence envelope lookup unavailable: {type(exc).__name__}: {exc}")
+        return None
+
+
+def _report_upgrade_patch_evidence(config: AgentConfig, install: MauticInstall, resolution: dict[str, Any] | None,
+                                   plan: dict[str, Any], *, started_at: str, status: str,
+                                   outcomes: list[dict[str, Any]] | None = None,
+                                   failure: dict[str, Any] | None = None,
+                                   rollback: dict[str, Any] | None = None) -> bool:
+    """Emit and durably submit one immutable-plan-bound v3 evidence record."""
+    records = _patch_evidence_records(plan, outcomes, failure)
+    evidence = {
+        "schema": "mcd-mautic-patch-evidence-v1",
+        "host_id": (resolution or {}).get("host_id", ""),
+        "instance_uid": install.instance_uid,
+        "catalog_revision": (resolution or {}).get("catalog_revision", ""),
+        "catalog_sha256": (resolution or {}).get("catalog_sha256", ""),
+        "registry_commit": plan.get("registry_commit", ""),
+        "registry_sha256": plan.get("registry_sha256", ""),
+        "plan_sha256": (resolution or {}).get("plan_sha256", ""),
+        "trigger": plan.get("trigger", ""),
+        "phase": plan.get("phase", ""),
+        "run_id": plan.get("run_id", ""),
+        "operation": "apply",
+        "started_at": started_at,
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "status": status,
+        "selected": [str(record.get("id", "") or "") for record in plan.get("patches", [])],
+        "records": records,
+        "rollback": rollback or {"available": False, "attempted": False, "succeeded": False},
+    }
+    from mcd_agent import __version__
+    evidence["agent_version"] = __version__
+    print("MCD_PATCH_PLAN_EVIDENCE=" + json.dumps(evidence, ensure_ascii=True, sort_keys=True,
+                                                   separators=(",", ":")), flush=True)
+    if resolution is None:
+        return False
+    try:
+        from mcd_agent.mautic_patch_resolution import _host_identity, report_evidence
+        host_name, hostname = _host_identity(config)
+        report_evidence(
+            config, instance_uid=install.instance_uid, mcc_host_name=host_name, hostname=hostname,
+            host_id=str(resolution["host_id"]), catalog_revision=str(resolution["catalog_revision"]),
+            catalog_sha256=str(resolution["catalog_sha256"]), plan_sha256=str(resolution["plan_sha256"]),
+            trigger="upgrade_lifecycle", phase="dependency_update_preflight",
+            run_id=str(plan["run_id"]), evidence=evidence,
+        )
+        return True
+    except Exception as exc:
+        print(f"WARN MCD v3 evidence submission failed: {type(exc).__name__}: {exc}")
+        return False
+
+
 def _apply_zip(config: AgentConfig, root: str, console_path: str, php_bin: str, target: str, after_source_install=None) -> None:
     pkg = _resolve_update_package(config, target)
     stage = getattr(after_source_install, "target_stage", None)
@@ -2030,6 +2142,12 @@ def run_upgrade_apply(
         )
     install_root, console = inst.root, inst.console_path
     current = _read_current_version(install_root, console, config.php_bin, config.mautic_run_as_user)
+    patch_resolution: dict[str, Any] | None = None
+    validated_patch_plan: dict[str, Any] | None = None
+    patch_evidence_started = datetime.now(timezone.utc).isoformat()
+    patch_evidence_outcomes: list[dict[str, Any]] = []
+    patch_evidence_failure: dict[str, Any] | None = None
+    patch_evidence_reported = False
     target = _clean_target_version(target_override)
     if mcc_preflighted_single_instance and not allow_release_transition:
         from mcd_agent.mautic_manual_upgrade import ManualUpgradePreflightError, validate_preflighted_single_instance
@@ -2150,6 +2268,7 @@ def run_upgrade_apply(
         if selected["status"] == "blocked":
             raise RuntimeError("Mautic catalog upgrade resolution blocked: " + str(selected.get("reason")))
         if selected["status"] == "selected":
+            patch_resolution = selected
             patch_plan_json = json.dumps(selected["plan"], ensure_ascii=True, separators=(",", ":"))
             patch_run_id = selected["plan"]["run_id"]
     patch_hook = None
@@ -2188,7 +2307,14 @@ def run_upgrade_apply(
             print("MCD_PATCH_PLAN_EVIDENCE=" + json.dumps(evidence, sort_keys=True))
             raise RuntimeError(f"Mautic patch preflight rejected: {exc}") from exc
 
+        if validated_patch_plan.get("schema") == "mcd-mautic-patch-plan-v3" and patch_resolution is None:
+            patch_resolution = _patch_resolution_for_upgrade_evidence(
+                config, inst, validated_patch_plan, current=current, target=target,
+                mode=chosen_mode, run_id=patch_run_id,
+            )
+
         def patch_hook(source_root: str) -> None:
+            nonlocal patch_evidence_failure
             try:
                 if target_stage is not None:
                     from mcd_agent.mautic_patch_plan import _target_version
@@ -2220,6 +2346,7 @@ def run_upgrade_apply(
                 apply_patch_phase(source_root, "before_background_imports")
 
         def apply_patch_phase(source_root: str, phase: str) -> None:
+            nonlocal patch_evidence_failure
             from mcd_agent.mautic_patch_plan import execute
             from mcd_agent.mautic_patch_stage import application_root
             source_root = str(application_root(source_root))
@@ -2229,9 +2356,20 @@ def run_upgrade_apply(
                 # installed the target. Execution still checks fresh drift.
                 target_stage.facts_receipt = _observe_facts(
                     validated_patch_plan, patch_facts_provider, "apply", phase)
-            result = execute(source_root, patch_plan_json, phase, patch_run_id, facts_provider=patch_facts_provider,
-                             accepted_facts=getattr(target_stage, "facts_receipt", None))
+            try:
+                result = execute(source_root, patch_plan_json, phase, patch_run_id, facts_provider=patch_facts_provider,
+                                 accepted_facts=getattr(target_stage, "facts_receipt", None))
+            except Exception as exc:
+                patch_evidence_failure = getattr(exc, "evidence", None) or {
+                    "failure": {"id": "", "gates": []}, "completed": list(patch_evidence_outcomes),
+                }
+                raise
             print("MCD_PATCH_PLAN_EVIDENCE=" + json.dumps(result, sort_keys=True))
+            for row in result.get("patches", []) if isinstance(result, dict) else []:
+                if not isinstance(row, dict) or not row.get("id"):
+                    continue
+                patch_evidence_outcomes[:] = [item for item in patch_evidence_outcomes if item.get("id") != row.get("id")]
+                patch_evidence_outcomes.append(row)
             if result.get("status") != "success":
                 raise RuntimeError("Mautic patch phase rejected: " + phase)
 
@@ -2239,8 +2377,23 @@ def run_upgrade_apply(
             supported_phases = {"post_source_install", "before_campaign_trigger", "before_cache_warmup", "before_asset_generation", "preflight_frontend_assets", "before_doctrine_migrations", "before_campaign_execution", "before_background_imports"}
             if any(set(record["phases"]) - supported_phases for record in validated_patch_plan["patches"]):
                 raise RuntimeError("Selected upgrade plan contains a phase unavailable in this upgrade workflow")
-            target_stage = _prepare_patch_target_stage(config, _resolve_composer_project_root(install_root) if chosen_mode == "composer" else install_root,
-                                                       current, target, chosen_mode, validated_patch_plan, facts_provider=patch_facts_provider)
+            try:
+                target_stage = _prepare_patch_target_stage(config, _resolve_composer_project_root(install_root) if chosen_mode == "composer" else install_root,
+                                                           current, target, chosen_mode, validated_patch_plan, facts_provider=patch_facts_provider)
+            except Exception as exc:
+                patch_evidence_failure = getattr(exc, "evidence", None) or {
+                    "failure": {"id": "", "gates": []}, "completed": list(patch_evidence_outcomes),
+                }
+                if not patch_evidence_reported:
+                    _report_upgrade_patch_evidence(
+                        config, inst, patch_resolution, validated_patch_plan,
+                        started_at=patch_evidence_started, status="error",
+                        outcomes=patch_evidence_failure.get("completed", patch_evidence_outcomes)
+                        if isinstance(patch_evidence_failure, dict) else patch_evidence_outcomes,
+                        failure=patch_evidence_failure.get("failure") if isinstance(patch_evidence_failure, dict) else None,
+                    )
+                    patch_evidence_reported = True
+                raise
             patch_hook.target_stage = target_stage
             patch_hook.apply_phase = apply_patch_phase
     if not yes:
@@ -2387,7 +2540,14 @@ def run_upgrade_apply(
             from mcd_agent.mautic_patch_plan_v3 import verify_applied
             verification = verify_applied(str(application_root(install_root)), validated_patch_plan,
                                           accepted_facts=getattr(target_stage, "facts_receipt", None))
-            print("MCD_PATCH_PLAN_EVIDENCE=" + json.dumps(verification, sort_keys=True))
+            if not patch_evidence_reported:
+                _report_upgrade_patch_evidence(
+                    config, inst, patch_resolution, validated_patch_plan,
+                    started_at=patch_evidence_started, status="success",
+                    outcomes=verification.get("patches", []) if isinstance(verification, dict) else [],
+                    rollback={"available": bool(patch_evidence_outcomes), "attempted": False, "succeeded": False},
+                )
+                patch_evidence_reported = True
         import_patch = {"status": "already", "reason": "runtime_reconciliation_uses_catalog_plan"}
         if import_patch.get("status") == "error":
             raise RuntimeError("Import tag patch after upgrade failed: " + str(import_patch.get("reason")))
@@ -2429,6 +2589,7 @@ def run_upgrade_apply(
         print(f"Mautic version cache refreshed: {final_version} ({cache_count} path(s))")
         print(f"Upgrade completed: {current} -> {final_version}")
     except Exception:
+        rollback_state = {"available": bool(patch_evidence_outcomes), "attempted": False, "succeeded": False}
         if target_stage is not None:
             from mcd_agent.mautic_patch_plan_v3 import rollback as rollback_v3
             try:
@@ -2436,8 +2597,21 @@ def run_upgrade_apply(
                 rollback_evidence = rollback_v3(str(application_root(_resolve_composer_project_root(install_root) if chosen_mode == "composer" else install_root)),
                                                 dict(validated_patch_plan, operation="rollback"), facts_provider=patch_facts_provider)
                 print("MCD_PATCH_PLAN_EVIDENCE=" + json.dumps(rollback_evidence, sort_keys=True))
+                rollback_state = {"available": True, "attempted": True, "succeeded": True}
             except RuntimeError as rollback_error:
                 print("MCD_PATCH_PLAN_EVIDENCE=" + json.dumps({"status": "error", "rollback_succeeded": False, "reason": str(rollback_error)}, sort_keys=True))
+                rollback_state = {"available": True, "attempted": True, "succeeded": False}
+        if validated_patch_plan is not None and validated_patch_plan.get("schema") == "mcd-mautic-patch-plan-v3" and not patch_evidence_reported:
+            failure = patch_evidence_failure.get("failure") if isinstance(patch_evidence_failure, dict) else None
+            completed = patch_evidence_failure.get("completed") if isinstance(patch_evidence_failure, dict) else None
+            _report_upgrade_patch_evidence(
+                config, inst, patch_resolution, validated_patch_plan,
+                started_at=patch_evidence_started, status="error",
+                outcomes=completed if isinstance(completed, list) else patch_evidence_outcomes,
+                failure=failure if isinstance(failure, dict) else None,
+                rollback=rollback_state,
+            )
+            patch_evidence_reported = True
         try:
             _exit_upgrade_maintenance(config, guard)
         except Exception as cleanup_error:

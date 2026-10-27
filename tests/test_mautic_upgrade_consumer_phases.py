@@ -3,6 +3,7 @@ import copy
 import hashlib
 import json
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -106,6 +107,37 @@ def test_upgrade_entrypoint_executes_all_six_record_phases_before_consumers(tmp_
     assert events.index("before_background_imports") < events.index("before_cache_warmup") < events.index("before_asset_generation") < events.index("scripts") < events.index("resume")
     assert all((tmp_path / row["source_paths"][0]).read_bytes() == b"after\n" for row in plan["patches"])
     assert executor.verify_applied(str(tmp_path), plan)["status"] == "success"
+
+
+def test_v3_upgrade_failure_evidence_is_submitted_against_the_issued_plan(capsys):
+    plan = _plan()
+    plan.update(
+        trigger="upgrade_lifecycle", phase="dependency_update_preflight",
+        source_version="7.2.0", target_version="7.2.1", operation="apply",
+    )
+    digest = upgrade.canonical_json_sha256(plan) if hasattr(upgrade, "canonical_json_sha256") else hashlib.sha256(
+        (json.dumps(plan, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n").encode()
+    ).hexdigest()
+    resolution = {
+        "status": "selected", "host_id": "host-1", "instance_uid": "fixture",
+        "catalog_revision": "catalog-1", "catalog_sha256": "c" * 64,
+        "plan_sha256": digest, "plan": plan,
+    }
+    install = SimpleNamespace(instance_uid="fixture")
+    config = SimpleNamespace(mcc_url="https://mcc.example", mcc_token="token")
+    failure = {"failure": {"id": plan["patches"][0]["id"], "gates": []}, "completed": []}
+    with patch("mcd_agent.mautic_patch_resolution._host_identity", return_value=("host", "fixture.example")), \
+         patch("mcd_agent.mautic_patch_resolution.report_evidence", return_value={"status": "accepted"}) as report:
+        assert upgrade._report_upgrade_patch_evidence(
+            config, install, resolution, plan, started_at="2026-10-27T00:00:00+00:00",
+            status="error", failure=failure,
+        )
+    evidence = report.call_args.kwargs["evidence"]
+    assert evidence["schema"] == "mcd-mautic-patch-evidence-v1"
+    assert evidence["status"] == "error"
+    assert evidence["selected"] == [plan["patches"][0]["id"]]
+    assert [row["id"] for row in evidence["records"]] == evidence["selected"]
+    assert "MCD_PATCH_PLAN_EVIDENCE=" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("mode", ["zip", "composer"])

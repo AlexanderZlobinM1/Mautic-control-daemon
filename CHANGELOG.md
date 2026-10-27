@@ -1,3 +1,11 @@
+## 1.5.266 - 2026-10-27
+
+- Always publish one immutable-plan-bound Mautic patch evidence record for
+  v3 upgrade success and failure, including observed fixed-gate failures,
+  before returning the terminal result. Recover the already-issued MCC
+  envelope by `run_id` and submit through the existing evidence endpoint;
+  never select a second catalog plan or synthesize success.
+
 ## 1.5.265 - 2026-10-27
 
 - Add an exclusive cross-process maintenance dispatch fence so scheduler
