@@ -51,7 +51,7 @@ post-step могут завершиться. Следующая совмести
 только незавершённую каталоговую remediation; native plugin operation не
 переисполняется из-за этого отказа.
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.266 (follow-up после immutable
+Актуальная редакция этого канона — MCD 1.5.267 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам

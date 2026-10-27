@@ -1,3 +1,9 @@
+## 1.5.267 - 2026-10-27
+
+- Restore the complete MCC-authoritative runtime settings snapshot after
+  update/reset, including intentionally empty containers, without preserving
+  stale local values as if they were operator changes.
+
 ## 1.5.266 - 2026-10-27
 
 - Always publish one immutable-plan-bound Mautic patch evidence record for
