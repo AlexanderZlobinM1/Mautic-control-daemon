@@ -27,6 +27,12 @@ MAX_ARTIFACT_BYTES = 16 * 1024 * 1024
 MAX_CONTEXT_BYTES = 256 * 1024
 CONTEXT_FD = 3
 _SECRET_WORDS = ("secret", "password", "token", "private", "credential", "access_key")
+SCENARIO_CONTEXT_SCHEMA = "mcd-scenario-executable-context-v1"
+LEGACY_SCENARIO_CONTEXT_SCHEMA = "portal-self-hosted-executable-context-v1"
+SCENARIO_CONTEXT_SCHEMAS = frozenset({SCENARIO_CONTEXT_SCHEMA, LEGACY_SCENARIO_CONTEXT_SCHEMA})
+SCENARIO_OUTPUT_SCHEMA = "mcd-scenario-executable-output-v1"
+LEGACY_SCENARIO_OUTPUT_SCHEMA = "mcd-self-hosted-executable-output-v1"
+SCENARIO_OUTPUT_SCHEMAS = frozenset({SCENARIO_OUTPUT_SCHEMA, LEGACY_SCENARIO_OUTPUT_SCHEMA})
 _PRIMITIVE_CONTEXT_SCHEMA = "mcd-scenario-primitive-context-v1"
 _PRIMITIVE_CONTEXT_VERSION = "1.0"
 _APPLICABILITY_FACTS_SCHEMA = "mcd-portal-applicability-facts-v1"
@@ -108,7 +114,7 @@ def _validate_context(
     artifact_size: int | None = None,
     artifact_digest: str | None = None,
 ) -> None:
-    if value.get("schema") != "portal-self-hosted-executable-context-v1" or value.get("contract_version") != "1.0":
+    if value.get("schema") not in SCENARIO_CONTEXT_SCHEMAS or value.get("contract_version") != "1.0":
         raise ScenarioLauncherError("self_hosted_mcd_runner_context_invalid")
     job = value.get("job")
     scenario = value.get("scenario")

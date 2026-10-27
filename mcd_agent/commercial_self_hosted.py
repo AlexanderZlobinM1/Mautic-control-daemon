@@ -23,7 +23,11 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Mapping
 
 from mcd_agent.commercial_detector import read_normalized_applicability_facts, read_normalized_local_facts
-from mcd_agent.scenario_launcher import encode_request_frame
+from mcd_agent.scenario_launcher import (
+    SCENARIO_CONTEXT_SCHEMA,
+    SCENARIO_OUTPUT_SCHEMAS,
+    encode_request_frame,
+)
 from mcd_agent.commercial_portal import (
     PORTAL_MCD_ADOPT_CONTRACT_VERSION,
     SELF_HOSTED_MCD_JOB_SCHEMA,
@@ -105,7 +109,7 @@ def default_scenario_runner_argv() -> list[str]:
 
 
 class _PortalTransportError(RuntimeError):
-    """An outbound Portal failure, kept separate from local job rejection."""
+    """A delivery transport failure, kept separate from local job rejection."""
 
 
 def _utc() -> str:
@@ -378,11 +382,11 @@ def _failed_terminal_receipt(verified: Mapping[str, Any], *, error: BaseExceptio
 
 
 class ExternalProcessPolicy:
-    """Run the bundled Portal scenario launcher with no shell or secrets.
+    """Run the single bundled MCD scenario launcher with no shell or secrets.
 
     The launcher receives a framed artifact/context request on stdin.  It is
-    the only MCD-owned executable in this boundary; scenario policy remains in
-    the signed Portal artifact.
+    the only MCD-owned execution path in this boundary; scenario policy remains
+    in the signed delivered artifact.
     """
 
     def __init__(self, argv: list[str] | tuple[str, ...] | None, *, timeout_sec: int = 1800):
@@ -420,7 +424,7 @@ class ExternalProcessPolicy:
             parameters = job.get("parameters") if isinstance(job.get("parameters"), Mapping) else {}
             secret_references = job.get("secret_references") if isinstance(job.get("secret_references"), list) else []
             payload: Mapping[str, Any] = {
-                "schema": "portal-self-hosted-executable-context-v1",
+                "schema": SCENARIO_CONTEXT_SCHEMA,
                 "contract_version": "1.0",
                 "job": {
                     "job_id": str(job.get("job_id") or ""),
@@ -436,6 +440,9 @@ class ExternalProcessPolicy:
                 "parameters": dict(parameters),
                 "secret_references": [str(item) for item in secret_references],
             }
+            primitive_context = job.get("primitive_context")
+            if isinstance(primitive_context, Mapping):
+                payload = {**payload, "primitive_context": dict(primitive_context)}
         else:
             payload = dict(context)
         try:
@@ -530,7 +537,7 @@ class ExternalProcessPolicy:
             if canonical_json(frame) != raw_frame:
                 raise ValueError("self_hosted_mcd_runner_output_not_canonical")
             schema = str(frame.get("schema") or "")
-            if schema != "mcd-self-hosted-executable-output-v1" or frame.get("contract_version") != "1.0":
+            if schema not in SCENARIO_OUTPUT_SCHEMAS or frame.get("contract_version") != "1.0":
                 raise ValueError("self_hosted_mcd_runner_output_schema_invalid")
             if _contains_secret_shape(frame):
                 raise ValueError("self_hosted_mcd_runner_output_secret_detected")
@@ -697,7 +704,13 @@ class ExternalProcessPolicy:
                 pass
 
 
-class SelfHostedScenarioExecutor:
+class ScenarioExecutor:
+    """Generic local scenario executor shared by every delivery transport.
+
+    The surrounding worker may be Portal-backed today, but this class owns no
+    connection, account, commercial-key or provider identity.  Those values
+    are admission/delivery bindings and never enter the local artifact frame.
+    """
     def __init__(self, state: CommercialState, *, runner: Callable[..., Any] | None = None, facts_reader: Callable[..., Mapping[str, Any]] | None = None):
         self.state = state
         self.runner = runner
@@ -809,6 +822,9 @@ class SelfHostedScenarioExecutor:
         return terminal
 
 
+SelfHostedScenarioExecutor = ScenarioExecutor
+
+
 class SelfHostedPortalWorker:
     """Durable outbound-only v2 Portal poll/verify/execute/receipt loop.
 
@@ -819,7 +835,7 @@ class SelfHostedPortalWorker:
     command before its receipt has been delivered.
     """
 
-    def __init__(self, client: Any, executor: SelfHostedScenarioExecutor, *, installation_id: str | list[str], portal_keys: Mapping[str, str], publisher_keys: Mapping[str, Any], context: Mapping[str, Any], commercial_key_id: str, agent_id: str, host_fingerprint: str, poll_wait_seconds: int = _DEFAULT_LONG_POLL_SECONDS, backoff_base_seconds: float = _DEFAULT_BACKOFF_BASE_SECONDS, backoff_max_seconds: float = _DEFAULT_BACKOFF_MAX_SECONDS, clock: Callable[[], float] | None = None, inventory_provider: Callable[[str], Mapping[str, Any]] | None = None, runtime_command_handler: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None):
+    def __init__(self, client: Any, executor: ScenarioExecutor, *, installation_id: str | list[str], portal_keys: Mapping[str, str], publisher_keys: Mapping[str, Any], context: Mapping[str, Any], commercial_key_id: str, agent_id: str, host_fingerprint: str, poll_wait_seconds: int = _DEFAULT_LONG_POLL_SECONDS, backoff_base_seconds: float = _DEFAULT_BACKOFF_BASE_SECONDS, backoff_max_seconds: float = _DEFAULT_BACKOFF_MAX_SECONDS, clock: Callable[[], float] | None = None, inventory_provider: Callable[[str], Mapping[str, Any]] | None = None, runtime_command_handler: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None):
         self.client = client
         self.executor = executor
         self.installation_ids = [installation_id] if isinstance(installation_id, str) else [str(value) for value in installation_id]

@@ -14,6 +14,7 @@ import pytest
 from mcd_agent.scenario_launcher import (
     FRAME_HEADER,
     FRAME_MAGIC,
+    SCENARIO_CONTEXT_SCHEMA,
     encode_request_frame,
 )
 from mcd_agent.commercial_self_hosted import ExternalProcessPolicy, RunnerExecutionError
@@ -22,7 +23,7 @@ from mcd_agent.commercial_self_hosted import ExternalProcessPolicy, RunnerExecut
 def test_frame_is_binary_artifact_plus_separate_context() -> None:
     artifact = b"#!/bin/sh\nprintf '%s\\n' signed\n"
     context = {
-        "schema": "portal-self-hosted-executable-context-v1",
+        "schema": SCENARIO_CONTEXT_SCHEMA,
         "contract_version": "1.0",
         "job": {"job_id": "j", "request_id": "r", "command_id": "c", "idempotency_key": "i"},
         "scenario": {"scenario_id": "s", "revision": "1", "artifact_revision": "1", "artifact_digest": "sha256:" + "0" * 64},

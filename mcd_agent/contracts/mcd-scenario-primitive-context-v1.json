@@ -1,7 +1,7 @@
 {
   "schema": "mcd-scenario-primitive-context-v1",
   "contract_version": "1.0",
-  "purpose": "Typed, versioned context for a signed Portal scenario artifact. This contract describes existing MCD admission and evidence primitives; it does not contain upgrade-version logic or an installer recipe.",
+  "purpose": "Typed, versioned context for the single MCD-local scenario runner. This contract is independent of the delivery or connection type; it does not contain upgrade-version logic or an installer recipe.",
   "binding": {
     "required": [
       "job_id",

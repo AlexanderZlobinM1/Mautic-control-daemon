@@ -1210,11 +1210,14 @@ never synthesized into this signed facts mapping. Older Portal consumers may
 ignore the additive field.
 
 The only MCD execution primitive is the contract's `scenario.apply` v1.0. MCD
-passes the verified external scenario artifact to an allowlisted, non-shell
-runner process and owns no installer, OS, Mautic, scenario or primitive recipe.
-No fixed onboarding stage registry is constructed on this path. Progress is
-checkpointed by immutable `job_id`; replay of the same signed job returns the
-durable terminal receipt without re-executing the runner.
+passes the latest verified external scenario artifact to one allowlisted,
+non-shell local runner process and owns no installer, OS, Mautic, scenario or
+primitive recipe. Connection type (Portal self-host, Cloud, MCC direct or a
+future integration) changes only delivery/authentication; it never selects a
+different runner, frame, context or execution engine. No fixed onboarding
+stage registry is constructed on this path. Progress is checkpointed by
+immutable `job_id`; replay of the same signed job returns the durable terminal
+receipt without re-executing the runner.
 
 For the Mautic primitive context, the additive
 `mcd-scenario-primitive-context-v1` contract is validated by the same launcher
@@ -1233,15 +1236,19 @@ semantics and explicit `not_attempted|attempted|succeeded|failed|blocked`
 state. The context validator checks binding and shape only; the launcher does
 not execute PHP, choose versions, restore a backup, or synthesize a recipe.
 
-The executable scenario bridge follows Portal's additive
-`portal-self-hosted-executable-scenario-v1` contract. The signed artifact must
-be `application/x-sh` or `application/x-elf`; the legacy declarative JSON
-artifact remains audit-only and is never dispatched. MCD sends the artifact and
-canonical context in the 88-byte `SSMCDX01` frame: exact lengths, raw SHA-256
-digests, and reserved flags are checked before execution. The context contains
-only job/scenario identity, applicability digest, scalar non-secret parameters,
-and opaque secret references; it is also exposed to the child only on inherited
-file descriptor 3. The bundled `mcd-scenario-runner` uses a sterile environment,
+The executable scenario bridge follows the generic
+`mcd-scenario-executable-context-v1` contract. The old
+`portal-self-hosted-executable-context-v1` value is accepted only as a
+compatibility data label and never creates a second execution path. The signed
+artifact must be `application/x-sh` or `application/x-elf`; the legacy
+declarative JSON artifact remains audit-only and is never dispatched. MCD sends
+the artifact and canonical context in the 88-byte `SSMCDX01` frame: exact
+lengths, raw SHA-256 digests, and reserved flags are checked before execution.
+The context contains only job/scenario identity, applicability digest, scalar
+non-secret parameters, opaque secret references and the typed primitive
+context; delivery account/provider identity remains outside the local frame
+and receipt binding. It is exposed to the child only on inherited file
+descriptor 3. The bundled `mcd-scenario-runner` uses a sterile environment,
 fixed `--mcd-scenario-apply` argv, no shell/eval, and a bounded process group.
 Child stdout is a length-prefixed canonical JSON stream with at most 256
 progress frames and one terminal result; unknown fields, secret-shaped values,
