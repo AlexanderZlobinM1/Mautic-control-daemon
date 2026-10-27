@@ -1,0 +1,28 @@
+{
+  "schema": "mcd-scenario-artifact-delivery-v1",
+  "contract_version": "1.0",
+  "ownership": "MCD owns local staging, object store, active pointer, cleanup and verified delivery receipt. The connector owns transport and authentication only.",
+  "sequence": [
+    "read signed metadata revision/version/media_type/size/digest/signature/trust",
+    "download exact bytes into isolated staging",
+    "verify transport/auth, schema, version/revision, size, SHA-256, signature/trust and context compatibility",
+    "fsync staged bytes and atomically move the object",
+    "fsync and atomically switch the active pointer",
+    "emit the verified delivery receipt",
+    "delete only the previous local object after the receipt is emitted"
+  ],
+  "receipt": {
+    "schema": "mcd-scenario-artifact-delivery-receipt-v1",
+    "required": ["delivery_id", "idempotency_key", "binding", "status", "revision", "digest", "media_type", "size_bytes", "idempotent", "cleanup_after_receipt", "observed_at"],
+    "status": ["verified", "failed"],
+    "cleanup_after_receipt": "true means the previous object remains retained until this receipt is durably emitted/queued; a later successful drain completes cleanup."
+  },
+  "failure": {
+    "staging_or_verification": "remove only the staging/partial new object and keep the previous active pointer/object",
+    "activation": "keep the previous active pointer/object; never execute the new artifact",
+    "receipt_delivery": "retain the previous object and pending cleanup state until the receipt queue drains",
+    "catalog": "MCC/Portal immutable catalog revisions are never deleted; rollback re-downloads a pinned old revision"
+  },
+  "idempotency": "The same active revision/digest returns an idempotent verified receipt without a second activation. Concurrent deliveries are serialized by the MCD store lock.",
+  "execution_boundary": "No runner is started by this contract. The generic scenario runner may execute only after activation and frame/context admission succeed."
+}

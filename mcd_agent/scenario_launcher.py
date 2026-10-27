@@ -54,6 +54,35 @@ class ScenarioLauncherError(RuntimeError):
         self.code = code
 
 
+def build_scenario_context(job: Mapping[str, Any]) -> dict[str, Any]:
+    """Build the single canonical local execution context from a signed job."""
+    applicability = job.get("applicability") if isinstance(job.get("applicability"), Mapping) else {}
+    parameters = job.get("parameters") if isinstance(job.get("parameters"), Mapping) else {}
+    secret_references = job.get("secret_references") if isinstance(job.get("secret_references"), list) else []
+    scenario = job.get("scenario") if isinstance(job.get("scenario"), Mapping) else {}
+    payload: dict[str, Any] = {
+        "schema": SCENARIO_CONTEXT_SCHEMA,
+        "contract_version": "1.0",
+        "job": {
+            "job_id": str(job.get("job_id") or ""),
+            "request_id": str(job.get("request_id") or ""),
+            "command_id": str(job.get("command_id") or job.get("job_id") or ""),
+            "idempotency_key": str(job.get("idempotency_key") or ""),
+        },
+        "scenario": {
+            key: scenario.get(key)
+            for key in ("scenario_id", "revision", "artifact_revision", "artifact_digest")
+        },
+        "applicability": {"facts_digest": str(applicability.get("facts_digest") or "")},
+        "parameters": dict(parameters),
+        "secret_references": [str(item) for item in secret_references],
+    }
+    primitive_context = job.get("primitive_context")
+    if isinstance(primitive_context, Mapping):
+        payload["primitive_context"] = dict(primitive_context)
+    return payload
+
+
 def encode_request_frame(artifact: bytes, context: Mapping[str, Any]) -> bytes:
     if not isinstance(artifact, bytes) or not artifact or len(artifact) > MAX_ARTIFACT_BYTES:
         raise ValueError("self_hosted_mcd_runner_artifact_size_invalid")

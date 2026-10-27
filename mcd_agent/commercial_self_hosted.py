@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from pathlib import Path
 import re
 import selectors
 import signal
@@ -26,8 +27,10 @@ from mcd_agent.commercial_detector import read_normalized_applicability_facts, r
 from mcd_agent.scenario_launcher import (
     SCENARIO_CONTEXT_SCHEMA,
     SCENARIO_OUTPUT_SCHEMAS,
+    build_scenario_context,
     encode_request_frame,
 )
+from mcd_agent.scenario_artifact_store import ScenarioArtifactStore, ScenarioArtifactStoreError
 from mcd_agent.commercial_portal import (
     PORTAL_MCD_ADOPT_CONTRACT_VERSION,
     SELF_HOSTED_MCD_JOB_SCHEMA,
@@ -420,29 +423,9 @@ class ExternalProcessPolicy:
         scenario["artifact_revision"] = str(scenario.get("artifact_revision") or scenario_pin.get("artifact_revision") or scenario.get("revision") or "")
         scenario["artifact_digest"] = str(scenario.get("artifact_digest") or scenario_pin.get("artifact_digest") or "")
         if context is None:
-            applicability = job.get("applicability") if isinstance(job.get("applicability"), Mapping) else {}
-            parameters = job.get("parameters") if isinstance(job.get("parameters"), Mapping) else {}
-            secret_references = job.get("secret_references") if isinstance(job.get("secret_references"), list) else []
-            payload: Mapping[str, Any] = {
-                "schema": SCENARIO_CONTEXT_SCHEMA,
-                "contract_version": "1.0",
-                "job": {
-                    "job_id": str(job.get("job_id") or ""),
-                    "request_id": str(job.get("request_id") or ""),
-                    "command_id": str(job.get("command_id") or job.get("job_id") or ""),
-                    "idempotency_key": str(job.get("idempotency_key") or ""),
-                },
-                "scenario": {
-                    key: scenario[key]
-                    for key in ("scenario_id", "revision", "artifact_revision", "artifact_digest")
-                },
-                "applicability": {"facts_digest": str(applicability.get("facts_digest") or "")},
-                "parameters": dict(parameters),
-                "secret_references": [str(item) for item in secret_references],
-            }
-            primitive_context = job.get("primitive_context")
-            if isinstance(primitive_context, Mapping):
-                payload = {**payload, "primitive_context": dict(primitive_context)}
+            context_job = dict(job)
+            context_job["scenario"] = scenario
+            payload: Mapping[str, Any] = build_scenario_context(context_job)
         else:
             payload = dict(context)
         try:
@@ -711,10 +694,11 @@ class ScenarioExecutor:
     connection, account, commercial-key or provider identity.  Those values
     are admission/delivery bindings and never enter the local artifact frame.
     """
-    def __init__(self, state: CommercialState, *, runner: Callable[..., Any] | None = None, facts_reader: Callable[..., Mapping[str, Any]] | None = None):
+    def __init__(self, state: CommercialState, *, runner: Callable[..., Any] | None = None, facts_reader: Callable[..., Mapping[str, Any]] | None = None, artifact_store: ScenarioArtifactStore | None = None):
         self.state = state
         self.runner = runner
         self.facts_reader = facts_reader or read_normalized_local_facts
+        self.artifact_store = artifact_store or ScenarioArtifactStore(Path(self.state.path).resolve().parent / "scenario-artifacts")
         with sqlite3.connect(self.state.path) as db:
             db.execute(f"CREATE TABLE IF NOT EXISTS {_RUNS_TABLE} (job_id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
 
@@ -763,7 +747,7 @@ class ScenarioExecutor:
         sequence = 0
         runner_evidence: Mapping[str, Any] | None = None
 
-        def emit(stage_id: str, status: str, result: object = None, error: Mapping[str, Any] | None = None) -> None:
+        def emit(stage_id: str, status: str, result: object = None, error: Mapping[str, Any] | None = None) -> bool:
             nonlocal sequence
             sequence += 1
             receipt = {**binding, "schema": SELF_HOSTED_MCD_STAGE_RECEIPT_SCHEMA, "contract_version": str(verified.get("contract_version") or SELF_HOSTED_MCD_CONTRACT_VERSION), "stage_id": stage_id, "sequence": sequence, "status": status, "idempotency_key": f"{binding['job_id']}:{stage_id}:{sequence}", "observed_at": _utc()}
@@ -779,13 +763,50 @@ class ScenarioExecutor:
                 receipt["error"] = error_payload
             validate_self_hosted_stage_receipt(receipt, binding=binding)
             if receipt_sink:
-                receipt_sink(receipt)
+                return receipt_sink(receipt) is not False
+            return True
 
         try:
-            emit("scenario_dispatch", "succeeded", {"status": "accepted"})
+            # Validate the exact frame/context compatibility before activation;
+            # this only serializes and validates the request and never starts
+            # the runner.
+            try:
+                context_job = dict(verified["job"])
+                context_scenario = dict(context_job.get("scenario") or {})
+                context_scenario.update(
+                    {
+                        "artifact_revision": verified["scenario_artifact"]["artifact_revision"],
+                        "artifact_digest": verified["scenario_artifact"]["artifact_digest"],
+                    }
+                )
+                context_job["scenario"] = context_scenario
+                encode_request_frame(scenario_artifact, build_scenario_context(context_job))
+            except (ValueError, TypeError) as exc:
+                raise ScenarioArtifactStoreError("scenario_store_context_incompatible") from exc
+            delivery = self.artifact_store.deliver(
+                pin=verified["scenario_artifact"],
+                artifact=scenario_artifact,
+                verify=lambda pin, payload: verify_self_hosted_external_artifact(
+                    pin, payload, publisher_keys, kind="scenario"
+                ),
+                binding={
+                    "job_id": binding["job_id"],
+                    "request_id": binding["request_id"],
+                    "idempotency_key": binding["job_id"] + ":artifact:" + str(verified["scenario_artifact"]["artifact_revision"]),
+                    "scenario": dict(binding["scenario"]),
+                },
+            )
+            delivery_receipt_emitted = emit(
+                "scenario_dispatch",
+                "succeeded",
+                {"status": "accepted", "artifact_delivery": delivery["receipt"]},
+            )
+            active_artifact = Path(delivery["artifact_path"]).read_bytes()
+            if delivery_receipt_emitted:
+                self.artifact_store.acknowledge(delivery["receipt"])
             if self.runner is None:
                 raise ValueError("self_hosted_mcd_runner_unconfigured")
-            result = self.runner(artifact=scenario_artifact, job=verified["job"], facts=facts)
+            result = self.runner(artifact=active_artifact, job=verified["job"], facts=facts)
             emit("execution", "succeeded", result)
             terminal = {**binding, "schema": SELF_HOSTED_MCD_TERMINAL_RECEIPT_SCHEMA, "contract_version": str(verified.get("contract_version") or SELF_HOSTED_MCD_CONTRACT_VERSION), "sequence": sequence + 1, "idempotency_key": f"{binding['job_id']}:terminal:{sequence + 1}", "status": "succeeded", "observed_at": _utc(), "started_at": started_at, "completed_at": _utc(), "result": _bounded_result(result), "rollback": "not_attempted"}
             validate_self_hosted_terminal_receipt(terminal, binding=binding)
@@ -928,6 +949,9 @@ class SelfHostedPortalWorker:
                 self.executor.state.put(_PENDING_KEY, pending)
                 return False
             self._transport_succeeded()
+            acknowledge_pending = getattr(getattr(self.executor, "artifact_store", None), "acknowledge_pending", None)
+            if callable(acknowledge_pending):
+                acknowledge_pending()
             drained_terminal = pending[0].get("schema") == SELF_HOSTED_MCD_TERMINAL_RECEIPT_SCHEMA
             pending.pop(0)
             self.executor.state.put(_PENDING_KEY, pending)

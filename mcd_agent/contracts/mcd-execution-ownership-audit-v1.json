@@ -46,7 +46,7 @@
     {
       "capability": "scenario_execution",
       "owner": "mcd",
-      "canonical_paths": ["mcd_agent/scenario_launcher.py", "mcd_agent/commercial_self_hosted.py"],
+      "canonical_paths": ["mcd_agent/scenario_launcher.py", "mcd_agent/scenario_artifact_store.py", "mcd_agent/commercial_self_hosted.py"],
       "preserve_entrypoints": ["mcd-scenario-runner = mcd_agent.scenario_launcher:main", "ScenarioExecutor"],
       "preservation_tests": ["tests/test_scenario_launcher.py", "tests/test_mcc_scenario_apply_boundary.py", "tests/test_commercial_self_hosted_v2.py"],
       "connector_role": "signed latest artifact/context delivery and stage/terminal receipt"

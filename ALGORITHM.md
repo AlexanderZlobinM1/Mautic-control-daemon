@@ -1236,6 +1236,19 @@ semantics and explicit `not_attempted|attempted|succeeded|failed|blocked`
 state. The context validator checks binding and shape only; the launcher does
 not execute PHP, choose versions, restore a backup, or synthesize a recipe.
 
+Scenario delivery is a separate MCD-owned boundary described by
+`mcd-scenario-artifact-delivery-v1` and implemented by
+`mcd_agent/scenario_artifact_store.py`. MCD reads signed metadata first,
+downloads into an isolated staging file, verifies exact revision/media/size/
+digest/signature/trust and frame compatibility, fsyncs the object, atomically
+switches the active pointer, and emits a verified delivery receipt before
+cleaning the previous local object. A failed verification, partial download,
+disk-full condition, outage, restart or concurrent delivery removes only the
+new staging material and keeps the previous active pointer. Pending cleanup is
+replayed after the durable receipt queue drains. The catalog is immutable and
+is never deleted by MCD; rollback re-downloads a pinned old revision. No
+scenario runner starts during this delivery sequence.
+
 The executable scenario bridge follows the generic
 `mcd-scenario-executable-context-v1` contract. The old
 `portal-self-hosted-executable-context-v1` value is accepted only as a
@@ -1257,8 +1270,9 @@ output fail closed. MCD also captures only bounded stderr and persists a
 redacted preview, output SHA-256 values, truncation flags, exit code/signal,
 timeout state, admission stage, and any already-valid progress frames as typed
 runner evidence. Raw stderr, artifact bytes, and executable context never enter
-receipts or run state. Portal owns the executable artifact and scenario policy;
-MCD owns only this transport, admission, timeout, and durable receipt boundary.
+receipts or run state. The delivery authority owns the executable artifact and
+scenario policy; MCD owns local staging/activation, execution admission,
+timeout, rollback state and durable receipts.
 
 Stage receipts use `mcd-self-hosted-stage-receipt-v2` with only
 `scenario_dispatch` and `execution`, statuses `queued|running|waiting|succeeded|failed`,
