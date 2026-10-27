@@ -42,6 +42,11 @@ STANDALONE_SETTINGS_SNAPSHOT_SCHEMA = "mcd-standalone-settings-snapshot-v1"
 INVENTORY_STATE_SCHEMA = "mcd-commercial-inventory-state-v1"
 INVENTORY_VOLATILE_FIELDS = frozenset({"request_id", "observed_at", "agent_signature"})
 MCC_ARTIFACT_SIGNATURE_DOMAIN = b"com.sales-snap.portal-mcc/artifact-signature/1.0\n"
+PORTAL_ARTIFACT_SIGNATURE_DOMAIN = b"com.sales-snap.portal/artifact-signature/1.0\n"
+PORTAL_ARTIFACT_TRUST_SCHEMA = "portal-artifact-trust-v1"
+PORTAL_ARTIFACT_TRUST_UPDATE_SCHEMA = "portal-mcd-artifact-trust-update-v1"
+PORTAL_ARTIFACT_TRUST_CONTRACT_VERSION = "1.0"
+PORTAL_ARTIFACT_TRUST_DOMAIN = "portal_self_host_scenario_artifact"
 MAX_ARTIFACT_BYTES = 512 * 1024 * 1024
 PORTAL_USER_AGENT = f"mcd-agent/{__version__} portal-commercial/{CONTRACT_VERSION}"
 
@@ -350,6 +355,120 @@ def _require_contract_string(value: object, code: str, *, maximum: int = 512) ->
     return value.strip()
 
 
+def _artifact_trust_key(value: object, code: str) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or set(value) - {"algorithm", "key_id", "value", "status", "not_before", "not_after"}:
+        raise ValueError(code)
+    if value.get("algorithm") != "ed25519" or value.get("status") not in {"active", "revoked"}:
+        raise ValueError(code)
+    key_id = _require_contract_string(value.get("key_id"), code, maximum=128)
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", key_id):
+        raise ValueError(code)
+    public = _require_contract_string(value.get("value"), code, maximum=43)
+    if len(public) != 43 or not re.fullmatch(r"[A-Za-z0-9_-]{43}", public):
+        raise ValueError(code)
+    result: dict[str, Any] = {"algorithm": "ed25519", "key_id": key_id, "value": public, "status": value["status"]}
+    for field in ("not_before", "not_after"):
+        if field in value:
+            item = value[field]
+            if item is not None:
+                item = _require_contract_string(item, code, maximum=64)
+                try:
+                    datetime.fromisoformat(item.replace("Z", "+00:00"))
+                except (TypeError, ValueError, OverflowError) as exc:
+                    raise ValueError(code) from exc
+            result[field] = item
+    if result.get("not_before") and result.get("not_after"):
+        before = datetime.fromisoformat(str(result["not_before"]).replace("Z", "+00:00"))
+        after = datetime.fromisoformat(str(result["not_after"]).replace("Z", "+00:00"))
+        if after <= before:
+            raise ValueError(code)
+    return result
+
+
+def _normalize_artifact_trust_keys(value: object, code: str) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        raise ValueError(code)
+    keys = [_artifact_trust_key(item, code) for item in value]
+    keys.sort(key=lambda item: item["key_id"])
+    if len({item["key_id"] for item in keys}) != len(keys):
+        raise ValueError(code)
+    return keys
+
+
+def _artifact_trust_digest(keys: list[dict[str, Any]]) -> str:
+    return _sha256(canonical_json({
+        "schema": PORTAL_ARTIFACT_TRUST_SCHEMA,
+        "contract_version": PORTAL_ARTIFACT_TRUST_CONTRACT_VERSION,
+        "trust_domain": PORTAL_ARTIFACT_TRUST_DOMAIN,
+        "keys": keys,
+    }))
+
+
+def validate_portal_artifact_trust(value: object, *, code: str = "portal_artifact_trust_invalid") -> dict[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != {"schema", "contract_version", "trust_domain", "trust_revision", "trust_digest", "keys"}:
+        raise ValueError(code)
+    if value.get("schema") != PORTAL_ARTIFACT_TRUST_SCHEMA or value.get("contract_version") != PORTAL_ARTIFACT_TRUST_CONTRACT_VERSION or value.get("trust_domain") != PORTAL_ARTIFACT_TRUST_DOMAIN:
+        raise ValueError(code)
+    revision = value.get("trust_revision")
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+        raise ValueError(code)
+    keys = _normalize_artifact_trust_keys(value.get("keys"), code)
+    digest = _require_sha256_digest(value.get("trust_digest"), code)
+    if digest != _artifact_trust_digest(keys):
+        raise ValueError(f"{code}_revision")
+    return {"schema": PORTAL_ARTIFACT_TRUST_SCHEMA, "contract_version": PORTAL_ARTIFACT_TRUST_CONTRACT_VERSION, "trust_domain": PORTAL_ARTIFACT_TRUST_DOMAIN, "trust_revision": revision, "trust_digest": digest, "keys": keys}
+
+
+def validate_portal_artifact_trust_update(value: object, *, code: str = "portal_artifact_trust_update_invalid") -> dict[str, Any]:
+    required = {"schema", "contract_version", "command_id", "delivery_cursor", "request_id", "idempotency_key", "binding", "trust_domain", "trust_revision", "trust_digest", "keys", "issued_at", "expires_at"}
+    if not isinstance(value, Mapping) or set(value) != required:
+        raise ValueError(code)
+    if value.get("schema") != PORTAL_ARTIFACT_TRUST_UPDATE_SCHEMA or value.get("contract_version") != PORTAL_ARTIFACT_TRUST_CONTRACT_VERSION or value.get("trust_domain") != PORTAL_ARTIFACT_TRUST_DOMAIN:
+        raise ValueError(code)
+    command_id = _require_contract_string(value.get("command_id"), code, maximum=128)
+    request_id = _require_contract_string(value.get("request_id"), code)
+    idempotency_key = _require_contract_string(value.get("idempotency_key"), code, maximum=128)
+    cursor = value.get("delivery_cursor")
+    if isinstance(cursor, bool) or not isinstance(cursor, int) or cursor < 1:
+        raise ValueError(code)
+    binding = value.get("binding")
+    if not isinstance(binding, Mapping) or set(binding) != {"agent_id", "installation_id", "host_fingerprint", "commercial_key_id"}:
+        raise ValueError(code)
+    normalized_binding = {
+        "agent_id": _require_contract_string(binding.get("agent_id"), code),
+        "installation_id": _require_contract_string(binding.get("installation_id"), code),
+        "host_fingerprint": _require_sha256_digest(binding.get("host_fingerprint"), code),
+        "commercial_key_id": _require_contract_string(binding.get("commercial_key_id"), code),
+    }
+    revision = value.get("trust_revision")
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+        raise ValueError(code)
+    keys = _normalize_artifact_trust_keys(value.get("keys"), code)
+    digest = _require_sha256_digest(value.get("trust_digest"), code)
+    if digest != _artifact_trust_digest(keys):
+        raise ValueError(f"{code}_revision")
+    issued_at = _require_contract_string(value.get("issued_at"), code, maximum=64)
+    expires_at = _require_contract_string(value.get("expires_at"), code, maximum=64)
+    try:
+        issued = datetime.fromisoformat(issued_at.replace("Z", "+00:00"))
+        expires = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(code) from exc
+    if expires <= issued:
+        raise ValueError(f"{code}_time")
+    return {"schema": PORTAL_ARTIFACT_TRUST_UPDATE_SCHEMA, "contract_version": PORTAL_ARTIFACT_TRUST_CONTRACT_VERSION, "command_id": command_id, "delivery_cursor": cursor, "request_id": request_id, "idempotency_key": idempotency_key, "binding": normalized_binding, "trust_domain": PORTAL_ARTIFACT_TRUST_DOMAIN, "trust_revision": revision, "trust_digest": digest, "keys": keys, "issued_at": issued_at, "expires_at": expires_at}
+
+
+def portal_artifact_trust_keys(value: object) -> dict[str, dict[str, Any] | str]:
+    """Return verifier material while preserving canonical key status metadata."""
+    if isinstance(value, Mapping) and value.get("schema") == PORTAL_ARTIFACT_TRUST_SCHEMA:
+        trust = validate_portal_artifact_trust(value)
+        return {key["key_id"]: dict(key) for key in trust["keys"]}
+    if isinstance(value, Mapping):
+        return {str(key): item for key, item in value.items() if isinstance(item, (str, Mapping))}
+    return {}
+
+
 def _assert_no_contract_secrets(value: object) -> None:
     if isinstance(value, Mapping):
         for key, child in value.items():
@@ -482,6 +601,8 @@ def verify_self_hosted_mcd_job(
     scenario_artifact = _validate_self_hosted_artifact_pin(job.get("scenario_artifact"), "self_hosted_mcd_scenario_artifact_invalid")
     if scenario_artifact["artifact_digest"] != scenario["artifact_digest"]:
         raise ValueError("self_hosted_mcd_scenario_digest_mismatch")
+    if scenario_artifact["artifact_revision"] != scenario["revision"]:
+        raise ValueError("self_hosted_mcd_scenario_revision_mismatch")
     execution = job.get("execution")
     if not isinstance(execution, Mapping) or execution.get("primitive") != "scenario.apply" or execution.get("version") != "1.0":
         raise ValueError("self_hosted_mcd_execution_invalid")
@@ -511,18 +632,33 @@ def verify_self_hosted_mcd_job(
     return {"job": dict(job), "scenario": scenario, "facts": facts, "bootstrap_artifact": bootstrap, "scenario_artifact": scenario_artifact, "job_id": identity["job_id"], "idempotency_key": identity["idempotency_key"], "host_fingerprint": host_fingerprint}
 
 
-def verify_self_hosted_external_artifact(pin: Mapping[str, Any], artifact: bytes, publisher_keys: Mapping[str, str], *, kind: str) -> dict[str, Any]:
-    """Verify exact bytes and the Portal/MCC catalog signature for one pin."""
+def verify_self_hosted_external_artifact(pin: Mapping[str, Any], artifact: bytes, publisher_keys: Mapping[str, Any], *, kind: str) -> dict[str, Any]:
+    """Verify exact bytes and a Portal artifact-trust signature for one pin.
+
+    Raw string values remain a deliberately narrow legacy alias for the old
+    MCC publisher store. Canonical Portal trust values are structured key
+    records, which also preserve revoked status and use the Portal domain.
+    """
     normalized = _validate_self_hosted_artifact_pin(pin, f"self_hosted_mcd_{kind}_artifact_invalid")
     if len(artifact) != normalized["artifact_size_bytes"] or hashlib.sha256(artifact).hexdigest() != normalized["artifact_digest"][7:]:
         raise ValueError("self_hosted_mcd_artifact_integrity_invalid")
     signature = normalized["signature"]
-    key = publisher_keys.get(signature["key_id"])
-    if not key:
+    key_record = publisher_keys.get(signature["key_id"])
+    if not key_record:
         raise ValueError("self_hosted_mcd_artifact_signer_unknown")
+    legacy = isinstance(key_record, str)
+    if isinstance(key_record, Mapping):
+        if key_record.get("status") == "revoked":
+            raise ValueError("self_hosted_mcd_artifact_signer_revoked")
+        if key_record.get("algorithm") != "ed25519" or not key_record.get("value"):
+            raise ValueError("self_hosted_mcd_artifact_signer_unknown")
+        key = str(key_record["value"])
+    else:
+        key = str(key_record)
     statement = {"kind": kind, "revision": normalized["artifact_revision"], "sha256": normalized["artifact_digest"][7:], "media_type": normalized["artifact_media_type"], "size_bytes": normalized["artifact_size_bytes"]}
     try:
-        Ed25519PublicKey.from_public_bytes(_unb64(str(key))).verify(_unb64(signature["value"]), MCC_ARTIFACT_SIGNATURE_DOMAIN + canonical_json(statement))
+        domain = MCC_ARTIFACT_SIGNATURE_DOMAIN if legacy else PORTAL_ARTIFACT_SIGNATURE_DOMAIN
+        Ed25519PublicKey.from_public_bytes(_unb64(key)).verify(_unb64(signature["value"]), domain + canonical_json(statement))
     except Exception as exc:
         raise ValueError("self_hosted_mcd_artifact_signature_invalid") from exc
     return normalized
@@ -572,6 +708,70 @@ class CommercialState:
     def put(self, key: str, value: Any) -> None:
         with sqlite3.connect(self.path) as db:
             db.execute("INSERT INTO commercial_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, json.dumps(value, ensure_ascii=True, sort_keys=True)))
+
+    def apply_portal_artifact_trust_update(self, command: Mapping[str, Any]) -> dict[str, Any]:
+        """Atomically apply one Portal trust revision and remember its idempotency."""
+        update = validate_portal_artifact_trust_update(command)
+        fingerprint = hashlib.sha256(canonical_json(update)).hexdigest()
+        command_id = update["command_id"]
+        idempotency_key = update["idempotency_key"]
+        with sqlite3.connect(self.path, timeout=30) as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT value FROM commercial_meta WHERE key=?", ("portal_artifact_trust_updates_v1",)).fetchone()
+            history = json.loads(row[0]) if row else {}
+            if not isinstance(history, dict):
+                raise ValueError("portal_artifact_trust_update_state_invalid")
+            for identity in (command_id, idempotency_key):
+                previous = history.get(identity)
+                if isinstance(previous, Mapping):
+                    if previous.get("fingerprint") != fingerprint:
+                        raise ValueError("portal_artifact_trust_update_idempotency_conflict")
+                    replay = dict(previous.get("result") or {})
+                    replay["idempotent"] = True
+                    return replay
+
+            current_row = db.execute("SELECT value FROM commercial_meta WHERE key=?", ("portal_artifact_trust_v1",)).fetchone()
+            current = json.loads(current_row[0]) if current_row else None
+            current_revision = 0
+            current_digest = None
+            if current is not None:
+                current = validate_portal_artifact_trust(current, code="portal_artifact_trust_state_invalid")
+                current_revision = int(current["trust_revision"])
+                current_digest = str(current["trust_digest"])
+            requested_revision = int(update["trust_revision"])
+            requested_digest = str(update["trust_digest"])
+            if requested_revision < current_revision:
+                raise ValueError("portal_artifact_trust_revision_stale")
+            if requested_revision == current_revision and current_digest != requested_digest:
+                raise ValueError("portal_artifact_trust_revision_conflict")
+
+            trust = {
+                "schema": PORTAL_ARTIFACT_TRUST_SCHEMA,
+                "contract_version": PORTAL_ARTIFACT_TRUST_CONTRACT_VERSION,
+                "trust_domain": PORTAL_ARTIFACT_TRUST_DOMAIN,
+                "trust_revision": requested_revision,
+                "trust_digest": requested_digest,
+                "keys": list(update["keys"]),
+            }
+            if current is None or requested_revision > current_revision:
+                encoded_trust = json.dumps(trust, ensure_ascii=True, sort_keys=True)
+                keys = {item["key_id"]: dict(item) for item in update["keys"]}
+                writes = {
+                    "portal_artifact_trust_v1": encoded_trust,
+                    "portal_artifact_signing_keys": json.dumps(keys, ensure_ascii=True, sort_keys=True),
+                    "portal_artifact_trust_revision": json.dumps(requested_revision),
+                    "portal_artifact_trust_digest": json.dumps(requested_digest),
+                    "portal_artifact_trust_domain": json.dumps(PORTAL_ARTIFACT_TRUST_DOMAIN),
+                    "portal_artifact_trust_source": json.dumps("portal"),
+                }
+                for key, value in writes.items():
+                    db.execute("INSERT INTO commercial_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+            result = {"status": "succeeded", "trust_revision": requested_revision, "trust_digest": requested_digest, "idempotent": current is not None and requested_revision == current_revision}
+            record = {"fingerprint": fingerprint, "result": result}
+            history[command_id] = record
+            history[idempotency_key] = record
+            db.execute("INSERT INTO commercial_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", ("portal_artifact_trust_updates_v1", json.dumps(history, ensure_ascii=True, sort_keys=True)))
+        return result
 
     @staticmethod
     def _inventory_state_record(raw: object) -> dict[str, Any]:
@@ -925,6 +1125,22 @@ class PortalClient:
         self.state.put("agent_private_key", _b64(private))
         self.state.put("agent_key_id", payload["agent"]["public_key"]["key_id"])
         self.state.put("portal_job_signing_keys", {x["key_id"]: x["value"] for x in signing_keys})
+        artifact_trust = result["portal"].get("artifact_trust")
+        artifact_signing_keys = result["portal"].get("artifact_signing_keys")
+        if artifact_trust is not None:
+            normalized_trust = validate_portal_artifact_trust(artifact_trust, code="commercial_activation_artifact_trust_invalid")
+            if artifact_signing_keys is not None:
+                supplied = _normalize_artifact_trust_keys(artifact_signing_keys, "commercial_activation_artifact_trust_invalid")
+                if supplied != normalized_trust["keys"]:
+                    raise CommercialPortalError(stage="activation", code="commercial_activation_artifact_trust_mismatch")
+            self.state.put("portal_artifact_trust_v1", normalized_trust)
+            self.state.put("portal_artifact_signing_keys", {item["key_id"]: item for item in normalized_trust["keys"]})
+            self.state.put("portal_artifact_trust_revision", normalized_trust["trust_revision"])
+            self.state.put("portal_artifact_trust_digest", normalized_trust["trust_digest"])
+            self.state.put("portal_artifact_trust_domain", normalized_trust["trust_domain"])
+            self.state.put("portal_artifact_trust_source", "portal")
+        elif artifact_signing_keys is not None:
+            raise CommercialPortalError(stage="activation", code="commercial_activation_artifact_trust_invalid")
         commercial_key = result.get("commercial_key") or result.get("commercial_key_metadata")
         if isinstance(commercial_key, dict) and commercial_key.get("commercial_key_id"):
             self.state.put("commercial_key_id", str(commercial_key["commercial_key_id"]))

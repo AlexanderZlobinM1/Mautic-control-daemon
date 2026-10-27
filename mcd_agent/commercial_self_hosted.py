@@ -28,6 +28,7 @@ from mcd_agent.commercial_portal import (
     SELF_HOSTED_MCD_STAGE_STATUSES,
     SELF_HOSTED_MCD_TERMINAL_STATUSES,
     SELF_HOSTED_MCD_ROLLBACK_STATUSES,
+    PORTAL_ARTIFACT_TRUST_UPDATE_SCHEMA,
     CommercialState,
     STANDALONE_SETTINGS_SNAPSHOT_SCHEMA,
     build_standalone_settings_snapshot,
@@ -36,6 +37,7 @@ from mcd_agent.commercial_portal import (
     standalone_settings_etag,
     verify_self_hosted_external_artifact,
     verify_self_hosted_mcd_job,
+    validate_portal_artifact_trust_update,
 )
 
 
@@ -247,16 +249,19 @@ class SelfHostedScenarioExecutor:
             raise ValueError("self_hosted_mcd_applicability_facts_mismatch")
         return observed
 
-    def run(self, job: Mapping[str, Any], *, portal_keys: Mapping[str, str], publisher_keys: Mapping[str, str], context: Mapping[str, Any], expected_agent_id: str, expected_installation_id: str, expected_commercial_key_id: str, expected_host_fingerprint: str, bootstrap_artifact: bytes, scenario_artifact: bytes, receipt_sink: Callable[[dict[str, Any]], Any] | None = None) -> dict[str, Any]:
+    def run(self, job: Mapping[str, Any], *, portal_keys: Mapping[str, str], publisher_keys: Mapping[str, Any], context: Mapping[str, Any], expected_agent_id: str, expected_installation_id: str, expected_commercial_key_id: str, expected_host_fingerprint: str, bootstrap_artifact: bytes, scenario_artifact: bytes, receipt_sink: Callable[[dict[str, Any]], Any] | None = None) -> dict[str, Any]:
         verified = verify_self_hosted_mcd_job(job, portal_keys, expected_agent_id=expected_agent_id, expected_installation_id=expected_installation_id, expected_commercial_key_id=expected_commercial_key_id, expected_host_fingerprint=expected_host_fingerprint)
         binding = _binding_from_verified(verified)
+        job_id = binding["job_id"]
+        job_digest = hashlib.sha256(canonical_json(dict(job))).hexdigest()
+        prior = self._load(job_id)
+        if isinstance(prior, dict) and prior.get("job_digest") == job_digest and isinstance(prior.get("terminal"), dict):
+            # The signed job envelope is still revalidated above, but a
+            # terminal replay must not depend on today's artifact trust set.
+            return dict(prior["terminal"])
         verify_self_hosted_external_artifact(verified["bootstrap_artifact"], bootstrap_artifact, publisher_keys, kind="bootstrap")
         verify_self_hosted_external_artifact(verified["scenario_artifact"], scenario_artifact, publisher_keys, kind="scenario")
         facts = self._local_facts(verified["facts"], context)
-        job_id = binding["job_id"]
-        prior = self._load(job_id)
-        if isinstance(prior, dict) and prior.get("job_digest") == hashlib.sha256(canonical_json(dict(job))).hexdigest() and isinstance(prior.get("terminal"), dict):
-            return dict(prior["terminal"])
         started_at = _utc()
         sequence = 0
 
@@ -283,7 +288,7 @@ class SelfHostedScenarioExecutor:
         except Exception as exc:
             emit("execution", "failed", error={"code": "self_hosted_mcd_execution_failed"})
             terminal = _failed_terminal_receipt(verified, error=exc, sequence=sequence + 1, started_at=started_at, completed=0, total=1)
-        self._save(job_id, {"job_digest": hashlib.sha256(canonical_json(dict(job))).hexdigest(), "terminal": terminal, "status": terminal["status"], "sequence": terminal["sequence"]})
+        self._save(job_id, {"job_digest": job_digest, "terminal": terminal, "status": terminal["status"], "sequence": terminal["sequence"]})
         if receipt_sink:
             receipt_sink(terminal)
         return terminal
@@ -299,7 +304,7 @@ class SelfHostedPortalWorker:
     command before its receipt has been delivered.
     """
 
-    def __init__(self, client: Any, executor: SelfHostedScenarioExecutor, *, installation_id: str | list[str], portal_keys: Mapping[str, str], publisher_keys: Mapping[str, str], context: Mapping[str, Any], commercial_key_id: str, agent_id: str, host_fingerprint: str, poll_wait_seconds: int = _DEFAULT_LONG_POLL_SECONDS, backoff_base_seconds: float = _DEFAULT_BACKOFF_BASE_SECONDS, backoff_max_seconds: float = _DEFAULT_BACKOFF_MAX_SECONDS, clock: Callable[[], float] | None = None, inventory_provider: Callable[[str], Mapping[str, Any]] | None = None, runtime_command_handler: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None):
+    def __init__(self, client: Any, executor: SelfHostedScenarioExecutor, *, installation_id: str | list[str], portal_keys: Mapping[str, str], publisher_keys: Mapping[str, Any], context: Mapping[str, Any], commercial_key_id: str, agent_id: str, host_fingerprint: str, poll_wait_seconds: int = _DEFAULT_LONG_POLL_SECONDS, backoff_base_seconds: float = _DEFAULT_BACKOFF_BASE_SECONDS, backoff_max_seconds: float = _DEFAULT_BACKOFF_MAX_SECONDS, clock: Callable[[], float] | None = None, inventory_provider: Callable[[str], Mapping[str, Any]] | None = None, runtime_command_handler: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None):
         self.client = client
         self.executor = executor
         self.installation_ids = [installation_id] if isinstance(installation_id, str) else [str(value) for value in installation_id]
@@ -600,6 +605,37 @@ class SelfHostedPortalWorker:
         binding = command.get("binding") if isinstance(command.get("binding"), Mapping) else {"agent_id": self.agent_id, "installation_id": self._active_installation_id, "host_fingerprint": self.host_fingerprint, "commercial_key_id": self.commercial_key_id}
         return {"schema": "portal-mcd-command-receipt-v1", "contract_version": "1.0", "command_id": str(command.get("command_id") or command.get("conflict_id") or ""), "delivery_cursor": int(command.get("delivery_cursor") or 0), "request_id": str(command.get("request_id") or command.get("command_id") or ""), "idempotency_key": str(command.get("idempotency_key") or ""), "binding": dict(binding), "status": status if status in {"succeeded", "failed"} else "failed", "payload": dict(payload), "observed_at": _utc()}
 
+    def _run_artifact_trust_update(self, command: Mapping[str, Any], *, cursor_next: str) -> dict[str, Any]:
+        try:
+            update = validate_portal_artifact_trust_update(command)
+            binding = update["binding"]
+            expected = {
+                "agent_id": self.agent_id,
+                "installation_id": self._active_installation_id,
+                "host_fingerprint": self.host_fingerprint,
+                "commercial_key_id": self.commercial_key_id,
+            }
+            if any(str(binding.get(key) or "") != str(expected[key]) for key in expected):
+                raise ValueError("portal_artifact_trust_update_binding_mismatch")
+            issued = datetime.fromisoformat(str(update["issued_at"]).replace("Z", "+00:00")).timestamp()
+            expires = datetime.fromisoformat(str(update["expires_at"]).replace("Z", "+00:00")).timestamp()
+            now = float(self._clock())
+            if expires <= issued or now < issued - 60 or now >= expires:
+                raise ValueError("portal_artifact_trust_update_expired_or_not_yet_valid")
+            result = self.executor.state.apply_portal_artifact_trust_update(update)
+            status = "succeeded"
+        except Exception as exc:
+            reason = str(exc).strip()
+            if not reason.startswith("portal_artifact_trust_") or len(reason) > 120 or not all(char.isalnum() or char in "_" for char in reason):
+                reason = "portal_artifact_trust_update_failed"
+            result = {"reason": reason}
+            status = "failed"
+        receipt = self._command_receipt(command, status=status, payload=result)
+        if not self._send_or_queue(receipt):
+            return {"status": "receipt_pending", "command_id": receipt["command_id"]}
+        self._finish_command(cursor_next=cursor_next)
+        return {"status": status, "command_id": receipt["command_id"]}
+
     def _run_runtime_command(self, command: Mapping[str, Any], *, cursor_next: str) -> dict[str, Any]:
         if str(command.get("schema") or "") != "mcc-desired-runtime-sync-v3" or int(command.get("desired_state_sync_protocol") or 0) != 3:
             receipt = self._command_receipt(command, status="failed", payload={"reason": "commercial_command_unsupported"})
@@ -702,6 +738,8 @@ class SelfHostedPortalWorker:
             return self._run_noop(command, cursor_next=cursor_next)
         if command.get("schema") == "mcc-desired-runtime-sync-v3":
             return self._run_runtime_command(command, cursor_next=cursor_next)
+        if command.get("schema") == PORTAL_ARTIFACT_TRUST_UPDATE_SCHEMA:
+            return self._run_artifact_trust_update(command, cursor_next=cursor_next)
         if command.get("schema") not in {None, SELF_HOSTED_MCD_JOB_SCHEMA, "portal-mcd-job-delivery-v1"}:
             receipt = self._command_receipt(command, status="failed", payload={"reason": "commercial_command_unsupported"})
             if self._send_or_queue(receipt):

@@ -1157,8 +1157,9 @@ Commercial MCD is an outbound-only Portal lane. A delivered
 key, agent, installation, host, scenario and applicability binding, local-facts
 revalidation, expiry, nonce, idempotency and Portal signature validation. The
 bootstrap and scenario artifacts are separate HTTPS pins; each is downloaded,
-size/digest checked and verified against the MCC publisher signature. MCD never
-fetches MCC directly and MCC is not the scenario authority.
+size/digest checked and verified against the Portal-owned artifact trust set.
+MCD never fetches MCC directly, never imports MCC credentials or scenario rules,
+and Portal is the self-hosted scenario authority.
 
 The only MCD execution primitive is the contract's `scenario.apply` v1.0. MCD
 passes the verified external scenario artifact to an allowlisted, non-shell
@@ -1186,15 +1187,19 @@ billing or tariff semantics are not part of MCD.
 `daemon.run_loop` may start at most one Portal worker when the durable
 commercial enrollment is valid: HTTPS Portal base, credential, agent and
 commercial-key identity, host binding, at least one installation binding, and
-Portal job-signing keys must all be present. MCC publisher keys are not
-activation material and are not a worker-start gate: poll, adopt, inventory,
-settings, noop, and receipt operations use Portal-owned signing keys only. The
-publisher trust set is passed as an operation capability and is required only
-when a `scenario.apply` command verifies its MCC-signed external bootstrap or
-scenario artifact. If that key is missing or unknown, the operation fails
-closed with typed `self_hosted_mcd_artifact_signer_unknown` and a durable
-failed terminal receipt; the worker remains available for later outbound
-polling. The base `passive`, `standalone`, or `corporate` profile is not an
+Portal job-signing keys must all be present. Portal artifact trust is not
+activation material and is not a worker-start gate: poll, adopt, inventory,
+settings, noop, and receipt operations use Portal job-signing keys only. The
+canonical `portal_artifact_signing_keys` set is seeded by activation and can be
+replaced only by a bound, time-valid, monotonically increasing
+`portal-mcd-artifact-trust-update-v1` command delivered in the signed poll
+response. A legacy `portal_mcc_publisher_keys` map is read only while canonical
+Portal trust is absent and is deprecated. Artifact trust is passed as an
+operation capability; missing or unknown/revoked key fails only that operation
+with typed `self_hosted_mcd_artifact_signer_unknown` or
+`self_hosted_mcd_artifact_signer_revoked` and a durable failed terminal
+receipt. The worker remains available for later outbound polling. The base
+`passive`, `standalone`, or `corporate` profile is not an
 eligibility switch; the Portal worker is an independent capability alongside
 the existing scheduler. Missing or invalid state, including an explicit
 revoke/detach marker, fails closed. Single-cycle mode never starts the worker.

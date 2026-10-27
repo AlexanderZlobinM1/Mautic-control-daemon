@@ -13,6 +13,7 @@ from mcd_agent.commercial_portal import (
     SELF_HOSTED_MCD_JOB_SCHEMA,
     SELF_HOSTED_MCD_CONTRACT_VERSION,
     canonical_json,
+    verify_self_hosted_mcd_job,
     verify_self_hosted_external_artifact,
 )
 from mcd_agent.commercial_self_hosted import (
@@ -101,6 +102,29 @@ def _job(portal: Ed25519PrivateKey, publisher: Ed25519PrivateKey) -> tuple[dict[
         "portal-1": _b64(portal.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)),
         "publisher-1": _b64(publisher.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)),
     }
+
+
+def test_v2_job_rejects_scenario_artifact_revision_mismatch() -> None:
+    portal = Ed25519PrivateKey.generate()
+    publisher = Ed25519PrivateKey.generate()
+    job, _bootstrap, _scenario, keys = _job(portal, publisher)
+    job["scenario_artifact"]["artifact_revision"] = "scenario-r2"
+    unsigned = dict(job)
+    unsigned.pop("portal_signature")
+    job["portal_signature"] = {"algorithm": "ed25519", "key_id": "portal-1", "value": _b64(portal.sign(canonical_json(unsigned)))}
+    try:
+        verify_self_hosted_mcd_job(
+            job,
+            {"portal-1": keys["portal-1"]},
+            expected_agent_id="agent-1",
+            expected_installation_id="installation-1",
+            expected_commercial_key_id="commercial-key-1",
+            expected_host_fingerprint="sha256:" + "b" * 64,
+        )
+    except ValueError as exc:
+        assert str(exc) == "self_hosted_mcd_scenario_revision_mismatch"
+    else:
+        raise AssertionError("scenario and artifact revisions must be immutable together")
 
 
 def test_v2_external_artifact_execution_has_exact_binding_and_no_handlers() -> None:

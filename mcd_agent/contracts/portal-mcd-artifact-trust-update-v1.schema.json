@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://portal.sales-snap.com/schemas/portal-mcd-artifact-trust-update-v1.schema.json",
+  "title": "Portal MCD artifact trust update v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "contract_version", "command_id", "delivery_cursor", "request_id", "idempotency_key", "binding", "trust_domain", "trust_revision", "trust_digest", "keys", "issued_at", "expires_at"],
+  "properties": {
+    "schema": { "const": "portal-mcd-artifact-trust-update-v1" },
+    "contract_version": { "const": "1.0" },
+    "command_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "delivery_cursor": { "type": "integer", "minimum": 1 },
+    "request_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+    "idempotency_key": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent_id", "installation_id", "host_fingerprint", "commercial_key_id"],
+      "properties": {
+        "agent_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "installation_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "host_fingerprint": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "commercial_key_id": { "type": "string", "minLength": 1, "maxLength": 512 }
+      }
+    },
+    "trust_domain": { "const": "portal_self_host_scenario_artifact" },
+    "trust_revision": { "type": "integer", "minimum": 1 },
+    "trust_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "keys": { "type": "array", "items": { "$ref": "portal-artifact-trust-v1.schema.json#/$defs/key" }, "uniqueItems": true },
+    "issued_at": { "type": "string", "format": "date-time" },
+    "expires_at": { "type": "string", "format": "date-time" }
+  }
+}

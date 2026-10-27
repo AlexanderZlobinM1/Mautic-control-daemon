@@ -78,19 +78,21 @@ The following must remain unchanged throughout acceptance:
 
 Any missing Portal URL, credential/host binding, agent/install identity, or
 Portal job signing key is a typed `disabled` status and blocks the outbound
-worker. MCC publisher keys are not activation material and their absence must
+worker. Portal artifact trust is not activation material and its absence must
 not disable Portal polling, adoption, inventory, settings, noop, or receipt
-delivery. They are required only when MCD validates a delivered MCC-signed
-bootstrap or scenario artifact; a missing/unknown key must produce the typed
-`self_hosted_mcd_artifact_signer_unknown` operation failure and a durable
-failed terminal receipt.
+delivery. It is required only when MCD validates a delivered Portal-signed
+bootstrap or scenario artifact; a missing/unknown/revoked key must produce the
+typed `self_hosted_mcd_artifact_signer_unknown` or
+`self_hosted_mcd_artifact_signer_revoked` operation failure and a durable failed
+terminal receipt. A legacy `portal_mcc_publisher_keys` map is accepted only as
+a deprecated fallback while canonical Portal trust is absent.
 
 ## 4. Portal-only no-op job and receipt
 
 Portal delivers one harmless bounded scenario through
 `portal-mcd-job-delivery-v1`. The package must contain:
 
-- exact MCC artifact digest and publisher signature;
+- exact Portal artifact digest, immutable revision and artifact signature;
 - applicable MCD contract/capabilities;
 - `package.download.path` and short-lived `grant`;
 - installation and agent scope matching the registered identities.
@@ -99,7 +101,7 @@ Expected sequence:
 
 1. outbound HTTPS poll only to `https://portal.sales-snap.com`;
 2. exact artifact download through Portal grant;
-3. Portal signature and MCC publisher signature verification;
+3. Portal job signature and Portal artifact trust verification;
 4. passive/no-op typed stages only;
 5. `mcd-onboarding-stage-receipt-v1` stage receipts;
 6. one signed `mcd-onboarding-terminal-receipt-v1`.

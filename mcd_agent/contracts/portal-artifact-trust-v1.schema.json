@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://portal.sales-snap.com/schemas/portal-artifact-trust-v1.schema.json",
+  "title": "Portal artifact trust v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "contract_version", "trust_domain", "trust_revision", "trust_digest", "keys"],
+  "properties": {
+    "schema": { "const": "portal-artifact-trust-v1" },
+    "contract_version": { "const": "1.0" },
+    "trust_domain": { "const": "portal_self_host_scenario_artifact" },
+    "trust_revision": { "type": "integer", "minimum": 1 },
+    "trust_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "keys": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/key" },
+      "uniqueItems": true
+    }
+  },
+  "$defs": {
+    "key": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "key_id", "value", "status"],
+      "properties": {
+        "algorithm": { "const": "ed25519" },
+        "key_id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._-]+$" },
+        "value": { "type": "string", "pattern": "^[A-Za-z0-9_-]{43}$" },
+        "status": { "enum": ["active", "revoked"] },
+        "not_before": { "type": ["string", "null"], "format": "date-time" },
+        "not_after": { "type": ["string", "null"], "format": "date-time" }
+      }
+    }
+  }
+}

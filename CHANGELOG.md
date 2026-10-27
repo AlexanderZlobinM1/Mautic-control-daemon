@@ -1,3 +1,15 @@
+## 1.5.257 - 2026-10-27
+
+- Separate Portal-owned artifact signing trust from Portal job signing trust;
+  persist activation trust revision/digest and apply signed, bound, monotonic
+  trust updates atomically over the outbound poll lane.
+- Preserve the deprecated `portal_mcc_publisher_keys` fallback only while
+  canonical Portal artifact trust is absent; verify canonical artifacts with
+  the Portal signature domain and fail revoked/unknown keys per operation.
+- Enforce scenario/artifact immutable revision binding and return durable
+  terminal results before rechecking current artifact trust on exact replay.
+- Record the canonical Portal schemas, fixture vectors, and source provenance.
+
 ## 1.5.256 - 2026-10-27
 
 - Persist canonical durable Portal inventory content, hash, and monotonic snapshot revision across restart, outage, replay, and concurrent workers.
