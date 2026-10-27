@@ -1943,6 +1943,9 @@ def _build_parser() -> argparse.ArgumentParser:
     up.add_argument("--repair-plan-json", default="", help="Strict versioned JSON-schema repair plan")
     up.add_argument("--repair-auth-context-file", default="", help="Root-owned signed MCC authorization context file for JSON repair")
     up.add_argument("--patch-backup-context-file", default="", help="Signed host-local backup attestation bound to the immutable v3 patch plan")
+    up.add_argument("--prepared-target-json", default="", help="MCC prepared-target manifest input for artifact-only apply")
+    up.add_argument("--prepared-target-file", default="", help="Private file containing the MCC prepared-target manifest input")
+    up.add_argument("--prepared-target-sha256", default="", help="Expected SHA-256 of --prepared-target-file")
     up.add_argument("--repair-auth-key-file", default="/etc/mcd/mcc-operation-signing.key", help="Root-owned MCC operation signing key file")
     up.add_argument("--backup-manifest-path", default="", help="MCD backup marker path for authorize-repair")
     up.add_argument("--repair-auth-output-file", default="", help="Optional root-owned output path for authorize-repair context")
@@ -3432,6 +3435,9 @@ def main() -> int:
             patch_backup_context_file=str(args.patch_backup_context_file or "") or None,
             repair_auth_key_file=str(args.repair_auth_key_file or "/etc/mcd/mcc-operation-signing.key"),
             mcc_preflighted_single_instance=bool(args.mcc_preflighted_single_instance),
+            prepared_target_json=str(args.prepared_target_json or "") or None,
+            prepared_target_file=str(args.prepared_target_file or "") or None,
+            prepared_target_sha256=str(args.prepared_target_sha256 or ""),
         )
         if rc == 0:
             _push_state_after_change(cfg, "mautic-upgrade-apply")

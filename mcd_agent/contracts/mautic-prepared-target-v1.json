@@ -1,0 +1,18 @@
+{
+  "schema": "mcd-mautic-prepared-target-input-v1",
+  "purpose": "MCC-built Composer or ZIP skeleton delivered to MCD without invoking Composer on the host",
+  "transport": "MCD fetches only the bound artifact path from the configured HTTPS MCC URL with the existing MCC Bearer API key; no GitHub, DNS or alternate network fallback",
+  "artifact": {
+    "media_type": "application/zip",
+    "integrity": "exact size and SHA-256 before extraction",
+    "archive_manifest": ".mcd/prepared-target-manifest.json",
+    "manifest_integrity": "embedded manifest must equal the MCC-provided manifest and every listed payload file must match its SHA-256"
+  },
+  "preserved_paths": ["config", "app/config", "var"],
+  "apply": "materialize the prepared application into the existing upgrade maintenance lifecycle, preserve config and var, run existing migration and health checks, and retain rollback evidence",
+  "composer": {
+    "host_invoked": false,
+    "host_composer_invoked": false
+  },
+  "failure": "integrity, layout, version, migration or health failure is terminal and invokes the existing rollback path"
+}

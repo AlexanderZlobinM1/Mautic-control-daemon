@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tarfile
 from typing import Any
 from dataclasses import dataclass, replace
 from urllib import error as urlerror
@@ -634,6 +635,57 @@ def _resolve_update_package(config: AgentConfig, target: str) -> Path:
     return dst
 
 
+def _load_prepared_target_input(
+    *,
+    config: AgentConfig,
+    raw_json: str | None,
+    file_path: str | None,
+    input_sha256: str,
+    target: str,
+    mode: str,
+):
+    if raw_json and file_path:
+        raise RuntimeError("Choose exactly one prepared target transport")
+    if not raw_json and not file_path:
+        return None
+    from mcd_agent.mautic_patch_plan import _target_version
+    from mcd_agent.prepared_target import (
+        PreparedTargetError,
+        download_prepared_target,
+        load_prepared_target_file,
+        load_prepared_target_json,
+        materialize_prepared_target,
+    )
+    try:
+        prepared = load_prepared_target_file(file_path, input_sha256) if file_path else load_prepared_target_json(raw_json or "")
+        if prepared["target_version"] != target:
+            raise PreparedTargetError("prepared_target_target_binding_mismatch")
+        if mode != "auto" and prepared["install_type"] != mode:
+            raise PreparedTargetError("prepared_target_install_type_binding_mismatch")
+        artifact = download_prepared_target(config, prepared)
+        return materialize_prepared_target(prepared, artifact, read_version=_target_version)
+    except PreparedTargetError as exc:
+        raise RuntimeError(f"Prepared Mautic target rejected: {exc}") from exc
+
+
+def _restore_prepared_target_backup(root: str, backup_path: str | Path) -> None:
+    """Restore the complete pre-apply tree from the local upgrade backup."""
+    target = Path(root).resolve(strict=True)
+    archive = Path(backup_path).resolve(strict=True)
+    if target == target.parent or target == Path("/") or not archive.is_file() or archive.is_symlink():
+        raise RuntimeError("prepared_target_rollback_path_invalid")
+    parent = target.parent
+    with tarfile.open(archive, "r:gz") as tar:
+        members = tar.getmembers()
+        if not members or any(member.name.startswith("/") or ".." in Path(member.name).parts for member in members):
+            raise RuntimeError("prepared_target_rollback_archive_invalid")
+        top = target.name
+        if any(Path(member.name).parts[:1] != (top,) for member in members):
+            raise RuntimeError("prepared_target_rollback_archive_binding_invalid")
+        shutil.rmtree(target)
+        tar.extractall(parent)
+
+
 def _command_with_user(cmd: list[str], *, as_www_data: bool = False) -> list[str]:
     full = cmd
     if as_www_data:
@@ -1121,12 +1173,16 @@ def _patch_lifecycle_phase(hook, root: str, phase: str) -> None:
         callback(root, phase)
 
 
-def _prepare_patch_target_stage(config, root: str, current: str, target: str, mode: str, plan, facts_provider=None):
+def _prepare_patch_target_stage(config, root: str, current: str, target: str, mode: str, plan, facts_provider=None, prepared_target=None):
     from mcd_agent.mautic_patch_stage import TargetStage, application_root
     from mcd_agent.mautic_patch_plan import _target_version
     package_identity = {}
     def prepare(stage_root: Path) -> None:
-        if mode == "composer":
+        if prepared_target is not None:
+            from mcd_agent.prepared_target import merge_into_live
+            merge_into_live(prepared_target.root, application_root(stage_root))
+            package_identity["sha256"] = prepared_target.artifact_sha256.removeprefix("sha256:")
+        elif mode == "composer":
             cjson = stage_root / "composer.json"
             text = cjson.read_text(encoding="utf-8")
             updated, _count = _replace_version_tokens(text, current, target)
@@ -1280,6 +1336,52 @@ def _apply_zip(config: AgentConfig, root: str, console_path: str, php_bin: str, 
     for phase in ("before_cache_warmup", "before_asset_generation", "preflight_frontend_assets", "before_doctrine_migrations"):
         _patch_lifecycle_phase(after_source_install, root, phase)
     _run([php_bin, console_path, "mautic:update:apply", "--finish"], cwd=root, as_www_data=True)
+
+
+def _apply_prepared_target(
+    config: AgentConfig,
+    root: str,
+    console_path: str,
+    php_bin: str,
+    target: str,
+    prepared_target,
+    after_source_install=None,
+) -> None:
+    """Apply an MCC-built skeleton through the existing upgrade lifecycle."""
+    from mcd_agent.mautic_patch_stage import application_root
+    from mcd_agent.prepared_target import merge_into_live
+
+    live_application = application_root(Path(root))
+    if prepared_target.input["target_version"] != target:
+        raise RuntimeError("prepared_target_target_binding_mismatch")
+    merge_into_live(prepared_target.root, live_application)
+    print(
+        "MCD_PREPARED_TARGET_EVIDENCE="
+        + json.dumps(
+            {
+                "schema": "mcd-mautic-prepared-target-receipt-v1",
+                "status": "staged",
+                "prepared_target_id": prepared_target.input["prepared_target_id"],
+                "target_version": target,
+                "artifact_sha256": prepared_target.artifact_sha256,
+                "host_composer_invoked": False,
+                "preserved_paths": ["config", "app/config", "var"],
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        flush=True,
+    )
+    if after_source_install:
+        after_source_install(root)
+    for phase in ("before_cache_warmup", "before_asset_generation", "preflight_frontend_assets", "before_doctrine_migrations"):
+        _patch_lifecycle_phase(after_source_install, root, phase)
+    project_root = _resolve_composer_project_root(root)
+    _run([php_bin, console_path, "mautic:update:apply", "--finish"], cwd=root, as_www_data=True)
+    migration_cmd = _doctrine_migrate_command(project_root, console_path, php_bin)
+    _run_doctrine_migrate_with_reconcile(project_root, console_path, php_bin, migration_cmd)
+    _verify_or_reconcile_doctrine_migrations(project_root, console_path, php_bin)
 
 
 def _replace_version_tokens(text: str, current: str, target: str) -> tuple[str, int]:
@@ -2134,6 +2236,9 @@ def run_upgrade_apply(
     allow_release_transition: bool = False,
     mcc_release_authorization_context_file: str = "",
     mcc_release_authorization_context_sha256: str = "",
+    prepared_target_json: str | None = None,
+    prepared_target_file: str | None = None,
+    prepared_target_sha256: str = "",
 ) -> int:
     inst = _pick_install_record(config, root)
     if str(getattr(inst, "runtime", "host") or "host").strip().lower() == "docker":
@@ -2239,6 +2344,21 @@ def run_upgrade_apply(
     chosen_mode = mode
     if chosen_mode == "auto":
         chosen_mode = detect_install_type(install_root)
+    prepared_target = _load_prepared_target_input(
+        config=config,
+        raw_json=prepared_target_json,
+        file_path=prepared_target_file,
+        input_sha256=prepared_target_sha256,
+        target=target,
+        mode=mode,
+    )
+    prepared_rollback_backup: Path | None = None
+    if prepared_target is not None:
+        # A prepared artifact is a complete source replacement. Keep a local
+        # rollback point even when the operator did not request the optional
+        # ordinary backup, because migration/health failures must restore the
+        # exact pre-apply tree.
+        chosen_mode = prepared_target.input["install_type"]
     if manual_system_upgrade:
         _assert_php84_host_safe(config, install_root)
     if requirements.get("database_compatibility") == "mautic7":
@@ -2379,7 +2499,8 @@ def run_upgrade_apply(
                 raise RuntimeError("Selected upgrade plan contains a phase unavailable in this upgrade workflow")
             try:
                 target_stage = _prepare_patch_target_stage(config, _resolve_composer_project_root(install_root) if chosen_mode == "composer" else install_root,
-                                                           current, target, chosen_mode, validated_patch_plan, facts_provider=patch_facts_provider)
+                                                           current, target, chosen_mode, validated_patch_plan, facts_provider=patch_facts_provider,
+                                                           prepared_target=prepared_target)
             except Exception as exc:
                 patch_evidence_failure = getattr(exc, "evidence", None) or {
                     "failure": {"id": "", "gates": []}, "completed": list(patch_evidence_outcomes),
@@ -2440,8 +2561,10 @@ def run_upgrade_apply(
                 )
             print("Mautic import tag remediation rollback: " + str(restore.get("status", "clean")))
 
-        if do_backup:
+        if do_backup or prepared_target is not None:
             b = _backup_install(install_root)
+            if prepared_target is not None:
+                prepared_rollback_backup = Path(b)
             print(f"Backup created: {b}")
 
         if requirements.get("requires_json_repair"):
@@ -2489,7 +2612,13 @@ def run_upgrade_apply(
             if repair_evidence.get("status") != "success":
                 raise RuntimeError("Mautic JSON schema repair rejected or failed")
 
-        if chosen_mode == "zip":
+        if prepared_target is not None:
+            if cross_line:
+                require_live_release_authorization()
+            elif not mcc_preflighted_single_instance:
+                _require_release_approval(config, target, current)
+            _apply_prepared_target(config, install_root, console, config.php_bin, target, prepared_target, patch_hook)
+        elif chosen_mode == "zip":
             if cross_line:
                 require_live_release_authorization()
             elif not mcc_preflighted_single_instance:
@@ -2514,27 +2643,47 @@ def run_upgrade_apply(
 
         # Restore transport dependencies for API senders after upgrade
         # (especially relevant for zip installs where update flow may drop composer deps).
-        ensure_mailer_packages_for_sender_config(
-            config=config,
-            root=install_root,
-            console_path=console,
-            reason="mautic-upgrade-sender-restore",
-        )
+        if prepared_target is None:
+            ensure_mailer_packages_for_sender_config(
+                config=config,
+                root=install_root,
+                console_path=console,
+                reason="mautic-upgrade-sender-restore",
+            )
 
-        ensure_amazon_mailer_for_bundles(
-            config=config,
-            root=install_root,
-            console_path=console,
-            bundles=installed_required_bundles(install_root),
-            reason="mautic-upgrade",
-        )
+            ensure_amazon_mailer_for_bundles(
+                config=config,
+                root=install_root,
+                console_path=console,
+                bundles=installed_required_bundles(install_root),
+                reason="mautic-upgrade",
+            )
 
-        if _parse_semver(current)[0] != 7 and _parse_semver(target)[0] == 7:
+        if prepared_target is None and _parse_semver(current)[0] != 7 and _parse_semver(target)[0] == 7:
             _ensure_mautic7_locale_fix(config, install_root)
 
         final_version = _read_current_version(install_root, console, config.php_bin, config.mautic_run_as_user)
         if _parse_semver(final_version) != _parse_semver(target):
             raise RuntimeError(f"Post-check failed: Mautic version is {final_version}, expected {target}")
+        if prepared_target is not None:
+            print(
+                "MCD_PREPARED_TARGET_EVIDENCE="
+                + json.dumps(
+                    {
+                        "schema": "mcd-mautic-prepared-target-receipt-v1",
+                        "status": "success",
+                        "prepared_target_id": prepared_target.input["prepared_target_id"],
+                        "target_version": target,
+                        "artifact_sha256": prepared_target.artifact_sha256,
+                        "host_composer_invoked": False,
+                        "rollback_backup": str(prepared_rollback_backup or ""),
+                    },
+                    ensure_ascii=True,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                flush=True,
+            )
         if target_stage is not None:
             from mcd_agent.mautic_patch_stage import application_root
             from mcd_agent.mautic_patch_plan_v3 import verify_applied
@@ -2601,6 +2750,25 @@ def run_upgrade_apply(
             except RuntimeError as rollback_error:
                 print("MCD_PATCH_PLAN_EVIDENCE=" + json.dumps({"status": "error", "rollback_succeeded": False, "reason": str(rollback_error)}, sort_keys=True))
                 rollback_state = {"available": True, "attempted": True, "succeeded": False}
+        if prepared_rollback_backup is not None:
+            try:
+                _restore_prepared_target_backup(install_root, prepared_rollback_backup)
+                print("MCD_PREPARED_TARGET_EVIDENCE=" + json.dumps({
+                    "schema": "mcd-mautic-prepared-target-receipt-v1",
+                    "status": "rolled_back",
+                    "prepared_target_id": prepared_target.input["prepared_target_id"],
+                    "host_composer_invoked": False,
+                    "rollback_backup": str(prepared_rollback_backup),
+                }, ensure_ascii=True, sort_keys=True, separators=(",", ":")), flush=True)
+            except Exception as prepared_rollback_error:
+                print("MCD_PREPARED_TARGET_EVIDENCE=" + json.dumps({
+                    "schema": "mcd-mautic-prepared-target-receipt-v1",
+                    "status": "rollback_failed",
+                    "prepared_target_id": prepared_target.input["prepared_target_id"],
+                    "host_composer_invoked": False,
+                    "reason": type(prepared_rollback_error).__name__,
+                }, ensure_ascii=True, sort_keys=True, separators=(",", ":")), flush=True)
+                raise
         if validated_patch_plan is not None and validated_patch_plan.get("schema") == "mcd-mautic-patch-plan-v3" and not patch_evidence_reported:
             failure = patch_evidence_failure.get("failure") if isinstance(patch_evidence_failure, dict) else None
             completed = patch_evidence_failure.get("completed") if isinstance(patch_evidence_failure, dict) else None
@@ -2620,6 +2788,8 @@ def run_upgrade_apply(
     finally:
         if target_stage is not None:
             target_stage.close()
+        if prepared_target is not None:
+            prepared_target.close()
 
     _exit_upgrade_maintenance(config, guard)
     return 0
