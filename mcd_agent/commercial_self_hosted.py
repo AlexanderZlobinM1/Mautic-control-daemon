@@ -17,7 +17,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping
 
-from mcd_agent.commercial_detector import read_normalized_local_facts
+from mcd_agent.commercial_detector import read_normalized_applicability_facts, read_normalized_local_facts
 from mcd_agent.commercial_portal import (
     PORTAL_MCD_ADOPT_CONTRACT_VERSION,
     SELF_HOSTED_MCD_JOB_SCHEMA,
@@ -284,7 +284,11 @@ class SelfHostedScenarioExecutor:
     def _local_facts(self, expected: Mapping[str, Any], context: Mapping[str, Any]) -> dict[str, Any]:
         target_kind = str(expected.get("target_kind") or context.get("target_kind") or "existing_server")
         capabilities = list(context.get("local_facts_capabilities") or ["package_manager.query"])
-        observed = dict(self.facts_reader(target_kind=target_kind, capabilities=capabilities))
+        observed = read_normalized_applicability_facts(
+            target_kind=target_kind,
+            capabilities=capabilities,
+            facts_reader=self.facts_reader,
+        )
         observed.pop("detector_schema", None)
         observed["capabilities"] = sorted(set(str(item) for item in observed.get("capabilities", [])))
         normalized_expected = dict(expected)

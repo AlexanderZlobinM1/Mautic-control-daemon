@@ -73,6 +73,7 @@ from mcd_agent.cleanup_schedule import (
 )
 from mcd_agent.cluster_assets import guard_cluster_assets
 from mcd_agent.custom_scripts import cached_custom_manifest_keys, cleanup_custom_cache, fetch_custom_manifest
+from mcd_agent.commercial_detector import PORTAL_LOCAL_FACTS_CAPABILITIES, build_applicability_facts_snapshot
 from mcd_agent.db import MauticDB
 from mcd_agent.db_watchdog import collect_db_watchdog_snapshot, effective_db_watchdog_config
 from mcd_agent.email_counters import repair_campaign_email_counters
@@ -422,6 +423,13 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
                     "blocked_keys": list(applied.get("blocked_keys", [])),
                 }
 
+            portal_context = {
+                "platform": "linux-arm64" if platform.machine().lower() in {"aarch64", "arm64"} else "linux-amd64",
+                "runtime": "host",
+                "cron_ownership": "none",
+                "local_facts_capabilities": list(PORTAL_LOCAL_FACTS_CAPABILITIES),
+            }
+
             def inventory_snapshot(_installation_id: str) -> Mapping[str, Any]:
                 """Build the complete secret-free host/instance inventory."""
                 local_cfg = load_config(config.config_file_path, allow_recover_from_mcc=False)
@@ -498,6 +506,10 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
                         "scheduler_paused": False,
                         "settings": settings(runtime),
                     },
+                    "applicability_facts": build_applicability_facts_snapshot(
+                        target_kind="existing_server",
+                        capabilities=list(portal_context["local_facts_capabilities"]),
+                    ),
                     "instances": rows,
                 }
 
@@ -507,7 +519,7 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
                 installation_id=sorted(str(value) for value in installations.values()),
                 portal_keys={str(key): str(value) for key, value in portal_keys.items()},
                 publisher_keys={str(key): value for key, value in publisher_keys.items() if isinstance(value, (str, dict))},
-                context={"platform": "linux-arm64" if platform.machine().lower() in {"aarch64", "arm64"} else "linux-amd64", "runtime": "host", "cron_ownership": "none", "local_facts_capabilities": ["package_manager.query", "portal_scenario_execution_v1", "mcd_passive_activation_v1"]},
+                context=portal_context,
                 commercial_key_id=commercial_key_id,
                 agent_id=agent_id,
                 host_fingerprint=host_fingerprint,

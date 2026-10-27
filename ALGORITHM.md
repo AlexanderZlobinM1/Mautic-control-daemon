@@ -1161,6 +1161,20 @@ size/digest checked and verified against the Portal-owned artifact trust set.
 MCD never fetches MCC directly, never imports MCC credentials or scenario rules,
 and Portal is the self-hosted scenario authority.
 
+The signed `portal-mcd-inventory-snapshot-v1` also carries the additive
+`applicability_facts` coordinate (`mcd-portal-applicability-facts-v1`, contract
+version `1.0`). Its `facts` mapping is the complete normalized value used by
+the local execution guard: `os_id`, `os_version`, `architecture`,
+`package_manager`, sorted unique `capabilities`, `target_kind`, and
+`detector_schema`. `facts_digest` hashes the same mapping after removing only
+`detector_schema`. Inventory publication and `scenario.apply` use the same
+reader and capability context, so the coordinate is stable across unchanged
+polls, restart, replay, and Portal outage; its durable inventory hash and
+revision include the field. Missing detector facts fail closed. Scenario
+`required_capabilities` remain Portal-side applicability predicates and are
+never synthesized into this signed facts mapping. Older Portal consumers may
+ignore the additive field.
+
 The only MCD execution primitive is the contract's `scenario.apply` v1.0. MCD
 passes the verified external scenario artifact to an allowlisted, non-shell
 runner process and owns no installer, OS, Mautic, scenario or primitive recipe.

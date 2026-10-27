@@ -11,6 +11,21 @@ from mcd_agent.commercial_portal import canonical_json
 
 
 SCHEMA = "mcd-scenario-detector-v1"
+APPLICABILITY_FACTS_SCHEMA = "mcd-portal-applicability-facts-v1"
+APPLICABILITY_FACTS_CONTRACT_VERSION = "1.0"
+PORTAL_LOCAL_FACTS_CAPABILITIES = (
+    "package_manager.query",
+    "portal_scenario_execution_v1",
+    "mcd_passive_activation_v1",
+)
+_APPLICABILITY_FACT_KEYS = (
+    "os_id",
+    "os_version",
+    "architecture",
+    "package_manager",
+    "capabilities",
+    "target_kind",
+)
 
 
 def validate_portal_scenario_resolution(value: Mapping[str, Any], *, expected_digest: str | None = None) -> dict[str, Any]:
@@ -61,6 +76,65 @@ def read_normalized_local_facts(*, os_release_path: str = "/etc/os-release", mac
     if target_kind not in {"new_server", "existing_server"}:
         raise ValueError("commercial_detector_target_kind_invalid")
     return {"os_id": os_id, "os_version": version, "architecture": arch, "package_manager": managers[0], "capabilities": sorted(set(capabilities or ["package_manager.query"])), "target_kind": target_kind, "detector_schema": SCHEMA}
+
+
+def normalize_applicability_facts(value: Mapping[str, Any], *, require_detector_schema: bool = False) -> dict[str, Any]:
+    """Normalize the exact facts shared by the Portal inventory and job guard."""
+    if not isinstance(value, Mapping):
+        raise ValueError("commercial_applicability_facts_invalid")
+    allowed = set(_APPLICABILITY_FACT_KEYS) | {"detector_schema"}
+    if set(value) - allowed or any(key not in value for key in _APPLICABILITY_FACT_KEYS):
+        raise ValueError("commercial_applicability_facts_invalid")
+    normalized: dict[str, Any] = {}
+    for key in _APPLICABILITY_FACT_KEYS:
+        if key == "capabilities":
+            capabilities = value.get(key)
+            if not isinstance(capabilities, list) or any(not isinstance(item, str) or not item.strip() for item in capabilities):
+                raise ValueError("commercial_applicability_facts_invalid")
+            normalized[key] = sorted(set(str(item).strip() for item in capabilities))
+            continue
+        item = value.get(key)
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError("commercial_applicability_facts_invalid")
+        normalized[key] = str(item).strip()
+    detector_schema = value.get("detector_schema")
+    if detector_schema is None:
+        if require_detector_schema:
+            raise ValueError("commercial_applicability_detector_schema_missing")
+    elif not isinstance(detector_schema, str) or not detector_schema.strip():
+        raise ValueError("commercial_applicability_detector_schema_invalid")
+    else:
+        normalized["detector_schema"] = detector_schema.strip()
+    return normalized
+
+
+def applicability_facts_digest(value: Mapping[str, Any]) -> str:
+    """Hash the guard mapping; detector schema identifies the producer, not facts."""
+    normalized = normalize_applicability_facts(value)
+    normalized.pop("detector_schema", None)
+    return "sha256:" + hashlib.sha256(canonical_json(normalized)).hexdigest()
+
+
+def read_normalized_applicability_facts(*, target_kind: str, capabilities: list[str] | None, facts_reader: Any = read_normalized_local_facts, require_detector_schema: bool = False) -> dict[str, Any]:
+    """Read and normalize facts using the same reader/context as the job guard."""
+    observed = facts_reader(target_kind=target_kind, capabilities=capabilities)
+    return normalize_applicability_facts(observed, require_detector_schema=require_detector_schema)
+
+
+def build_applicability_facts_snapshot(*, target_kind: str, capabilities: list[str] | None, facts_reader: Any = read_normalized_local_facts) -> dict[str, Any]:
+    """Build the signed, additive inventory coordinate consumed by Portal."""
+    facts = read_normalized_applicability_facts(
+        target_kind=target_kind,
+        capabilities=capabilities,
+        facts_reader=facts_reader,
+        require_detector_schema=True,
+    )
+    return {
+        "schema": APPLICABILITY_FACTS_SCHEMA,
+        "contract_version": APPLICABILITY_FACTS_CONTRACT_VERSION,
+        "facts": facts,
+        "facts_digest": applicability_facts_digest(facts),
+    }
 
 
 def detector_digest(facts: Mapping[str, Any]) -> str:
