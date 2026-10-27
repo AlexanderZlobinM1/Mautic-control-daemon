@@ -1,3 +1,10 @@
+## 1.5.260 - 2026-10-27
+
+- Continue same-job Portal recovery terminals with the next sequence and
+  idempotency key, so an existing first-attempt terminal is not conflicted.
+- Finish a durable pending delivery after its terminal receipt drains, without
+  replaying the runner after restart or outage.
+
 ## 1.5.259 - 2026-10-27
 
 - Keep the self-hosted Portal executor independent from corporate MCC

@@ -254,6 +254,8 @@ def test_v2_worker_command6_shape_expiry_emits_terminal_and_advances(monkeypatch
     publisher_key = Ed25519PrivateKey.generate()
     job, _bootstrap, _scenario, keys = _job(portal_key, publisher_key)
     job["job_id"] = "job-command6"
+    job["command_id"] = "mcd_command_job-command6_retry_1"
+    job["delivery_cursor"] = 6
     job["expires_at"] = "2020-01-01T00:00:00Z"
     unsigned = dict(job)
     unsigned.pop("portal_signature")
@@ -291,6 +293,8 @@ def test_v2_worker_command6_shape_expiry_emits_terminal_and_advances(monkeypatch
         assert result == {"status": "failed", "job_id": "job-command6"}
         assert len(portal.receipts) == 1
         assert portal.receipts[0]["schema"] == "mcd-self-hosted-terminal-receipt-v2"
+        assert portal.receipts[0]["sequence"] == 2
+        assert portal.receipts[0]["idempotency_key"] == "job-command6:terminal:2"
         assert portal.receipts[0]["error"]["type"] == "self_hosted_mcd_job_expired_or_not_yet_valid"
         assert state.get("commercial_self_hosted_pending_delivery_v1") is None
 
@@ -332,6 +336,67 @@ def test_v2_worker_revoked_state_closes_already_accepted_delivery(monkeypatch) -
 
         assert result == {"status": "failed", "job_id": "job-1"}
         assert portal.receipts[0]["error"]["type"] == "self_hosted_mcd_commercial_state_revoked"
+        assert state.get("commercial_self_hosted_pending_delivery_v1") is None
+
+
+def test_v2_worker_draining_recovery_terminal_closes_delivery_without_replay() -> None:
+    portal_key = Ed25519PrivateKey.generate()
+    publisher_key = Ed25519PrivateKey.generate()
+    job, _bootstrap, _scenario, keys = _job(portal_key, publisher_key)
+    job["command_id"] = "mcd_command_job-1_retry_1"
+    job["delivery_cursor"] = 6
+
+    class Portal:
+        def __init__(self) -> None:
+            self.receipts: list[dict[str, object]] = []
+
+        def pull_job(self, **_: object):
+            return None
+
+        def send_receipt(self, receipt: dict[str, object], **_: object):
+            self.receipts.append(receipt)
+            return {}
+
+    with TemporaryDirectory() as directory:
+        state = CommercialState(str(Path(directory) / "commercial.sqlite"))
+        state.put(
+            "commercial_self_hosted_pending_delivery_v1",
+            {"cursor": "5", "cursor_next": "6", "installation_id": "installation-1", "job": {"commands": [job]}},
+        )
+        state.put(
+            "commercial_self_hosted_pending_receipts",
+            [{
+                "schema": "mcd-self-hosted-terminal-receipt-v2",
+                "job_id": "job-1",
+                "sequence": 1,
+                "idempotency_key": "job-1:terminal:1",
+                "status": "failed",
+            }],
+        )
+        calls = {"runner": 0}
+
+        def runner(**_: object):
+            calls["runner"] += 1
+            return {"status": "succeeded"}
+
+        worker = SelfHostedPortalWorker(
+            Portal(),
+            SelfHostedScenarioExecutor(state, runner=runner),
+            installation_id="installation-1",
+            portal_keys={"portal-1": keys["portal-1"]},
+            publisher_keys={"publisher-1": keys["publisher-1"]},
+            context={},
+            commercial_key_id="commercial-key-1",
+            agent_id="agent-1",
+            host_fingerprint="sha256:" + "b" * 64,
+        )
+
+        worker.run_once()
+
+        assert calls["runner"] == 0
+        assert worker.client.receipts[0]["sequence"] == 2
+        assert worker.client.receipts[0]["idempotency_key"] == "job-1:terminal:2"
+        assert state.get("commercial_self_hosted_pending_receipts") == []
         assert state.get("commercial_self_hosted_pending_delivery_v1") is None
 
 

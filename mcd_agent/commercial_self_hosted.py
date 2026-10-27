@@ -142,6 +142,11 @@ def _failed_terminal_for_delivery(command: Mapping[str, Any], *, error: BaseExce
         return None
 
 
+def _is_recovery_command(command: Mapping[str, Any]) -> bool:
+    """Identify Portal's same-job recovery delivery without changing its identity."""
+    return "_retry_" in str(command.get("command_id") or "")
+
+
 def _binding_from_verified(verified: Mapping[str, Any]) -> dict[str, Any]:
     job = verified["job"]
     return {
@@ -388,8 +393,46 @@ class SelfHostedPortalWorker:
             self._queue(receipt)
             return False
 
+    def _normalize_pending_recovery_receipt(self) -> None:
+        """Rebase an unsent retry terminal to the next job sequence.
+
+        Portal recovery is a continuation of the same job.  If the original
+        terminal was already recorded, a retry terminal must use the next
+        sequence/idempotency key; otherwise Portal correctly rejects it as a
+        receipt conflict.  Re-signing is intentionally deferred to
+        ``PortalClient.send_receipt`` after this durable rewrite.
+        """
+        pending_delivery = self._pending_delivery()
+        pending = self._pending()
+        if not pending or not pending_delivery:
+            return
+        commands = self._commands_from_delivery(
+            pending_delivery.get("job") if isinstance(pending_delivery.get("job"), Mapping) else {}
+        )
+        if not commands or not _is_recovery_command(commands[0]):
+            return
+        receipt = pending[0]
+        if receipt.get("schema") != SELF_HOSTED_MCD_TERMINAL_RECEIPT_SCHEMA:
+            return
+        try:
+            sequence = int(receipt.get("sequence") or 0)
+        except (TypeError, ValueError):
+            return
+        if sequence < 1:
+            return
+        rebased = dict(receipt)
+        next_sequence = sequence + 1
+        rebased["sequence"] = next_sequence
+        identity = str(rebased.get("idempotency_key") or "")
+        prefix = identity.rsplit(":terminal:", 1)[0] if ":terminal:" in identity else str(rebased.get("job_id") or "")
+        rebased["idempotency_key"] = f"{prefix}:terminal:{next_sequence}"
+        rebased.pop("agent_signature", None)
+        pending[0] = rebased
+        self.executor.state.put(_PENDING_KEY, pending)
+
     def _drain(self) -> bool:
         pending = self._pending()
+        drained_terminal = False
         while pending:
             try:
                 self._send_receipt(pending[0])
@@ -398,8 +441,13 @@ class SelfHostedPortalWorker:
                 self.executor.state.put(_PENDING_KEY, pending)
                 return False
             self._transport_succeeded()
+            drained_terminal = pending[0].get("schema") == SELF_HOSTED_MCD_TERMINAL_RECEIPT_SCHEMA
             pending.pop(0)
             self.executor.state.put(_PENDING_KEY, pending)
+        if drained_terminal:
+            saved = self._pending_delivery()
+            if saved:
+                self._finish_command(cursor_next=str(saved.get("cursor_next") or saved.get("cursor") or ""))
         return True
 
     def _send_receipt(self, receipt: Mapping[str, Any]) -> Any:
@@ -735,6 +783,8 @@ class SelfHostedPortalWorker:
         delivery, local rejection, expiry, disabled state, and artifact
         unavailability must not leave that lease silent.
         """
+        if _is_recovery_command(command):
+            sequence = max(2, int(sequence))
         failed = _failed_terminal_for_delivery(
             command,
             error=error,
@@ -761,6 +811,7 @@ class SelfHostedPortalWorker:
         return None
 
     def run_once(self) -> dict[str, Any]:
+        self._normalize_pending_recovery_receipt()
         if not self._drain():
             return {"status": "receipt_pending"}
         pending = self._pending_delivery()

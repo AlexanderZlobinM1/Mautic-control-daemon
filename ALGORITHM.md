@@ -1191,6 +1191,10 @@ exceptions are typed and bounded. A receipt that cannot be sent immediately is
 queued durably before the delivery is considered complete; the runner is never
 re-run just to deliver a receipt after restart. A poll/network failure before a
 delivery exists remains a transport retry and has no command to acknowledge.
+For Portal's same-job recovery command, the terminal continues at the next
+monotonic sequence/idempotency key after any terminal from the first attempt;
+draining that durable terminal completes the delivery and never re-runs the
+runner.
 
 `daemon.run_loop` may start at most one Portal worker when the durable
 Portal enrollment is valid: HTTPS Portal base, credential, agent and
