@@ -7,6 +7,7 @@ import zipfile
 from unittest.mock import patch
 
 from mcd_agent.prepared_target import (
+    MAX_INPUT_BYTES,
     MANIFEST_NAME,
     PRESERVED_PATHS,
     PreparedTargetError,
@@ -43,7 +44,7 @@ def _fixture(tmp_path: Path):
     body = artifact.getvalue()
     prepared = {
         "schema": "mcd-mautic-prepared-target-input-v1",
-        "prepared_target_id": "prepared-7-1-4-fixture",
+        "prepared_target_id": "mautic-7.1.4-php8.4-composer",
         "target_version": "7.1.4",
         "install_type": "composer",
         "artifact": {
@@ -63,6 +64,9 @@ def _version(root: Path):
 
 
 class PreparedTargetTests(unittest.TestCase):
+  def test_input_limit_covers_full_mcc_manifest_envelope(self):
+    self.assertGreaterEqual(MAX_INPUT_BYTES, 4 * 1024 * 1024)
+
   def test_dev_candidate_metadata_keeps_approved_baseline(self):
     from mcd_agent import __version__
 
@@ -77,6 +81,19 @@ class PreparedTargetTests(unittest.TestCase):
         "baseline_role": "historical-rollback-audit-only",
         "publication_status": "dev-only",
     })
+
+  def test_prepared_target_identity_is_target_only(self):
+    prepared, _body = _fixture(Path("/tmp"))
+    self.assertEqual(validate_prepared_target(prepared)["prepared_target_id"], "mautic-7.1.4-php8.4-composer")
+    zip_input = json.loads(json.dumps(prepared))
+    zip_input["install_type"] = "zip"
+    zip_input["prepared_target_id"] = "mautic-7.1.4-zip"
+    zip_input["manifest"]["install_type"] = "zip"
+    self.assertEqual(validate_prepared_target(zip_input)["prepared_target_id"], "mautic-7.1.4-zip")
+    invalid = json.loads(json.dumps(prepared))
+    invalid["prepared_target_id"] = "mautic-7.1.3-to-7.1.4-composer-0123456789ab"
+    with self.assertRaisesRegex(PreparedTargetError, "prepared_target_id_invalid"):
+        validate_prepared_target(invalid)
 
   def test_prepared_target_verifies_manifest_and_preserves_config_var(self):
     from tempfile import TemporaryDirectory

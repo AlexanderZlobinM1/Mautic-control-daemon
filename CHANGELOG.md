@@ -6,8 +6,11 @@
   Composer on the host, with `config`/`var` preservation and existing
   migration, health and rollback receipts. MCD 1.5.268 remains only as the
   historical rollback/audit reference; it is not a parallel implementation.
-  The legacy hardcoded upgrade path is retained until sandbox prepared-skeleton
-  parity is accepted.
+  Prepared-target IDs are target-only: ZIP uses
+  `mautic-{target_version}-zip`, while Composer uses
+  `mautic-{target_version}-php{major.minor}-composer`; full MCC manifests fit
+  the bounded 8 MiB input envelope. The legacy hardcoded upgrade path is
+  retained until sandbox prepared-skeleton parity is accepted.
 
 ## 1.5.268 - 2026-10-27
 

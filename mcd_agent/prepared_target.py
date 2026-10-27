@@ -25,7 +25,11 @@ from typing import Any, Callable, Mapping
 SCHEMA = "mcd-mautic-prepared-target-input-v1"
 MANIFEST_SCHEMA = "mcd-mautic-prepared-target-manifest-v1"
 MANIFEST_NAME = ".mcd/prepared-target-manifest.json"
-MAX_INPUT_BYTES = 1_048_576
+# The input envelope carries the complete MCC file manifest.  Real Mautic 6
+# targets are several megabytes even before extraction; keep the envelope
+# bounded, but do not reject a valid manifest merely because the application
+# contains tens of thousands of verified files.
+MAX_INPUT_BYTES = 8 * 1024 * 1024
 MAX_MANIFEST_BYTES = 16 * 1024 * 1024
 MAX_ARTIFACT_BYTES = 512 * 1024 * 1024
 SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -34,6 +38,7 @@ PRESERVED_PATHS = ("config", "app/config", "var")
 _INPUT_KEYS = {"schema", "prepared_target_id", "target_version", "install_type", "artifact", "manifest"}
 _ARTIFACT_KEYS = {"path", "grant", "size_bytes", "sha256", "media_type"}
 _MANIFEST_KEYS = {"schema", "target_version", "install_type", "application_root_relative", "preserve_paths", "files"}
+_COMPOSER_ID_RE = re.compile(r"^mautic-(?P<target>[0-9]+\.[0-9]+\.[0-9]+)-php(?P<php>[0-9]+\.[0-9]+)-composer$")
 
 
 class PreparedTargetError(ValueError):
@@ -77,6 +82,14 @@ def validate_prepared_target(value: object) -> dict[str, Any]:
     install_type = item["install_type"]
     if install_type not in {"composer", "zip"}:
         raise PreparedTargetError("prepared_target_install_type_invalid")
+    if install_type == "zip":
+        canonical_id = f"mautic-{target}-zip"
+        if prepared_id != canonical_id:
+            raise PreparedTargetError("prepared_target_id_invalid")
+    else:
+        composer_id = _COMPOSER_ID_RE.fullmatch(prepared_id)
+        if not composer_id or composer_id.group("target") != target:
+            raise PreparedTargetError("prepared_target_id_invalid")
 
     artifact = _exact(item["artifact"], _ARTIFACT_KEYS, "prepared_target_artifact_fields_invalid")
     path = _string(artifact["path"], "prepared_target_artifact_path_invalid", maximum=2048)

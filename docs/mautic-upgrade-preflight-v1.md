@@ -10,6 +10,13 @@ SHA-256 plus the embedded file manifest, and applies the verified tree without
 invoking Composer on the host. `config`, `app/config`, and `var` remain from
 the live installation. Existing migration, health and full-tree rollback
 receipts are reused, and the receipt records `host_composer_invoked=false`.
+The prepared-target identity is target-only: ZIP uses
+`mautic-{target_version}-zip`; Composer uses
+`mautic-{target_version}-php{major.minor}-composer`. Source compatibility remains
+in the MCC scenario manifest and is never encoded in the prepared-target ID.
+The PHP matrix applies to Composer skeletons; ZIP has one official upstream
+target artifact. The full MCC file manifest is accepted within a bounded 8 MiB
+input envelope.
 
 This is the dev-only 1.6.0 continuation of the current MCD line, not a parallel
 implementation. Published channels remain at 1.5.268 until the MCC sandbox
