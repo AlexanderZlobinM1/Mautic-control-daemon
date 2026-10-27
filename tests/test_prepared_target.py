@@ -72,8 +72,9 @@ class PreparedTargetTests(unittest.TestCase):
     self.assertEqual(__version__, "1.6.0")
     self.assertEqual(contract["candidate"], {
         "agent_version": "1.6.0",
-        "lineage": "prepared-target",
+        "lineage": "current-mcd-prepared-target",
         "approved_baseline": "1.5.268",
+        "baseline_role": "historical-rollback-audit-only",
         "publication_status": "dev-only",
     })
 

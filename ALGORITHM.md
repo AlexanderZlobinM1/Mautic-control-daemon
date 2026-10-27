@@ -51,9 +51,10 @@ post-step могут завершиться. Следующая совмести
 только незавершённую каталоговую remediation; native plugin operation не
 переисполняется из-за этого отказа.
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная dev-редакция этого канона — MCD 1.6.0 (prepared-target lineage;
-approved baseline остаётся immutable MCD 1.5.268; follow-up после immutable
-1.5.88). В этой редакции startup/profile rebase не считается локальной
+Актуальная dev-редакция этого канона — MCD 1.6.0 (продолжение текущей MCD-линии,
+prepared-target lineage). MCD 1.5.268 сохраняется только как историческая точка
+rollback/audit, а не как альтернативная реализация; follow-up после immutable
+1.5.88. В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам
 canonical desired envelope; expanded effective snapshot не добавляет ключи в

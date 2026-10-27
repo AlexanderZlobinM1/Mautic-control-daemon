@@ -2,8 +2,9 @@
   "schema": "mcd-mautic-prepared-target-input-v1",
   "candidate": {
     "agent_version": "1.6.0",
-    "lineage": "prepared-target",
+    "lineage": "current-mcd-prepared-target",
     "approved_baseline": "1.5.268",
+    "baseline_role": "historical-rollback-audit-only",
     "publication_status": "dev-only"
   },
   "purpose": "MCC-built Composer or ZIP skeleton delivered to MCD without invoking Composer on the host",

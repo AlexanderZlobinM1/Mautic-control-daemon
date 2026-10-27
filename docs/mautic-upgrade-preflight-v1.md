@@ -11,9 +11,11 @@ invoking Composer on the host. `config`, `app/config`, and `var` remain from
 the live installation. Existing migration, health and full-tree rollback
 receipts are reused, and the receipt records `host_composer_invoked=false`.
 
-This is a dev-only 1.6.0 candidate. Approved/test/latest remain 1.5.268 until
-the MCC sandbox accepts prepared-skeleton parity. The legacy hardcoded upgrade
-path remains present until that acceptance.
+This is the dev-only 1.6.0 continuation of the current MCD line, not a parallel
+implementation. Published channels remain at 1.5.268 until the MCC sandbox
+accepts prepared-skeleton parity; 1.5.268 is retained only for historical
+rollback/audit. The legacy hardcoded upgrade path remains present until that
+acceptance.
 
 `mcd-cli mautic-upgrade preflight --root INSTANCE --mode composer --target VERSION --json`
 emits one compact `MCD_UPGRADE_PREFLIGHT_EVIDENCE=` line with schema
