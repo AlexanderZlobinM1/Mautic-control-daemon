@@ -1,3 +1,12 @@
+## 1.5.262 - 2026-10-27
+
+- Add the Portal-owned executable scenario v1 launcher boundary: MCD validates
+  the exact framed artifact/context contract, runs only the bundled generic
+  launcher, bounds canonical progress/result frames, and keeps scenario policy
+  outside the agent.
+- Reject legacy declarative JSON artifacts on the executable path while
+  retaining the existing audit-only artifact lane.
+
 ## 1.5.261 - 2026-10-27
 
 - Publish the complete MCC-authoritative runtime snapshot after a local

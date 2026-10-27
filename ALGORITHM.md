@@ -1182,6 +1182,22 @@ No fixed onboarding stage registry is constructed on this path. Progress is
 checkpointed by immutable `job_id`; replay of the same signed job returns the
 durable terminal receipt without re-executing the runner.
 
+The executable scenario bridge follows Portal's additive
+`portal-self-hosted-executable-scenario-v1` contract. The signed artifact must
+be `application/x-sh` or `application/x-elf`; the legacy declarative JSON
+artifact remains audit-only and is never dispatched. MCD sends the artifact and
+canonical context in the 88-byte `SSMCDX01` frame: exact lengths, raw SHA-256
+digests, and reserved flags are checked before execution. The context contains
+only job/scenario identity, applicability digest, scalar non-secret parameters,
+and opaque secret references; it is also exposed to the child only on inherited
+file descriptor 3. The bundled `mcd-scenario-runner` uses a sterile environment,
+fixed `--mcd-scenario-apply` argv, no shell/eval, and a bounded process group.
+Child stdout is a length-prefixed canonical JSON stream with at most 256
+progress frames and one terminal result; unknown fields, secret-shaped values,
+non-contiguous progress, malformed frames, timeouts, signals, and oversized
+output fail closed. Portal owns the executable artifact and scenario policy;
+MCD owns only this transport, admission, timeout, and durable receipt boundary.
+
 Stage receipts use `mcd-self-hosted-stage-receipt-v2` with only
 `scenario_dispatch` and `execution`, statuses `queued|running|waiting|succeeded|failed`,
 mandatory installation binding and unique idempotency keys. Terminal receipts

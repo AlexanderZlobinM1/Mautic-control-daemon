@@ -233,7 +233,7 @@ from mcd_agent.state_backend import (
     mysql_state_table_names,
     normalized_state_backend,
 )
-from mcd_agent.commercial_self_hosted import ExternalProcessPolicy, SelfHostedPortalWorker, SelfHostedScenarioExecutor
+from mcd_agent.commercial_self_hosted import ExternalProcessPolicy, SelfHostedPortalWorker, SelfHostedScenarioExecutor, default_scenario_runner_argv
 from mcd_agent.commercial_portal import CommercialState, PortalClient, build_standalone_settings_snapshot, canonical_json, portal_artifact_trust_keys
 
 _CMD_SEP = "\x1f"
@@ -354,9 +354,11 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
             disabled("portal_runtime_material_incomplete")
             return None
         try:
-            runner_argv = state.get("commercial_scenario_runner_argv")
+            # The commercial lane uses the immutable runner shipped with the
+            # MCD runtime.  It is independent of the standalone/corporate
+            # scheduler and cannot be replaced by ad-hoc host state.
             runner = ExternalProcessPolicy(
-                runner_argv if isinstance(runner_argv, list) else None,
+                default_scenario_runner_argv(),
                 timeout_sec=int(state.get("commercial_scenario_runner_timeout_sec") or 1800),
             )
             runtime_store = TaskStore(config.state_db_path)

@@ -11,13 +11,19 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
+import selectors
+import signal
 import sqlite3
+import struct
 import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping
 
 from mcd_agent.commercial_detector import read_normalized_applicability_facts, read_normalized_local_facts
+from mcd_agent.scenario_launcher import encode_request_frame
 from mcd_agent.commercial_portal import (
     PORTAL_MCD_ADOPT_CONTRACT_VERSION,
     SELF_HOSTED_MCD_JOB_SCHEMA,
@@ -54,6 +60,19 @@ _DEFAULT_BACKOFF_BASE_SECONDS = 1.0
 _DEFAULT_BACKOFF_MAX_SECONDS = 300.0
 _PORTAL_NOOP_SCHEMA = "portal-mcd-command-noop-v1"
 _PORTAL_NOOP_RECEIPT_SCHEMA = "portal-mcd-command-noop-receipt-v1"
+_MAX_RUNNER_OUTPUT_BYTES = 256 * 1024
+_MAX_RUNNER_FRAME_BYTES = 64 * 1024
+_MAX_RUNNER_PROGRESS_FRAMES = 256
+
+
+def _nonnegative_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def default_scenario_runner_argv() -> list[str]:
+    """Return the immutable runner shipped in the MCD virtualenv."""
+    executable = os.path.join(os.path.dirname(sys.executable), "mcd-scenario-runner")
+    return [executable]
 
 
 class _PortalTransportError(RuntimeError):
@@ -79,6 +98,22 @@ def _secret_free_result(value: object) -> object:
     if isinstance(value, (str, int, float, bool)) or value is None:
         return str(value)[:1024] if isinstance(value, str) else value
     return str(value)[:1024]
+
+
+def _contains_secret_shape(value: object) -> bool:
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            if any(token in str(key).lower() for token in ("secret", "password", "token", "private", "credential", "access_key")):
+                return True
+            if _contains_secret_shape(child):
+                return True
+        return False
+    if isinstance(value, list):
+        return any(_contains_secret_shape(item) for item in value)
+    if isinstance(value, str):
+        lowered = value.lower()
+        return any(token in lowered for token in ("password=", "token=", "secret=", "private_key=", "credential="))
+    return False
 
 
 def _bounded_result(value: object) -> object:
@@ -223,7 +258,12 @@ def _failed_terminal_receipt(verified: Mapping[str, Any], *, error: BaseExceptio
 
 
 class ExternalProcessPolicy:
-    """Run one externally supplied runner with no shell or inherited secrets."""
+    """Run the bundled Portal scenario launcher with no shell or secrets.
+
+    The launcher receives a framed artifact/context request on stdin.  It is
+    the only MCD-owned executable in this boundary; scenario policy remains in
+    the signed Portal artifact.
+    """
 
     def __init__(self, argv: list[str] | tuple[str, ...] | None, *, timeout_sec: int = 1800):
         self.argv = tuple(str(item) for item in (argv or ()))
@@ -238,30 +278,185 @@ class ExternalProcessPolicy:
         if not self.argv:
             raise ValueError("self_hosted_mcd_runner_unconfigured")
         env = {"LC_ALL": "C", "LANG": "C"}
-        payload = {"job_id": str(job["job_id"]), "scenario": dict(job["scenario"]), "facts": dict(facts)}
+        scenario = dict(job["scenario"])
+        scenario_pin = job.get("scenario_artifact") if isinstance(job.get("scenario_artifact"), Mapping) else {}
+        media_type = str(scenario_pin.get("artifact_media_type") or "")
+        if media_type not in {"application/x-sh", "application/x-elf"}:
+            raise ValueError("self_hosted_mcd_runner_artifact_media_type_invalid")
+        scenario["artifact_revision"] = str(scenario.get("artifact_revision") or scenario_pin.get("artifact_revision") or scenario.get("revision") or "")
+        scenario["artifact_digest"] = str(scenario.get("artifact_digest") or scenario_pin.get("artifact_digest") or "")
+        applicability = job.get("applicability") if isinstance(job.get("applicability"), Mapping) else {}
+        parameters = job.get("parameters") if isinstance(job.get("parameters"), Mapping) else {}
+        secret_references = job.get("secret_references") if isinstance(job.get("secret_references"), list) else []
+        payload = {
+            "schema": "portal-self-hosted-executable-context-v1",
+            "contract_version": "1.0",
+            "job": {
+                "job_id": str(job.get("job_id") or ""),
+                "request_id": str(job.get("request_id") or ""),
+                "command_id": str(job.get("command_id") or job.get("job_id") or ""),
+                "idempotency_key": str(job.get("idempotency_key") or ""),
+            },
+            "scenario": {
+                key: scenario[key]
+                for key in ("scenario_id", "revision", "artifact_revision", "artifact_digest")
+            },
+            "applicability": {"facts_digest": str(applicability.get("facts_digest") or "")},
+            "parameters": dict(parameters),
+            "secret_references": [str(item) for item in secret_references],
+        }
+        framed = encode_request_frame(artifact, payload)
         try:
-            completed = subprocess.run(
-                [*self.argv, "--mcd-scenario-apply"],
-                input=artifact,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                cwd="/",
-                env=env,
-                timeout=self.timeout_sec,
-                check=False,
-            )
+            completed = self._run_bounded([*self.argv, "--mcd-scenario-apply"], framed, env)
         except subprocess.TimeoutExpired as exc:
             raise TimeoutError("self_hosted_mcd_runner_timeout") from exc
+        if completed.returncode < 0:
+            raise ValueError(f"self_hosted_mcd_runner_signal_{-completed.returncode}")
+        stdout = completed.stdout
         if completed.returncode != 0:
-            raise RuntimeError("self_hosted_mcd_runner_failed")
-        stdout = completed.stdout[:_MAX_PROCESS_OUTPUT_BYTES]
-        if not stdout:
-            return {"status": "succeeded"}
-        try:
-            parsed = json.loads(stdout.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            return {"status": "succeeded", "evidence": "runner_completed"}
+            code = self._child_error_code(stdout)
+            raise ValueError(code or "self_hosted_mcd_runner_failed")
+        frames = self._decode_output_frames(stdout)
+        if not frames:
+            raise ValueError("self_hosted_mcd_runner_output_missing")
+        parsed = frames[-1]
+        if str(parsed.get("status") or "") not in {"succeeded", "completed", "ok"}:
+            raise ValueError("self_hosted_mcd_runner_failed")
         return {"status": "succeeded", "runner": _bounded_result(parsed), "binding": hashlib.sha256(canonical_json(payload)).hexdigest()}
+
+    @staticmethod
+    def _child_error_code(stdout: bytes) -> str | None:
+        try:
+            frames = ExternalProcessPolicy._decode_output_frames(stdout)
+        except ValueError:
+            return None
+        code = frames[-1].get("error_code") if frames else None
+        if isinstance(code, str) and code.startswith("self_hosted_mcd_runner_") and len(code) <= 96 and all(char.isalnum() or char == "_" for char in code):
+            return code
+        return None
+
+    @staticmethod
+    def _decode_output_frames(stdout: bytes) -> list[dict[str, Any]]:
+        if len(stdout) > _MAX_RUNNER_OUTPUT_BYTES:
+            raise ValueError("self_hosted_mcd_runner_output_too_large")
+        frames: list[dict[str, Any]] = []
+        offset = 0
+        terminal_seen = False
+        while offset < len(stdout):
+            if len(stdout) - offset < 4:
+                raise ValueError("self_hosted_mcd_runner_output_invalid")
+            frame_size = struct.unpack("!I", stdout[offset : offset + 4])[0]
+            offset += 4
+            if frame_size <= 0 or frame_size > _MAX_RUNNER_FRAME_BYTES or frame_size > len(stdout) - offset:
+                raise ValueError("self_hosted_mcd_runner_output_frame_invalid")
+            try:
+                raw_frame = stdout[offset : offset + frame_size]
+                frame = json.loads(raw_frame.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ValueError("self_hosted_mcd_runner_output_invalid") from exc
+            if not isinstance(frame, Mapping):
+                raise ValueError("self_hosted_mcd_runner_output_invalid")
+            if canonical_json(frame) != raw_frame:
+                raise ValueError("self_hosted_mcd_runner_output_not_canonical")
+            schema = str(frame.get("schema") or "")
+            if schema != "mcd-self-hosted-executable-output-v1" or frame.get("contract_version") != "1.0":
+                raise ValueError("self_hosted_mcd_runner_output_schema_invalid")
+            if _contains_secret_shape(frame):
+                raise ValueError("self_hosted_mcd_runner_output_secret_detected")
+            status = str(frame.get("status") or "")
+            if status in {"running", "waiting"}:
+                allowed = {"schema", "contract_version", "frame_type", "sequence", "status", "message_code", "percent"}
+                if frame.get("frame_type") != "progress" or set(frame) - allowed or not _nonnegative_int(frame.get("sequence")) or frame.get("sequence") != len(frames) + 1 or not isinstance(frame.get("message_code"), str) or not re.fullmatch(r"[a-z0-9][a-z0-9_.:-]{0,127}", frame["message_code"]) or ("percent" in frame and (not _nonnegative_int(frame["percent"]) or not 0 <= frame["percent"] <= 100)):
+                    raise ValueError("self_hosted_mcd_runner_output_progress_invalid")
+                if terminal_seen:
+                    raise ValueError("self_hosted_mcd_runner_output_terminal_order_invalid")
+            elif status in {"succeeded", "failed"}:
+                allowed = {"schema", "contract_version", "frame_type", "status", "exit_code", "completed", "total", "rollback", "error_code"}
+                if terminal_seen or frame.get("frame_type") != "result" or set(frame) - allowed or not all(_nonnegative_int(frame.get(key)) for key in ("exit_code", "completed", "total")) or frame.get("total") < 1 or frame.get("completed") > frame.get("total") or frame.get("rollback") not in {"not_attempted", "not_started", "succeeded", "failed"}:
+                    raise ValueError("self_hosted_mcd_runner_output_terminal_invalid")
+                if status == "succeeded" and frame.get("exit_code") != 0 or status == "failed" and frame.get("exit_code") == 0:
+                    raise ValueError("self_hosted_mcd_runner_output_exit_status_invalid")
+                if status == "failed" and (not isinstance(frame.get("error_code"), str) or not re.fullmatch(r"[a-z0-9][a-z0-9_.:-]{0,127}", frame["error_code"])):
+                    raise ValueError("self_hosted_mcd_runner_output_result_invalid")
+                if "error_code" in frame and (not isinstance(frame["error_code"], str) or len(frame["error_code"]) > 128):
+                    raise ValueError("self_hosted_mcd_runner_output_result_invalid")
+                terminal_seen = True
+            else:
+                raise ValueError("self_hosted_mcd_runner_output_status_invalid")
+            frames.append(dict(frame))
+            if sum(1 for item in frames if item.get("frame_type") == "progress") > _MAX_RUNNER_PROGRESS_FRAMES:
+                raise ValueError("self_hosted_mcd_runner_progress_too_large")
+            offset += frame_size
+        if not terminal_seen:
+            raise ValueError("self_hosted_mcd_runner_output_terminal_missing")
+        return frames
+
+    def _run_bounded(self, argv: list[str], framed: bytes, env: Mapping[str, str]) -> subprocess.CompletedProcess[bytes]:
+        try:
+            process = subprocess.Popen(
+                argv,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                cwd="/",
+                env=dict(env),
+                start_new_session=True,
+            )
+        except FileNotFoundError as exc:
+            raise ValueError("self_hosted_mcd_runner_not_allowlisted") from exc
+        except PermissionError as exc:
+            raise ValueError("self_hosted_mcd_runner_permissions") from exc
+        try:
+            assert process.stdin is not None
+            process.stdin.write(framed)
+            process.stdin.close()
+            assert process.stdout is not None
+            selector = selectors.DefaultSelector()
+            selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+            output = bytearray()
+            deadline = time.monotonic() + self.timeout_sec
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self._terminate_process_group(process)
+                    raise subprocess.TimeoutExpired(argv, self.timeout_sec)
+                for key, _ in selector.select(min(remaining, 0.25)):
+                    chunk = os.read(key.fileobj.fileno(), _MAX_RUNNER_OUTPUT_BYTES + 1)
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
+                    if len(output) + len(chunk) > _MAX_RUNNER_OUTPUT_BYTES:
+                        self._terminate_process_group(process)
+                        raise ValueError("self_hosted_mcd_runner_output_too_large")
+                    output.extend(chunk)
+            process.wait(timeout=5)
+            return subprocess.CompletedProcess(argv, process.returncode, bytes(output), None)
+        except BrokenPipeError as exc:
+            self._terminate_process_group(process)
+            raise ValueError("self_hosted_mcd_runner_failed") from exc
+        finally:
+            try:
+                if process.stdin is not None and not process.stdin.closed:
+                    process.stdin.close()
+            except OSError:
+                pass
+
+    @staticmethod
+    def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
+        if process.poll() is not None:
+            return
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+            process.wait(timeout=2)
+        except (OSError, subprocess.TimeoutExpired):
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
 
 
 class SelfHostedScenarioExecutor:
