@@ -394,7 +394,14 @@ class ExternalProcessPolicy:
             if any(not item or "\x00" in item for item in self.argv):
                 raise ValueError("self_hosted_mcd_runner_argv_invalid")
 
-    def run(self, *, artifact: bytes, job: Mapping[str, Any], facts: Mapping[str, Any]) -> dict[str, Any]:
+    def run(
+        self,
+        *,
+        artifact: bytes,
+        job: Mapping[str, Any],
+        facts: Mapping[str, Any],
+        context: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
         if not self.argv:
             raise ValueError("self_hosted_mcd_runner_unconfigured")
         env = {"LC_ALL": "C", "LANG": "C"}
@@ -408,26 +415,29 @@ class ExternalProcessPolicy:
             )
         scenario["artifact_revision"] = str(scenario.get("artifact_revision") or scenario_pin.get("artifact_revision") or scenario.get("revision") or "")
         scenario["artifact_digest"] = str(scenario.get("artifact_digest") or scenario_pin.get("artifact_digest") or "")
-        applicability = job.get("applicability") if isinstance(job.get("applicability"), Mapping) else {}
-        parameters = job.get("parameters") if isinstance(job.get("parameters"), Mapping) else {}
-        secret_references = job.get("secret_references") if isinstance(job.get("secret_references"), list) else []
-        payload = {
-            "schema": "portal-self-hosted-executable-context-v1",
-            "contract_version": "1.0",
-            "job": {
-                "job_id": str(job.get("job_id") or ""),
-                "request_id": str(job.get("request_id") or ""),
-                "command_id": str(job.get("command_id") or job.get("job_id") or ""),
-                "idempotency_key": str(job.get("idempotency_key") or ""),
-            },
-            "scenario": {
-                key: scenario[key]
-                for key in ("scenario_id", "revision", "artifact_revision", "artifact_digest")
-            },
-            "applicability": {"facts_digest": str(applicability.get("facts_digest") or "")},
-            "parameters": dict(parameters),
-            "secret_references": [str(item) for item in secret_references],
-        }
+        if context is None:
+            applicability = job.get("applicability") if isinstance(job.get("applicability"), Mapping) else {}
+            parameters = job.get("parameters") if isinstance(job.get("parameters"), Mapping) else {}
+            secret_references = job.get("secret_references") if isinstance(job.get("secret_references"), list) else []
+            payload: Mapping[str, Any] = {
+                "schema": "portal-self-hosted-executable-context-v1",
+                "contract_version": "1.0",
+                "job": {
+                    "job_id": str(job.get("job_id") or ""),
+                    "request_id": str(job.get("request_id") or ""),
+                    "command_id": str(job.get("command_id") or job.get("job_id") or ""),
+                    "idempotency_key": str(job.get("idempotency_key") or ""),
+                },
+                "scenario": {
+                    key: scenario[key]
+                    for key in ("scenario_id", "revision", "artifact_revision", "artifact_digest")
+                },
+                "applicability": {"facts_digest": str(applicability.get("facts_digest") or "")},
+                "parameters": dict(parameters),
+                "secret_references": [str(item) for item in secret_references],
+            }
+        else:
+            payload = dict(context)
         try:
             framed = encode_request_frame(artifact, payload)
         except ValueError as exc:

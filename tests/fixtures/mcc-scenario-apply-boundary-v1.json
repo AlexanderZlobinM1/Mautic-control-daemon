@@ -1,0 +1,48 @@
+{
+  "schema": "mcc-mcd-scenario-apply-boundary-fixture-v1",
+  "fixture_status": "synthetic_adapter_test_only",
+  "execution_authority": "mcd",
+  "mcc_role": "catalog_pin_and_orchestration_only",
+  "capability": {"name": "scenario.apply", "version": "1.0"},
+  "artifact": {
+    "kind": "scenario",
+    "path": "backend/docs/fixtures/mcc-scenario-apply-boundary-v1.sh",
+    "media_type": "application/x-sh",
+    "revision": "fixture-mautic-upgrade-609-610-v1",
+    "size_bytes": 1919,
+    "sha256": "sha256:49a7ad7381ca56d784bfb4992aae68f4bb68373db65bdc2e7f546f8cb953735f",
+    "signature_statement": "com.sales-snap.portal-mcc/artifact-signature/1.0\n{\"kind\":\"scenario\",\"media_type\":\"application/x-sh\",\"revision\":\"fixture-mautic-upgrade-609-610-v1\",\"sha256\":\"49a7ad7381ca56d784bfb4992aae68f4bb68373db65bdc2e7f546f8cb953735f\",\"size_bytes\":1919}",
+    "signature": {
+      "algorithm": "ed25519",
+      "key_id": "mcc-publisher-test-01",
+      "value": "7qMfiFKcDnY7TGn5bsySfPHGRa6RFVjb_7X1OaGKxKmg-2f6s75pucU2OlkH0x6UHH-guU5Ej9iB9M3inIL6Bg"
+    },
+    "public_key_base64url": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+    "trust_scope": "adapter_test_only",
+    "production_trust_key_id": "mcc-publisher-1",
+    "production_signature_source": "existing MCC catalog publisher trust configured at deployment"
+  },
+  "job_binding": {
+    "service_id": "mcc-fixture",
+    "host": {"host_id": "host-fixture-001", "agent_id": "agent-fixture-001", "installation_id": "installation-fixture-001", "host_fingerprint": "sha256:1111111111111111111111111111111111111111111111111111111111111111"},
+    "instance": {"instance_uid": "instance-fixture-001", "application_root": "/var/www/fixture/public_html", "install_type": "composer"},
+    "facts": {"facts_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333", "source_version": "6.0.9", "target_release_line": "7.1", "package_manager": "composer", "target_kind": "existing_server", "capabilities": ["package_manager.query", "scenario.apply"]},
+    "plan": {"scenario_id": "mautic-upgrade", "scenario_revision": "fixture-mautic-upgrade-609-610-v1", "source_version": "6.0.9", "target_version": "6.0.10", "target_release_line": "6.0", "patch_plan_sha256": "sha256:4444444444444444444444444444444444444444444444444444444444444444", "with_system_upgrade": false},
+    "idempotency_key": "mcc-mautic-upgrade-609-610-001",
+    "request_id": "mcc-request-fixture-001",
+    "command_id": "mcc-command-fixture-001",
+    "job_id": "mcc-job-fixture-001"
+  },
+  "runner_context": {
+    "schema": "portal-self-hosted-executable-context-v1",
+    "contract_version": "1.0",
+    "job": {"command_id": "mcc-command-fixture-001", "idempotency_key": "mcc-mautic-upgrade-609-610-001", "job_id": "mcc-job-fixture-001", "request_id": "mcc-request-fixture-001"},
+    "scenario": {"artifact_digest": "sha256:49a7ad7381ca56d784bfb4992aae68f4bb68373db65bdc2e7f546f8cb953735f", "artifact_revision": "fixture-mautic-upgrade-609-610-v1", "revision": "fixture-mautic-upgrade-609-610-v1", "scenario_id": "mautic-upgrade"},
+    "applicability": {"facts_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333"},
+    "parameters": {"install_type": "composer", "source_version": "6.0.9", "target_release_line": "6.0", "target_version": "6.0.10", "with_system_upgrade": false},
+    "secret_references": []
+  },
+  "frame": {"magic": "SSMCDX01", "version": 1, "header_bytes": 88, "artifact_size_bytes": 1919, "context_size_bytes": 763, "context_sha256": "sha256:e25be69ee352bac0a86bd959896bc10ec0646d4a50569e4de5df6f979b0ac318", "header_hex": "53534d4344583031000100580000077f000002fb49a7ad7381ca56d784bfb4992aae68f4bb68373db65bdc2e7f546f8cb953735fe25be69ee352bac0a86bd959896bc10ec0646d4a50569e4de5df6f979b0ac31800000000", "frame_size_bytes": 2770, "frame_sha256": "sha256:e70afe334bfc40011635bff3fdca1377733267c9cf399a4bb38e534a1dd40cac"},
+  "expected_receipts": {"stage_order": ["scenario_dispatch", "execution"], "stage_contract": {"schema": "mcd-self-hosted-stage-receipt-v2", "contract_version": "2.0", "binding": "runner_context.job + runner_context.scenario + runner_context.applicability.facts_digest; MCC host/instance binding is job_binding", "idempotency": "<job_id>:<stage_id>:<sequence>"}, "terminal_contract": {"schema": "mcd-self-hosted-terminal-receipt-v2", "contract_version": "2.0", "status": "succeeded", "sequence": 3, "idempotency_key": "mcc-job-fixture-001:terminal:3", "rollback": "not_attempted", "result": {"status": "succeeded", "runner": {"status": "succeeded", "completed": 20, "total": 20, "rollback": "not_attempted"}}}},
+  "rollback_contract": {"trigger": "any required block fails verification or the runner returns a non-zero result", "order": "reverse completed blocks only", "terminal_statuses": ["failed"], "allowed_rollback": ["not_attempted", "succeeded", "failed"], "blind_retry": false, "receipt_binding": "same job/request/idempotency/scenario/facts binding"}
+}

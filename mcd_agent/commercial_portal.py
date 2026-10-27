@@ -639,7 +639,14 @@ def verify_self_hosted_mcd_job(
     return {"job": dict(job), "contract_version": str(contract_version), "scenario": scenario, "facts": facts, "bootstrap_artifact": bootstrap, "scenario_artifact": scenario_artifact, "job_id": identity["job_id"], "idempotency_key": identity["idempotency_key"], "host_fingerprint": host_fingerprint}
 
 
-def verify_self_hosted_external_artifact(pin: Mapping[str, Any], artifact: bytes, publisher_keys: Mapping[str, Any], *, kind: str) -> dict[str, Any]:
+def verify_self_hosted_external_artifact(
+    pin: Mapping[str, Any],
+    artifact: bytes,
+    publisher_keys: Mapping[str, Any],
+    *,
+    kind: str,
+    signature_domain: bytes | None = None,
+) -> dict[str, Any]:
     """Verify exact bytes and a Portal artifact-trust signature for one pin.
 
     Raw string values remain a deliberately narrow legacy alias for the old
@@ -664,7 +671,7 @@ def verify_self_hosted_external_artifact(pin: Mapping[str, Any], artifact: bytes
         key = str(key_record)
     statement = {"kind": kind, "revision": normalized["artifact_revision"], "sha256": normalized["artifact_digest"][7:], "media_type": normalized["artifact_media_type"], "size_bytes": normalized["artifact_size_bytes"]}
     try:
-        domain = MCC_ARTIFACT_SIGNATURE_DOMAIN if legacy else PORTAL_ARTIFACT_SIGNATURE_DOMAIN
+        domain = signature_domain or (MCC_ARTIFACT_SIGNATURE_DOMAIN if legacy else PORTAL_ARTIFACT_SIGNATURE_DOMAIN)
         Ed25519PublicKey.from_public_bytes(_unb64(key)).verify(_unb64(signature["value"]), domain + canonical_json(statement))
     except Exception as exc:
         raise ValueError("self_hosted_mcd_artifact_signature_invalid") from exc
