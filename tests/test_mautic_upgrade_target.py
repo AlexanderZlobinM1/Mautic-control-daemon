@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+import io
+import json
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from unittest.mock import patch
 
 from mcd_agent.mautic_upgrade import (
@@ -195,10 +198,24 @@ class MauticUpgradeTargetTests(unittest.TestCase):
                     },
                 ),
             ):
-                with self.assertRaisesRegex(RuntimeError, "unable to stop all running Mautic tasks"):
+                output = io.StringIO()
+                with redirect_stdout(output), self.assertRaisesRegex(
+                    RuntimeError, "unable to stop all running Mautic tasks"
+                ):
                     _enter_upgrade_maintenance(cfg)
                 self.assertFalse(pause_flag.exists())
                 restore_cron.assert_called_once_with(cfg)
+                evidence_lines = [
+                    line.split("=", 1)[1]
+                    for line in output.getvalue().splitlines()
+                    if line.startswith("MCD_MAINTENANCE_GUARD_EVIDENCE=")
+                ]
+                self.assertEqual(len(evidence_lines), 1)
+                evidence = json.loads(evidence_lines[0])
+                self.assertEqual(evidence["schema"], "mcd-maintenance-guard-evidence-v1")
+                self.assertEqual(evidence["managed_running"], 1)
+                self.assertTrue(evidence["cleanup"]["pause_removed"])
+                self.assertNotIn("MCD_PATCH_PLAN_EVIDENCE=", output.getvalue())
 
     def test_upgrade_maintenance_guard_allows_clean_race_after_stop_failure(self) -> None:
         with tempfile.TemporaryDirectory() as td:

@@ -90,6 +90,7 @@ from mcd_agent.mautic6_core_patch import ensure_m6_plugin_update_metadata_patch,
 from mcd_agent.mautic713_import_tag_patch import reconcile_import_tag_patch
 from mcd_agent.grapesjs_ckeditor_patch import ensure_grapesjs_ckeditor_gpl_patch
 from mcd_agent.mautic_locks import cleanup_stale_mautic_file_locks
+from mcd_agent.maintenance_mode import scheduler_dispatch_fence
 from mcd_agent.mautic_version_cache import confirmed_mautic_major, retire_zabbix_mautic_version_userparameter
 from mcd_agent.mautic_core_restore import restore_retired_mcd_core_patches
 from mcd_agent.logical_issues import (
@@ -13157,6 +13158,30 @@ def _external_task_key(root: str, task_type: str, entity_id: int | None, pid: in
 @_scheduler_runtime_serialized
 def _sync_external_running_tasks(
     *,
+    config: AgentConfig,
+    installs: list[object],
+    running: dict[str, RunningTask],
+    popens: dict[str, subprocess.Popen[bytes]],
+) -> dict[str, int]:
+    """Adopt external work only while the shared admission fence is held."""
+    with scheduler_dispatch_fence(config, exclusive=False, blocking=False) as admitted:
+        if not admitted:
+            return {"observed": 0, "adopted": 0, "updated": 0, "released": 0, "fence_blocked": 1}
+        try:
+            pause_path = str(getattr(config, "scheduler_pause_flag_path", "") or "").strip()
+            if pause_path and Path(pause_path).exists():
+                return {"observed": 0, "adopted": 0, "updated": 0, "released": 0, "fence_blocked": 1}
+        except OSError:
+            return {"observed": 0, "adopted": 0, "updated": 0, "released": 0, "fence_blocked": 1}
+        return _sync_external_running_tasks_unfenced(
+            installs=installs,
+            running=running,
+            popens=popens,
+        )
+
+
+def _sync_external_running_tasks_unfenced(
+    *,
     installs: list[object],
     running: dict[str, RunningTask],
     popens: dict[str, subprocess.Popen[bytes]],
@@ -15256,29 +15281,42 @@ def _submit_if_slot(
     stdout_path: str = "",
     stderr_path: str = "",
 ) -> bool:
-    if not _campaign_dispatch_begin(root, task_type):
-        return False
-    try:
-        return _submit_if_slot_uncoordinated(
-            config=config,
-            store=store,
-            running=running,
-            root=root,
-            task_type=task_type,
-            entity_id=entity_id,
-            args=args,
-            timeout_sec=timeout_sec,
-            max_parallel_for_type=max_parallel_for_type,
-            popens=popens,
-            ignore_limit=ignore_limit,
-            manual_request_id=manual_request_id,
-            bypass_repeat_guard=bypass_repeat_guard,
-            bypass_baseline_admission=bypass_baseline_admission,
-            stdout_path=stdout_path,
-            stderr_path=stderr_path,
-        )
-    finally:
-        _campaign_dispatch_end(root, task_type)
+    # The shared fence closes the check-then-spawn window with an upgrade
+    # process holding the exclusive maintenance fence. A daemon restart or a
+    # late scheduler tick therefore skips admission instead of racing the
+    # pause flag and launching new work during a drain.
+    with scheduler_dispatch_fence(config, exclusive=False, blocking=False) as admitted:
+        if not admitted:
+            return False
+        try:
+            pause_path = str(getattr(config, "scheduler_pause_flag_path", "") or "").strip()
+            if pause_path and Path(pause_path).exists():
+                return False
+        except OSError:
+            return False
+        if not _campaign_dispatch_begin(root, task_type):
+            return False
+        try:
+            return _submit_if_slot_uncoordinated(
+                config=config,
+                store=store,
+                running=running,
+                root=root,
+                task_type=task_type,
+                entity_id=entity_id,
+                args=args,
+                timeout_sec=timeout_sec,
+                max_parallel_for_type=max_parallel_for_type,
+                popens=popens,
+                ignore_limit=ignore_limit,
+                manual_request_id=manual_request_id,
+                bypass_repeat_guard=bypass_repeat_guard,
+                bypass_baseline_admission=bypass_baseline_admission,
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+            )
+        finally:
+            _campaign_dispatch_end(root, task_type)
 
 
 def _wait_for_segment_process_exit(
@@ -19738,12 +19776,21 @@ def run_loop(
             _monitor_authoritative_runtime()
         now = time.time()
         if now >= next_scheduler_reconcile_at:
-            rec = _reconcile_running_state(
-                store=store,
-                running=running,
-                popens=popens,
-                segment_liveness_probe=_segment_liveness_probe,
-            )
+            with scheduler_dispatch_fence(config, exclusive=False, blocking=False) as admitted:
+                try:
+                    pause_path = str(getattr(config, "scheduler_pause_flag_path", "") or "").strip()
+                    paused_for_maintenance = bool(pause_path and Path(pause_path).exists())
+                except OSError:
+                    paused_for_maintenance = True
+                if admitted and not paused_for_maintenance:
+                    rec = _reconcile_running_state(
+                        store=store,
+                        running=running,
+                        popens=popens,
+                        segment_liveness_probe=_segment_liveness_probe,
+                    )
+                else:
+                    rec = {"fence_blocked": 1}
             if any(int(rec.get(k, 0) or 0) > 0 for k in ("adopted", "lost_pid", "lost_cmd", "duplicate", "shadow_replaced")):
                 logging.warning(
                     "scheduler reconcile: tracked=%s kept=%s adopted=%s lost_pid=%s lost_cmd=%s duplicate=%s shadow_replaced=%s",
@@ -19784,7 +19831,7 @@ def run_loop(
                 logging.warning("inventory auto-rescan failed: %s", e)
             next_inventory_auto_rescan_at = now + interval
 
-        ext = _sync_external_running_tasks(installs=installs, running=running, popens=popens)
+        ext = _sync_external_running_tasks(config=config, installs=installs, running=running, popens=popens)
         if any(int(ext.get(k, 0) or 0) > 0 for k in ("adopted", "updated", "released")):
             logging.info(
                 "external task sync: observed=%s adopted=%s updated=%s released=%s",

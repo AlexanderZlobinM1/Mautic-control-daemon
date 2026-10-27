@@ -1,3 +1,13 @@
+## 1.5.265 - 2026-10-27
+
+- Add an exclusive cross-process maintenance dispatch fence so scheduler
+  submit, tracked-row reconciliation, and external-console adoption cannot
+  race an upgrade pause or daemon restart.
+- Drain maintenance work with bounded repeated snapshots, reconcile dead
+  tracked rows, stop work appearing during the drain, and emit typed,
+  bounded, secret-free guard diagnostics before any source/package/patch
+  mutation.
+
 ## 1.5.264 - 2026-10-27
 
 - Consume Portal's additive self-hosted job contract `2.1` for already

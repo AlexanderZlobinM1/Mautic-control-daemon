@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from typing import Any
@@ -25,6 +26,7 @@ from mcd_agent.install_type import detect_install_type
 from mcd_agent.maintenance_mode import (
     cron_marker_path,
     restore_cron_service_if_needed,
+    scheduler_dispatch_fence,
     stop_cron_service,
     stop_running_tasks_for_maintenance,
 )
@@ -122,6 +124,42 @@ class UpgradeMaintenanceGuard:
     owned_cron_stop: bool
     stopped_tasks: int = 0
     stop_failed: int = 0
+    dispatch_fence: Any = None
+
+
+def _emit_maintenance_guard_failure(
+    *,
+    reason: str,
+    stop_result: dict[str, Any] | None = None,
+    cleanup: dict[str, Any] | None = None,
+    error_type: str = "",
+) -> None:
+    result = stop_result if isinstance(stop_result, dict) else {}
+    evidence = {
+        "schema": "mcd-maintenance-guard-evidence-v1",
+        "contract_version": 1,
+        "status": "failed",
+        "reason": str(reason),
+        "error_type": str(error_type or ""),
+        "tracked_running": int(result.get("tracked_running") or 0),
+        "external_running": int(result.get("external_running") or 0),
+        "managed_running": int(result.get("managed_running") or 0),
+        "mautic_console_total": int(result.get("mautic_console_total") or 0),
+        "stop_failed": int(result.get("stop_failed") or 0),
+        "stopped": int(result.get("stopped") or 0),
+        "stable_snapshots": int(result.get("stable_snapshots") or 0),
+        "stable_snapshots_required": int(result.get("stable_snapshots_required") or 0),
+        "drain_attempts": int(result.get("drain_attempts") or 0),
+        "drain_timed_out": bool(result.get("drain_timed_out", False)),
+        "tracked_tasks": list(result.get("tracked_tasks") or [])[:100],
+        "external_tasks": list(result.get("external_tasks") or [])[:100],
+        "released_stale_tasks": list(result.get("released_stale_tasks") or [])[:100],
+        "cleanup": dict(cleanup or {}),
+    }
+    print(
+        "MCD_MAINTENANCE_GUARD_EVIDENCE="
+        + json.dumps(evidence, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    )
 
 
 def _pick_install_record(config: AgentConfig, root: str | None) -> MauticInstall:
@@ -196,6 +234,16 @@ def _scheduler_pause_flag(config: AgentConfig) -> Path:
 
 
 def _enter_upgrade_maintenance(config: AgentConfig) -> UpgradeMaintenanceGuard:
+    fence = scheduler_dispatch_fence(config, exclusive=True, blocking=True)
+    fence.__enter__()
+    try:
+        return _enter_upgrade_maintenance_locked(config, fence)
+    except BaseException:
+        fence.__exit__(*sys.exc_info())
+        raise
+
+
+def _enter_upgrade_maintenance_locked(config: AgentConfig, fence: Any) -> UpgradeMaintenanceGuard:
     pause_flag = _scheduler_pause_flag(config)
     owned_pause_flag = not pause_flag.exists()
     if owned_pause_flag:
@@ -211,17 +259,51 @@ def _enter_upgrade_maintenance(config: AgentConfig) -> UpgradeMaintenanceGuard:
     else:
         cron_stop = stop_cron_service(config)
         if not bool(cron_stop.get("ok", False)):
+            pause_removed = False
             if owned_pause_flag and pause_flag.exists():
-                pause_flag.unlink()
+                try:
+                    pause_flag.unlink()
+                    pause_removed = not pause_flag.exists()
+                except OSError:
+                    pause_removed = False
             message = str(cron_stop.get("message", "") or "").strip() or "cron service stop failed"
             unit = str(cron_stop.get("unit", "") or "").strip() or "-"
+            _emit_maintenance_guard_failure(
+                reason="cron_stop_failed",
+                cleanup={
+                    "cron_restore": {"requested": False, "reason": "cron_was_not_stopped"},
+                    "pause_owned": bool(owned_pause_flag),
+                    "pause_removed": bool(pause_removed),
+                    "dispatch_fence": "held_until_failure_evidence_emitted",
+                },
+            )
             raise RuntimeError(f"Maintenance guard failed: unable to stop cron unit {unit}: {message}")
         owned_cron_stop = True
         unit = str(cron_stop.get("unit", "") or "").strip() or "-"
         was_active = str(bool(cron_stop.get("was_active", False))).lower()
         print(f"Maintenance guard: cron stopped unit={unit} was_active={was_active}")
 
-    stop_result = stop_running_tasks_for_maintenance(config, grace_sec=30, kill_orphans=True)
+    try:
+        stop_result = stop_running_tasks_for_maintenance(config, grace_sec=30, kill_orphans=True)
+    except Exception as exc:
+        pause_removed = False
+        if owned_pause_flag and pause_flag.exists():
+            try:
+                pause_flag.unlink()
+                pause_removed = not pause_flag.exists()
+            except OSError:
+                pause_removed = False
+        _emit_maintenance_guard_failure(
+            reason="drain_observation_failed",
+            error_type=type(exc).__name__,
+            cleanup={
+                "cron_restore": {"requested": False, "reason": "drain_observation_failed"},
+                "pause_owned": bool(owned_pause_flag),
+                "pause_removed": bool(pause_removed),
+                "dispatch_fence": "held_until_failure_evidence_emitted",
+            },
+        )
+        raise RuntimeError("Maintenance guard failed: drain observation failed") from exc
     stopped_tasks = int(stop_result.get("stopped") or 0)
     stop_failed = int(stop_result.get("stop_failed") or 0)
     print(
@@ -239,13 +321,34 @@ def _enter_upgrade_maintenance(config: AgentConfig) -> UpgradeMaintenanceGuard:
     managed_remaining = int(stop_result.get("managed_running") or 0)
     console_remaining = int(stop_result.get("mautic_console_total") or 0)
     if managed_remaining > 0 or console_remaining > 0:
+        cron_restore: dict[str, Any] = {"ok": True, "requested": False, "started": False}
         if owned_cron_stop:
             try:
-                restore_cron_service_if_needed(config)
-            except Exception:
-                pass
+                cron_restore = restore_cron_service_if_needed(config)
+            except Exception as exc:
+                cron_restore = {
+                    "ok": False,
+                    "requested": True,
+                    "started": False,
+                    "error_type": type(exc).__name__,
+                }
+        pause_removed = False
         if owned_pause_flag and pause_flag.exists():
-            pause_flag.unlink()
+            try:
+                pause_flag.unlink()
+                pause_removed = not pause_flag.exists()
+            except OSError:
+                pause_removed = False
+        _emit_maintenance_guard_failure(
+            reason="tasks_not_quiescent",
+            stop_result=stop_result,
+            cleanup={
+                "cron_restore": cron_restore,
+                "pause_owned": bool(owned_pause_flag),
+                "pause_removed": bool(pause_removed),
+                "dispatch_fence": "held_until_failure_evidence_emitted",
+            },
+        )
         raise RuntimeError(
             "Maintenance guard failed: unable to stop all running Mautic tasks "
             f"(stop_failed={stop_failed} managed_remaining={managed_remaining} "
@@ -258,28 +361,34 @@ def _enter_upgrade_maintenance(config: AgentConfig) -> UpgradeMaintenanceGuard:
         owned_cron_stop=owned_cron_stop,
         stopped_tasks=stopped_tasks,
         stop_failed=stop_failed,
+        dispatch_fence=fence,
     )
 
 
 def _exit_upgrade_maintenance(config: AgentConfig, guard: UpgradeMaintenanceGuard) -> None:
-    if guard.owned_cron_stop:
-        cron_restore = restore_cron_service_if_needed(config)
-        if not bool(cron_restore.get("ok", False)):
-            message = str(cron_restore.get("message", "") or "").strip() or "cron service restore failed"
+    try:
+        if guard.owned_cron_stop:
+            cron_restore = restore_cron_service_if_needed(config)
+            if not bool(cron_restore.get("ok", False)):
+                message = str(cron_restore.get("message", "") or "").strip() or "cron service restore failed"
+                unit = str(cron_restore.get("unit", "") or "").strip() or "-"
+                raise RuntimeError(f"Maintenance guard failed: unable to restore cron unit {unit}: {message}")
             unit = str(cron_restore.get("unit", "") or "").strip() or "-"
-            raise RuntimeError(f"Maintenance guard failed: unable to restore cron unit {unit}: {message}")
-        unit = str(cron_restore.get("unit", "") or "").strip() or "-"
-        started = str(bool(cron_restore.get("started", False))).lower()
-        print(f"Maintenance guard: cron restored unit={unit} started={started}")
-    else:
-        print("Maintenance guard: cron ownership unchanged")
+            started = str(bool(cron_restore.get("started", False))).lower()
+            print(f"Maintenance guard: cron restored unit={unit} started={started}")
+        else:
+            print("Maintenance guard: cron ownership unchanged")
 
-    if guard.owned_pause_flag:
-        if guard.pause_flag.exists():
-            guard.pause_flag.unlink()
-        print(f"Maintenance guard: scheduler resumed ({guard.pause_flag})")
-    else:
-        print("Maintenance guard: scheduler pause left unchanged")
+        if guard.owned_pause_flag:
+            if guard.pause_flag.exists():
+                guard.pause_flag.unlink()
+            print(f"Maintenance guard: scheduler resumed ({guard.pause_flag})")
+        else:
+            print("Maintenance guard: scheduler pause left unchanged")
+    finally:
+        if guard.dispatch_fence is not None:
+            guard.dispatch_fence.__exit__(None, None, None)
+            guard.dispatch_fence = None
 
 
 def _default_zip_url(version: str) -> str:

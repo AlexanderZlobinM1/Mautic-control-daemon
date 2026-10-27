@@ -12,6 +12,24 @@ first-class фазой для patch records, которые должны зав�
 `before_campaign_execution`. Контракт, runtime executor, fixture и receipt
 должны рекламировать и проверять один и тот же порядок.
 
+Upgrade maintenance fencing is a cross-process admission barrier, not only a
+marker file. The upgrade owner acquires the exclusive
+`maintenance.dispatch.fence.lock` beside `scheduler.pause` before publishing
+the pause flag and holds it through the complete drain and upgrade. Every
+scheduler submit, running-row reconciliation, and external-console adoption
+must acquire the same fence in shared non-blocking mode and skip admission
+when the exclusive owner is present. This closes the check-then-spawn and
+restart/adoption race after pause publication.
+
+The maintenance drain repeatedly observes tracked and external tasks, stops
+newly appearing work, releases dead tracked rows as `lost` with a bounded
+maintenance note, and requires three consecutive empty snapshots before
+entering the upgrade. A bounded typed
+`mcd-maintenance-guard-evidence-v1` is emitted on every task-quiescence
+failure with task identities, stable-snapshot counts, timeout state, and
+truthful cron/pause cleanup. Patch evidence is not emitted when the guard
+fails before the source/package stage, and no patch rollback is attempted.
+
 Каталоговая преднастройка перед native plugin reload остаётся fail-closed:
 MCD не применяет план при `agent_patch_contract_mismatch`,
 `agent_patch_contract_fields_mismatch` или `agent_version_below_minimum` и не
@@ -22,7 +40,7 @@ post-step могут завершиться. Следующая совмести
 только незавершённую каталоговую remediation; native plugin operation не
 переисполняется из-за этого отказа.
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.247 (follow-up после immutable
+Актуальная редакция этого канона — MCD 1.5.265 (follow-up после immutable
 1.5.88). В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам
