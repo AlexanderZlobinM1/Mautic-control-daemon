@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -11,6 +13,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from mcd_agent.commercial_portal import (
     MCC_ARTIFACT_SIGNATURE_DOMAIN,
     SELF_HOSTED_MCD_JOB_SCHEMA,
+    SELF_HOSTED_MCD_LEGACY_CONTRACT_VERSION,
     SELF_HOSTED_MCD_CONTRACT_VERSION,
     canonical_json,
     verify_self_hosted_mcd_job,
@@ -57,7 +60,7 @@ def _artifact(pin_kind: str, revision: str, body: bytes, key: Ed25519PrivateKey)
     }
 
 
-def _job(portal: Ed25519PrivateKey, publisher: Ed25519PrivateKey) -> tuple[dict[str, object], bytes, bytes, dict[str, str]]:
+def _job(portal: Ed25519PrivateKey, publisher: Ed25519PrivateKey, *, contract_version: str = SELF_HOSTED_MCD_LEGACY_CONTRACT_VERSION) -> tuple[dict[str, object], bytes, bytes, dict[str, str]]:
     facts = {
         "os_id": "ubuntu",
         "os_version": "24.04",
@@ -72,7 +75,7 @@ def _job(portal: Ed25519PrivateKey, publisher: Ed25519PrivateKey) -> tuple[dict[
     scenario_pin = _artifact("scenario", "scenario-r1", scenario, publisher)
     job: dict[str, object] = {
         "schema": SELF_HOSTED_MCD_JOB_SCHEMA,
-        "contract_version": SELF_HOSTED_MCD_CONTRACT_VERSION,
+        "contract_version": contract_version,
         "job_id": "job-1",
         "request_id": "request-1",
         "idempotency_key": "request-1:scenario-r1",
@@ -88,7 +91,6 @@ def _job(portal: Ed25519PrivateKey, publisher: Ed25519PrivateKey) -> tuple[dict[
             "artifact_digest": scenario_pin["artifact_digest"],
         },
         "applicability": {"facts": facts, "facts_digest": facts_digest},
-        "bootstrap_artifact": _artifact("bootstrap", "bootstrap-r1", bootstrap, publisher),
         "scenario_artifact": scenario_pin,
         "execution": {"primitive": "scenario.apply", "version": "1.0"},
         "issued_at": "2026-10-26T10:00:00Z",
@@ -96,6 +98,8 @@ def _job(portal: Ed25519PrivateKey, publisher: Ed25519PrivateKey) -> tuple[dict[
         "nonce": "nonce-1",
         "portal_signature": {"algorithm": "ed25519", "key_id": "portal-1", "value": ""},
     }
+    if contract_version == SELF_HOSTED_MCD_LEGACY_CONTRACT_VERSION:
+        job["bootstrap_artifact"] = _artifact("bootstrap", "bootstrap-r1", bootstrap, publisher)
     unsigned = dict(job)
     unsigned.pop("portal_signature")
     job["portal_signature"] = {"algorithm": "ed25519", "key_id": "portal-1", "value": _b64(portal.sign(canonical_json(unsigned)))}
@@ -126,6 +130,147 @@ def test_v2_job_rejects_scenario_artifact_revision_mismatch() -> None:
         assert str(exc) == "self_hosted_mcd_scenario_revision_mismatch"
     else:
         raise AssertionError("scenario and artifact revisions must be immutable together")
+
+
+def _resign(job: dict[str, object], portal: Ed25519PrivateKey) -> None:
+    unsigned = dict(job)
+    unsigned.pop("portal_signature", None)
+    job["portal_signature"] = {"algorithm": "ed25519", "key_id": "portal-1", "value": _b64(portal.sign(canonical_json(unsigned)))}
+
+
+def test_v21_registered_scenario_job_has_no_bootstrap_artifact() -> None:
+    portal = Ed25519PrivateKey.generate()
+    publisher = Ed25519PrivateKey.generate()
+    job, _bootstrap, _scenario, keys = _job(portal, publisher, contract_version=SELF_HOSTED_MCD_CONTRACT_VERSION)
+
+    verified = verify_self_hosted_mcd_job(
+        job,
+        {"portal-1": keys["portal-1"]},
+        expected_agent_id="agent-1",
+        expected_installation_id="installation-1",
+        expected_commercial_key_id="commercial-key-1",
+        expected_host_fingerprint="sha256:" + "b" * 64,
+    )
+
+    assert verified["contract_version"] == SELF_HOSTED_MCD_CONTRACT_VERSION
+    assert verified["bootstrap_artifact"] is None
+
+
+def test_v21_portal_fixture_matches_signed_cross_component_vector() -> None:
+    fixture_path = Path(__file__).parent / "fixtures" / "portal-self-hosted-mcd-v2.1-job.json"
+    job = json.loads(fixture_path.read_text(encoding="utf-8"))
+    public_key = (fixture_path.with_suffix(".public-key")).read_text(encoding="utf-8").strip()
+    expected_hash = (fixture_path.with_suffix(".sha256")).read_text(encoding="utf-8").strip()
+
+    verified = verify_self_hosted_mcd_job(
+        job,
+        {job["portal_signature"]["key_id"]: public_key},
+        expected_agent_id=job["agent_id"],
+        expected_installation_id=job["installation_id"],
+        expected_commercial_key_id=job["commercial_key_id"],
+        expected_host_fingerprint=job["host_fingerprint"],
+        now=datetime(2099, 10, 26, 0, 30, tzinfo=timezone.utc).timestamp(),
+    )
+
+    assert verified["contract_version"] == SELF_HOSTED_MCD_CONTRACT_VERSION
+    assert "bootstrap_artifact" not in job
+    assert hashlib.sha256(canonical_json(job)).hexdigest() == expected_hash
+
+
+def test_v21_registered_scenario_job_rejects_mixed_bootstrap_artifact() -> None:
+    portal = Ed25519PrivateKey.generate()
+    publisher = Ed25519PrivateKey.generate()
+    job, bootstrap, _scenario, keys = _job(portal, publisher, contract_version=SELF_HOSTED_MCD_CONTRACT_VERSION)
+    job["bootstrap_artifact"] = _artifact("bootstrap", "bootstrap-r1", bootstrap, publisher)
+    _resign(job, portal)
+
+    try:
+        verify_self_hosted_mcd_job(
+            job,
+            {"portal-1": keys["portal-1"]},
+            expected_agent_id="agent-1",
+            expected_installation_id="installation-1",
+            expected_commercial_key_id="commercial-key-1",
+            expected_host_fingerprint="sha256:" + "b" * 64,
+        )
+    except ValueError as exc:
+        assert str(exc) == "self_hosted_mcd_bootstrap_artifact_forbidden"
+    else:
+        raise AssertionError("2.1 scenario jobs must fail closed when bootstrap is mixed in")
+
+
+def test_v20_legacy_job_still_requires_bootstrap_artifact() -> None:
+    portal = Ed25519PrivateKey.generate()
+    publisher = Ed25519PrivateKey.generate()
+    job, _bootstrap, _scenario, keys = _job(portal, publisher)
+    job.pop("bootstrap_artifact")
+    _resign(job, portal)
+
+    try:
+        verify_self_hosted_mcd_job(
+            job,
+            {"portal-1": keys["portal-1"]},
+            expected_agent_id="agent-1",
+            expected_installation_id="installation-1",
+            expected_commercial_key_id="commercial-key-1",
+            expected_host_fingerprint="sha256:" + "b" * 64,
+        )
+    except ValueError as exc:
+        assert str(exc) == "self_hosted_mcd_bootstrap_artifact_invalid"
+    else:
+        raise AssertionError("legacy 2.0 jobs must continue to require bootstrap")
+
+
+def test_v21_worker_downloads_and_executes_only_scenario_artifact(monkeypatch) -> None:
+    portal_key = Ed25519PrivateKey.generate()
+    publisher_key = Ed25519PrivateKey.generate()
+    job, _bootstrap, scenario, keys = _job(portal_key, publisher_key, contract_version=SELF_HOSTED_MCD_CONTRACT_VERSION)
+    downloaded: list[str] = []
+
+    class Portal:
+        def __init__(self) -> None:
+            self.receipts: list[dict[str, object]] = []
+
+        def pull_job(self, **_: object):
+            return {"cursor": "cursor-21", "job": job}
+
+        def send_receipt(self, receipt: dict[str, object], **_: object):
+            self.receipts.append(receipt)
+            return {}
+
+    def download(uri: str, expected_size: int) -> bytes:
+        downloaded.append(uri)
+        assert "bootstrap" not in uri
+        assert expected_size == len(scenario)
+        return scenario
+
+    with TemporaryDirectory() as directory:
+        state = CommercialState(str(Path(directory) / "commercial.sqlite"))
+        events: list[bytes] = []
+        executor = SelfHostedScenarioExecutor(
+            state,
+            facts_reader=lambda **_: job["applicability"]["facts"],
+            runner=lambda **kwargs: events.append(kwargs["artifact"]) or {"status": "succeeded"},
+        )
+        monkeypatch.setattr("mcd_agent.commercial_self_hosted.download_external_artifact", download)
+        worker = SelfHostedPortalWorker(
+            Portal(),
+            executor,
+            installation_id="installation-1",
+            portal_keys={"portal-1": keys["portal-1"]},
+            publisher_keys={"publisher-1": keys["publisher-1"]},
+            context={},
+            commercial_key_id="commercial-key-1",
+            agent_id="agent-1",
+            host_fingerprint="sha256:" + "b" * 64,
+        )
+
+        result = worker.run_once()
+
+        assert result == {"status": "succeeded", "job_id": "job-1"}
+        assert downloaded == [job["scenario_artifact"]["artifact_uri"]]
+        assert events == [scenario]
+        assert worker.client.receipts[-1]["contract_version"] == SELF_HOSTED_MCD_CONTRACT_VERSION
 
 
 def test_v2_external_artifact_execution_has_exact_binding_and_no_handlers() -> None:

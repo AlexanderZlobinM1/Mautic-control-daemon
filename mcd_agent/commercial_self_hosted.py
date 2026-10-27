@@ -27,6 +27,7 @@ from mcd_agent.scenario_launcher import encode_request_frame
 from mcd_agent.commercial_portal import (
     PORTAL_MCD_ADOPT_CONTRACT_VERSION,
     SELF_HOSTED_MCD_JOB_SCHEMA,
+    SELF_HOSTED_MCD_CONTRACT_VERSIONS,
     SELF_HOSTED_MCD_CONTRACT_VERSION,
     SELF_HOSTED_MCD_STAGE_RECEIPT_SCHEMA,
     SELF_HOSTED_MCD_TERMINAL_RECEIPT_SCHEMA,
@@ -271,7 +272,10 @@ def _verified_shape_for_terminal(command: Mapping[str, Any], *, expected_agent_i
     facts_digest = applicability.get("facts_digest") if isinstance(applicability, Mapping) else None
     if not isinstance(scenario, Mapping) or not isinstance(facts_digest, str) or not facts_digest:
         return None
-    return {"job": job, "scenario": dict(scenario), "facts": dict(applicability.get("facts") or {}) if isinstance(applicability, Mapping) and isinstance(applicability.get("facts"), Mapping) else {}, "facts_digest": facts_digest}
+    contract_version = str(job.get("contract_version") or SELF_HOSTED_MCD_CONTRACT_VERSION)
+    if contract_version not in SELF_HOSTED_MCD_CONTRACT_VERSIONS:
+        contract_version = SELF_HOSTED_MCD_CONTRACT_VERSION
+    return {"job": job, "contract_version": contract_version, "scenario": dict(scenario), "facts": dict(applicability.get("facts") or {}) if isinstance(applicability, Mapping) and isinstance(applicability.get("facts"), Mapping) else {}, "facts_digest": facts_digest}
 
 
 def _failed_terminal_for_delivery(command: Mapping[str, Any], *, error: BaseException, sequence: int, expected_agent_id: str, expected_installation_id: str, expected_commercial_key_id: str, expected_host_fingerprint: str) -> dict[str, Any] | None:
@@ -313,7 +317,7 @@ def _validate_binding(receipt: Mapping[str, Any], binding: Mapping[str, Any]) ->
 
 
 def validate_self_hosted_stage_receipt(receipt: Mapping[str, Any], *, binding: Mapping[str, Any]) -> None:
-    if receipt.get("schema") != SELF_HOSTED_MCD_STAGE_RECEIPT_SCHEMA or receipt.get("contract_version") != SELF_HOSTED_MCD_CONTRACT_VERSION:
+    if receipt.get("schema") != SELF_HOSTED_MCD_STAGE_RECEIPT_SCHEMA or receipt.get("contract_version") not in SELF_HOSTED_MCD_CONTRACT_VERSIONS:
         raise ValueError("self_hosted_mcd_stage_receipt_invalid")
     if receipt.get("stage_id") not in SELF_HOSTED_MCD_STAGE_IDS or receipt.get("status") not in SELF_HOSTED_MCD_STAGE_STATUSES:
         raise ValueError("self_hosted_mcd_stage_receipt_invalid")
@@ -328,7 +332,7 @@ def validate_self_hosted_stage_receipt(receipt: Mapping[str, Any], *, binding: M
 
 
 def validate_self_hosted_terminal_receipt(receipt: Mapping[str, Any], *, binding: Mapping[str, Any]) -> None:
-    if receipt.get("schema") != SELF_HOSTED_MCD_TERMINAL_RECEIPT_SCHEMA or receipt.get("contract_version") != SELF_HOSTED_MCD_CONTRACT_VERSION:
+    if receipt.get("schema") != SELF_HOSTED_MCD_TERMINAL_RECEIPT_SCHEMA or receipt.get("contract_version") not in SELF_HOSTED_MCD_CONTRACT_VERSIONS:
         raise ValueError("self_hosted_mcd_terminal_receipt_invalid")
     if receipt.get("status") not in SELF_HOSTED_MCD_TERMINAL_STATUSES or receipt.get("rollback") not in SELF_HOSTED_MCD_ROLLBACK_STATUSES:
         raise ValueError("self_hosted_mcd_terminal_receipt_invalid")
@@ -346,10 +350,13 @@ def validate_self_hosted_terminal_receipt(receipt: Mapping[str, Any], *, binding
 
 def _failed_terminal_receipt(verified: Mapping[str, Any], *, error: BaseException, sequence: int, started_at: str, completed: int = 0, total: int = 1, rollback: str = "not_attempted", runner_evidence: Mapping[str, Any] | None = None) -> dict[str, Any]:
     binding = _binding_from_verified(verified)
+    contract_version = str(verified.get("contract_version") or SELF_HOSTED_MCD_CONTRACT_VERSION)
+    if contract_version not in SELF_HOSTED_MCD_CONTRACT_VERSIONS:
+        contract_version = SELF_HOSTED_MCD_CONTRACT_VERSION
     result = {
         **binding,
         "schema": SELF_HOSTED_MCD_TERMINAL_RECEIPT_SCHEMA,
-        "contract_version": SELF_HOSTED_MCD_CONTRACT_VERSION,
+        "contract_version": contract_version,
         "sequence": max(1, int(sequence)),
         "idempotency_key": f"{binding['job_id']}:terminal:{max(1, int(sequence))}",
         "status": "failed",
@@ -713,7 +720,7 @@ class SelfHostedScenarioExecutor:
             raise ValueError("self_hosted_mcd_applicability_facts_mismatch")
         return observed
 
-    def run(self, job: Mapping[str, Any], *, portal_keys: Mapping[str, str], publisher_keys: Mapping[str, Any], context: Mapping[str, Any], expected_agent_id: str, expected_installation_id: str, expected_commercial_key_id: str, expected_host_fingerprint: str, bootstrap_artifact: bytes, scenario_artifact: bytes, receipt_sink: Callable[[dict[str, Any]], Any] | None = None) -> dict[str, Any]:
+    def run(self, job: Mapping[str, Any], *, portal_keys: Mapping[str, str], publisher_keys: Mapping[str, Any], context: Mapping[str, Any], expected_agent_id: str, expected_installation_id: str, expected_commercial_key_id: str, expected_host_fingerprint: str, bootstrap_artifact: bytes | None, scenario_artifact: bytes, receipt_sink: Callable[[dict[str, Any]], Any] | None = None) -> dict[str, Any]:
         verified = verify_self_hosted_mcd_job(job, portal_keys, expected_agent_id=expected_agent_id, expected_installation_id=expected_installation_id, expected_commercial_key_id=expected_commercial_key_id, expected_host_fingerprint=expected_host_fingerprint)
         binding = _binding_from_verified(verified)
         job_id = binding["job_id"]
@@ -723,7 +730,10 @@ class SelfHostedScenarioExecutor:
             # The signed job envelope is still revalidated above, but a
             # terminal replay must not depend on today's artifact trust set.
             return dict(prior["terminal"])
-        verify_self_hosted_external_artifact(verified["bootstrap_artifact"], bootstrap_artifact, publisher_keys, kind="bootstrap")
+        if verified["bootstrap_artifact"] is not None:
+            if bootstrap_artifact is None:
+                raise ValueError("self_hosted_mcd_bootstrap_artifact_unavailable")
+            verify_self_hosted_external_artifact(verified["bootstrap_artifact"], bootstrap_artifact, publisher_keys, kind="bootstrap")
         verify_self_hosted_external_artifact(verified["scenario_artifact"], scenario_artifact, publisher_keys, kind="scenario")
         facts = self._local_facts(verified["facts"], context)
         started_at = _utc()
@@ -733,7 +743,7 @@ class SelfHostedScenarioExecutor:
         def emit(stage_id: str, status: str, result: object = None, error: Mapping[str, Any] | None = None) -> None:
             nonlocal sequence
             sequence += 1
-            receipt = {**binding, "schema": SELF_HOSTED_MCD_STAGE_RECEIPT_SCHEMA, "contract_version": SELF_HOSTED_MCD_CONTRACT_VERSION, "stage_id": stage_id, "sequence": sequence, "status": status, "idempotency_key": f"{binding['job_id']}:{stage_id}:{sequence}", "observed_at": _utc()}
+            receipt = {**binding, "schema": SELF_HOSTED_MCD_STAGE_RECEIPT_SCHEMA, "contract_version": str(verified.get("contract_version") or SELF_HOSTED_MCD_CONTRACT_VERSION), "stage_id": stage_id, "sequence": sequence, "status": status, "idempotency_key": f"{binding['job_id']}:{stage_id}:{sequence}", "observed_at": _utc()}
             if result is not None:
                 receipt["result"] = _bounded_result(result)
             if error is not None:
@@ -754,7 +764,7 @@ class SelfHostedScenarioExecutor:
                 raise ValueError("self_hosted_mcd_runner_unconfigured")
             result = self.runner(artifact=scenario_artifact, job=verified["job"], facts=facts)
             emit("execution", "succeeded", result)
-            terminal = {**binding, "schema": SELF_HOSTED_MCD_TERMINAL_RECEIPT_SCHEMA, "contract_version": SELF_HOSTED_MCD_CONTRACT_VERSION, "sequence": sequence + 1, "idempotency_key": f"{binding['job_id']}:terminal:{sequence + 1}", "status": "succeeded", "observed_at": _utc(), "started_at": started_at, "completed_at": _utc(), "result": _bounded_result(result), "rollback": "not_attempted"}
+            terminal = {**binding, "schema": SELF_HOSTED_MCD_TERMINAL_RECEIPT_SCHEMA, "contract_version": str(verified.get("contract_version") or SELF_HOSTED_MCD_CONTRACT_VERSION), "sequence": sequence + 1, "idempotency_key": f"{binding['job_id']}:terminal:{sequence + 1}", "status": "succeeded", "observed_at": _utc(), "started_at": started_at, "completed_at": _utc(), "result": _bounded_result(result), "rollback": "not_attempted"}
             validate_self_hosted_terminal_receipt(terminal, binding=binding)
         except Exception as exc:
             evidence = getattr(exc, "evidence", None)
@@ -1334,10 +1344,12 @@ class SelfHostedPortalWorker:
         if local_state_error is not None:
             return self._delivery_failure(command, cursor_next=cursor_next, error=local_state_error)
         try:
-            bootstrap_pin = verified["bootstrap_artifact"]
+            bootstrap_pin = verified.get("bootstrap_artifact")
             scenario_pin = verified["scenario_artifact"]
             try:
-                bootstrap = self._outbound("bootstrap_download", lambda: download_external_artifact(bootstrap_pin["artifact_uri"], expected_size=bootstrap_pin["artifact_size_bytes"]))
+                bootstrap = None
+                if bootstrap_pin is not None:
+                    bootstrap = self._outbound("bootstrap_download", lambda: download_external_artifact(bootstrap_pin["artifact_uri"], expected_size=bootstrap_pin["artifact_size_bytes"]))
                 scenario = self._outbound("scenario_download", lambda: download_external_artifact(scenario_pin["artifact_uri"], expected_size=scenario_pin["artifact_size_bytes"]))
             except _PortalTransportError as exc:
                 return self._delivery_failure(command, cursor_next=cursor_next, error=ValueError("self_hosted_mcd_artifact_unavailable"))

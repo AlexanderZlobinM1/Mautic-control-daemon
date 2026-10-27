@@ -1,3 +1,13 @@
+## 1.5.264 - 2026-10-27
+
+- Consume Portal's additive self-hosted job contract `2.1` for already
+  registered MCD installations: `scenario.apply` jobs require the signed
+  scenario artifact and reject any mixed `bootstrap_artifact`.
+- Keep legacy contract `2.0` bootstrap verification and receipt replay
+  semantics unchanged; bootstrap remains an onboarding-only concern.
+- Ensure the 2.1 worker downloads, verifies, executes, and durably replays
+  only the signed scenario artifact across restart and receipt retry paths.
+
 ## 1.5.263 - 2026-10-27
 
 - Persist bounded, redacted external-runner evidence: stderr preview,

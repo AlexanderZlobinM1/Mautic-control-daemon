@@ -1156,10 +1156,15 @@ Commercial MCD is an outbound-only Portal lane. A delivered
 `portal-self-hosted-mcd-job-v2` is admitted only after exact account, commercial
 key, agent, installation, host, scenario and applicability binding, local-facts
 revalidation, expiry, nonce, idempotency and Portal signature validation. The
-bootstrap and scenario artifacts are separate HTTPS pins; each is downloaded,
-size/digest checked and verified against the Portal-owned artifact trust set.
-MCD never fetches MCC directly, never imports MCC credentials or scenario rules,
-and Portal is the self-hosted scenario authority.
+additive contract version `2.1` is the registered-installation path: its
+`execution.primitive` is `scenario.apply`, it requires the signed scenario
+artifact, and `bootstrap_artifact` must be absent. MCD downloads, size/digest
+checks, and verifies only that scenario artifact against the Portal-owned
+artifact trust set. Legacy contract `2.0` remains accepted with its required
+bootstrap and scenario pins for compatibility; bootstrap is not part of the
+registered scenario operation. MCD never fetches MCC directly, never imports
+MCC credentials or scenario rules, and Portal is the self-hosted scenario
+authority.
 
 The signed `portal-mcd-inventory-snapshot-v1` also carries the additive
 `applicability_facts` coordinate (`mcd-portal-applicability-facts-v1`, contract
@@ -1211,12 +1216,14 @@ bounded and secret-free. Every unsent stage or terminal receipt is durable and
 retried in order after Portal outage or MCD restart.
 
 The commercial transport worker is a separate non-blocking Portal lane:
-`pull_job` → exact v2 job admission → both pinned artifact downloads → local
-facts guard → generic runner → ordered stage/terminal receipts. Its cursor and
-pending receipt queue are durable in the commercial state store. Network/Portal
-failure never pauses corporate or standalone scheduler work. The commercial
-key is durable identity metadata only; raw credentials and future quota,
-billing or tariff semantics are not part of MCD.
+`pull_job` → exact v2 job admission → pinned artifact download(s) → local facts
+guard → generic runner → ordered stage/terminal receipts. A 2.1 registered
+scenario delivery has exactly one artifact download; only legacy 2.0 may have
+the additional bootstrap download. Its cursor and pending receipt queue are
+durable in the commercial state store. Network/Portal failure never pauses
+corporate or standalone scheduler work. The commercial key is durable identity
+metadata only; raw credentials and future quota, billing or tariff semantics
+are not part of MCD.
 
 Once Portal has leased and MCD has durably accepted a delivery, every local
 outcome closes through a signed terminal receipt: expiry, malformed or failed

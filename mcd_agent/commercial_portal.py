@@ -28,7 +28,9 @@ CONTRACT_VERSION = "1.0"
 SELF_HOSTED_MCD_JOB_SCHEMA = "portal-self-hosted-mcd-job-v2"
 SELF_HOSTED_MCD_STAGE_RECEIPT_SCHEMA = "mcd-self-hosted-stage-receipt-v2"
 SELF_HOSTED_MCD_TERMINAL_RECEIPT_SCHEMA = "mcd-self-hosted-terminal-receipt-v2"
-SELF_HOSTED_MCD_CONTRACT_VERSION = "2.0"
+SELF_HOSTED_MCD_LEGACY_CONTRACT_VERSION = "2.0"
+SELF_HOSTED_MCD_CONTRACT_VERSION = "2.1"
+SELF_HOSTED_MCD_CONTRACT_VERSIONS = frozenset({SELF_HOSTED_MCD_LEGACY_CONTRACT_VERSION, SELF_HOSTED_MCD_CONTRACT_VERSION})
 SELF_HOSTED_MCD_STAGE_IDS = frozenset({"scenario_dispatch", "execution"})
 SELF_HOSTED_MCD_STAGE_STATUSES = frozenset({"queued", "running", "waiting", "succeeded", "failed"})
 SELF_HOSTED_MCD_TERMINAL_STATUSES = frozenset({"succeeded", "failed"})
@@ -580,9 +582,10 @@ def verify_self_hosted_mcd_job(
     if not isinstance(job, Mapping):
         raise ValueError("self_hosted_mcd_job_invalid")
     _assert_no_contract_secrets(job)
-    if job.get("schema") != SELF_HOSTED_MCD_JOB_SCHEMA or job.get("contract_version") != SELF_HOSTED_MCD_CONTRACT_VERSION:
+    contract_version = job.get("contract_version")
+    if job.get("schema") != SELF_HOSTED_MCD_JOB_SCHEMA or contract_version not in SELF_HOSTED_MCD_CONTRACT_VERSIONS:
         raise ValueError("self_hosted_mcd_job_invalid")
-    required = ("job_id", "request_id", "idempotency_key", "account_id", "commercial_key_id", "agent_id", "installation_id", "host_fingerprint", "scenario", "applicability", "bootstrap_artifact", "scenario_artifact", "execution", "issued_at", "expires_at", "nonce", "portal_signature")
+    required = ("job_id", "request_id", "idempotency_key", "account_id", "commercial_key_id", "agent_id", "installation_id", "host_fingerprint", "scenario", "applicability", "scenario_artifact", "execution", "issued_at", "expires_at", "nonce", "portal_signature")
     if any(not job.get(key) for key in required):
         raise ValueError("self_hosted_mcd_job_fields_missing")
     identity = {key: _require_contract_string(job.get(key), "self_hosted_mcd_job_invalid") for key in ("job_id", "request_id", "idempotency_key", "account_id", "commercial_key_id", "agent_id", "installation_id", "nonce")}
@@ -597,7 +600,11 @@ def verify_self_hosted_mcd_job(
     facts = _validate_self_hosted_facts(applicability.get("facts"))
     if _require_sha256_digest(applicability.get("facts_digest"), "self_hosted_mcd_facts_digest_invalid") != _self_hosted_facts_digest(facts):
         raise ValueError("self_hosted_mcd_facts_digest_invalid")
-    bootstrap = _validate_self_hosted_artifact_pin(job.get("bootstrap_artifact"), "self_hosted_mcd_bootstrap_artifact_invalid")
+    bootstrap = None
+    if contract_version == SELF_HOSTED_MCD_LEGACY_CONTRACT_VERSION:
+        bootstrap = _validate_self_hosted_artifact_pin(job.get("bootstrap_artifact"), "self_hosted_mcd_bootstrap_artifact_invalid")
+    elif "bootstrap_artifact" in job:
+        raise ValueError("self_hosted_mcd_bootstrap_artifact_forbidden")
     scenario_artifact = _validate_self_hosted_artifact_pin(job.get("scenario_artifact"), "self_hosted_mcd_scenario_artifact_invalid")
     if scenario_artifact["artifact_digest"] != scenario["artifact_digest"]:
         raise ValueError("self_hosted_mcd_scenario_digest_mismatch")
@@ -629,7 +636,7 @@ def verify_self_hosted_mcd_job(
         Ed25519PublicKey.from_public_bytes(_unb64(str(key))).verify(_unb64(str(signature.get("value") or "")), canonical_json(unsigned))
     except Exception as exc:
         raise ValueError("self_hosted_mcd_signature_invalid") from exc
-    return {"job": dict(job), "scenario": scenario, "facts": facts, "bootstrap_artifact": bootstrap, "scenario_artifact": scenario_artifact, "job_id": identity["job_id"], "idempotency_key": identity["idempotency_key"], "host_fingerprint": host_fingerprint}
+    return {"job": dict(job), "contract_version": str(contract_version), "scenario": scenario, "facts": facts, "bootstrap_artifact": bootstrap, "scenario_artifact": scenario_artifact, "job_id": identity["job_id"], "idempotency_key": identity["idempotency_key"], "host_fingerprint": host_fingerprint}
 
 
 def verify_self_hosted_external_artifact(pin: Mapping[str, Any], artifact: bytes, publisher_keys: Mapping[str, Any], *, kind: str) -> dict[str, Any]:
