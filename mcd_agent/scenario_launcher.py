@@ -15,6 +15,7 @@ import os
 import struct
 import sys
 import tempfile
+from pathlib import Path
 from typing import Any, Mapping
 
 
@@ -26,6 +27,19 @@ MAX_ARTIFACT_BYTES = 16 * 1024 * 1024
 MAX_CONTEXT_BYTES = 256 * 1024
 CONTEXT_FD = 3
 _SECRET_WORDS = ("secret", "password", "token", "private", "credential", "access_key")
+_PRIMITIVE_CONTEXT_SCHEMA = "mcd-scenario-primitive-context-v1"
+_PRIMITIVE_CONTEXT_VERSION = "1.0"
+_APPLICABILITY_FACTS_SCHEMA = "mcd-portal-applicability-facts-v1"
+_BACKUP_RECEIPT_SCHEMA = "mcd-mautic-patch-backup-attestation-v1"
+_BACKUP_MANIFEST_SCHEMA = "mcc.backup.manifest.v1"
+_MIGRATION_COMMANDS = frozenset({
+    "doctrine:migrations:migrate",
+    "doctrine:migration:migrate",
+    "doctrine:migrations:up-to-date",
+    "doctrine:migration:up-to-date",
+    "doctrine:migrations:version",
+    "doctrine:migration:version",
+})
 
 
 class ScenarioLauncherError(RuntimeError):
@@ -40,7 +54,7 @@ def encode_request_frame(artifact: bytes, context: Mapping[str, Any]) -> bytes:
     context_bytes = json.dumps(dict(context), ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
     if len(context_bytes) > MAX_CONTEXT_BYTES:
         raise ValueError("self_hosted_mcd_runner_context_size_invalid")
-    _validate_context(dict(context))
+    _validate_context(dict(context), artifact_size=len(artifact), artifact_digest=hashlib.sha256(artifact).hexdigest())
     return FRAME_HEADER.pack(
         FRAME_MAGIC,
         FRAME_VERSION,
@@ -84,11 +98,16 @@ def _read_request_frame(stream: Any) -> tuple[bytes, dict[str, Any]]:
         raise ScenarioLauncherError("self_hosted_mcd_runner_context_invalid") from exc
     if not isinstance(context, dict):
         raise ScenarioLauncherError("self_hosted_mcd_runner_context_invalid")
-    _validate_context(context)
+    _validate_context(context, artifact_size=artifact_size, artifact_digest=artifact_digest.hex())
     return artifact, context
 
 
-def _validate_context(value: Mapping[str, Any]) -> None:
+def _validate_context(
+    value: Mapping[str, Any],
+    *,
+    artifact_size: int | None = None,
+    artifact_digest: str | None = None,
+) -> None:
     if value.get("schema") != "portal-self-hosted-executable-context-v1" or value.get("contract_version") != "1.0":
         raise ScenarioLauncherError("self_hosted_mcd_runner_context_invalid")
     job = value.get("job")
@@ -115,6 +134,142 @@ def _validate_context(value: Mapping[str, Any]) -> None:
             raise ScenarioLauncherError("self_hosted_mcd_runner_secret_in_context")
     if any(not isinstance(item, str) or not item or len(item) > 256 or any(char not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:/-" for char in item) for item in references):
         raise ScenarioLauncherError("self_hosted_mcd_runner_secret_reference_invalid")
+    primitive = value.get("primitive_context")
+    if primitive is not None:
+        _validate_primitive_context(
+            primitive,
+            job=job,
+            scenario=scenario,
+            applicability=applicability,
+            artifact_size=artifact_size,
+            artifact_digest=artifact_digest,
+        )
+
+
+def _validate_primitive_context(
+    value: Any,
+    *,
+    job: Mapping[str, Any],
+    scenario: Mapping[str, Any],
+    applicability: Mapping[str, Any],
+    artifact_size: int | None,
+    artifact_digest: str | None,
+) -> None:
+    """Validate the additive typed primitive contract used by MCC artifacts.
+
+    The launcher deliberately validates shape and binding only.  It does not
+    execute PHP, discover a migration, restore a backup, or select a version;
+    those remain the existing signed artifact/host mechanisms.
+    """
+    if not isinstance(value, Mapping):
+        raise ScenarioLauncherError("self_hosted_mcd_runner_primitive_context_invalid")
+    if value.get("schema") != _PRIMITIVE_CONTEXT_SCHEMA or value.get("contract_version") != _PRIMITIVE_CONTEXT_VERSION:
+        raise ScenarioLauncherError("self_hosted_mcd_runner_primitive_context_invalid")
+
+    binding = value.get("binding")
+    required_binding = (
+        "job_id", "request_id", "command_id", "idempotency_key", "scenario_id",
+        "scenario_revision", "artifact_revision", "artifact_digest", "host_fingerprint", "facts_digest",
+    )
+    if not isinstance(binding, Mapping) or any(not isinstance(binding.get(key), str) or not binding.get(key) for key in required_binding):
+        raise ScenarioLauncherError("self_hosted_mcd_runner_primitive_binding_invalid")
+    expected_binding = {
+        "job_id": job.get("job_id"),
+        "request_id": job.get("request_id"),
+        "command_id": job.get("command_id"),
+        "idempotency_key": job.get("idempotency_key"),
+        "scenario_id": scenario.get("scenario_id"),
+        "scenario_revision": scenario.get("revision"),
+        "artifact_revision": scenario.get("artifact_revision"),
+        "artifact_digest": scenario.get("artifact_digest"),
+        "host_fingerprint": binding.get("host_fingerprint"),
+        "facts_digest": applicability.get("facts_digest"),
+    }
+    for key in required_binding:
+        if key != "host_fingerprint" and binding.get(key) != expected_binding[key]:
+            raise ScenarioLauncherError("self_hosted_mcd_runner_primitive_binding_mismatch")
+    if not _valid_digest(str(binding.get("host_fingerprint"))) or binding.get("facts_digest") != expected_binding["facts_digest"]:
+        raise ScenarioLauncherError("self_hosted_mcd_runner_primitive_binding_mismatch")
+
+    application = value.get("application")
+    if not isinstance(application, Mapping):
+        raise ScenarioLauncherError("self_hosted_mcd_runner_primitive_application_invalid")
+    for key in ("root", "console_path", "php_bin"):
+        item = application.get(key)
+        if not isinstance(item, str) or not item or not Path(item).is_absolute() or "\x00" in item:
+            raise ScenarioLauncherError("self_hosted_mcd_runner_primitive_application_invalid")
+    if not isinstance(application.get("run_as_user"), str) or not application["run_as_user"].strip():
+        raise ScenarioLauncherError("self_hosted_mcd_runner_primitive_application_invalid")
+
+    host_facts = value.get("host_facts")
+    if not isinstance(host_facts, Mapping) or host_facts.get("schema") != _APPLICABILITY_FACTS_SCHEMA or host_facts.get("contract_version") != "1.0":
+        raise ScenarioLauncherError("self_hosted_mcd_runner_primitive_facts_invalid")
+    facts = host_facts.get("facts")
+    required_facts = ("os_id", "os_version", "architecture", "package_manager", "capabilities", "target_kind")
+    if not isinstance(facts, Mapping) or any(not isinstance(facts.get(key), str) or not facts.get(key).strip() for key in required_facts if key != "capabilities"):
+        raise ScenarioLauncherError("self_hosted_mcd_runner_primitive_facts_invalid")
+    capabilities = facts.get("capabilities")
+    if not isinstance(capabilities, list) or any(not isinstance(item, str) or not item.strip() for item in capabilities):
+        raise ScenarioLauncherError("self_hosted_mcd_runner_primitive_facts_invalid")
+    normalized_facts = {key: facts[key] for key in required_facts}
+    normalized_facts["capabilities"] = sorted(set(str(item).strip() for item in capabilities))
+    fact_digest = "sha256:" + hashlib.sha256(
+        json.dumps(normalized_facts, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    if host_facts.get("facts_digest") != fact_digest or binding.get("facts_digest") != fact_digest:
+        raise ScenarioLauncherError("self_hosted_mcd_runner_primitive_facts_digest_mismatch")
+
+    artifact = value.get("artifact")
+    if not isinstance(artifact, Mapping) or not isinstance(artifact.get("revision"), str) or not artifact.get("revision"):
+        raise ScenarioLauncherError("self_hosted_mcd_runner_primitive_artifact_invalid")
+    if artifact.get("revision") != binding.get("artifact_revision") or artifact.get("digest") != binding.get("artifact_digest"):
+        raise ScenarioLauncherError("self_hosted_mcd_runner_primitive_artifact_binding_mismatch")
+    if artifact.get("media_type") not in {"application/x-sh", "application/x-elf"} or type(artifact.get("size")) is not int or artifact["size"] <= 0:
+        raise ScenarioLauncherError("self_hosted_mcd_runner_primitive_artifact_invalid")
+    if artifact_size is not None and artifact["size"] != artifact_size:
+        raise ScenarioLauncherError("self_hosted_mcd_runner_primitive_artifact_size_mismatch")
+    if artifact_digest is not None and artifact["digest"] != "sha256:" + artifact_digest:
+        raise ScenarioLauncherError("self_hosted_mcd_runner_primitive_artifact_digest_mismatch")
+
+    backup = value.get("backup")
+    if not isinstance(backup, Mapping) or backup.get("receipt_schema") != _BACKUP_RECEIPT_SCHEMA or backup.get("manifest_schema") != _BACKUP_MANIFEST_SCHEMA:
+        raise ScenarioLauncherError("self_hosted_mcd_runner_primitive_backup_invalid")
+    evidence = backup.get("evidence")
+    required_evidence = ("backup_id", "backup_path", "manifest_path", "sha256", "completed_at", "bytes_written", "rollback_supported")
+    if not isinstance(evidence, Mapping) or any(key not in evidence for key in required_evidence):
+        raise ScenarioLauncherError("self_hosted_mcd_runner_primitive_backup_invalid")
+    if any(not isinstance(evidence.get(key), str) or not evidence.get(key) for key in ("backup_id", "backup_path", "manifest_path", "completed_at")):
+        raise ScenarioLauncherError("self_hosted_mcd_runner_primitive_backup_invalid")
+    if not Path(str(evidence["backup_path"])).is_absolute() or not Path(str(evidence["manifest_path"])).is_absolute() or not _valid_digest("sha256:" + str(evidence["sha256"])):
+        raise ScenarioLauncherError("self_hosted_mcd_runner_primitive_backup_invalid")
+    if type(evidence.get("bytes_written")) is not int or evidence["bytes_written"] <= 0 or evidence.get("rollback_supported") is not True:
+        raise ScenarioLauncherError("self_hosted_mcd_runner_primitive_backup_invalid")
+
+    migration = value.get("migration")
+    if not isinstance(migration, Mapping):
+        raise ScenarioLauncherError("self_hosted_mcd_runner_primitive_migration_invalid")
+    discovery = migration.get("discovery")
+    if not isinstance(discovery, Mapping) or discovery.get("argv_tail") != ["list", "doctrine"]:
+        raise ScenarioLauncherError("self_hosted_mcd_runner_primitive_migration_invalid")
+    for phase in ("apply", "verify", "reconcile"):
+        row = migration.get(phase)
+        if not isinstance(row, Mapping) or not isinstance(row.get("command"), str) or row["command"] not in _MIGRATION_COMMANDS:
+            raise ScenarioLauncherError("self_hosted_mcd_runner_primitive_migration_invalid")
+    if migration.get("apply", {}).get("arguments") != ["--no-interaction"] or migration.get("prohibited") != ["arbitrary_sql", "down_migration", "delete_migration_history", "invented_command_or_default"]:
+        raise ScenarioLauncherError("self_hosted_mcd_runner_primitive_migration_invalid")
+
+    rollback = value.get("rollback")
+    if not isinstance(rollback, Mapping) or rollback.get("state") not in {"not_attempted", "attempted", "succeeded", "failed", "blocked"}:
+        raise ScenarioLauncherError("self_hosted_mcd_runner_primitive_rollback_invalid")
+    if rollback.get("state") == "succeeded" and rollback.get("succeeded") is not True:
+        raise ScenarioLauncherError("self_hosted_mcd_runner_primitive_rollback_invalid")
+    if rollback.get("state") in {"failed", "blocked"} and rollback.get("succeeded") is True:
+        raise ScenarioLauncherError("self_hosted_mcd_runner_primitive_rollback_invalid")
+    rollback_binding = rollback.get("binding")
+    if not isinstance(rollback_binding, Mapping) or any(not isinstance(rollback_binding.get(key), str) or not rollback_binding.get(key) for key in ("run_id", "plan_sha256", "backup_id", "root")):
+        raise ScenarioLauncherError("self_hosted_mcd_runner_primitive_rollback_invalid")
+    if not Path(str(rollback_binding["root"])).is_absolute() or not _valid_digest("sha256:" + str(rollback_binding["plan_sha256"])):
+        raise ScenarioLauncherError("self_hosted_mcd_runner_primitive_rollback_invalid")
 
 
 def _valid_digest(value: str) -> bool:

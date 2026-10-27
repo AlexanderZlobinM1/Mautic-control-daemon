@@ -39,6 +39,139 @@ def test_frame_is_binary_artifact_plus_separate_context() -> None:
     assert context["applicability"]["facts_digest"].startswith("sha256:")
 
 
+def _primitive_context(artifact: bytes) -> dict[str, object]:
+    facts = {
+        "os_id": "ubuntu",
+        "os_version": "22.04",
+        "architecture": "amd64",
+        "package_manager": "apt-get",
+        "capabilities": ["package_manager.query"],
+        "target_kind": "existing_server",
+    }
+    facts_digest = "sha256:" + hashlib.sha256(
+        json.dumps(facts, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    artifact_digest = "sha256:" + hashlib.sha256(artifact).hexdigest()
+    return {
+        "schema": "mcd-scenario-primitive-context-v1",
+        "contract_version": "1.0",
+        "binding": {
+            "job_id": "job-primitive-1",
+            "request_id": "request-primitive-1",
+            "command_id": "command-primitive-1",
+            "idempotency_key": "idempotency-primitive-1",
+            "scenario_id": "scenario-primitive-1",
+            "scenario_revision": "revision-1",
+            "artifact_revision": "artifact-revision-1",
+            "artifact_digest": artifact_digest,
+            "host_fingerprint": "sha256:" + "2" * 64,
+            "facts_digest": facts_digest,
+        },
+        "application": {
+            "root": "/var/www/example/public_html",
+            "console_path": "/var/www/example/public_html/bin/console",
+            "php_bin": "/usr/bin/php",
+            "run_as_user": "www-data",
+        },
+        "host_facts": {
+            "schema": "mcd-portal-applicability-facts-v1",
+            "contract_version": "1.0",
+            "facts": facts,
+            "facts_digest": facts_digest,
+        },
+        "artifact": {
+            "revision": "artifact-revision-1",
+            "digest": artifact_digest,
+            "media_type": "application/x-sh",
+            "size": len(artifact),
+        },
+        "backup": {
+            "receipt_schema": "mcd-mautic-patch-backup-attestation-v1",
+            "manifest_schema": "mcc.backup.manifest.v1",
+            "evidence": {
+                "backup_id": "instance-1:backup-1",
+                "backup_path": "/var/lib/mcd/backups/backup-1",
+                "manifest_path": "/var/lib/mcd/backups/backup-1/.mcd-backup.json",
+                "sha256": "3" * 64,
+                "completed_at": "2026-10-27T00:00:00Z",
+                "bytes_written": 1,
+                "rollback_supported": True,
+            },
+        },
+        "migration": {
+            "discovery": {"argv_tail": ["list", "doctrine"]},
+            "apply": {"command": "doctrine:migrations:migrate", "arguments": ["--no-interaction"]},
+            "verify": {"command": "doctrine:migrations:up-to-date", "arguments": []},
+            "reconcile": {"command": "doctrine:migrations:version"},
+            "prohibited": ["arbitrary_sql", "down_migration", "delete_migration_history", "invented_command_or_default"],
+        },
+        "rollback": {
+            "state": "not_attempted",
+            "succeeded": False,
+            "binding": {
+                "run_id": "run-primitive-1",
+                "plan_sha256": "4" * 64,
+                "backup_id": "instance-1:backup-1",
+                "root": "/var/www/example/public_html",
+            },
+        },
+    }
+
+
+def _primitive_job_context(artifact: bytes) -> dict[str, object]:
+    primitive = _primitive_context(artifact)
+    return {
+        "schema": "portal-self-hosted-executable-context-v1",
+        "contract_version": "1.0",
+        "job": {
+            "job_id": "job-primitive-1",
+            "request_id": "request-primitive-1",
+            "command_id": "command-primitive-1",
+            "idempotency_key": "idempotency-primitive-1",
+        },
+        "scenario": {
+            "scenario_id": "scenario-primitive-1",
+            "revision": "revision-1",
+            "artifact_revision": "artifact-revision-1",
+            "artifact_digest": primitive["binding"]["artifact_digest"],
+        },
+        "applicability": {"facts_digest": primitive["binding"]["facts_digest"]},
+        "parameters": {},
+        "secret_references": [],
+        "primitive_context": primitive,
+    }
+
+
+def test_primitive_context_binds_existing_mcd_primitives() -> None:
+    artifact = b"#!/bin/sh\nprintf '%s\\n' primitive\n"
+    frame = encode_request_frame(artifact, _primitive_job_context(artifact))
+    assert frame.startswith(FRAME_MAGIC)
+
+
+@pytest.mark.parametrize(
+    ("path", "value", "error"),
+    [
+        ("binding.job_id", "other-job", "binding_mismatch"),
+        ("artifact.size", 1, "artifact_size_mismatch"),
+        ("migration.apply.command", "doctrine:drop-database", "migration_invalid"),
+        ("rollback.state", "succeeded", "rollback_invalid"),
+    ],
+)
+def test_primitive_context_rejects_unbound_or_unsafe_state(path: str, value: object, error: str) -> None:
+    artifact = b"#!/bin/sh\nprintf '%s\\n' primitive\n"
+    context = _primitive_job_context(artifact)
+    target: object = context["primitive_context"]
+    for part in path.split("."):
+        target = target[part]  # type: ignore[index]
+    parent: object = context["primitive_context"]
+    parts = path.split(".")
+    for part in parts[:-1]:
+        parent = parent[part]  # type: ignore[index]
+    parent[parts[-1]] = value  # type: ignore[index]
+    with pytest.raises(Exception, match=error):
+        encode_request_frame(artifact, context)
+
+
 def test_launcher_executes_signed_artifact_without_shell_and_exposes_context_on_fd3(tmp_path: Path) -> None:
     artifact = b"#!/bin/sh\ncat <&3 >/dev/null || exit 71\nprintf '%s\\n' '{\"status\":\"succeeded\",\"job_id\":\"job-1\"}'\n"
     context = {

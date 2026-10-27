@@ -1216,6 +1216,23 @@ No fixed onboarding stage registry is constructed on this path. Progress is
 checkpointed by immutable `job_id`; replay of the same signed job returns the
 durable terminal receipt without re-executing the runner.
 
+For the Mautic primitive context, the additive
+`mcd-scenario-primitive-context-v1` contract is validated by the same launcher
+(`mcd_agent/contracts/mcd-scenario-primitive-context-v1.json`). It binds the
+job/request/command/idempotency tuple, scenario and artifact pins, host
+fingerprint, and the normalized applicability facts digest. The application
+coordinates are the already discovered absolute `root`, `console_path`,
+`php_bin`, and `run_as_user`; MCD does not invent a path or default. Backup
+evidence is the existing `mcd-mautic-patch-backup-attestation-v1` receipt over
+the `mcc.backup.manifest.v1` marker. Migration policy carries only the existing
+`list doctrine` discovery and the discovered migrate/up-to-date/version command
+families with non-interactive apply; arbitrary SQL, down migrations, deletion
+of migration history, and invented defaults are rejected. Rollback remains the
+existing immutable patch-plan/backup restore path with drift-fail-closed
+semantics and explicit `not_attempted|attempted|succeeded|failed|blocked`
+state. The context validator checks binding and shape only; the launcher does
+not execute PHP, choose versions, restore a backup, or synthesize a recipe.
+
 The executable scenario bridge follows Portal's additive
 `portal-self-hosted-executable-scenario-v1` contract. The signed artifact must
 be `application/x-sh` or `application/x-elf`; the legacy declarative JSON
