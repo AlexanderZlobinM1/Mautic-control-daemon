@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import subprocess
 import unittest
+from contextlib import contextmanager
 from types import SimpleNamespace
+from unittest.mock import Mock
 from unittest.mock import patch
 
 from mcd_agent import daemon
@@ -10,6 +12,38 @@ from mcd_agent.daemon import RunningTask, TaskStore
 
 
 class ExternalTaskAdmissionTests(unittest.TestCase):
+    def test_maintenance_fence_blocks_late_submit_and_external_adoption(self) -> None:
+        @contextmanager
+        def blocked_fence(*_args, **_kwargs):
+            yield False
+
+        config = SimpleNamespace(scheduler_pause_flag_path="/tmp/mcd-test-scheduler.pause")
+        with patch.object(daemon, "scheduler_dispatch_fence", blocked_fence), patch.object(
+            daemon, "_submit_if_slot_uncoordinated"
+        ) as submit:
+            launched = daemon._submit_if_slot(
+                config=config,
+                store=Mock(),
+                running={},
+                root="/var/www/client",
+                task_type="segment",
+                entity_id=92,
+                args=["true"],
+                timeout_sec=1,
+                max_parallel_for_type=1,
+            )
+        self.assertFalse(launched)
+        submit.assert_not_called()
+
+        with patch.object(daemon, "scheduler_dispatch_fence", blocked_fence):
+            result = daemon._sync_external_running_tasks(
+                config=config,
+                installs=[],
+                running={},
+                popens={},
+            )
+        self.assertEqual(result["fence_blocked"], 1)
+
     def test_external_console_processes_are_one_logical_task(self) -> None:
         root = "/var/www/client"
         ps_output = (

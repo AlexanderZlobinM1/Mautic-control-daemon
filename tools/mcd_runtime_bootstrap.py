@@ -51,6 +51,12 @@ except ImportError:  # pragma: no cover - the bridge is POSIX-only
 
 MANIFEST_NAME = "mcd-runtime-manifest.json"
 MANIFEST_SCHEMA = "mcd-runtime-package-v1"
+REQUIRED_RUNTIME_FILES = {
+    "mcd_agent/__init__.py",
+    "mcd_agent/daemon.py",
+    "mcd_agent/state_push.py",
+    "mcd_agent/mcd_control.py",
+}
 RECEIPT_SCHEMA = "mcd-runtime-bootstrap-receipt-v1"
 STATE_NAME = "mcd-self-update.json"
 SERVICE_DROPIN_NAME = "99-mcd-runtime-package.conf"
@@ -140,6 +146,9 @@ def _validate_manifest(stage: Path) -> dict[str, Any]:
     unlisted = sorted(actual_files - listed)
     if unlisted:
         raise BridgeError(f"runtime manifest has unlisted payload files: {unlisted[:8]}")
+    missing_required = sorted(REQUIRED_RUNTIME_FILES - listed)
+    if missing_required:
+        raise BridgeError(f"runtime manifest is missing required import files: {missing_required}")
     for forbidden in FORBIDDEN_TOP_LEVEL:
         if (stage / forbidden).exists():
             raise BridgeError(f"runtime-only payload contains forbidden material: {forbidden}")

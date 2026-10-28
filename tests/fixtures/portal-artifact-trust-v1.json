@@ -1,0 +1,123 @@
+{
+  "schema": "portal-artifact-trust-fixture-v1",
+  "contract_version": "1.0",
+  "job_signing_public_key": {
+    "algorithm": "ed25519",
+    "key_id": "portal-job-fixture-1",
+    "value": "d3bocLkzVPKgskwj8qNsxOgOIjIYwbl5Jv3QGDlqK5s"
+  },
+  "artifact_trust": {
+    "schema": "portal-artifact-trust-v1",
+    "contract_version": "1.0",
+    "trust_domain": "portal_self_host_scenario_artifact",
+    "trust_revision": 1,
+    "trust_digest": "sha256:92fed1f1379c75f693a17727104af47d8edff4a3228997109d8a38e7cb6fc714",
+    "keys": [
+      {
+        "algorithm": "ed25519",
+        "key_id": "portal-artifact-fixture-1",
+        "value": "JUO5L_EJVRFHatyDadtt3JM2ZaEZeN2hQE7hBmypVZ0",
+        "status": "active",
+        "not_before": null,
+        "not_after": null
+      }
+    ]
+  },
+  "artifact_statement": {
+    "kind": "scenario",
+    "revision": "scenario-fixture-r1",
+    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "media_type": "application/vnd.sales-snap.scenario+json",
+    "size_bytes": 2194
+  },
+  "artifact_signature": {
+    "algorithm": "ed25519",
+    "key_id": "portal-artifact-fixture-1",
+    "value": "QIU-9rQePd_iC0buuec79kwILZojNvtU4lgIs_WRgkP0izUlmcQ6Khvym1-VAZgKDC-Yrmfo7Sv2jEmGh8qbDQ"
+  },
+  "update_command": {
+    "schema": "portal-mcd-artifact-trust-update-v1",
+    "contract_version": "1.0",
+    "command_id": "cmd-fixture-1",
+    "delivery_cursor": 12,
+    "request_id": "req-fixture-1",
+    "idempotency_key": "idem-fixture-1",
+    "binding": {
+      "agent_id": "agent-fixture-1",
+      "installation_id": "installation-fixture-1",
+      "host_fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "commercial_key_id": "commercial-fixture-1"
+    },
+    "trust_domain": "portal_self_host_scenario_artifact",
+    "trust_revision": 1,
+    "trust_digest": "sha256:92fed1f1379c75f693a17727104af47d8edff4a3228997109d8a38e7cb6fc714",
+    "keys": [
+      {
+        "algorithm": "ed25519",
+        "key_id": "portal-artifact-fixture-1",
+        "value": "JUO5L_EJVRFHatyDadtt3JM2ZaEZeN2hQE7hBmypVZ0",
+        "status": "active",
+        "not_before": null,
+        "not_after": null
+      }
+    ],
+    "issued_at": "2026-10-27T00:00:00.000Z",
+    "expires_at": "2026-10-27T00:05:00.000Z"
+  },
+  "poll_response": {
+    "schema": "portal-mcd-poll-response-v1",
+    "contract_version": "1.0",
+    "request_id": "poll-fixture-1",
+    "idempotency_key": "poll-idem-fixture-1",
+    "binding": {
+      "agent_id": "agent-fixture-1",
+      "installation_id": "installation-fixture-1",
+      "host_fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "commercial_key_id": "commercial-fixture-1"
+    },
+    "next_command_cursor": 12,
+    "commands": [
+      {
+        "schema": "portal-mcd-artifact-trust-update-v1",
+        "contract_version": "1.0",
+        "command_id": "cmd-fixture-1",
+        "delivery_cursor": 12,
+        "request_id": "req-fixture-1",
+        "idempotency_key": "idem-fixture-1",
+        "binding": {
+          "agent_id": "agent-fixture-1",
+          "installation_id": "installation-fixture-1",
+          "host_fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "commercial_key_id": "commercial-fixture-1"
+        },
+        "trust_domain": "portal_self_host_scenario_artifact",
+        "trust_revision": 1,
+        "trust_digest": "sha256:92fed1f1379c75f693a17727104af47d8edff4a3228997109d8a38e7cb6fc714",
+        "keys": [
+          {
+            "algorithm": "ed25519",
+            "key_id": "portal-artifact-fixture-1",
+            "value": "JUO5L_EJVRFHatyDadtt3JM2ZaEZeN2hQE7hBmypVZ0",
+            "status": "active",
+            "not_before": null,
+            "not_after": null
+          }
+        ],
+        "issued_at": "2026-10-27T00:00:00.000Z",
+        "expires_at": "2026-10-27T00:05:00.000Z"
+      }
+    ],
+    "retry_after_ms": 0,
+    "portal_signature": {
+      "algorithm": "ed25519",
+      "key_id": "portal-job-fixture-1",
+      "value": "Mo_48PnIYER_jgWdn1NOvEG_WRHqCu6xdVgrilIN_tUb_uEGWcNudOeY45eS5360InTdyu7WdGn5qSgYzc4cCQ"
+    }
+  },
+  "canonical_sha256": {
+    "artifact_statement": "sha256:45a830c17c951a9a385b8871be0d90ab023f46ef0d4c4e25d0eafcf1277ccc38",
+    "artifact_trust": "sha256:4a26db4c071f0872b00f0bc6d5129417430a67287f2e7b31e016da6b2dafc468",
+    "update_command": "sha256:d3ea8efa363eb8e9f92ba5ac35e82ddb4656856bbd8cd606afb515b4ad16c968",
+    "poll_response_unsigned": "sha256:a340484b76e5ac6341f1e853d04ee1f472e83dea512eb3d8a747f955bba5d7cb"
+  }
+}

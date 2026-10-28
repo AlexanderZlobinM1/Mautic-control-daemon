@@ -1,0 +1,46 @@
+{
+  "schema": "portal-self-hosted-mcd-job-v2",
+  "contract_version": "2.1",
+  "job_id": "fixture-job-v21",
+  "request_id": "fixture-request-v21",
+  "idempotency_key": "fixture-idempotency-v21",
+  "account_id": "fixture-account-v21",
+  "commercial_key_id": "fixture-commercial-v21",
+  "agent_id": "fixture-agent-v21",
+  "installation_id": "fixture-installation-v21",
+  "host_fingerprint": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "scenario": {
+    "scenario_id": "debian-family-self-hosted",
+    "revision": "3.0.0",
+    "mode": "scan",
+    "artifact_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "applicability": {
+    "facts": {
+      "os_id": "ubuntu",
+      "os_version": "24.04",
+      "architecture": "amd64",
+      "package_manager": "apt-get",
+      "capabilities": ["mcd_passive_activation_v1", "portal_scenario_execution_v1"],
+      "target_kind": "existing_server"
+    },
+    "facts_digest": "sha256:d90e3650d374b2f4e42ce9784a55734b0cc1ef426ecf2d46cce0ccaeadec5ab6"
+  },
+  "scenario_artifact": {
+    "artifact_uri": "https://portal.example/artifacts/scenario",
+    "artifact_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "artifact_size_bytes": 24,
+    "artifact_media_type": "application/json",
+    "artifact_revision": "3.0.0",
+    "signature": {"algorithm": "ed25519", "key_id": "fixture-scenario-artifact", "value": "fixture-scenario-signature"}
+  },
+  "execution": {"primitive": "scenario.apply", "version": "1.0"},
+  "issued_at": "2099-10-26T00:00:00.000Z",
+  "expires_at": "2099-10-26T01:00:00.000Z",
+  "nonce": "fixture-nonce-v21",
+  "portal_signature": {
+    "algorithm": "ed25519",
+    "key_id": "portal-self-hosted-mcd-v2.1-fixture",
+    "value": "k3h_Iv5Neb1Gf6vmbpnB6hUtxsJskh6bcs1yq8TY12waeiu_Jp01MH7z_i-HuePj-dPs4YOBQAI0xWMfkLtLBQ"
+  }
+}

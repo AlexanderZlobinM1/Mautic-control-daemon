@@ -41,6 +41,7 @@ from mcd_agent.config import (
     reapply_profile_authority,
     recover_config_from_mcc,
     remove_runtime_values,
+    runtime_remote_allowed_keys,
     runtime_effective_map,
     upsert_runtime_values,
 )
@@ -72,6 +73,7 @@ from mcd_agent.cleanup_schedule import (
 )
 from mcd_agent.cluster_assets import guard_cluster_assets
 from mcd_agent.custom_scripts import cached_custom_manifest_keys, cleanup_custom_cache, fetch_custom_manifest
+from mcd_agent.commercial_detector import PORTAL_LOCAL_FACTS_CAPABILITIES, build_applicability_facts_snapshot
 from mcd_agent.db import MauticDB
 from mcd_agent.db_watchdog import collect_db_watchdog_snapshot, effective_db_watchdog_config
 from mcd_agent.email_counters import repair_campaign_email_counters
@@ -88,6 +90,7 @@ from mcd_agent.mautic6_core_patch import ensure_m6_plugin_update_metadata_patch,
 from mcd_agent.mautic713_import_tag_patch import reconcile_import_tag_patch
 from mcd_agent.grapesjs_ckeditor_patch import ensure_grapesjs_ckeditor_gpl_patch
 from mcd_agent.mautic_locks import cleanup_stale_mautic_file_locks
+from mcd_agent.maintenance_mode import scheduler_dispatch_fence
 from mcd_agent.mautic_version_cache import confirmed_mautic_major, retire_zabbix_mautic_version_userparameter
 from mcd_agent.mautic_core_restore import restore_retired_mcd_core_patches
 from mcd_agent.logical_issues import (
@@ -141,7 +144,18 @@ from mcd_agent.runtime_overrides import (
     merge_instance_desired_states,
     normalize_segment_special_rings,
     overrides_fingerprint,
+    push_runtime_sync_v3,
     push_runtime_overrides,
+)
+from mcd_agent.runtime_sync_v3 import (
+    STATE_KEY as _RUNTIME_SYNC_V3_KEY,
+    conflict_active as _runtime_sync_v3_conflict_active,
+    conflict_safe_runtime as _runtime_sync_v3_conflict_safe_runtime,
+    desired_runtime_from_response as _runtime_sync_v3_desired_runtime,
+    intent_id as _runtime_sync_v3_intent_id,
+    resolution_seen as _runtime_sync_v3_resolution_seen,
+    runtime_changes as _runtime_sync_v3_changes,
+    three_way_merge as _runtime_sync_v3_three_way_merge,
 )
 from mcd_agent.ring_utils import advance_ring_after_launch as _advance_ring_after_launch
 from mcd_agent.ring_utils import mark_ring_entity_executed as _mark_ring_entity_executed
@@ -220,9 +234,8 @@ from mcd_agent.state_backend import (
     mysql_state_table_names,
     normalized_state_backend,
 )
-from mcd_agent.commercial_execution import CommercialPortalWorker, CommercialScenarioExecutor
-from mcd_agent.commercial_onboarding import build_onboarding_primitive_registry
-from mcd_agent.commercial_portal import CommercialState, PortalClient
+from mcd_agent.commercial_self_hosted import ExternalProcessPolicy, SelfHostedPortalWorker, SelfHostedScenarioExecutor, default_scenario_runner_argv
+from mcd_agent.commercial_portal import CommercialState, PortalClient, build_standalone_settings_snapshot, canonical_json, portal_artifact_trust_keys
 
 _CMD_SEP = "\x1f"
 _M4_CAMPAIGN_DELETED_CLAUSE_RE = re.compile(r"\s+AND\s*\(?\s*c\.deleted\s+IS\s+NULL\s*\)?", re.IGNORECASE)
@@ -247,43 +260,276 @@ _LOCAL_RUNTIME_ACCEPTED_KEY = "local_runtime_accepted"
 _MCD_RUNTIME_AGENT_VERSION_KEY = "mcd_runtime_agent_version"
 
 
+def _commercial_pending_delivery(state: CommercialState) -> bool:
+    pending = state.get("commercial_self_hosted_pending_delivery_v1")
+    return isinstance(pending, Mapping) and isinstance(pending.get("job"), Mapping)
+
+
+def _commercial_state_eligibility(config: AgentConfig) -> tuple[bool, str]:
+    """Determine Portal capability from durable commercial state only.
+
+    The base MCD profile remains independent: a passive/standalone config may
+    run the outbound Portal capability when a valid persistent enrollment is
+    present, while a commercial-looking profile without that enrollment must
+    fail closed.
+    """
+    state_path = str(getattr(config, "state_db_path", "") or "").strip()
+    if not state_path:
+        return False, "commercial_state_path_missing"
+    try:
+        state = CommercialState(state_path)
+        connection_state = str(state.get("commercial_portal_connection_state") or "").strip().lower()
+        if connection_state == "pending_activation":
+            return False, "commercial_state_pending_activation"
+        revoked = bool(state.get("commercial_revoked")) or bool(state.get("commercial_detached")) or connection_state in {"revoked", "detached"}
+        if revoked and not _commercial_pending_delivery(state):
+            return False, "commercial_state_revoked"
+        if not state.portal_enrollment_enabled:
+            # A saved delivery must still be drained after a state transition;
+            # the worker will emit a typed terminal receipt and then stop.
+            if not _commercial_pending_delivery(state):
+                return False, "commercial_state_not_enabled"
+        base = str(state.get("portal_api_base") or "").strip()
+        credential = str(state.get("portal_agent_credential") or "").strip()
+        agent_id = str(state.get("agent_id") or "").strip()
+        key_metadata = state.get("commercial_key_metadata")
+        commercial_key_id = str(state.get("commercial_key_id") or (key_metadata.get("commercial_key_id") if isinstance(key_metadata, dict) else "") or "").strip()
+        host_fingerprint = str(state.get("host_fingerprint") or "").strip()
+        installations = state.get("installation_ids")
+        if (
+            not base.startswith("https://")
+            or not credential
+            or not agent_id
+            or not commercial_key_id
+            or not host_fingerprint
+            or not isinstance(installations, dict)
+            or not installations
+        ):
+            return False, "commercial_state_binding_incomplete"
+    except Exception:
+        return False, "commercial_state_unreadable"
+    return True, ""
+
+
 def _commercial_worker_allowed(config: AgentConfig, *, single_cycle: bool, factory: object) -> bool:
-    """Keep the Portal lane outside corporate/standalone scheduler paths."""
-    return (
-        not single_cycle
-        and callable(factory)
-        and str(getattr(config, "profile_name", "") or "").strip().lower() == "commercial"
-    )
+    """Start Portal as an independent capability, never by profile name."""
+    eligible, _reason = _commercial_state_eligibility(config)
+    return not single_cycle and callable(factory) and eligible
 
 
-def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threading.Event], CommercialPortalWorker | None]:
+def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threading.Event], SelfHostedPortalWorker | None]:
     """Build the commercial worker from protected local state only."""
-    def build(_stop_event: threading.Event) -> CommercialPortalWorker | None:
+    def build(_stop_event: threading.Event) -> SelfHostedPortalWorker | None:
         state = CommercialState(config.state_db_path)
         def disabled(reason: str) -> None:
             state.put("commercial_worker_status", {"schema": "mcd-commercial-worker-status-v1", "status": "disabled", "reason": reason, "secret": None})
-        if not state.commercial_enabled:
+        pending_delivery = _commercial_pending_delivery(state)
+        if not state.portal_enrollment_enabled and not pending_delivery:
             disabled("portal_credential_or_host_binding_invalid")
+            return None
+        connection_state = str(state.get("commercial_portal_connection_state") or "").strip().lower()
+        if (bool(state.get("commercial_revoked")) or bool(state.get("commercial_detached")) or connection_state in {"revoked", "detached"}) and not pending_delivery:
+            disabled("commercial_state_revoked")
             return None
         base = str(state.get("portal_api_base") or "")
         credential = str(state.get("portal_agent_credential") or "")
         agent_id = str(state.get("agent_id") or "")
         installations = state.get("installation_ids")
         portal_keys = state.get("portal_job_signing_keys")
-        publisher_keys = state.get("portal_mcc_publisher_keys")
-        if not base.startswith("https://") or not credential or not agent_id or not isinstance(installations, dict) or not installations or not isinstance(portal_keys, dict) or not portal_keys or not isinstance(publisher_keys, dict) or not publisher_keys:
+        # Portal artifact trust is operation-scoped material. It is needed only
+        # when a delivered scenario's external artifacts are verified; it is
+        # not a worker-start gate. Canonical Portal trust wins. The old MCC
+        # publisher map remains a deprecated compatibility alias only while no
+        # canonical Portal trust has been activated.
+        artifact_trust_raw = state.get("portal_artifact_trust_v1")
+        publisher_keys_raw = state.get("portal_artifact_signing_keys")
+        if isinstance(artifact_trust_raw, dict):
+            publisher_keys = portal_artifact_trust_keys(artifact_trust_raw)
+        elif isinstance(publisher_keys_raw, dict):
+            publisher_keys = publisher_keys_raw
+        else:
+            legacy_keys = state.get("portal_mcc_publisher_keys")
+            publisher_keys = legacy_keys if isinstance(legacy_keys, dict) else {}
+        key_metadata = state.get("commercial_key_metadata")
+        commercial_key_id = str(state.get("commercial_key_id") or (key_metadata.get("commercial_key_id") if isinstance(key_metadata, dict) else "") or "")
+        host_fingerprint = str(state.get("host_fingerprint") or "")
+        if not base.startswith("https://") or not credential or not agent_id or not commercial_key_id or not host_fingerprint or not isinstance(installations, dict) or not installations or not isinstance(portal_keys, dict) or not portal_keys:
             disabled("portal_runtime_material_incomplete")
             return None
         try:
-            worker = CommercialPortalWorker(
+            # The commercial lane uses the immutable runner shipped with the
+            # MCD runtime.  It is independent of the standalone/corporate
+            # scheduler and cannot be replaced by ad-hoc host state.
+            runner = ExternalProcessPolicy(
+                default_scenario_runner_argv(),
+                timeout_sec=int(state.get("commercial_scenario_runner_timeout_sec") or 1800),
+            )
+            runtime_store = TaskStore(config.state_db_path)
+
+            def handle_runtime_command(command: Mapping[str, Any]) -> Mapping[str, Any]:
+                """Apply Portal's generic v3 intent through MCD primitives."""
+                local_cfg = load_config(config.config_file_path, allow_recover_from_mcc=False)
+                current = local_runtime_overrides(local_cfg)
+                choice = str(command.get("choice") or command.get("resolution") or "").strip().lower()
+                value = command.get("value")
+                if choice in {"host", "keep_host"}:
+                    resolved = dict(current)
+                elif choice in {"central", "keep_central", "merged"} and isinstance(value, Mapping):
+                    resolved = dict(value)
+                else:
+                    base = command.get("base") if isinstance(command.get("base"), Mapping) else {}
+                    changes = command.get("changes") if isinstance(command.get("changes"), Mapping) else {}
+                    central = dict(base)
+                    central.update(dict(changes))
+                    merge = _runtime_sync_v3_three_way_merge(
+                        base,
+                        central,
+                        current,
+                        semantic_groups=command.get("semantic_conflict_groups", []),
+                    )
+                    if merge["status"] == "conflict":
+                        runtime_store.put_runtime_sync(
+                            _RUNTIME_SYNC_V3_KEY,
+                            {
+                                "schema": "mcd-runtime-sync-v3-state-v1",
+                                "status": "conflict",
+                                "conflict": merge,
+                                "base_revision": command.get("base_revision"),
+                            },
+                        )
+                        return {"status": "conflict", "conflict": merge["conflicts"]}
+                    resolved = dict(merge["merged"])
+                _persist_resolved_runtime_to_config(
+                    local_cfg,
+                    current,
+                    resolved,
+                    {},
+                    full_snapshot=True,
+                )
+                applied = apply_remote_overrides(
+                    load_config(config.config_file_path, allow_recover_from_mcc=False),
+                    resolved,
+                )
+                runtime_store.put_runtime_sync("mcc_runtime", resolved)
+                runtime_store.put_runtime_sync("local_runtime", resolved)
+                runtime_store.put_runtime_sync(
+                    _RUNTIME_SYNC_V3_KEY,
+                    {
+                        "schema": "mcd-runtime-sync-v3-state-v1",
+                        "status": "accepted",
+                        "base_revision": command.get("result_revision") or command.get("base_revision"),
+                        "base": resolved,
+                        "changes": {},
+                    },
+                )
+                return {
+                    "status": "succeeded",
+                    "applied_keys": list(applied.get("applied_keys", [])),
+                    "blocked_keys": list(applied.get("blocked_keys", [])),
+                }
+
+            portal_context = {
+                "platform": "linux-arm64" if platform.machine().lower() in {"aarch64", "arm64"} else "linux-amd64",
+                "runtime": "host",
+                "cron_ownership": "none",
+                "local_facts_capabilities": list(PORTAL_LOCAL_FACTS_CAPABILITIES),
+            }
+
+            def inventory_snapshot(_installation_id: str) -> Mapping[str, Any]:
+                """Build the complete secret-free host/instance inventory."""
+                local_cfg = load_config(config.config_file_path, allow_recover_from_mcc=False)
+                runtime = local_runtime_overrides(local_cfg)
+                instances = InstanceInventory(config.state_db_path).list_instances()
+                desired_state = runtime_store.get_runtime_sync("mcc_runtime_desired_state")
+                host_revision = int(desired_state.get("revision") or 0) if isinstance(desired_state, Mapping) else 0
+                sync_state = runtime_store.get_runtime_sync(_RUNTIME_SYNC_V3_KEY)
+                pending_intent = None
+                conflict = None
+                if isinstance(sync_state, Mapping):
+                    if str(sync_state.get("status") or "").lower() == "queued":
+                        candidate = {
+                            key: sync_state.get(key)
+                            for key in (
+                                "desired_state_sync_protocol",
+                                "scope",
+                                "scope_key",
+                                "origin",
+                                "base_revision",
+                                "base",
+                                "changes",
+                                "idempotency_key",
+                                "semantic_conflict_groups",
+                            )
+                        }
+                        if all(candidate.get(key) is not None for key in ("scope", "scope_key", "base_revision", "base", "changes", "idempotency_key", "semantic_conflict_groups")):
+                            pending_intent = candidate
+                    candidate_conflict = sync_state.get("conflict")
+                    if isinstance(candidate_conflict, Mapping) and all(key in candidate_conflict for key in ("id", "scope", "scope_key", "base_revision", "base", "central", "host", "conflicts", "semantic_conflict_groups", "status")):
+                        conflict = dict(candidate_conflict)
+                sync = {
+                    "desired_state_sync_protocol": 3,
+                    "pending_intent": pending_intent,
+                    "conflict": conflict,
+                }
+                def settings(values: Mapping[str, Any]) -> dict[str, Any]:
+                    return build_standalone_settings_snapshot(values, revision=host_revision, sync=sync)
+                scoped = instance_desired_states(runtime, instances)
+                rows = []
+                for inst in instances:
+                    uid = str(getattr(inst, "instance_uid", "") or "").strip()
+                    if not uid:
+                        continue
+                    rows.append(
+                        {
+                            "instance_id": uid,
+                            "display_name": str(getattr(inst, "name", "") or uid),
+                            "root": str(getattr(inst, "root", "") or uid),
+                            "mautic_version": str(getattr(inst, "mautic_major", None) or "unknown"),
+                            "status": "active" if Path(str(getattr(inst, "root", "") or "")).exists() else "missing",
+                            "capabilities": sorted(str(item) for item in (getattr(inst, "runtime_capabilities", []) or [])),
+                            "settings": settings(scoped.get(uid, {})),
+                        }
+                    )
+                rows.sort(key=lambda item: str(item["instance_id"]))
+                return {
+                    "schema": "portal-mcd-inventory-snapshot-v1",
+                    "contract_version": "1.0",
+                    "request_id": f"inventory-{int(time.time() * 1000)}",
+                    "binding": {
+                        "agent_id": agent_id,
+                        "installation_id": _installation_id,
+                        "host_fingerprint": host_fingerprint,
+                        "commercial_key_id": commercial_key_id,
+                    },
+                    "snapshot_revision": str(host_revision),
+                    "observed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "complete": True,
+                    "host": {
+                        "mcd_version": __version__,
+                        "profile": str(local_cfg.profile_name or "commercial"),
+                        "service_status": "active",
+                        "scheduler_paused": False,
+                        "settings": settings(runtime),
+                    },
+                    "applicability_facts": build_applicability_facts_snapshot(
+                        target_kind="existing_server",
+                        capabilities=list(portal_context["local_facts_capabilities"]),
+                    ),
+                    "instances": rows,
+                }
+
+            worker = SelfHostedPortalWorker(
                 PortalClient(state),
-                CommercialScenarioExecutor(state, stage_handlers=build_onboarding_primitive_registry()),
+                SelfHostedScenarioExecutor(state, runner=runner.run),
                 installation_id=sorted(str(value) for value in installations.values()),
                 portal_keys={str(key): str(value) for key, value in portal_keys.items()},
-                publisher_keys={str(key): str(value) for key, value in publisher_keys.items()},
-                context={"platform": "linux-arm64" if platform.machine().lower() in {"aarch64", "arm64"} else "linux-amd64", "runtime": "host", "cron_ownership": "none"},
-                capabilities={"portal_scenario_execution_v1", "mcd_passive_activation_v1"},
-                preflight_required=True,
+                publisher_keys={str(key): value for key, value in publisher_keys.items() if isinstance(value, (str, dict))},
+                context=portal_context,
+                commercial_key_id=commercial_key_id,
+                agent_id=agent_id,
+                host_fingerprint=host_fingerprint,
+                inventory_provider=inventory_snapshot,
+                runtime_command_handler=handle_runtime_command,
             )
         except Exception:
             disabled("commercial_worker_material_invalid")
@@ -374,6 +620,128 @@ def _iter_instances_with_root_dispatch_gate(
 _MCC_RUNTIME_METADATA_KEY = "mcc_runtime_metadata"
 _RUNTIME_METADATA_SCHEMA = "mcd-runtime-sync-metadata-v1"
 _PLUGIN_OPERATIONS_RUNTIME_KEY = "plugin_operations"
+
+
+def _runtime_sync_v3_state(store: object) -> dict[str, Any]:
+    try:
+        raw = store.get_runtime_sync(_RUNTIME_SYNC_V3_KEY)
+    except Exception:
+        raw = None
+    return dict(raw) if isinstance(raw, Mapping) else {}
+
+
+def _runtime_sync_v3_groups(config: AgentConfig, store: object) -> list[dict[str, Any]]:
+    raw = getattr(config, "mcc_runtime_sync_semantic_conflict_groups", None)
+    if raw is None:
+        raw = _runtime_sync_v3_state(store).get("semantic_conflict_groups", [])
+    return [dict(item) for item in raw if isinstance(item, Mapping)] if isinstance(raw, list) else []
+
+
+def _runtime_sync_v3_base(store: object) -> tuple[int | None, dict[str, Any]]:
+    state = _runtime_sync_v3_state(store)
+    base = state.get("base")
+    revision = state.get("base_revision")
+    if isinstance(base, Mapping) and isinstance(revision, int) and not isinstance(revision, bool):
+        return revision, dict(base)
+    stored = store.get_runtime_sync("mcc_runtime")
+    stored = dict(stored) if isinstance(stored, Mapping) else {}
+    desired = store.get_runtime_sync("mcc_runtime_desired_state")
+    desired = desired if isinstance(desired, Mapping) else {}
+    revision = desired.get("revision")
+    return (revision if isinstance(revision, int) and not isinstance(revision, bool) else None), stored
+
+
+def _runtime_sync_v3_mark(store: object, state: Mapping[str, Any]) -> None:
+    try:
+        store.put_runtime_sync(_RUNTIME_SYNC_V3_KEY, dict(state))
+    except Exception:
+        logging.warning("runtime-sync-v3 state persistence failed")
+
+
+def _runtime_sync_v3_attempt(
+    config: AgentConfig,
+    store: object,
+    current_runtime: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Produce one durable host intent, or explicitly decline to v2."""
+    state = _runtime_sync_v3_state(store)
+    if _runtime_sync_v3_conflict_active(state):
+        return {"handled": True, "status": "conflict", "response": {"status": "conflict", "conflict": state.get("conflict")}}
+    if (
+        str(state.get("status") or "").strip().lower() == "unsupported"
+        and isinstance(state.get("retry_after"), (int, float))
+        and time.time() < float(state["retry_after"])
+    ):
+        return {"handled": False, "reason": "runtime_sync_v3_unsupported"}
+    base_revision, base = _runtime_sync_v3_base(store)
+    if base_revision is None:
+        return {"handled": False, "reason": "runtime_sync_v3_base_unavailable"}
+    groups = _runtime_sync_v3_groups(config, store)
+    changes = _runtime_sync_v3_changes(base, current_runtime, allowed_keys=runtime_remote_allowed_keys())
+    if not changes:
+        return {"handled": False, "reason": "runtime_sync_v3_no_changes"}
+    current_digest = overrides_fingerprint(dict(current_runtime))
+    if (
+        str(state.get("status") or "").strip().lower() == "queued"
+        and str(state.get("current_digest") or "") == current_digest
+    ):
+        return {"handled": True, "status": "queued", "response": {"status": "queued", "v3_supported": True}}
+    key = str(state.get("idempotency_key") or "")
+    if not key or str(state.get("current_digest") or "") != current_digest:
+        key = _runtime_sync_v3_intent_id(
+            scope_key=str(getattr(config, "mcc_host_name", "") or ""),
+            base_revision=base_revision,
+            base=base,
+            changes=changes,
+            groups=groups,
+        )
+    response = push_runtime_sync_v3(
+        config,
+        base_revision=base_revision,
+        base=base,
+        changes=changes,
+        idempotency_key=key,
+        semantic_conflict_groups=groups,
+    )
+    supported = response.get("v3_supported")
+    next_state: dict[str, Any] = {
+        "schema": "mcd-runtime-sync-v3-state-v1",
+        "base_revision": base_revision,
+        "base": dict(base),
+        "changes": dict(changes),
+        "current_digest": current_digest,
+        "idempotency_key": key,
+        "semantic_conflict_groups": groups,
+    }
+    if supported is False:
+        next_state["status"] = "unsupported"
+        next_state["retry_after"] = time.time() + 3600
+        _runtime_sync_v3_mark(store, next_state)
+        return {"handled": False, "reason": response.get("reason", "runtime_sync_v3_unsupported")}
+    status = str(response.get("status") or "error").strip().lower()
+    if status in {"applied", "merged"}:
+        revision, canonical = _runtime_sync_v3_desired_runtime(response)
+        if revision is not None and isinstance(canonical, dict):
+            next_state.update({"status": "accepted", "base_revision": revision, "base": canonical, "changes": {}, "current_digest": overrides_fingerprint(canonical), "idempotency_key": ""})
+            _runtime_sync_v3_mark(store, next_state)
+            normalized = dict(response)
+            normalized["status"] = "ok"
+            normalized["runtime_overrides"] = canonical
+            normalized["desired_state"] = {**dict(normalized.get("desired_state") or {}), "revision": revision, "runtime_overrides": canonical}
+            return {"handled": True, "status": "ok", "response": normalized, "runtime": canonical}
+    if status == "conflict" or isinstance(response.get("conflict"), Mapping):
+        conflict = response.get("conflict")
+        next_state.update({"status": "conflict", "conflict": dict(conflict) if isinstance(conflict, Mapping) else {}})
+        _runtime_sync_v3_mark(store, next_state)
+        return {"handled": True, "status": "conflict", "response": {"status": "conflict", "conflict": next_state.get("conflict")}}
+    if status in {"queued", "idempotent"}:
+        next_state["status"] = "queued"
+        _runtime_sync_v3_mark(store, next_state)
+        return {"handled": True, "status": "queued", "response": {"status": "queued", "v3_supported": True}}
+    next_state["status"] = "error"
+    next_state["reason"] = response.get("reason", "runtime_sync_v3_failed")
+    _runtime_sync_v3_mark(store, next_state)
+    return {"handled": True, "status": "error", "response": response}
 
 
 def _runtime_response_is_authoritative_full_snapshot(response: Mapping[str, Any]) -> bool:
@@ -721,6 +1089,174 @@ def _merge_missing_runtime_values(
         elif text_key not in merged:
             merged[text_key] = deepcopy(value)
     return merged
+
+
+def _runtime_value_looks_reset(value: object) -> bool:
+    """Recognize a storage/config reset without treating false/zero as loss."""
+    return value is None or (
+        isinstance(value, (str, bytes, Mapping, list, tuple, set)) and len(value) == 0
+    )
+
+
+def _runtime_snapshot_loss_detected(
+    current_runtime: Mapping[str, Any],
+    durable_runtime: Mapping[str, Any],
+) -> bool:
+    """Detect a missing or reset part of the durable MCC snapshot.
+
+    An empty/missing local projection is not a local delete.  It is a storage
+    loss signal when the durable MCC snapshot still contains that field.  The
+    check deliberately compares only fields present in the durable snapshot,
+    so it does not manufacture defaults for settings that MCC never stored.
+    False and zero remain valid values; empty containers are considered lost
+    only when the durable value is non-empty.
+    """
+    current = current_runtime if isinstance(current_runtime, Mapping) else {}
+    durable = durable_runtime if isinstance(durable_runtime, Mapping) else {}
+    for raw_key, durable_value in durable.items():
+        key = str(raw_key)
+        if key not in current:
+            return True
+        current_value = current.get(key)
+        if _is_instance_runtime_map_key(key) and isinstance(durable_value, Mapping):
+            current_rows = current_value if isinstance(current_value, Mapping) else {}
+            for uid, durable_row in durable_value.items():
+                current_uid = _matching_instance_runtime_entry(current_rows, uid)
+                if current_uid is None:
+                    return True
+                if (
+                    _runtime_value_looks_reset(current_rows.get(current_uid))
+                    and not _runtime_value_looks_reset(durable_row)
+                ):
+                    return True
+            continue
+        if _runtime_value_looks_reset(current_value) and not _runtime_value_looks_reset(durable_value):
+            return True
+    return False
+
+
+def _merge_recovered_runtime_values(
+    current_runtime: Mapping[str, Any],
+    fallback_runtime: Mapping[str, Any],
+    metadata: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Restore every missing/reset field while preserving explicit local deletes.
+
+    A mutable runtime include can be replaced by an update or truncated by an
+    failed write.  The durable snapshot is therefore authoritative for every
+    allowed field that disappeared or became empty, not only instance rows or
+    stable keys.  A real local deletion is represented by a non-bootstrap MCD
+    tombstone and must not be resurrected here.
+    """
+    merged = deepcopy(dict(current_runtime))
+    for raw_key, fallback_value in fallback_runtime.items():
+        key = str(raw_key)
+        if _is_instance_runtime_map_key(key) and isinstance(fallback_value, Mapping):
+            current_rows = merged.get(key)
+            current_rows = dict(current_rows) if isinstance(current_rows, Mapping) else {}
+            next_rows = dict(current_rows)
+            for raw_uid, value in fallback_value.items():
+                uid = str(raw_uid)
+                existing_uid = _matching_instance_runtime_entry(next_rows, uid)
+                existing_value = next_rows.get(existing_uid) if existing_uid is not None else None
+                stamp = _runtime_metadata_get(metadata, "instance", key, uid)
+                local_delete = (
+                    isinstance(stamp, Mapping)
+                    and str(stamp.get("source") or "").lower() == "mcd"
+                    and bool(stamp.get("tombstone"))
+                    and not str(stamp.get("event_id") or "").startswith("bootstrap:")
+                )
+                if local_delete:
+                    continue
+                if existing_uid is None or _runtime_value_looks_reset(existing_value):
+                    next_rows[uid] = deepcopy(value)
+            if next_rows:
+                merged[key] = next_rows
+            continue
+        stamp = _runtime_metadata_get(metadata, "host", key)
+        local_delete = (
+            isinstance(stamp, Mapping)
+            and str(stamp.get("source") or "").lower() == "mcd"
+            and bool(stamp.get("tombstone"))
+            and not str(stamp.get("event_id") or "").startswith("bootstrap:")
+        )
+        if local_delete:
+            continue
+        if key not in merged or _runtime_value_looks_reset(merged.get(key)):
+            merged[key] = deepcopy(fallback_value)
+    return merged
+
+
+def _overlay_runtime_recovery_snapshot(
+    current_runtime: Mapping[str, Any],
+    recovery_runtime: Mapping[str, Any],
+    metadata: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Restore the complete MCC snapshot after detecting a runtime loss.
+
+    A loss can leave a mixture of missing keys and non-empty reset defaults.
+    Filling only absent values would therefore preserve part of the reset and
+    make the next restart look like a real MCD edit.  Once loss is detected,
+    every field present in the durable recovery snapshot is materialized.
+    A proven, non-bootstrap MCD edit remains authoritative for that field, and
+    an explicit local tombstone remains destructive.  Fields absent from the
+    snapshot are retained because absence is not a deletion signal.
+    """
+    restored = deepcopy(dict(current_runtime))
+    for raw_key, recovery_value in recovery_runtime.items():
+        key = str(raw_key)
+        if _is_instance_runtime_map_key(key) and isinstance(recovery_value, Mapping):
+            current_rows = restored.get(key)
+            current_rows = dict(current_rows) if isinstance(current_rows, Mapping) else {}
+            next_rows = dict(current_rows)
+            for raw_uid, value in recovery_value.items():
+                uid = str(raw_uid)
+                existing_uid = _matching_instance_runtime_entry(next_rows, uid)
+                stamp = _runtime_metadata_get(metadata, "instance", key, uid)
+                local_edit = (
+                    isinstance(stamp, Mapping)
+                    and str(stamp.get("source") or "").lower() == "mcd"
+                    and not str(stamp.get("event_id") or "").startswith("bootstrap:")
+                    and not bool(stamp.get("tombstone"))
+                )
+                local_delete = (
+                    isinstance(stamp, Mapping)
+                    and str(stamp.get("source") or "").lower() == "mcd"
+                    and bool(stamp.get("tombstone"))
+                    and not str(stamp.get("event_id") or "").startswith("bootstrap:")
+                )
+                if local_delete:
+                    if existing_uid is not None:
+                        next_rows.pop(existing_uid, None)
+                    continue
+                if not local_edit or existing_uid is None:
+                    if existing_uid is not None and existing_uid != uid:
+                        next_rows.pop(existing_uid, None)
+                    next_rows[uid] = deepcopy(value)
+            if next_rows:
+                restored[key] = next_rows
+            elif key in restored:
+                restored[key] = {}
+            continue
+
+        stamp = _runtime_metadata_get(metadata, "host", key)
+        local_edit = (
+            isinstance(stamp, Mapping)
+            and str(stamp.get("source") or "").lower() == "mcd"
+            and not str(stamp.get("event_id") or "").startswith("bootstrap:")
+            and not bool(stamp.get("tombstone"))
+        )
+        local_delete = (
+            isinstance(stamp, Mapping)
+            and str(stamp.get("source") or "").lower() == "mcd"
+            and bool(stamp.get("tombstone"))
+            and not str(stamp.get("event_id") or "").startswith("bootstrap:")
+        )
+        if local_delete:
+            restored.pop(key, None)
+        elif not local_edit:
+            restored[key] = deepcopy(recovery_value)
+    return restored
 
 
 def _merge_missing_plugin_operation_catalog(
@@ -1292,11 +1828,23 @@ def _persist_resolved_runtime_to_config(
     previous_runtime: Mapping[str, Any],
     resolved_runtime: Mapping[str, Any],
     resolved_metadata: Mapping[str, Any],
+    *,
+    full_snapshot: bool = False,
 ) -> None:
-    """Persist only resolved values and explicit MCC tombstones."""
+    """Persist resolved values and explicit MCC tombstones.
+
+    Normal stable polls retain the historical stable-key projection. A
+    startup/update recovery, or any normal poll where MCC wins a non-stable
+    field, is different: the mutable runtime include may have been replaced or
+    truncated, so every MCC-allowed runtime key must be materialized back to
+    disk. Keeping that distinction here prevents a partial recovery from
+    looking like a successful full restore while preserving normal poll
+    non-destructive behavior.
+    """
     previous = dict(previous_runtime)
     resolved = dict(resolved_runtime)
-    stable_keys = (_STABLE_RUNTIME_KEYS | set(previous) | set(resolved)) & _STABLE_RUNTIME_KEYS
+    persistable_keys = runtime_remote_allowed_keys() if full_snapshot else _STABLE_RUNTIME_KEYS
+    stable_keys = (persistable_keys | set(previous) | set(resolved)) & persistable_keys
     updates = {
         str(key): deepcopy(resolved[key])
         for key in stable_keys
@@ -1651,8 +2199,9 @@ def _initialize_local_runtime_baseline(
     if recover_after_update:
         # A package/source transition may leave the mutable runtime include
         # empty or partially rebuilt. That is not an operator deletion. Start
-        # from the complete durable baseline and overlay non-empty MCC values;
-        # an explicit MCC tombstone is the only destructive signal.
+        # from the complete durable baseline and overlay the complete MCC
+        # snapshot, including intentionally empty containers; an explicit MCC
+        # tombstone is the only destructive signal.
         remote_metadata = _runtime_metadata_normalize(
             store.get_runtime_sync(_MCC_RUNTIME_METADATA_KEY)
         )
@@ -1661,8 +2210,6 @@ def _initialize_local_runtime_baseline(
             text_key = str(key)
             if _runtime_metadata_has_remote_tombstone(remote_metadata, text_key):
                 recovered_after_update.pop(text_key, None)
-                continue
-            if isinstance(value, Mapping) and not value:
                 continue
             recovered_after_update[text_key] = deepcopy(value)
         recovered_after_update = _persist_recovered_runtime_values(
@@ -1673,31 +2220,44 @@ def _initialize_local_runtime_baseline(
         current = recovered_after_update
         stored = recovered_after_update
 
-    # A package/update may leave the mutable file without an instance row even
-    # though the durable local baseline still has it. Restore only rows that
-    # are also absent from the last known MCC/accepted snapshot; an explicit
-    # local deletion against a present remote row remains a real local delta.
-    recoverable = deepcopy(stored)
-    for key, rows in _missing_instance_runtime_values(stored, remote_for_recovery).items():
-        current_entries = current.get(key)
-        if not isinstance(current_entries, dict):
-            recoverable[str(key)] = deepcopy(stored.get(key, {}))
-            continue
-        missing_rows = {
-            str(uid): deepcopy(value)
-            for uid, value in rows.items()
-            if _matching_instance_runtime_entry(current_entries, uid) is None
-        }
-        if missing_rows:
-            existing = recoverable.get(key)
-            existing = dict(existing) if isinstance(existing, dict) else {}
-            existing.update(missing_rows)
-            recoverable[str(key)] = existing
-    recovered = _merge_missing_instance_runtime_values(current, recoverable)
-    _persist_recovered_instance_runtime(config, current, recovered)
+    # A package/update or failed config write may remove any part of the
+    # mutable file, not just an instance row. Build the complete recovery
+    # snapshot from the durable local baseline plus the latest MCC values.
+    # Missing fields in a partial MCC response are not deletions; an explicit
+    # tombstone remains the only destructive signal.
+    raw_metadata = _runtime_metadata_normalize(store.get_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY))
+    recovery_snapshot = deepcopy(stored)
+    for raw_key, remote_value in remote_for_recovery.items():
+        key = str(raw_key)
+        if _is_instance_runtime_map_key(key) and isinstance(remote_value, Mapping):
+            existing_rows = recovery_snapshot.get(key)
+            if not isinstance(existing_rows, Mapping):
+                recovery_snapshot[key] = deepcopy(dict(remote_value))
+            else:
+                merged_rows = dict(existing_rows)
+                for raw_uid, value in remote_value.items():
+                    if _matching_instance_runtime_entry(merged_rows, raw_uid) is None:
+                        merged_rows[str(raw_uid)] = deepcopy(value)
+                recovery_snapshot[key] = merged_rows
+        else:
+            recovery_snapshot[key] = deepcopy(remote_value)
+
+    # Once any part of the local projection is detected as lost, overlay the
+    # entire recovery snapshot. This deliberately replaces stale non-empty
+    # reset defaults as well as absent keys, so recovery cannot resurrect only
+    # the stable/instance subset while silently leaving other settings stale.
+    full_runtime_loss = _runtime_snapshot_loss_detected(current, recovery_snapshot)
+    if full_runtime_loss:
+        recoverable = _overlay_runtime_recovery_snapshot(current, recovery_snapshot, raw_metadata)
+    else:
+        recoverable = _merge_recovered_runtime_values(current, recovery_snapshot, raw_metadata)
+    remote_metadata = _runtime_metadata_normalize(store.get_runtime_sync(_MCC_RUNTIME_METADATA_KEY))
+    recoverable = _remove_remote_tombstoned_runtime_values(recoverable, remote_metadata)
+    if recoverable != current:
+        _persist_recovered_runtime_values(config, current, recoverable)
+    recovered = recoverable
     current = recovered
 
-    raw_metadata = _runtime_metadata_normalize(store.get_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY))
     local_edit = _has_authoritative_local_runtime_edit(raw_metadata, stored, current)
     metadata = _runtime_metadata_for_snapshot(raw_metadata, stored, source="mcd")
     if current != stored and local_edit:
@@ -1746,10 +2306,40 @@ def _store_runtime_fetch_snapshot(
     store.put_runtime_sync("mcc_runtime_desired_state", state_for_store)
 
 
+def _runtime_resolution_needs_full_snapshot(
+    resolution: Mapping[str, Any],
+    *,
+    recover_after_update: bool,
+    local_runtime_was_reset: bool = False,
+) -> bool:
+    """Materialize every MCC-managed key when MCC fills a local gap.
+
+    The same rule is required on startup and on a normal runtime poll. A
+    reset include can happen while the daemon is already running; limiting the
+    full projection to update bootstrap would leave non-stable MCC keys only
+    in memory and lose them again on the next restart.
+    """
+    if recover_after_update:
+        return True
+    if local_runtime_was_reset:
+        return True
+    # Stable-only persistence remains sufficient for ordinary stable updates.
+    # If MCC won any non-stable field, the local file was incomplete, changed,
+    # or lost that field, so persist the complete allowed snapshot, including
+    # false/zero/empty values.
+    for path in resolution.get("remote_wins", []):
+        if isinstance(path, (tuple, list)) and len(path) >= 2:
+            if str(path[1]) not in _STABLE_RUNTIME_KEYS:
+                return True
+    return False
+
+
 def _bootstrap_remote_runtime_before_local_baseline(
     config: AgentConfig,
     store: object,
     instance_uids: list[str],
+    *,
+    recover_after_update: bool = False,
 ) -> str:
     """Read canonical MCC state before startup can mistake a missing file row for deletion."""
     if not config.mcc_url or not config.mcc_token:
@@ -1784,7 +2374,16 @@ def _bootstrap_remote_runtime_before_local_baseline(
         (accepted_runtime, previous_mcc_runtime),
     )
 
-    current_local_runtime = local_runtime_overrides(config)
+    # During the first start after an MCD package/source transition, the
+    # mutable include may contain a reset snapshot that was self-stamped by
+    # the previous broken startup. Do not let that synthetic local event win
+    # LWW over the canonical MCC response; durable values are reconciled after
+    # this fetch and explicit MCC tombstones remain destructive.
+    current_local_runtime = {} if recover_after_update else local_runtime_overrides(config)
+    local_runtime_was_reset = _runtime_snapshot_loss_detected(
+        current_local_runtime,
+        remote_runtime,
+    )
     local_metadata = _runtime_metadata_for_snapshot(
         store.get_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY),
         current_local_runtime,
@@ -1815,6 +2414,11 @@ def _bootstrap_remote_runtime_before_local_baseline(
         current_local_runtime,
         resolved_runtime,
         resolved_metadata,
+        full_snapshot=_runtime_resolution_needs_full_snapshot(
+            resolution,
+            recover_after_update=recover_after_update,
+            local_runtime_was_reset=local_runtime_was_reset,
+        ),
     )
     store.put_runtime_sync("local_runtime", resolved_runtime)
     store.put_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY, resolved_metadata)
@@ -12651,6 +13255,30 @@ def _external_task_key(root: str, task_type: str, entity_id: int | None, pid: in
 @_scheduler_runtime_serialized
 def _sync_external_running_tasks(
     *,
+    config: AgentConfig,
+    installs: list[object],
+    running: dict[str, RunningTask],
+    popens: dict[str, subprocess.Popen[bytes]],
+) -> dict[str, int]:
+    """Adopt external work only while the shared admission fence is held."""
+    with scheduler_dispatch_fence(config, exclusive=False, blocking=False) as admitted:
+        if not admitted:
+            return {"observed": 0, "adopted": 0, "updated": 0, "released": 0, "fence_blocked": 1}
+        try:
+            pause_path = str(getattr(config, "scheduler_pause_flag_path", "") or "").strip()
+            if pause_path and Path(pause_path).exists():
+                return {"observed": 0, "adopted": 0, "updated": 0, "released": 0, "fence_blocked": 1}
+        except OSError:
+            return {"observed": 0, "adopted": 0, "updated": 0, "released": 0, "fence_blocked": 1}
+        return _sync_external_running_tasks_unfenced(
+            installs=installs,
+            running=running,
+            popens=popens,
+        )
+
+
+def _sync_external_running_tasks_unfenced(
+    *,
     installs: list[object],
     running: dict[str, RunningTask],
     popens: dict[str, subprocess.Popen[bytes]],
@@ -14750,29 +15378,42 @@ def _submit_if_slot(
     stdout_path: str = "",
     stderr_path: str = "",
 ) -> bool:
-    if not _campaign_dispatch_begin(root, task_type):
-        return False
-    try:
-        return _submit_if_slot_uncoordinated(
-            config=config,
-            store=store,
-            running=running,
-            root=root,
-            task_type=task_type,
-            entity_id=entity_id,
-            args=args,
-            timeout_sec=timeout_sec,
-            max_parallel_for_type=max_parallel_for_type,
-            popens=popens,
-            ignore_limit=ignore_limit,
-            manual_request_id=manual_request_id,
-            bypass_repeat_guard=bypass_repeat_guard,
-            bypass_baseline_admission=bypass_baseline_admission,
-            stdout_path=stdout_path,
-            stderr_path=stderr_path,
-        )
-    finally:
-        _campaign_dispatch_end(root, task_type)
+    # The shared fence closes the check-then-spawn window with an upgrade
+    # process holding the exclusive maintenance fence. A daemon restart or a
+    # late scheduler tick therefore skips admission instead of racing the
+    # pause flag and launching new work during a drain.
+    with scheduler_dispatch_fence(config, exclusive=False, blocking=False) as admitted:
+        if not admitted:
+            return False
+        try:
+            pause_path = str(getattr(config, "scheduler_pause_flag_path", "") or "").strip()
+            if pause_path and Path(pause_path).exists():
+                return False
+        except OSError:
+            return False
+        if not _campaign_dispatch_begin(root, task_type):
+            return False
+        try:
+            return _submit_if_slot_uncoordinated(
+                config=config,
+                store=store,
+                running=running,
+                root=root,
+                task_type=task_type,
+                entity_id=entity_id,
+                args=args,
+                timeout_sec=timeout_sec,
+                max_parallel_for_type=max_parallel_for_type,
+                popens=popens,
+                ignore_limit=ignore_limit,
+                manual_request_id=manual_request_id,
+                bypass_repeat_guard=bypass_repeat_guard,
+                bypass_baseline_admission=bypass_baseline_admission,
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+            )
+        finally:
+            _campaign_dispatch_end(root, task_type)
 
 
 def _wait_for_segment_process_exit(
@@ -16385,7 +17026,7 @@ def run_loop(
     single_cycle: bool = False,
     *,
     _test_stop_event: threading.Event | None = None,
-    _commercial_worker_factory: Callable[[threading.Event], CommercialPortalWorker | None] | None = None,
+    _commercial_worker_factory: Callable[[threading.Event], SelfHostedPortalWorker | None] | None = None,
 ) -> None:
     """Run the daemon."""
 
@@ -16474,10 +17115,12 @@ def run_loop(
             installs = inventory.list_instances()
     else:
         installs = inventory.list_instances()
+    recover_after_update = _mcd_runtime_update_recovery_needed(store)
     bootstrap_status = _bootstrap_remote_runtime_before_local_baseline(
         config,
         store,
         [str(getattr(inst, "instance_uid", "") or "") for inst in installs],
+        recover_after_update=recover_after_update,
     )
     if bootstrap_status == "applied":
         try:
@@ -16486,12 +17129,23 @@ def run_loop(
             profile_authority = str(getattr(config, "profile_name", "") or "").strip().lower()
         except Exception as exc:
             logging.warning("runtime-overrides startup bootstrap reload failed: %s", exc)
-    recover_after_update = _mcd_runtime_update_recovery_needed(store)
     _, startup_local_runtime_fp = _initialize_local_runtime_baseline(
         config,
         store,
         recover_after_update=recover_after_update,
     )
+    if recover_after_update and bootstrap_status != "applied":
+        # Bootstrap may be deferred behind an accepted revision or a transient
+        # MCC response.  The recovery path still materializes the complete
+        # durable snapshot into the mutable include; reload it before the
+        # scheduler starts so the in-memory config cannot keep an empty or
+        # partial post-update projection (notably plugin_operations).
+        try:
+            config = load_config(config.config_file_path, allow_recover_from_mcc=False)
+            base_config = config
+            profile_authority = str(getattr(config, "profile_name", "") or "").strip().lower()
+        except Exception as exc:
+            logging.warning("runtime-overrides post-update recovery reload failed: %s", exc)
     _mark_mcd_runtime_agent_version(store)
     _sync_segment_whitelist_file(config, installs)
     _refresh_instance_db_maps(installs, db_configs_by_root, mautic_timezones_by_root)
@@ -16718,13 +17372,13 @@ def run_loop(
     pusher = MCCStatePusher(config, runtime_store=store)
     commercial_stop_event = threading.Event()
     commercial_thread: threading.Thread | None = None
-    commercial_mode = str(getattr(config, "profile_name", "") or "").strip().lower() == "commercial"
+    commercial_mode, commercial_mode_reason = _commercial_state_eligibility(config)
     if commercial_mode and _commercial_worker_factory is None:
         _commercial_worker_factory = _default_commercial_worker_factory(config)
     if commercial_mode and _commercial_worker_allowed(config, single_cycle=single_cycle, factory=_commercial_worker_factory):
         try:
             commercial_worker = _commercial_worker_factory(commercial_stop_event)
-            if not isinstance(commercial_worker, CommercialPortalWorker):
+            if not isinstance(commercial_worker, SelfHostedPortalWorker):
                 raise TypeError("commercial_worker_factory_invalid")
             commercial_thread = threading.Thread(
                 target=commercial_worker.run_forever,
@@ -16736,7 +17390,10 @@ def run_loop(
             commercial_thread.start()
         except Exception as exc:
             logging.warning("commercial Portal worker was not started: %s", exc)
+    elif not commercial_mode:
+        logging.info("commercial Portal worker capability inactive: %s", commercial_mode_reason)
     commercial_profile_seen = commercial_mode
+    commercial_reason_seen = commercial_mode_reason
 
     priority_executor = _PriorityTaskExecutor()
     _ACTIVE_PRIORITY_EXECUTOR = priority_executor
@@ -19188,7 +19845,7 @@ def run_loop(
         ).start()
 
     while _test_stop_event is None or not _test_stop_event.is_set():
-        current_commercial_mode = str(getattr(config, "profile_name", "") or "").strip().lower() == "commercial"
+        current_commercial_mode, current_commercial_reason = _commercial_state_eligibility(config)
         if current_commercial_mode != commercial_profile_seen and not single_cycle:
             if not current_commercial_mode and commercial_thread is not None:
                 commercial_stop_event.set()
@@ -19204,17 +19861,33 @@ def run_loop(
                         commercial_thread.start()
                 except Exception as exc:
                     logging.warning("commercial Portal worker reload start failed: %s", exc)
+            elif current_commercial_mode and commercial_thread is not None:
+                logging.debug("commercial Portal worker already running; no duplicate start")
             commercial_profile_seen = current_commercial_mode
+        elif not current_commercial_mode and commercial_reason_seen != current_commercial_reason:
+            logging.info("commercial Portal worker capability inactive: %s", current_commercial_reason)
+            commercial_reason_seen = current_commercial_reason
+        elif current_commercial_mode:
+            commercial_reason_seen = current_commercial_reason
         if single_cycle:
             _monitor_authoritative_runtime()
         now = time.time()
         if now >= next_scheduler_reconcile_at:
-            rec = _reconcile_running_state(
-                store=store,
-                running=running,
-                popens=popens,
-                segment_liveness_probe=_segment_liveness_probe,
-            )
+            with scheduler_dispatch_fence(config, exclusive=False, blocking=False) as admitted:
+                try:
+                    pause_path = str(getattr(config, "scheduler_pause_flag_path", "") or "").strip()
+                    paused_for_maintenance = bool(pause_path and Path(pause_path).exists())
+                except OSError:
+                    paused_for_maintenance = True
+                if admitted and not paused_for_maintenance:
+                    rec = _reconcile_running_state(
+                        store=store,
+                        running=running,
+                        popens=popens,
+                        segment_liveness_probe=_segment_liveness_probe,
+                    )
+                else:
+                    rec = {"fence_blocked": 1}
             if any(int(rec.get(k, 0) or 0) > 0 for k in ("adopted", "lost_pid", "lost_cmd", "duplicate", "shadow_replaced")):
                 logging.warning(
                     "scheduler reconcile: tracked=%s kept=%s adopted=%s lost_pid=%s lost_cmd=%s duplicate=%s shadow_replaced=%s",
@@ -19255,7 +19928,7 @@ def run_loop(
                 logging.warning("inventory auto-rescan failed: %s", e)
             next_inventory_auto_rescan_at = now + interval
 
-        ext = _sync_external_running_tasks(installs=installs, running=running, popens=popens)
+        ext = _sync_external_running_tasks(config=config, installs=installs, running=running, popens=popens)
         if any(int(ext.get(k, 0) or 0) > 0 for k in ("adopted", "updated", "released")):
             logging.info(
                 "external task sync: observed=%s adopted=%s updated=%s released=%s",
@@ -19274,7 +19947,8 @@ def run_loop(
         local_fp = overrides_fingerprint(local_runtime)
         pending_local_runtime = None
         local_runtime_push_accepted_this_tick = False
-        if config.mcc_url and config.mcc_token:
+        v3_conflict_active = _runtime_sync_v3_conflict_active(_runtime_sync_v3_state(store))
+        if config.mcc_url and config.mcc_token and not v3_conflict_active:
             pending_local_runtime = _queue_local_runtime_delta(
                 store,
                 local_runtime,
@@ -19314,15 +19988,57 @@ def run_loop(
                 # a fresh canonical snapshot instead of polling it over the
                 # local edit. The pending payload is durable so a remote poll
                 # or daemon restart cannot hide this edit.
-                pushed = _push_local_runtime_change(
-                    config,
-                    previous_local_runtime,
-                    local_runtime_to_push,
-                    installs,
-                    desired_revision=known_revision,
-                    instance_revisions=known_instance_revisions,
-                    runtime_metadata=push_metadata,
-                )
+                v3_result = _runtime_sync_v3_attempt(config, store, local_runtime_to_push)
+                v3_conflict_handled = bool(v3_result.get("handled") and v3_result.get("status") == "conflict")
+                if v3_result.get("handled"):
+                    pushed = dict(v3_result.get("response") or {"status": v3_result.get("status", "error")})
+                    v3_runtime = v3_result.get("runtime")
+                    if v3_result.get("status") == "ok" and isinstance(v3_runtime, Mapping):
+                        # A v3 merge may include an independent central edit;
+                        # materialize the canonical result before recording the
+                        # accepted baseline and emitting the normal ACK.
+                        _persist_resolved_runtime_to_config(
+                            config,
+                            local_runtime_overrides(config),
+                            v3_runtime,
+                            {},
+                            full_snapshot=True,
+                        )
+                        base_config = load_config(config.config_file_path, allow_recover_from_mcc=False)
+                        applied = apply_remote_overrides(base_config, dict(v3_runtime))
+                        if isinstance(applied.get("config"), AgentConfig):
+                            config = applied["config"]
+                            pusher.cfg = config
+                        local_runtime_to_push = dict(v3_runtime)
+                    elif v3_conflict_handled:
+                        conflict = v3_result.get("response", {}).get("conflict")
+                        safe_runtime = _runtime_sync_v3_conflict_safe_runtime(
+                            conflict if isinstance(conflict, Mapping) else {},
+                            local_runtime_to_push,
+                        )
+                        if safe_runtime:
+                            _persist_resolved_runtime_to_config(
+                                config,
+                                local_runtime_overrides(config),
+                                safe_runtime,
+                                {},
+                                full_snapshot=True,
+                            )
+                            base_config = load_config(config.config_file_path, allow_recover_from_mcc=False)
+                            applied = apply_remote_overrides(base_config, safe_runtime)
+                            if isinstance(applied.get("config"), AgentConfig):
+                                config = applied["config"]
+                                pusher.cfg = config
+                else:
+                    pushed = _push_local_runtime_change(
+                        config,
+                        previous_local_runtime,
+                        local_runtime_to_push,
+                        installs,
+                        desired_revision=known_revision,
+                        instance_revisions=known_instance_revisions,
+                        runtime_metadata=push_metadata,
+                    )
                 p_status = str(pushed.get("status", "")).strip().lower()
                 accepted = p_status == "ok" and _store_desired_runtime_push_result(
                     store,
@@ -19367,6 +20083,12 @@ def run_loop(
                     )
                     _sync_and_publish_form_embed_status(config, installs, reason="local_runtime_push")
                 elif p_status == "conflict":
+                    if v3_conflict_handled:
+                        local_runtime_push_pending = False
+                        last_local_runtime_fp = overrides_fingerprint(local_runtime_overrides(config))
+                        store.put_runtime_sync("local_runtime", local_runtime_overrides(config))
+                        logging.warning("runtime-sync-v3 durable conflict awaiting operator resolution")
+                        continue
                     local_runtime_push_pending = True
                     logging.warning(
                         "runtime-overrides local change rebase failed: %s",
@@ -19396,7 +20118,8 @@ def run_loop(
 
         runtime_poll_enabled = bool(getattr(config, "mcc_runtime_overrides_poll_enabled", False))
         should_runtime_poll = runtime_poll_enabled and now >= next_runtime_overrides_poll_at
-        if config.mcc_url and config.mcc_token and not local_runtime_push_pending:
+        v3_conflict_active = _runtime_sync_v3_conflict_active(_runtime_sync_v3_state(store))
+        if config.mcc_url and config.mcc_token and not local_runtime_push_pending and not v3_conflict_active:
             # Re-sample immediately before the remote fetch. A file edit can
             # arrive after the normal local-change block above; queue it
             # durably before the poll may refresh the baseline.
@@ -19414,6 +20137,12 @@ def run_loop(
             )
             status = str(ro.get("status", "")).strip().lower()
             poll_interval = max(15, min(300, int(config.mcc_push_interval_sec or config.poll_interval_sec or 60)))
+            v3_state = _runtime_sync_v3_state(store)
+            if _runtime_sync_v3_conflict_active(v3_state) and not _runtime_sync_v3_resolution_seen(v3_state, ro):
+                status = "v3_conflict_hold"
+                logging.warning("runtime-sync-v3 conflict remains unresolved; holding ambiguous runtime keys")
+            elif _runtime_sync_v3_conflict_active(v3_state):
+                _runtime_sync_v3_mark(store, {"schema": "mcd-runtime-sync-v3-state-v1", "status": "resolved", "resolved_revision": ro.get("desired_state", {}).get("revision") if isinstance(ro.get("desired_state"), Mapping) else None})
             if status == "ok" and not local_runtime_push_pending:
                 # Re-sample after the network round trip as well. If the
                 # operator edited runtime while MCC was responding, defer
@@ -19465,6 +20194,10 @@ def run_loop(
                         (accepted_runtime, previous_mcc_runtime),
                     )
                     current_local_runtime = local_runtime_overrides(config)
+                    local_runtime_was_reset = _runtime_snapshot_loss_detected(
+                        current_local_runtime,
+                        remote_runtime,
+                    )
                     local_metadata = _runtime_metadata_for_snapshot(
                         store.get_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY),
                         current_local_runtime,
@@ -19534,6 +20267,21 @@ def run_loop(
                     state_for_store = dict(desired_state)
                     state_for_store["instance_revisions"] = revisions
                     store.put_runtime_sync("mcc_runtime_desired_state", state_for_store)
+                    v3_state = _runtime_sync_v3_state(store)
+                    if (
+                        not _runtime_sync_v3_conflict_active(v3_state)
+                        and str(v3_state.get("status") or "").strip().lower() != "queued"
+                        and isinstance(desired_state.get("revision"), int)
+                    ):
+                        v3_state.update(
+                            {
+                                "schema": "mcd-runtime-sync-v3-state-v1",
+                                "status": v3_state.get("status", "accepted"),
+                                "base_revision": int(desired_state["revision"]),
+                                "base": deepcopy(remote_runtime),
+                            }
+                        )
+                        _runtime_sync_v3_mark(store, v3_state)
                 response_profile = canonical_profile_from_runtime_response(ro)
                 desired_response_profile = desired_profile_from_runtime_response(ro)
                 # An observed passive snapshot can be stale while a selected
@@ -19561,6 +20309,11 @@ def run_loop(
                             local_runtime_overrides(config),
                             overrides,
                             resolved_metadata,
+                            full_snapshot=_runtime_resolution_needs_full_snapshot(
+                                resolution,
+                                recover_after_update=False,
+                                local_runtime_was_reset=local_runtime_was_reset,
+                            ),
                         )
                     base_config = load_config(config.config_file_path, allow_recover_from_mcc=False)
                     if profile_authority:
@@ -19642,6 +20395,11 @@ def run_loop(
                             local_runtime_overrides(config),
                             overrides,
                             resolved_metadata,
+                            full_snapshot=_runtime_resolution_needs_full_snapshot(
+                                resolution,
+                                recover_after_update=False,
+                                local_runtime_was_reset=local_runtime_was_reset,
+                            ),
                         )
                     # Persisted MCC values are not a new local operator edit.
                     # Refresh the local fingerprint so the next tick does not

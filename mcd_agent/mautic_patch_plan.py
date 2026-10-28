@@ -55,20 +55,46 @@ def rejected_preflight(run_id: str | None, reason: str) -> dict[str, Any]:
 
 
 def _target_version(root: Path) -> str | None:
-    versions = set()
+    lock_versions: set[str] = set()
+    metadata_versions: set[str] = set()
     for prefix in ("", "docroot/", "public/"):
         lock = root / (prefix + "composer.lock")
-        metadata = root / (prefix + "app/bundles/CoreBundle/release_metadata.json")
+        metadata_paths = (
+            root / (prefix + "app/release_metadata.json"),
+            root / (prefix + "app/bundles/CoreBundle/release_metadata.json"),
+        )
         try:
             if lock.is_file():
                 for package in json.loads(lock.read_text(encoding="utf-8"))["packages"]:
                     if package.get("name") in {"mautic/core-lib", "mautic/core-bundle", "mautic/core"}:
-                        versions.add(str(package.get("version", "")).removeprefix("v"))
-            if metadata.is_file():
-                versions.add(json.loads(metadata.read_text(encoding="utf-8"))["version"])
+                        version = str(package.get("version", "")).strip().removeprefix("v")
+                        if version:
+                            lock_versions.add(version)
+            for metadata in metadata_paths:
+                if metadata.is_file():
+                    version = str(json.loads(metadata.read_text(encoding="utf-8"))["version"]).strip().removeprefix("v")
+                    if version:
+                        metadata_versions.add(version)
         except (ValueError, KeyError, TypeError, AttributeError) as exc:
             raise PatchPlanError("invalid_version_metadata") from exc
-    return versions.pop() if len(versions) == 1 else None
+
+    # Official ZIP releases carry the authoritative version in the root
+    # app/release_metadata.json. Composer's 6.0.0-dev package marker is a
+    # build-time placeholder and must not make an otherwise exact ZIP look
+    # inconsistent. Stable lock/metadata conflicts remain fail-closed.
+    if metadata_versions:
+        if len(metadata_versions) != 1:
+            return None
+        authoritative = next(iter(metadata_versions))
+        stable_lock_versions = {
+            version
+            for version in lock_versions
+            if not re.search(r"(?i)(?:^|[-@])dev(?:$|[-.])", version)
+        }
+        if stable_lock_versions and stable_lock_versions != {authoritative}:
+            return None
+        return authoritative
+    return lock_versions.pop() if len(lock_versions) == 1 else None
 
 
 def _dispatch(root_value: str, raw_plan: str, run_id: str, operation: str, phase: str | None = None, **facts_options):

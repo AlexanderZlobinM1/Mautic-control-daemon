@@ -62,6 +62,11 @@ _PLUGIN_SYNC_IGNORED_RE = re.compile(r"(sync-conflict|\.sync-conflict|\.syncthin
 _MAUTIC7_PLUGIN_RUNTIME_PACKAGES = {"nikic/php-parser:^5.0"}
 _PLUGIN_CACHE_RESET_SCHEMA = "mcd-plugin-cache-reset-v1"
 _PLUGIN_APPLY_RESULT_SCHEMA = "mcd-plugin-apply-result-v1"
+_CATALOG_COMPATIBILITY_BLOCK_REASONS = frozenset({
+    "agent_patch_contract_mismatch",
+    "agent_patch_contract_fields_mismatch",
+    "agent_version_below_minimum",
+})
 _GALERA_DANGEROUS_SQL_RE = re.compile(
     r"^\s*(ALTER|CREATE|DROP|RENAME|TRUNCATE|OPTIMIZE|ANALYZE|CHECK|REPAIR|LOCK|UNLOCK)\b",
     re.IGNORECASE,
@@ -1488,6 +1493,7 @@ def _emit_plugin_apply_result(
     overall_status: str,
     rc: int | None,
     inventory: list[dict[str, Any]] | None = None,
+    inventory_sync: dict[str, Any] | None = None,
     error: str = "",
 ) -> dict[str, Any]:
     payload = {
@@ -1507,12 +1513,32 @@ def _emit_plugin_apply_result(
         "inventory": list(inventory or []),
         "error": error,
     }
+    if isinstance(inventory_sync, dict):
+        payload["inventory_sync_status"] = str(inventory_sync.get("inventory_sync_status") or inventory_sync.get("status") or "error")
+        payload["inventory_sync"] = dict(inventory_sync)
     print(
         "MCD_PLUGIN_APPLY_RESULT="
         + json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
         flush=True,
     )
     return payload
+
+
+def _sync_plugin_inventory_before_terminal(
+    config: AgentConfig,
+    install,
+    *,
+    operation_id: str,
+    action: str,
+) -> dict[str, Any]:
+    from mcd_agent.state_push import sync_plugin_inventory_after_operation
+
+    return sync_plugin_inventory_after_operation(
+        config,
+        install,
+        operation_id=operation_id,
+        action=action,
+    )
 
 
 def _plugin_files_applied_observed(
@@ -1622,7 +1648,21 @@ def _run_plugin_install_reload(config: AgentConfig, install, expected_bundles: s
     if getattr(config, "mcc_url", ""):
         preflight = run_catalog(config, install, phase="before_plugin_reload", trigger="plugin_reload_failure")
         if preflight.get("status") == "error":
-            raise RuntimeError("Catalog plugin reload preflight failed: " + str(preflight.get("reason")))
+            reason = str(preflight.get("reason") or "catalog_preflight_failed")
+            if reason in _CATALOG_COMPATIBILITY_BLOCK_REASONS:
+                # The catalog admission remains strict and no unvalidated patch
+                # is applied.  A stale MCC/agent contract must not turn a
+                # completed plugin file/cache operation into a failed native
+                # plugin reload; the next catalog reconciliation can retry the
+                # optional remediation once compatibility is restored.
+                logging.warning(
+                    "[%s] catalog plugin reload preflight blocked by compatibility (%s); "
+                    "continuing native plugin reload",
+                    install.root,
+                    reason,
+                )
+            else:
+                raise RuntimeError("Catalog plugin reload preflight failed: " + reason)
     rc, out = _run_plugin_template(config, install, "mautic:plugin:install")
     if rc == 0:
         return
@@ -2084,6 +2124,12 @@ def _apply_plugin_file_changes_impl(
                     action=action,
                     selected=selected,
                 )
+                inventory_sync = _sync_plugin_inventory_before_terminal(
+                    config,
+                    install,
+                    operation_id=operation_id,
+                    action=action,
+                )
                 _emit_plugin_apply_result(
                     operation_id=operation_id,
                     install_root=install_root,
@@ -2096,6 +2142,7 @@ def _apply_plugin_file_changes_impl(
                     overall_status="success",
                     rc=0,
                     inventory=inventory,
+                    inventory_sync=inventory_sync,
                 )
         elif run_post_steps:
             expected_bundles = (
@@ -2114,6 +2161,12 @@ def _apply_plugin_file_changes_impl(
                 action=action,
                 selected=selected,
             )
+            inventory_sync = _sync_plugin_inventory_before_terminal(
+                config,
+                install,
+                operation_id=operation_id,
+                action=action,
+            )
             _emit_plugin_apply_result(
                 operation_id=operation_id,
                 install_root=install_root,
@@ -2126,6 +2179,7 @@ def _apply_plugin_file_changes_impl(
                 overall_status="success",
                 rc=0,
                 inventory=inventory,
+                inventory_sync=inventory_sync,
             )
     except Exception as exc:
         if run_post_steps:
@@ -2651,6 +2705,12 @@ def _run_cluster_plugin_operation(
                 action=action,
                 selected=selected,
             )
+            inventory_sync = _sync_plugin_inventory_before_terminal(
+                config,
+                install,
+                operation_id=operation_id,
+                action=action,
+            )
             _emit_plugin_apply_result(
                 operation_id=operation_id,
                 install_root=install_root,
@@ -2663,6 +2723,7 @@ def _run_cluster_plugin_operation(
                 overall_status="success",
                 rc=0,
                 inventory=inventory,
+                inventory_sync=inventory_sync,
             )
             return 0
         except Exception as exc:
@@ -2723,6 +2784,12 @@ def _run_cluster_plugin_operation(
             action=action,
             selected=selected,
         )
+        inventory_sync = _sync_plugin_inventory_before_terminal(
+            config,
+            install,
+            operation_id=operation_id,
+            action=action,
+        )
         _emit_plugin_apply_result(
             operation_id=operation_id,
             install_root=install_root,
@@ -2735,6 +2802,7 @@ def _run_cluster_plugin_operation(
             overall_status="success",
             rc=0,
             inventory=inventory,
+            inventory_sync=inventory_sync,
         )
         return 0
     if begin_action == "busy":
@@ -2838,6 +2906,12 @@ def _run_cluster_plugin_operation(
             action=action,
             selected=selected,
         )
+        inventory_sync = _sync_plugin_inventory_before_terminal(
+            config,
+            install,
+            operation_id=operation_id,
+            action=action,
+        )
         _emit_plugin_apply_result(
             operation_id=operation_id,
             install_root=install_root,
@@ -2850,6 +2924,7 @@ def _run_cluster_plugin_operation(
             overall_status="success",
             rc=0,
             inventory=inventory,
+            inventory_sync=inventory_sync,
         )
         _cluster_plugin_set_phase(
             config,

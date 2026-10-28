@@ -11,9 +11,50 @@ first-class фазой для patch records, которые должны зав�
 управления trigger-consumer; она не подменяется более широкой фазой
 `before_campaign_execution`. Контракт, runtime executor, fixture и receipt
 должны рекламировать и проверять один и тот же порядок.
+
+Каждый Mautic patch-plan v3 upgrade завершает lifecycle ровно одним
+plan-bound evidence receipt: `success`, `noop` или `error`. При ошибке
+target-stage, source/apply check или fixed-gate MCD сохраняет фактически
+наблюдённые gates и уже завершённые records, затем отправляет этот receipt в
+MCC через существующий `record_mautic_patch_evidence`; stdout marker является
+только диагностическим fallback. Для inline-плана MCD по исходному `run_id`
+читает уже выданный MCC envelope, проверяет canonical `plan_sha256` и точное
+соответствие плана, но никогда не выбирает второй catalog plan и не объявляет
+успех без фактической проверки. Повторный запуск использует тот же immutable
+plan и остаётся идемпотентным.
+
+Upgrade maintenance fencing is a cross-process admission barrier, not only a
+marker file. The upgrade owner acquires the exclusive
+`maintenance.dispatch.fence.lock` beside `scheduler.pause` before publishing
+the pause flag and holds it through the complete drain and upgrade. Every
+scheduler submit, running-row reconciliation, and external-console adoption
+must acquire the same fence in shared non-blocking mode and skip admission
+when the exclusive owner is present. This closes the check-then-spawn and
+restart/adoption race after pause publication.
+
+The maintenance drain repeatedly observes tracked and external tasks, stops
+newly appearing work, releases dead tracked rows as `lost` with a bounded
+maintenance note, and requires three consecutive empty snapshots before
+entering the upgrade. A bounded typed
+`mcd-maintenance-guard-evidence-v1` is emitted on every task-quiescence
+failure with task identities, stable-snapshot counts, timeout state, and
+truthful cron/pause cleanup. Patch evidence is not emitted when the guard
+fails before the source/package stage, and no patch rollback is attempted.
+
+Каталоговая преднастройка перед native plugin reload остаётся fail-closed:
+MCD не применяет план при `agent_patch_contract_mismatch`,
+`agent_patch_contract_fields_mismatch` или `agent_version_below_minimum` и не
+подменяет строгую проверку MCC. Такой отказ совместимости не отменяет уже
+успешно применённые файлы и сброс кеша: MCD фиксирует предупреждение и
+продолжает штатный `mautic:plugin:install`, после чего обычный reload ACK и
+post-step могут завершиться. Следующая совместимая reconciliation повторяет
+только незавершённую каталоговую remediation; native plugin operation не
+переисполняется из-за этого отказа.
 ручной `segments:update`, изменение профиля, capacity или данных на хосте.
-Актуальная редакция этого канона — MCD 1.5.199 (follow-up после immutable
-1.5.88). В этой редакции startup/profile rebase не считается локальной
+Актуальная dev-редакция этого канона — MCD 1.6.0 (продолжение текущей MCD-линии,
+prepared-target lineage). MCD 1.5.268 сохраняется только как историческая точка
+rollback/audit, а не как альтернативная реализация; follow-up после immutable
+1.5.88. В этой редакции startup/profile rebase не считается локальной
 операторской правкой без durable provenance, а runtime ACK ограничен
 запрошенными per-key наблюдениями. Host ACK строится только по ключам
 canonical desired envelope; expanded effective snapshot не добавляет ключи в
@@ -21,6 +62,33 @@ chunk. Recurring super-priority admission сохраняет резерв для
 ordinary cycle. Active dedicated super-priority work не вычитается из ordinary
 shared capacity: постоянный super-ring не может голодать обычный tail; обычная
 priority остаётся частью shared regular accounting.
+
+Plugin inventory is an observed, durable per-instance state, not a destructive
+filesystem listing. A complete scan canonically replaces the stored
+last-known inventory and records `mcd-plugin-inventory-observation-v1`. A scan
+error retains the last-known rows, marks the observation `complete=false` and
+`last_known=true`, and carries a typed `scan_error`; MCC must not prune from
+that observation. After a successful install, update, remove, purge, or reload,
+MCD persists the observation and a single deduplicated pending item before
+emitting the terminal receipt. It attempts an immediate normal state push; the
+receipt reports `inventory_sync_status=ok`, `pending`, or `error`, with the
+inventory digest and observation time. A failed push remains in the durable
+`plugin_inventory_sync_pending` runtime key and is retried by the ordinary
+state-push loop after errors and restarts. HTTP success ACKs only the exact
+instance/digest/observation tuple sent, so a newer local change cannot be
+cleared by an older response. The wire envelope is
+`mcd-plugin-inventory-sync-v1`; it is additive to `mcd-state-v1` and does not
+require Docker or alter native runtime execution.
+
+Commercial scenario failures are terminally observable: after a validated job
+has an execution error, MCD creates a bounded, secret-free
+`mcd-self-hosted-terminal-receipt-v2` with `status=failed` and explicit
+`rollback` before advancing the Portal cursor. If Portal receipt delivery
+fails, the exact unsigned receipt payload is stored in the ordered durable
+pending queue and retried after restart; exception text,
+subprocess output, SSH credentials and DNS credentials are never copied into
+the receipt. This is only transport/execution/retry behavior; external Portal
+artifacts remain the sole owner of bootstrap, OS, Mautic and scenario policy.
 
 Super-priority ticks are a dedicated recurring lane: each tick advances its
 own static round-robin cycle and is not gated by completion, refill, or fair
@@ -146,6 +214,16 @@ Qualified UID и его priority/super-priority lane maps сначала materia
 локальном runtime, затем именно этот snapshot становится baseline; restart не
 создаёт ложную local deletion и не отправляет пустой instance-row обратно в
 MCC.
+
+Если локальный runtime include потерян или обнулён, любой remote winner вне
+stable-проекции переводит startup или обычный poll в full-snapshot режим: в
+config materialize-ся весь `runtime_remote_allowed_keys()` MCC snapshot,
+включая `false`, `0`, пустые структуры и явные tombstone. Такое
+materialize-ние не создаёт локальную revision и не отправляет потерю обратно в
+MCC. После MCD update этот режим включается всегда: reset локального файла не
+считается изменением настроек, а источником истины остаётся полный
+сохранённый snapshot MCC. Поэтому восстановление после потери не ограничено
+стабильной частью runtime и одинаково работает до и после перезапуска.
 
 Если локальный config-файл изменился во время remote poll/apply, MCD сначала
 сохраняет пару `previous/current` в durable `local_runtime_push_pending`, а
@@ -822,12 +900,27 @@ effective `plugin_operations` содержит большой structured payload
 восстановления catalog scheduler снова применяет обычные
 bundle-registration, slot и resource guards.
 После смены версии/источника MCD первый запуск помечается как post-update
-recovery. Пропавшее или обнулённое mutable runtime include в этом запуске не
-является изменением оператора: MCD восстанавливает полный durable runtime
-snapshot и свежий MCC snapshot, причём явный MCC tombstone имеет приоритет.
+recovery. Пропавший или обнулённый mutable runtime include в этом запуске и
+при обычном восстановлении после сброса не является изменением оператора: MCD
+восстанавливает полный durable runtime snapshot и свежий MCC snapshot,
+причём восстанавливаются все MCC-allowed host- и instance-runtime keys, а не
+только scheduler/plugin subset; false/zero остаются валидными значениями,
+пустой контейнер считается потерянной projection-частью, если нет явного
+локального tombstone. Явный MCC tombstone имеет приоритет. Этот полный snapshot
+материализуется обратно в mutable include до перезагрузки конфига и старта
+scheduler, поэтому потеря части файла не может выглядеть как намеренное
+удаление настроек.
+Этот режим включается до первого MCC poll: сброшенный локальный projection не
+может получить свежий `mcd` timestamp и победить canonical MCC snapshot.
 Реальное локальное изменение MCD по-прежнему фиксируется своим
 timestamp/event и проходит через тот же LWW: более новый источник становится
 истиной и синхронизируется в обратную сторону.
+Runtime-only release gate также проверяет обязательный import closure
+(`daemon.py`, `state_push.py`, `mcd_control.py`); архив без любого из них не
+может пройти bridge QA и не допускается до host switch.
+Если MCC bootstrap после обновления временно отложен, MCD всё равно сначала
+материализует полный durable snapshot, затем перечитывает include в память;
+scheduler не стартует с пустой или частичной post-update projection.
 Если отдельное `desired` или `effective` значение само превышает safety
 budget, оно заменяется строго проверяемой ссылкой
 `{encoding:"canonical-json-sha256",sha256,bytes}`; key не отбрасывается.
@@ -1045,6 +1138,8 @@ cycle без ручного `segments:update`, profile/capacity/data changes. Ad
 | heavy-plan deferral and durable pending guard | `mcd_agent/daemon.py` | `tests/test_segment_liveness.py`, live M6/M7 acceptance receipt |
 | self-update preserves ordinary application work and all durable queues | `mcd_agent/self_update.py`, `daemon.py`, systemd unit | `tests/test_self_update_version_reporting.py`, `tools/runtime_bridge_qa.py` (`mcd-runtime-bridge-qa-v1`) |
 | legacy source-tree to runtime-only transition is authority-safe and accepts complete split TOML config | `tools/mcd_runtime_bootstrap.py`, `tools/mcd_profile_authority_probe.py` | `tests/test_profile_authority_probe.py`, `tests/test_runtime_bootstrap_capture.py`, live `mcd-runtime-bootstrap-receipt-v1` |
+| activation-derived Portal material is imported atomically without new auth/job issuance | `mcd_agent/commercial_registration.py`, `mcd_agent/commercial_portal.py` | `tests/test_commercial_registration.py`, redacted `mcd-portal-registration-receipt-v1` |
+| manual existing commercial-key fallback keeps pending/active/disconnected state idempotently | `mcd_agent/commercial_manual_activation.py`, `mcd_agent/commercial_portal.py`, `mcd_agent/daemon.py` | `tests/test_commercial_manual_activation.py`, redacted `mcd-commercial-manual-activation-receipt-v1` |
 | result-signing identity bootstraps from MCD-owned config and gates signed control execution on MCC ACK | `mcd_agent/config.py`, `mcd_agent/result_signing.py`, `mcd_agent/state_push.py`, `mcd_agent/mcd_control.py` | `tests/test_result_signing.py`, `tests/test_mcd_control.py`, live `mcd-state-v1` identity/key/ACK and terminal-receipt evidence |
 | authority-safe desired runtime projection | `mcd_agent/config.py`, `mcd_agent/runtime_overrides.py` | `tests/test_runtime_override_direction.py`, `tests/test_runtime_stable_keys.py`, `tests/test_runtime_migration_adapter.py` |
 | natural b2bss/Adonis evidence | runtime TaskStore/MCC receipts | rollout acceptance (после package/install) |
@@ -1088,46 +1183,246 @@ overrides such as `[backup]` and `[backup.schedule]`. Startup and reload must
 therefore preserve `backup.enabled` and schedule enablement from the effective
 local file when the entrypoint only supplies defaults or MCC bootstrap fields.
 
-### Commercial Portal scenario admission
+### Commercial Portal self-hosted scenario admission
 
-Commercial MCD is an outbound-only Portal lane. A delivered job is admitted
-only after Portal envelope, scope, expiry, nonce, command, applicability and
-Portal signature validation. The complete artifact is then hashed and checked
-against the Portal-delivered artifact signature and any separately referenced
-MCC publisher statement; MCD never fetches MCC directly and MCC is not the
-scenario authority.
-The artifact may contain only `portal-mcd-scenario-v1` with declared stages.
-Stage handlers are an injected registry: an unknown stage, schema, contract or
-compatibility value fails closed before execution.
+Commercial MCD is an outbound-only Portal lane. A delivered
+`portal-self-hosted-mcd-job-v2` is admitted only after exact account, commercial
+key, agent, installation, host, scenario and applicability binding, local-facts
+revalidation, expiry, nonce, idempotency and Portal signature validation. The
+additive contract version `2.1` is the registered-installation path: its
+`execution.primitive` is `scenario.apply`, it requires the signed scenario
+artifact, and `bootstrap_artifact` must be absent. The trusted internal MCC
+catalog path carries an active catalog revision, executable artifact metadata
+and SHA-256 through the authenticated MCC/Portal API; MCD downloads through
+that API and accepts bytes only when size and SHA-256 match the immutable
+catalog entry. SHA-only integrity does not authenticate an artifact author and
+is never accepted for an unknown or untrusted external source. Legacy
+contract `2.0` and legacy publisher-signed artifact pins remain accepted only
+for compatibility; bootstrap is not part of the registered scenario
+operation. MCD never imports MCC credentials or scenario rules, and Portal
+remains only the connector/UI for this lane.
 
-Scenario progress is checkpointed by `job_id` and completed `stage_id` in the
-commercial state store. Re-delivery resumes from the checkpoint and does not
-repeat completed stages. A failed run executes registered rollback handlers in
-reverse order and writes a failed checkpoint. A successful run produces a
-monotonic Portal receipt payload signed by the host agent. This lane does not
-alter corporate MCC↔MCD, standalone mode, scheduler ownership, cron, or Mautic
-state semantics; existing-server discovery/registration and new-server
-bootstrap are scenario stages supplied by the owning operation, not hardcoded
-commercial policy in MCD.
+The signed `portal-mcd-inventory-snapshot-v1` also carries the additive
+`applicability_facts` coordinate (`mcd-portal-applicability-facts-v1`, contract
+version `1.0`). Its `facts` mapping is the complete normalized value used by
+the local execution guard: `os_id`, `os_version`, `architecture`,
+`package_manager`, sorted unique `capabilities`, `target_kind`, and
+`detector_schema`. `facts_digest` hashes the same mapping after removing only
+`detector_schema`. Inventory publication and `scenario.apply` use the same
+reader and capability context, so the coordinate is stable across unchanged
+polls, restart, replay, and Portal outage; its durable inventory hash and
+revision include the field. Missing detector facts fail closed. Scenario
+`required_capabilities` remain Portal-side applicability predicates and are
+never synthesized into this signed facts mapping. Older Portal consumers may
+ignore the additive field.
+
+The only MCD execution primitive is the contract's `scenario.apply` v1.0. MCD
+passes the latest verified external scenario artifact to one allowlisted,
+non-shell local runner process and owns no installer, OS, Mautic, scenario or
+primitive recipe. Connection type (Portal self-host, Cloud, MCC direct or a
+future integration) changes only delivery/authentication; it never selects a
+different runner, frame, context or execution engine. No fixed onboarding
+stage registry is constructed on this path. Progress is checkpointed by
+immutable `job_id`; replay of the same signed job returns the durable terminal
+receipt without re-executing the runner.
+
+For the Mautic primitive context, the additive
+`mcd-scenario-primitive-context-v1` contract is validated by the same launcher
+(`mcd_agent/contracts/mcd-scenario-primitive-context-v1.json`). It binds the
+job/request/command/idempotency tuple, scenario and artifact pins, host
+fingerprint, and the normalized applicability facts digest. The application
+coordinates are the already discovered absolute `root`, `console_path`,
+`php_bin`, and `run_as_user`; MCD does not invent a path or default. Backup
+evidence is the existing `mcd-mautic-patch-backup-attestation-v1` receipt over
+the `mcc.backup.manifest.v1` marker. Migration policy carries only the existing
+`list doctrine` discovery and the discovered migrate/up-to-date/version command
+families with non-interactive apply; arbitrary SQL, down migrations, deletion
+of migration history, and invented defaults are rejected. Rollback remains the
+existing immutable patch-plan/backup restore path with drift-fail-closed
+semantics and explicit `not_attempted|attempted|succeeded|failed|blocked`
+state. The context validator checks binding and shape only; the launcher does
+not execute PHP, choose versions, restore a backup, or synthesize a recipe.
+
+Scenario delivery is a separate MCD-owned boundary described by
+`mcd-scenario-artifact-delivery-v1` and implemented by
+`mcd_agent/scenario_artifact_store.py`. On the trusted internal path MCD reads
+active MCC catalog metadata first, downloads through the authenticated API into
+an isolated staging file, verifies exact revision/media/size/SHA-256 and
+catalog binding, fsyncs the object, atomically switches the active pointer,
+and emits a verified delivery receipt before cleaning the previous local
+object. This path has no artifact signer operation. A failed verification,
+unknown/stale/mismatched catalog, partial download, disk-full condition,
+outage, restart or concurrent delivery removes only the new staging material
+and keeps the previous active pointer. Pending cleanup is replayed after the
+durable receipt queue drains. The catalog is immutable and is never deleted by
+MCD; rollback re-downloads a pinned old revision. No scenario runner starts
+during this delivery sequence.
+
+The executable scenario bridge follows the generic
+`mcd-scenario-executable-context-v1` contract. The old
+`portal-self-hosted-executable-context-v1` value is accepted only as a
+compatibility data label and never creates a second execution path. The signed
+artifact must be `application/x-sh` or `application/x-elf`; the legacy
+declarative JSON artifact remains audit-only and is never dispatched. MCD sends
+the artifact and canonical context in the 88-byte `SSMCDX01` frame: exact
+lengths, raw SHA-256 digests, and reserved flags are checked before execution.
+The context contains only job/scenario identity, applicability digest, scalar
+non-secret parameters, opaque secret references and the typed primitive
+context; delivery account/provider identity remains outside the local frame
+and receipt binding. It is exposed to the child only on inherited file
+descriptor 3. The bundled `mcd-scenario-runner` uses a sterile environment,
+fixed `--mcd-scenario-apply` argv, no shell/eval, and a bounded process group.
+Child stdout is a length-prefixed canonical JSON stream with at most 256
+progress frames and one terminal result; unknown fields, secret-shaped values,
+non-contiguous progress, malformed frames, timeouts, signals, and oversized
+output fail closed. MCD also captures only bounded stderr and persists a
+redacted preview, output SHA-256 values, truncation flags, exit code/signal,
+timeout state, admission stage, and any already-valid progress frames as typed
+runner evidence. Raw stderr, artifact bytes, and executable context never enter
+receipts or run state. MCC owns the executable artifact, active catalog
+metadata and scenario policy; MCD owns authenticated download admission, local
+staging/activation, execution admission, timeout, rollback state and durable
+receipts. The legacy artifact-trust capability remains only for compatibility
+and is not required by the trusted MCC SHA-only path.
+
+Stage receipts use `mcd-self-hosted-stage-receipt-v2` with only
+`scenario_dispatch` and `execution`, statuses `queued|running|waiting|succeeded|failed`,
+mandatory installation binding and unique idempotency keys. Terminal receipts
+use `mcd-self-hosted-terminal-receipt-v2`, `succeeded|failed`, explicit
+`rollback`, the same binding and a monotonic sequence. Failed terminals are
+bounded and secret-free. Every unsent stage or terminal receipt is durable and
+retried in order after Portal outage or MCD restart.
 
 The commercial transport worker is a separate non-blocking Portal lane:
-`pull_job` → exact artifact download/admission → accepted acknowledgement →
-stage execution/checkpoint receipts → one terminal receipt. Its cursor and
-pending terminal receipt are durable in the commercial state store, so a
-restart retries the same receipt and resumes completed stages without
-re-executing them. Network/Portal failure never pauses corporate or standalone
-scheduler work. Onboarding stage and terminal receipt schemas are validated
-before they are sent.
+`pull_job` → exact v2 job admission → pinned artifact download(s) → local facts
+guard → generic runner → ordered stage/terminal receipts. A 2.1 registered
+scenario delivery has exactly one artifact download; only legacy 2.0 may have
+the additional bootstrap download. Its cursor and pending receipt queue are
+durable in the commercial state store. Network/Portal failure never pauses
+corporate or standalone scheduler work. The commercial key is durable identity
+metadata only; raw credentials and future quota, billing or tariff semantics
+are not part of MCD.
 
-`daemon.run_loop` may start at most one Portal worker only when the effective
-profile is `commercial`, the caller supplies a validated commercial worker
-factory, and the daemon is not in single-cycle mode. The worker owns only its
-Portal stop event and bounded thread; it does not enter scheduler admission,
-locks, or task slots. Shutdown sets that event and joins the worker with a
-bounded grace period. Corporate, standalone, and single-cycle paths do not
-instantiate or call the commercial worker.
+Once Portal has leased and MCD has durably accepted a delivery, every local
+outcome closes through a signed terminal receipt: expiry, malformed or failed
+admission, revoked/disabled Portal state, artifact unavailability, and runner
+exceptions are typed and bounded. A receipt that cannot be sent immediately is
+queued durably before the delivery is considered complete; the runner is never
+re-run just to deliver a receipt after restart. A poll/network failure before a
+delivery exists remains a transport retry and has no command to acknowledge.
+For Portal's same-job recovery command, the terminal continues at the next
+monotonic sequence/idempotency key after any terminal from the first attempt;
+draining that durable terminal completes the delivery and never re-runs the
+runner.
+
+`daemon.run_loop` may start at most one Portal worker when the durable
+Portal enrollment is valid: HTTPS Portal base, credential, agent and
+commercial-key identity, host binding, at least one installation binding, and
+Portal job-signing keys must all be present. Portal artifact trust is not
+activation material and is not a worker-start gate: poll, adopt, inventory,
+settings, noop, and receipt operations use Portal job-signing keys only. The
+trusted MCC SHA-only path does not load or require artifact signer keys; it
+requires the authenticated API transport and active catalog binding. The
+canonical `portal_artifact_signing_keys` set is seeded by activation and can be
+replaced only by a bound, time-valid, monotonically increasing
+`portal-mcd-artifact-trust-update-v1` command delivered in the signed poll
+response. A legacy `portal_mcc_publisher_keys` map is read only while canonical
+Portal trust is absent and is deprecated for legacy signed artifact pins.
+Unknown/stale/mismatched SHA or an authenticated API failure rejects only that
+operation with a durable failed terminal receipt. The live worker remains
+available for later outbound polling; a restart reloads the same durable
+catalog/receipt state.
+The worker remains available for later outbound polling. The base
+`passive`, `standalone`, or `corporate` profile is not an
+eligibility switch; the Portal worker is an independent capability alongside
+the existing scheduler. The corporate MCC URL/token and base profile are not
+Portal eligibility switches. Missing or invalid Portal state, including an explicit
+revoke/detach marker, fails closed. Single-cycle mode never starts the worker.
+The worker owns only its Portal stop event and bounded thread; it does not
+enter scheduler admission, locks, or task slots. On revoke, detach, or
+shutdown MCD stops and joins only this worker, leaving corporate MCC and
+standalone work running. A restart re-reads the same durable registration and
+resumes without activation or token issuance; starting is idempotent and never
+creates a duplicate Portal worker.
+
+The existing activation-derived Portal credential is delivered through the
+`mcd-portal-activation-material-v1` bootstrap envelope. MCD imports that
+envelope locally and atomically into `CommercialState`; it never redeems the
+activation code, creates an agent/key/job, or performs a second registration.
+The importer validates the host fingerprint, agent key/public-key binding,
+Portal signing keys, commercial key and installation IDs. It preserves the
+cursor and pending receipts, and its redacted receipt contains no credential
+or private key. A missing or mismatched binding fails closed before the
+commercial worker can start.
+
+#### Manual fallback for an existing commercial key
+
+If the normal Own-host bootstrap is unavailable, the operator may use the
+already-issued installation-bound commercial key through the MCD-owned manual
+fallback. The key is entered through a hidden prompt, stdin, or an explicit
+CLI argument for automation; it is never printed or included in receipts.
+MCD stores it in the existing mode-0600 `CommercialState`, sends the existing
+passive installation registration, and records
+`commercial_portal_connection_state=pending_activation`. The Portal tile then
+waits for explicit activation. Only an explicit `activate` changes the state
+to `active`; only an explicit `disconnect` changes it to `detached`. Repeated
+stage/activate/disconnect operations reuse the same key and registration
+identity idempotently. This path has no SSH, DNS-token, global-settings-key,
+or second authentication layer and does not create a job or activation code.
+Subscription/entitlement expiry never changes this connection state; only the
+explicit operator `disconnect` does so. Expiry may affect feature admission,
+but it is not an implicit revoke or cancellation.
 
 ### Managed-cloud versus self-hosted commercial boundary
+
+### Opt-in MCC desired-runtime sync v3
+
+#### Полное восстановление runtime-настроек после потери
+
+MCC хранит полный разрешённый runtime-снимок хоста и его версионные метаданные.
+Если локальный runtime-файл после обновления, перезапуска или неудачной записи
+стал пустым, неполным или содержит reset-проекцию, это не считается изменением
+настроек MCD. MCD сначала читает канонический снимок MCC, восстанавливает весь
+`runtime_remote_allowed_keys` (включая host-поля, структурированные каталоги и
+все instance-строки), сохраняет его в локальный mutable include и только затем
+перезагружает конфигурацию. Восстановление не ограничивается stable- или
+instance-ключами; false/zero/empty значения восстанавливаются как валидные
+значения, если они присутствуют в каноническом снимке. MCD отдельно
+распознаёт потерю полного локального снимка по отсутствующим или сброшенным
+полям/instance-строкам и в этом случае всегда материализует весь разрешённый
+MCC-снимок, включая замену оставшихся непустых reset-default значений, даже
+если текущий ответ содержит только stable-поля.
+
+Для каждого host/instance-поля применяется LWW по сохранённому `updated_at`,
+затем `revision`, с детерминированным MCC tie-break. Более новое изменение MCD
+отправляется в MCC и не затирается устаревшим ответом; более новое изменение
+MCC применяется на хосте. Отсутствие поля в частичном ответе не является
+удалением. Удаление допускается только явным MCC tombstone либо подтверждённым
+локальным tombstone с последующей синхронизацией. После восстановления MCD
+обновляет baseline без повторной отправки того же состояния как новой локальной
+правки.
+
+MCD may negotiate the opt-in `desired_state_sync_protocol=3` endpoint without
+changing the legacy v2 transport. The producer keeps the complete acknowledged
+MCC snapshot and its revision as the common base in `runtime_sync`; a local
+change is sent as only the changed host keys plus a durable idempotency key and
+externally declared `semantic_conflict_groups`. A missing v3 endpoint records
+an explicit capability miss and falls back to v2; an existing endpoint never
+silently downgrades a rejected, queued, or conflicting v3 intent.
+
+The v3 consumer uses the canonical desired snapshot returned through the
+existing runtime-overrides/readback path. `applied` and `merged` results are
+materialized atomically through the existing runtime override primitives and
+then acknowledged by the normal chunked ACK. A `conflict` stores base,
+central, host, group metadata, and both values durably; non-ambiguous fields
+may be projected, but ambiguous fields remain held and are never resolved by
+last-writer-wins. Restart and Portal/MCC outage retry the same idempotency key.
+
+An operator resolution is accepted only after a newer canonical snapshot is
+read back with `source=sync_v3_operator_resolution`; the conflict hold is then
+cleared and the ordinary apply/ACK path verifies the actual local state. The
+legacy v2, corporate, and standalone paths remain unchanged when v3 is not
+negotiated.
 
 For managed-cloud installations under `name.sales-snap.com`, the single
 corporate MCD remains connected only to MCC. Portal reaches MCC through the
@@ -1140,3 +1435,49 @@ uses the outbound Portal contract and a host-level commercial agent, separate
 from the corporate MCD identity. Passive commercial acceptance is held until
 Portal completes the approved “Установки” flow; this hold authorizes no host,
 source, credential, or tenant mutation.
+
+### Commercial Portal network boundary and durable outbound cycle
+
+The commercial worker is an outbound-only transport. MCD is the sole
+connection initiator: it uses HTTPS poll/long-poll to consume queued Portal
+commands and settings/resolutions, and HTTPS POST to deliver signed ACKs,
+receipts, local intents, inventory and state. Portal has no callback, webhook,
+SSH, reverse connection, inbound listener, bind, or public host reachability
+through this lane. The corporate MCC transport remains a separate path.
+
+Every commercial Portal HTTP request carries the stable product User-Agent
+`mcd-agent/<version> portal-commercial/1.0`, including activation, registration,
+adoption, polling, inventory, receipt, state and artifact requests. This is a
+product identity header for normal WAF classification; it is not an
+authentication credential and must not contain activation codes or secrets.
+Transport failures are surfaced as redacted typed diagnostics with `stage`,
+safe `code`, optional `http_status` and `retryable`. Response bodies, URLs
+with query data, credentials and activation material are never included in
+diagnostics.
+
+Before processing a delivery MCD durably records the delivery, its prior
+cursor, next cursor and installation binding. Stage2 uses the exact
+installation-scoped poll, adopt/inventory and adopt-receipts routes. The
+complete signed inventory is sent on adoption and on subsequent changes. Every
+returned command is retained in order; the cursor advances only after the
+terminal receipt for each command and all earlier receipts are accepted by
+Portal. A daemon restart therefore resumes the saved batch or the durable
+receipt queue; replay uses command/job idempotency keys and never re-runs a
+completed scenario. A Portal/network failure leaves commands queued at Portal
+and records an exponential, durable retry deadline. The next outbound cycle
+drains receipts first, then resumes the saved batch or polls with the last
+cursor; no scheduler or standalone work is blocked. Backoff is applied only
+to transport failures, not to local signature/applicability rejection.
+
+Inventory publication has its own durable revision ledger per installation.
+MCD canonicalizes the complete inventory and removes only transport-volatility
+fields `request_id`, `observed_at`, and `agent_signature`; every other durable
+field (MCD version, profile, settings, instances, capabilities, binding and
+revision) participates in the hash. A changed durable hash increments
+`snapshot_revision` exactly once under the state-store transaction; unchanged
+content reuses the same revision across restart, outage, replay and concurrent
+workers. The state stores the durable snapshot/hash plus last published and
+acknowledged pins. A missing hash at legacy revision `0` performs one safe
+baseline migration; corrupted or regressive state fails closed. Portal acceptance
+pins the same hash/revision, and a failed publication retries that revision
+without creating a new one.

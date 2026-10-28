@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MCD manual existing commercial key fallback",
+  "type": "object",
+  "required": [
+    "schema",
+    "contract_version",
+    "portal_api_base",
+    "agent_id",
+    "commercial_key_id",
+    "host_fingerprint",
+    "local_identity",
+    "activation_state"
+  ],
+  "properties": {
+    "schema": {"const": "mcd-manual-commercial-key-v1"},
+    "contract_version": {"const": "1.0"},
+    "portal_api_base": {"type": "string", "pattern": "^https://"},
+    "agent_id": {"type": "string", "minLength": 1},
+    "commercial_key_id": {"type": "string", "minLength": 1},
+    "host_fingerprint": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "local_identity": {"type": "string", "minLength": 1},
+    "activation_state": {"enum": ["passive", "pending_activation", "active", "disconnected"]},
+    "fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "registration_id": {"type": ["string", "null"]}
+  },
+  "additionalProperties": true
+}

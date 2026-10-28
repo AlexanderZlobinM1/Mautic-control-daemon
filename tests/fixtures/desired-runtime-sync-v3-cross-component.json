@@ -1,0 +1,42 @@
+{
+  "schema": "mcc-desired-runtime-sync-v3-fixture-v1",
+  "protocol": 3,
+  "semantic_conflict_groups": [
+    {"id": "campaign-pair", "keys": ["campaign_limit", "campaign_batch"]}
+  ],
+  "cases": {
+    "central_only": {
+      "base": {"jobs_max_workers": 2},
+      "central_changes": {"jobs_max_workers": 3},
+      "host_changes": {},
+      "expected": {"jobs_max_workers": 3},
+      "status": "merged"
+    },
+    "host_only": {
+      "base": {"jobs_max_workers": 2},
+      "central_changes": {},
+      "host_changes": {"jobs_max_workers": 4},
+      "expected": {"jobs_max_workers": 4},
+      "status": "merged"
+    },
+    "disjoint": {
+      "base": {"jobs_max_workers": 2, "campaign_limit": 10, "campaign_batch": 2},
+      "central_changes": {"jobs_max_workers": 3},
+      "host_changes": {"import_stall_timeout_sec": 1800},
+      "expected": {"jobs_max_workers": 3, "campaign_limit": 10, "campaign_batch": 2, "import_stall_timeout_sec": 1800},
+      "status": "merged"
+    },
+    "same_key": {
+      "base": {"jobs_max_workers": 2},
+      "central_changes": {"jobs_max_workers": 3},
+      "host_changes": {"jobs_max_workers": 4},
+      "status": "conflict"
+    },
+    "coupled_group": {
+      "base": {"campaign_limit": 10, "campaign_batch": 2},
+      "central_changes": {"campaign_limit": 20, "campaign_batch": 4},
+      "host_changes": {"campaign_limit": 30, "campaign_batch": 6},
+      "status": "conflict"
+    }
+  }
+}

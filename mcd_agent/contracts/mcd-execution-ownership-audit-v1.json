@@ -1,0 +1,69 @@
+{
+  "schema": "mcd-execution-ownership-audit-v1",
+  "status": "preservation-audit-required-before-deletion",
+  "rule": "MCC and Portal deliver signed commands/scenario revisions and receive status/receipts. MCD executes locally in standalone mode and in every connected mode. Connection type must not change execution semantics.",
+  "rows": [
+    {
+      "capability": "standalone_cli",
+      "owner": "mcd",
+      "canonical_paths": ["mcd_agent/cli.py", "mcd_agent/mcd_control.py"],
+      "preserve_entrypoints": ["mcd-cli"],
+      "preservation_tests": ["tests/test_mcd_control.py", "tests/test_passive_dispatch.py"],
+      "connector_role": "none required; MCC/Portal attachment is additive"
+    },
+    {
+      "capability": "scheduler_cron_taskstore",
+      "owner": "mcd",
+      "canonical_paths": ["mcd_agent/daemon.py", "mcd_agent/plugin_operations.py"],
+      "preserve_entrypoints": ["scheduler tick", "cron/catalog operations", "TaskStore adoption"],
+      "preservation_tests": ["tests/test_campaign_ring_dispatch.py", "tests/test_task_lifecycle.py", "tests/test_plugin_operation_cron.py"],
+      "connector_role": "delivery/status only; no scheduler control"
+    },
+    {
+      "capability": "plugin_operations",
+      "owner": "mcd",
+      "canonical_paths": ["mcd_agent/plugin_operations.py", "mcd_agent/plugins.py"],
+      "preserve_entrypoints": ["catalog-derived operation execution"],
+      "preservation_tests": ["tests/test_plugin_operations.py", "tests/test_plugin_registration.py"],
+      "connector_role": "delivery/status only; no plugin recipe"
+    },
+    {
+      "capability": "upgrades_and_migrations",
+      "owner": "mcd",
+      "canonical_paths": ["mcd_agent/mautic_upgrade.py", "mcd_agent/mautic_patch_plan_v3.py", "mcd_agent/mautic_patch_facts.py"],
+      "preserve_entrypoints": ["mautic-upgrade", "doctrine discovery/apply/verify"],
+      "preservation_tests": ["tests/test_mautic_upgrade_target.py", "tests/test_mautic_manual_upgrade.py", "tests/test_mautic_patch_plan_v3.py", "tests/test_mautic_patch_facts.py"],
+      "connector_role": "signed plan/package delivery and evidence only"
+    },
+    {
+      "capability": "backup_and_rollback",
+      "owner": "mcd",
+      "canonical_paths": ["mcd_agent/backup.py", "mcd_agent/mautic_patch_backup.py", "mcd_agent/mautic_patch_plan_v3.py"],
+      "preserve_entrypoints": ["backup_run", "backup_restore", "immutable patch rollback"],
+      "preservation_tests": ["tests/test_backup_local_storage.py", "tests/test_mautic_patch_backup.py", "tests/test_upgrade_rollback_receipt.py"],
+      "connector_role": "backup evidence/receipt exchange only"
+    },
+    {
+      "capability": "scenario_execution",
+      "owner": "mcd",
+      "canonical_paths": ["mcd_agent/scenario_launcher.py", "mcd_agent/scenario_artifact_store.py", "mcd_agent/commercial_self_hosted.py"],
+      "preserve_entrypoints": ["mcd-scenario-runner = mcd_agent.scenario_launcher:main", "ScenarioExecutor"],
+      "preservation_tests": ["tests/test_scenario_launcher.py", "tests/test_mcc_scenario_apply_boundary.py", "tests/test_commercial_self_hosted_v2.py"],
+      "connector_role": "signed latest artifact/context delivery and stage/terminal receipt"
+    },
+    {
+      "capability": "settings_recovery",
+      "owner": "mcd",
+      "canonical_paths": ["mcd_agent/runtime_overrides.py", "mcd_agent/daemon.py", "mcd_agent/state_push.py"],
+      "preserve_entrypoints": ["full MCC-authoritative snapshot recovery"],
+      "preservation_tests": ["tests/test_runtime_override_direction.py"],
+      "connector_role": "MCC stores/returns complete snapshot; MCD materializes it locally"
+    }
+  ],
+  "deletion_gate": [
+    "Every row has passing standalone and connected-mode preservation evidence.",
+    "No command, schedule, migration, backup, rollback or settings path is removed or routed through MCC/Portal.",
+    "No duplicate execution runner or connection-specific scenario adapter exists.",
+    "Only after the audit passes may legacy paths be considered for removal."
+  ]
+}

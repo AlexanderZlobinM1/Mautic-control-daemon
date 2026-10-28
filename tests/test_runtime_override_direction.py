@@ -705,6 +705,135 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             )
         self.assertNotIn("scheduler_host_max_parallel", baseline)
 
+    def test_mcd_update_recovery_applies_empty_values_from_complete_mcc_snapshot(self) -> None:
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        class MemoryStore:
+            def __init__(self, values=None):
+                self.values = dict(values or {})
+
+            def get_runtime_sync(self, key):
+                return self.values.get(key)
+
+            def put_runtime_sync(self, key, value):
+                self.values[key] = dict(value)
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "mcd.toml"
+            path.write_text('[profile]\nname = "farm-hiload"\n', encoding="utf-8")
+            cfg = SimpleNamespace(config_file_path=str(path))
+            store = MemoryStore(
+                {
+                    # The local durable copy is stale and non-empty.
+                    "local_runtime": {"db_watchdog": {"enabled": True, "max_connections": 120}},
+                    # MCC explicitly stores an empty value in the complete snapshot.
+                    "mcc_runtime": {"db_watchdog": {}},
+                }
+            )
+
+            baseline, _ = daemon._initialize_local_runtime_baseline(
+                cfg,
+                store,
+                recover_after_update=True,
+            )
+
+            self.assertEqual(baseline, {"db_watchdog": {}})
+            self.assertEqual(
+                local_runtime_overrides(load_config(str(path), allow_recover_from_mcc=False)),
+                {"db_watchdog": {}},
+            )
+
+    def test_runtime_reset_restores_all_durable_settings_not_only_instance_rows(self) -> None:
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        class MemoryStore:
+            def __init__(self, values=None):
+                self.values = dict(values or {})
+
+            def get_runtime_sync(self, key):
+                return self.values.get(key)
+
+            def put_runtime_sync(self, key, value):
+                self.values[key] = dict(value)
+
+        desired = {
+            "plugin_operations": {
+                "/var/www/neodent/public_html": [{"operation_key": "stats", "interval_sec": 600}]
+            },
+            "scheduler_host_max_parallel": 8,
+            "segment_full_scan_interval_sec": 47,
+            "scheduler_elastic_slots_enabled": True,
+            "db_watchdog": {"enabled": True, "max_connections": 120},
+        }
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "mcd.toml"
+            # The update/reset left a valid but empty runtime projection.
+            path.write_text(
+                '[profile]\nname = "farm-hiload"\n\n[runtime]\n'
+                'plugin_operations = {}\n'
+                'scheduler_host_max_parallel = 1\n',
+                encoding="utf-8",
+            )
+            cfg = SimpleNamespace(config_file_path=str(path))
+            store = MemoryStore({"local_runtime": desired, "mcc_runtime": desired})
+
+            # The reset can leave a valid-looking default for one key while
+            # dropping the rest. Recovery must replace that stale value too,
+            # not only append the missing fields.
+            store.values["local_runtime"] = {
+                "plugin_operations": {},
+                "scheduler_host_max_parallel": 1,
+            }
+
+            baseline, _ = daemon._initialize_local_runtime_baseline(cfg, store)
+
+            self.assertEqual(baseline, desired)
+            restored = local_runtime_overrides(load_config(str(path), allow_recover_from_mcc=False))
+            self.assertEqual(restored, desired)
+
+    def test_runtime_loss_forces_full_snapshot_materialization_for_stable_only_response(self) -> None:
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        class MemoryStore:
+            def __init__(self):
+                self.values = {}
+
+            def get_runtime_sync(self, key):
+                return self.values.get(key)
+
+            def put_runtime_sync(self, key, value):
+                self.values[key] = dict(value)
+
+        desired = {
+            "plugin_operations": {
+                "/var/www/neodent/public_html": [{"operation_key": "stats", "interval_sec": 600}]
+            }
+        }
+        response = {
+            "status": "ok",
+            "runtime_overrides": desired,
+            "desired_state": {"revision": 203, "runtime_overrides": desired},
+        }
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "mcd.toml"
+            path.write_text('[profile]\nname = "custom"\n', encoding="utf-8")
+            cfg = replace(
+                load_config(str(path), allow_recover_from_mcc=False),
+                mcc_url="https://mcc.example",
+                mcc_token="token",
+            )
+            store = MemoryStore()
+            with patch("mcd_agent.daemon.fetch_runtime_overrides", return_value=response), patch(
+                "mcd_agent.daemon._persist_resolved_runtime_to_config"
+            ) as persist:
+                status = daemon._bootstrap_remote_runtime_before_local_baseline(cfg, store, [])
+
+        self.assertEqual(status, "applied")
+        self.assertTrue(persist.call_args.kwargs["full_snapshot"])
+
     def test_restart_profile_snapshot_without_local_provenance_does_not_push(self) -> None:
         class MemoryStore:
             def __init__(self):
@@ -2255,6 +2384,170 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             self.assertEqual(baseline, desired_runtime)
             self.assertIsNone(daemon._read_local_runtime_push_pending(store))
             self.assertEqual(store.get_runtime_sync("mcc_runtime"), desired_runtime)
+
+    def test_runtime_loss_restores_complete_mcc_snapshot_not_only_stable_keys(self) -> None:
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        class MemoryStore:
+            def __init__(self):
+                self.values = {}
+
+            def get_runtime_sync(self, key):
+                return self.values.get(key)
+
+            def put_runtime_sync(self, key, value):
+                self.values[key] = dict(value)
+
+            def delete_runtime_sync(self, keys):
+                for key in keys:
+                    self.values.pop(key, None)
+                return 1
+
+        desired_runtime = {
+            "segment_full_scan_interval_sec": 47,
+            "segment_priority_parallel_idle": 0,
+            "scheduler_elastic_slots_enabled": False,
+            "db_watchdog": {},
+        }
+        response = {
+            "status": "ok",
+            "runtime_overrides": desired_runtime,
+            "desired_state": {
+                "revision": 202,
+                "updated_at": 600.0,
+                "runtime_overrides": desired_runtime,
+            },
+        }
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "mcd.toml"
+            # Simulate an arbitrary local runtime loss, not an operator edit:
+            # MCC remains the complete source of settings.
+            path.write_text('[profile]\nname = "custom"\n', encoding="utf-8")
+            cfg = replace(
+                load_config(str(path), allow_recover_from_mcc=False),
+                mcc_url="https://mcc.example",
+                mcc_token="token",
+            )
+            store = MemoryStore()
+            with patch("mcd_agent.daemon.fetch_runtime_overrides", return_value=response):
+                status = daemon._bootstrap_remote_runtime_before_local_baseline(cfg, store, [])
+
+            self.assertEqual(status, "applied")
+            restored = local_runtime_overrides(load_config(str(path), allow_recover_from_mcc=False))
+            self.assertEqual(restored, desired_runtime)
+            self.assertEqual(store.get_runtime_sync("local_runtime"), desired_runtime)
+
+    def test_runtime_poll_full_snapshot_is_required_for_nonstable_mcc_winner(self) -> None:
+        self.assertTrue(
+            daemon._runtime_resolution_needs_full_snapshot(
+                {"remote_wins": [("host", "db_watchdog", "")]},
+                recover_after_update=False,
+            )
+        )
+        self.assertFalse(
+            daemon._runtime_resolution_needs_full_snapshot(
+                {"remote_wins": [("host", "backup_enabled", "")]},
+                recover_after_update=False,
+            )
+        )
+
+    def test_post_update_bootstrap_prefers_canonical_catalog_over_reset_local_projection(self) -> None:
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        class MemoryStore:
+            def __init__(self, values=None):
+                self.values = dict(values or {})
+
+            def get_runtime_sync(self, key):
+                return self.values.get(key)
+
+            def put_runtime_sync(self, key, value):
+                self.values[key] = dict(value)
+
+        catalog = {
+            "/var/www/neodent/public_html": [
+                {
+                    "operation_key": "salessnapviberbundle:5-6-7:stats_update",
+                    "bundle": "SalesSnapViberBundle",
+                    "operation": {
+                        "id": "stats_update",
+                        "mode": "scheduled",
+                        "command": {"runner": "mautic_console", "name": "viber:stats:update"},
+                    },
+                }
+            ]
+        }
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "mcd.toml"
+            path.write_text(
+                '[profile]\nname = "farm-hiload"\n\n[runtime]\nplugin_operations = {}\n',
+                encoding="utf-8",
+            )
+            cfg = replace(
+                load_config(str(path), allow_recover_from_mcc=False),
+                mcc_url="https://mcc.example",
+                mcc_token="token",
+            )
+            local_metadata = daemon._runtime_metadata_empty()
+            daemon._runtime_metadata_set(
+                local_metadata,
+                "host",
+                "plugin_operations",
+                daemon._runtime_metadata_stamp(
+                    source="mcd",
+                    updated_at=400.0,
+                    revision=6984,
+                    event_id="mcd:6984",
+                ),
+            )
+            store = MemoryStore({
+                "local_runtime": {"plugin_operations": {}},
+                "mcc_runtime": {"plugin_operations": {}},
+                "local_runtime_metadata": local_metadata,
+                "mcc_runtime_metadata": local_metadata,
+            })
+            response = {
+                "status": "ok",
+                "runtime_overrides": {
+                    "plugin_operations": catalog,
+                    # These are valid MCC runtime settings but intentionally
+                    # are not in daemon.py's ordinary stable-key projection.
+                    # Post-update recovery must still materialize them.
+                    "segment_full_scan_interval_sec": 47,
+                    "scheduler_elastic_slots_enabled": True,
+                    "db_watchdog": {"enabled": True, "max_connections": 120},
+                },
+                "desired_state": {
+                    "revision": 201,
+                    "updated_at": 500.0,
+                    "runtime_overrides": {
+                        "plugin_operations": catalog,
+                        "segment_full_scan_interval_sec": 47,
+                        "scheduler_elastic_slots_enabled": True,
+                        "db_watchdog": {"enabled": True, "max_connections": 120},
+                    },
+                },
+            }
+            with patch("mcd_agent.daemon.fetch_runtime_overrides", return_value=response):
+                status = daemon._bootstrap_remote_runtime_before_local_baseline(
+                    cfg,
+                    store,
+                    ["neodent.sales-snap.com"],
+                    recover_after_update=True,
+                )
+            self.assertEqual(status, "applied")
+            self.assertEqual(
+                local_runtime_overrides(load_config(str(path), allow_recover_from_mcc=False))["plugin_operations"],
+                catalog,
+            )
+            restored = local_runtime_overrides(load_config(str(path), allow_recover_from_mcc=False))
+            self.assertEqual(restored["segment_full_scan_interval_sec"], 47)
+            self.assertTrue(restored["scheduler_elastic_slots_enabled"])
+            self.assertEqual(restored["db_watchdog"], {"enabled": True, "max_connections": 120})
+            self.assertEqual(store.get_runtime_sync("mcc_runtime")["plugin_operations"], catalog)
 
     def test_plugin_catalog_survives_partial_restart_and_authoritative_empty_clears(self) -> None:
         from pathlib import Path

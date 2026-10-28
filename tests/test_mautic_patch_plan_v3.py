@@ -192,6 +192,19 @@ class MauticPatchPlanV3Tests(unittest.TestCase):
             executor.execute(str(self.root), plan)
         self.assertEqual(self.source.read_bytes(), b"before\n")
 
+    def test_fixed_gate_failure_keeps_observed_gate_evidence(self):
+        plan = _plan()
+        plan["patches"][0]["gate"][1]["needle"] = "not-produced-by-payload"
+        with self.assertRaisesRegex(executor.PatchPlanV3Error, "patch_fixed_gate_failed") as raised:
+            executor.execute(str(self.root), plan)
+        self.assertEqual(raised.exception.evidence["failure"]["id"], "FIXTURE-GENERIC-PATCH")
+        gates = raised.exception.evidence["failure"]["gates"]
+        self.assertEqual(gates[0]["group"], "vulnerable")
+        self.assertEqual(gates[1]["group"], "fixed")
+        self.assertEqual(gates[1]["actual"], 0)
+        self.assertEqual(raised.exception.evidence["completed"], [])
+        self.assertEqual(self.source.read_bytes(), b"before\n")
+
     def test_declared_legacy_backup_is_read_only_until_safe_generic_rollback(self):
         plan = _plan()
         self.source.write_bytes(b"after\n")

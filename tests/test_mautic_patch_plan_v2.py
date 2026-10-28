@@ -21,6 +21,41 @@ def _payload(old="legacy", new="fixed"):
     ).encode()
 
 
+def test_target_version_accepts_official_zip_release_metadata_over_dev_lock(tmp_path):
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "release_metadata.json").write_text('{"version":"6.0.9"}', encoding="utf-8")
+    (tmp_path / "composer.lock").write_text(
+        '{"packages":[{"name":"mautic/core-lib","version":"6.0.0-dev"}]}',
+        encoding="utf-8",
+    )
+
+    assert v1._target_version(tmp_path) == "6.0.9"
+
+
+def test_target_version_rejects_conflicting_release_metadata_and_stable_lock(tmp_path):
+    (tmp_path / "app").mkdir(parents=True)
+    (tmp_path / "docroot" / "app" / "bundles" / "CoreBundle").mkdir(parents=True)
+    (tmp_path / "app" / "release_metadata.json").write_text('{"version":"6.0.9"}', encoding="utf-8")
+    (tmp_path / "docroot" / "app" / "bundles" / "CoreBundle" / "release_metadata.json").write_text('{"version":"6.0.10"}', encoding="utf-8")
+    (tmp_path / "composer.lock").write_text(
+        '{"packages":[{"name":"mautic/core-lib","version":"6.0.8"}]}',
+        encoding="utf-8",
+    )
+
+    assert v1._target_version(tmp_path) is None
+
+
+def test_target_version_rejects_malformed_or_missing_metadata(tmp_path):
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "release_metadata.json").write_text('{"version":', encoding="utf-8")
+    with pytest.raises(v1.PatchPlanError, match="invalid_version_metadata"):
+        v1._target_version(tmp_path)
+
+    missing = tmp_path / "missing"
+    missing.mkdir()
+    assert v1._target_version(missing) is None
+
+
 def _record(payload, *, absent_gate=False, phase="post_source_install", fixed_ranges=None):
     vulnerable_needle = "legacy" if not absent_gate else "migration_marker"
     vulnerable_count = 1 if not absent_gate else 0

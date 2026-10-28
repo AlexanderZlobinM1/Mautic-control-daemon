@@ -616,6 +616,60 @@ def push_runtime_overrides(
         return {"status": "error", "reason": str(e)}
 
 
+def push_runtime_sync_v3(
+    cfg: AgentConfig,
+    *,
+    base_revision: int,
+    base: dict[str, Any],
+    changes: dict[str, Any],
+    idempotency_key: str,
+    semantic_conflict_groups: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Submit one opt-in host intent to MCC's canonical v3 sync endpoint.
+
+    A missing endpoint is explicitly reported as unsupported so callers can
+    retain the legacy v2 whole-snapshot path.  HTTP responses from an existing
+    endpoint remain v3-supported even when the intent is rejected or queued.
+    """
+    api_base = _api_base(cfg)
+    if not api_base:
+        return {"status": "disabled", "reason": "mcc_url_not_set", "v3_supported": False}
+    ident = resolve_agent_identity(cfg)
+    payload: dict[str, Any] = {
+        "desired_state_sync_protocol": 3,
+        "scope": "host",
+        "scope_key": str(ident.get("effective_mcc_host_name") or ident.get("effective_hostname") or ""),
+        "origin": "host",
+        "base_revision": int(base_revision),
+        "base": dict(base),
+        "changes": dict(changes),
+        "idempotency_key": str(idempotency_key),
+        "hostname": str(ident.get("effective_hostname") or ""),
+        "mcc_host_name": str(ident.get("effective_mcc_host_name") or ""),
+        "agent_hostname": str(ident.get("local_hostname") or ""),
+        "configured_host_name": str(ident.get("configured_host_name") or ""),
+        "agent_version": __version__,
+    }
+    if semantic_conflict_groups is not None:
+        payload["semantic_conflict_groups"] = semantic_conflict_groups
+    try:
+        out = _post_json(api_base + "/api/v1/agent/runtime-sync", payload, cfg.mcc_token, timeout_sec=12)
+        if not isinstance(out, dict):
+            return {"status": "error", "reason": "runtime_sync_v3_response_invalid", "v3_supported": True}
+        out.setdefault("status", "error")
+        out["v3_supported"] = True
+        return out
+    except HTTPError as exc:
+        # 404/405 are the only negative capability signal.  400/401/409/5xx
+        # prove the route exists and must not silently downgrade the intent.
+        supported = int(exc.code) not in {404, 405}
+        return {"status": "unsupported" if not supported else "error", "reason": f"http_{exc.code}", "v3_supported": supported}
+    except URLError as exc:
+        return {"status": "error", "reason": f"urlerror:{exc.reason}", "v3_supported": None}
+    except Exception as exc:
+        return {"status": "error", "reason": str(exc), "v3_supported": None}
+
+
 def local_runtime_overrides(cfg: AgentConfig) -> dict[str, Any]:
     return runtime_overrides_from_config_file(cfg.config_file_path)
 

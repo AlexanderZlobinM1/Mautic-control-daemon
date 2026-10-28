@@ -1,7 +1,17 @@
 {
   "schema": "mcd-mautic-patch-resolution-v1",
-  "minimum_agent_version": "1.5.237",
-  "features": {"typed_execution_context_v1": true, "facts_receipt_binding_v1": true, "typed_context_preflight_v1": true, "release_transition_authorization_v3": true},
+  "minimum_agent_version": "1.6.0",
+  "features": {"typed_execution_context_v1": true, "facts_receipt_binding_v1": true, "typed_context_preflight_v1": true, "release_transition_authorization_v3": true, "prepared_target_input_v1": true},
+  "prepared_target_input": {
+    "schema": "mcd-mautic-prepared-target-input-v1",
+    "request_field": "prepared_target_json|prepared_target_file",
+    "transport": "existing HTTPS MCC URL plus existing MCC Bearer API key; artifact path and grant are bound by the MCC-provided input",
+    "integrity": "exact artifact size and SHA-256, embedded manifest equality, and every payload file SHA-256 before live replacement",
+    "install_types": ["composer", "zip"],
+    "host_composer_invoked": false,
+    "preserved_paths": ["config", "app/config", "var"],
+    "lifecycle": "uses the existing maintenance, migration, health and rollback lifecycle; no network fallback, release selection or version-specific branch"
+  },
   "context_preflight_contract": {
     "schema": "mcd-mautic-patch-context-v1",
     "minimum_agent_version": "1.2.66",

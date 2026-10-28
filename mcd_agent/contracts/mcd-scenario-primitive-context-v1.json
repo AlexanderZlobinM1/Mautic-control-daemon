@@ -1,0 +1,71 @@
+{
+  "schema": "mcd-scenario-primitive-context-v1",
+  "contract_version": "1.0",
+  "purpose": "Typed, versioned context for the single MCD-local scenario runner. This contract is independent of the delivery or connection type; it does not contain upgrade-version logic or an installer recipe.",
+  "binding": {
+    "required": [
+      "job_id",
+      "request_id",
+      "command_id",
+      "idempotency_key",
+      "scenario_id",
+      "scenario_revision",
+      "artifact_revision",
+      "artifact_digest",
+      "host_fingerprint",
+      "facts_digest"
+    ],
+    "digest_format": "sha256:<64 lowercase hexadecimal characters>",
+    "semantics": "Every receipt, retry and terminal result is bound to this tuple. Replaying the same idempotency_key may return the durable terminal receipt but must not execute the artifact twice."
+  },
+  "application": {
+    "required": ["root", "console_path", "php_bin", "run_as_user"],
+    "path_semantics": "root, console_path and php_bin are absolute paths declared by the verified host installation; MCD does not infer or replace them in this context.",
+    "console_semantics": "console_path is the already discovered bin/console or app/console path for the selected root.",
+    "user_semantics": "run_as_user is the existing application execution identity; no new default is defined here."
+  },
+  "host_facts": {
+    "schema": "mcd-portal-applicability-facts-v1",
+    "contract_version": "1.0",
+    "required_fields": ["os_id", "os_version", "architecture", "package_manager", "capabilities", "target_kind"],
+    "digest_semantics": "facts_digest is the existing applicability_facts_digest over the normalized facts mapping, excluding detector_schema only."
+  },
+  "artifact": {
+    "required": ["revision", "digest", "media_type", "size"],
+    "digest_semantics": "digest and revision must equal the verified active MCC catalog scenario_artifact pin; size is the exact delivered artifact byte length. The trusted MCC path verifies SHA-256 equality and does not claim artifact-author authentication.",
+    "allowed_media_types": ["application/x-sh", "application/x-elf"]
+  },
+  "backup": {
+    "receipt_schema": "mcd-mautic-patch-backup-attestation-v1",
+    "manifest_schema": "mcc.backup.manifest.v1",
+    "required_evidence": ["backup_id", "backup_path", "manifest_path", "sha256", "completed_at", "bytes_written", "rollback_supported"],
+    "precondition": "The verified backup manifest is complete, current, bound to the selected root and instance, and its files/database assets have passed the existing MCD evidence checks before a mutating primitive begins.",
+    "receipt_binding": "backup evidence is bound to the same job/run/plan identity and is never replaced by caller-supplied size or hash fields."
+  },
+  "migration": {
+    "discovery": {"argv_tail": ["list", "doctrine"], "source": "mcd_agent.mautic_upgrade._doctrine_*_command"},
+    "apply": {"command": "discovered doctrine:migrations:migrate or doctrine:migration:migrate", "arguments": ["--no-interaction"]},
+    "verify": {"command": "discovered doctrine:migrations:up-to-date or doctrine:migration:up-to-date", "arguments": []},
+    "reconcile": {"command": "discovered doctrine:migrations:version or doctrine:migration:version", "scope": "only an already-in-schema identified version reported by the existing MCD reconciliation path"},
+    "prohibited": ["arbitrary_sql", "down_migration", "delete_migration_history", "invented_command_or_default"],
+    "policy": "The contract carries the discovered command family and policy only; it does not select source or target upgrade versions."
+  },
+  "rollback": {
+    "primitive": "existing immutable patch-plan reverse snapshot and backup restore mechanisms",
+    "states": ["not_attempted", "attempted", "succeeded", "failed", "blocked"],
+    "receipt_fields": ["available", "attempted", "succeeded"],
+    "binding": ["run_id", "plan_sha256", "backup_id", "root"],
+    "semantics": "Restore original file bytes and metadata, or remove a created file only when its current digest equals the recorded after digest; restore database rows only when their current value equals the recorded replacement. Drift, missing evidence or unknown dependent migration blocks rollback and fails closed.",
+    "idempotency": "A completed rollback receipt is terminal for the bound run; a retry may verify the same state but must not apply a second unrelated rollback."
+  },
+  "failure_behavior": {
+    "precondition_failure": "fail_closed_before_mutation",
+    "receipt": "persist a bounded typed failed receipt with the binding and failure stage; never persist secrets or raw artifact/context bytes",
+    "unknown_state": "unknown, interrupted or partially observed mutation requires rollback state attempted/failed or blocked; it is never reported succeeded"
+  },
+  "mcd_ownership": {
+    "mcd": ["signed job admission", "host/artifact binding", "timeout", "transport", "durable stage and terminal receipts", "idempotency", "rollback state"],
+    "portal_or_mcc": ["scenario policy", "artifact bytes and active catalog metadata", "selected primitive fields", "applicability facts and pins"],
+    "excluded": ["installer recipe", "Mautic version selection", "raw credentials", "upgrade-version branching"]
+  }
+}

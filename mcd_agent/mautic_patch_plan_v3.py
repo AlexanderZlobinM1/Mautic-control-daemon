@@ -30,6 +30,10 @@ _DIFF_RE = re.compile(rb"^diff --git a/(.+) b/(.+)$", flags=re.MULTILINE)
 class PatchPlanV3Error(RuntimeError):
     """A v3 plan could not be safely verified, applied, or rolled back."""
 
+    def __init__(self, reason: str, *, evidence: dict[str, Any] | None = None):
+        super().__init__(reason)
+        self.evidence = evidence if isinstance(evidence, dict) else None
+
 
 def _sha(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
@@ -271,7 +275,10 @@ def _simulate_inner(root: Path, plan: dict[str, Any], phase: str | None, temp: P
         state, gates = _record_state(temp, record)
         if state == "ambiguous":
             shutil.rmtree(temp, ignore_errors=True)
-            raise PatchPlanV3Error("patch_source_state_ambiguous")
+            raise PatchPlanV3Error(
+                "patch_source_state_ambiguous",
+                evidence={"completed": outcomes, "failure": {"id": record["id"], "gates": gates}},
+            )
         if state == "already":
             outcomes.append({"id": record["id"], "decision": "already", "gates": gates})
             continue
@@ -288,7 +295,10 @@ def _simulate_inner(root: Path, plan: dict[str, Any], phase: str | None, temp: P
         )
         if check.returncode != 0:
             shutil.rmtree(temp, ignore_errors=True)
-            raise PatchPlanV3Error("patch_apply_check_failed")
+            raise PatchPlanV3Error(
+                "patch_apply_check_failed",
+                evidence={"completed": outcomes, "failure": {"id": record["id"], "gates": gates}},
+            )
         applied = subprocess.run(
             ["git", "apply", "--binary"],
             cwd=temp,
@@ -300,7 +310,10 @@ def _simulate_inner(root: Path, plan: dict[str, Any], phase: str | None, temp: P
         )
         if applied.returncode != 0:
             shutil.rmtree(temp, ignore_errors=True)
-            raise PatchPlanV3Error("patch_apply_simulation_failed")
+            raise PatchPlanV3Error(
+                "patch_apply_simulation_failed",
+                evidence={"completed": outcomes, "failure": {"id": record["id"], "gates": gates}},
+            )
         for relative in patch_paths:
             blocks = list(_DIFF_RE.finditer(payload))
             block = next(payload[match.start():blocks[index + 1].start() if index + 1 < len(blocks) else len(payload)]
@@ -314,7 +327,13 @@ def _simulate_inner(root: Path, plan: dict[str, Any], phase: str | None, temp: P
         after_state, after_gates = _record_state(temp, record)
         if after_state != "already":
             shutil.rmtree(temp, ignore_errors=True)
-            raise PatchPlanV3Error("patch_fixed_gate_failed")
+            raise PatchPlanV3Error(
+                "patch_fixed_gate_failed",
+                evidence={
+                    "completed": outcomes,
+                    "failure": {"id": record["id"], "gates": after_gates},
+                },
+            )
         outcomes.append({"id": record["id"], "decision": "candidate", "gates": gates})
     for relative in declared:
         path = _file(temp, relative)

@@ -1,3 +1,273 @@
+## 1.6.0 - 2026-10-28 (dev-only candidate)
+
+- Add the generic prepared-target Mautic apply path: MCC-built Composer/ZIP
+  skeletons are delivered through the existing authenticated MCC HTTPS API,
+  verified by exact artifact and manifest SHA-256, applied without invoking
+  Composer on the host, with `config`/`var` preservation and existing
+  migration, health and rollback receipts. MCD 1.5.268 remains only as the
+  historical rollback/audit reference; it is not a parallel implementation.
+  Prepared-target IDs are target-only: ZIP uses
+  `mautic-{target_version}-zip`, while Composer uses
+  `mautic-{target_version}-php{major.minor}-composer`; full MCC manifests fit
+  the bounded 8 MiB input envelope. The legacy hardcoded upgrade path is
+  retained until sandbox prepared-skeleton parity is accepted.
+
+## 1.5.268 - 2026-10-27
+
+- Use the authenticated MCC catalog/API path for scenario delivery: require
+  the existing API credential, optionally enforce the configured exact FQDN/IP
+  allowlist, verify exact artifact size and SHA-256 against active catalog metadata, then run
+  the existing generic MCD executor and receipts without an artifact signer
+  operation. Legacy signed pins remain compatibility-only.
+
+## 1.5.267 - 2026-10-27
+
+- Restore the complete MCC-authoritative runtime settings snapshot after
+  update/reset, including intentionally empty containers, without preserving
+  stale local values as if they were operator changes.
+
+## 1.5.266 - 2026-10-27
+
+- Always publish one immutable-plan-bound Mautic patch evidence record for
+  v3 upgrade success and failure, including observed fixed-gate failures,
+  before returning the terminal result. Recover the already-issued MCC
+  envelope by `run_id` and submit through the existing evidence endpoint;
+  never select a second catalog plan or synthesize success.
+
+## 1.5.265 - 2026-10-27
+
+- Add an exclusive cross-process maintenance dispatch fence so scheduler
+  submit, tracked-row reconciliation, and external-console adoption cannot
+  race an upgrade pause or daemon restart.
+- Drain maintenance work with bounded repeated snapshots, reconcile dead
+  tracked rows, stop work appearing during the drain, and emit typed,
+  bounded, secret-free guard diagnostics before any source/package/patch
+  mutation.
+
+## 1.5.264 - 2026-10-27
+
+- Consume Portal's additive self-hosted job contract `2.1` for already
+  registered MCD installations: `scenario.apply` jobs require the signed
+  scenario artifact and reject any mixed `bootstrap_artifact`.
+- Keep legacy contract `2.0` bootstrap verification and receipt replay
+  semantics unchanged; bootstrap remains an onboarding-only concern.
+- Ensure the 2.1 worker downloads, verifies, executes, and durably replays
+  only the signed scenario artifact across restart and receipt retry paths.
+
+## 1.5.263 - 2026-10-27
+
+- Persist bounded, redacted external-runner evidence: stderr preview,
+  stdout/stderr digests, truncation flags, exit/signal/timeout state, admission
+  stage, and valid progress frames across stage receipts, terminal receipts,
+  and replay state without storing artifact bytes or execution context.
+- Restore the complete MCC-authoritative runtime snapshot after host settings
+  loss, including partial host fields and instance rows; stable-only responses
+  now also trigger full materialization while explicit tombstones and LWW
+  semantics remain unchanged.
+
+## 1.5.262 - 2026-10-27
+
+- Add the Portal-owned executable scenario v1 launcher boundary: MCD validates
+  the exact framed artifact/context contract, runs only the bundled generic
+  launcher, bounds canonical progress/result frames, and keeps scenario policy
+  outside the agent.
+- Reject legacy declarative JSON artifacts on the executable path while
+  retaining the existing audit-only artifact lane.
+
+## 1.5.261 - 2026-10-27
+
+- Publish the complete MCC-authoritative runtime snapshot after a local
+  settings loss or update reset: restore every allowed host and instance
+  setting, including false, zero, and empty values, before scheduler startup.
+- Keep explicit MCC tombstones and newer local MCD events authoritative so a
+  recovery cannot turn a real deletion into an accidental restore.
+
+## 1.5.260 - 2026-10-27
+
+- Continue same-job Portal recovery terminals with the next sequence and
+  idempotency key, so an existing first-attempt terminal is not conflicted.
+- Finish a durable pending delivery after its terminal receipt drains, without
+  replaying the runner after restart or outage.
+
+## 1.5.259 - 2026-10-27
+
+- Keep the self-hosted Portal executor independent from corporate MCC
+  profile/URL state; valid Portal enrollment remains usable in standalone and
+  passive modes.
+- Close every accepted self-hosted delivery with a typed signed terminal
+  receipt on local expiry, malformed or invalid admission, revoked/disabled
+  local Portal state, and artifact unavailability; retain durable receipt
+  delivery across restart/outage without re-running the runner.
+- Make the recovery contract explicit: after update, reset, or partial runtime
+  loss, restore the complete MCC-authoritative runtime snapshot, including all
+  host and instance settings; an omitted field is not deletion and only an
+  explicit tombstone may remove it.
+
+## 1.5.258 - 2026-10-27
+
+- Refresh the live self-hosted worker's Portal artifact-trust capability
+  immediately after a durable trust update, so a following scenario command in
+  the same process verifies with the new key set without requiring a restart.
+- Keep unknown/revoked signer failures operation-scoped with typed, secret-free
+  terminal evidence including `rollback=not_attempted` and bounded progress.
+
+## 1.5.257 - 2026-10-27
+
+- Separate Portal-owned artifact signing trust from Portal job signing trust;
+  persist activation trust revision/digest and apply signed, bound, monotonic
+  trust updates atomically over the outbound poll lane.
+- Preserve the deprecated `portal_mcc_publisher_keys` fallback only while
+  canonical Portal artifact trust is absent; verify canonical artifacts with
+  the Portal signature domain and fail revoked/unknown keys per operation.
+- Enforce scenario/artifact immutable revision binding and return durable
+  terminal results before rechecking current artifact trust on exact replay.
+- Record the canonical Portal schemas, fixture vectors, and source provenance.
+
+## 1.5.256 - 2026-10-27
+
+- Persist canonical durable Portal inventory content, hash, and monotonic snapshot revision across restart, outage, replay, and concurrent workers.
+- Ignore only inventory transport volatility (`request_id`, `observed_at`, and `agent_signature`) when deciding whether to bump the revision.
+
+## 1.5.255 - 2026-10-27
+
+- Persist one canonical standalone-settings ETag across inventory and noop processing.
+- Emit durable signed terminal command receipts for noop mismatch, unavailable, malformed, expired, and delivery-outage outcomes.
+- Restore the complete MCC-managed runtime snapshot after update/reset loss; use per-field LWW metadata and explicit tombstones instead of partial recovery.
+
+## 1.5.254 - 2026-10-26
+
+- Preserve safe `self_hosted_mcd_*` verifier codes in failed commercial
+  terminal receipts so missing or unknown MCC artifact trust remains typed at
+  the operation boundary instead of being reported as generic `ValueError`.
+
+## 1.5.253 - 2026-10-26
+
+- Keep the self-hosted commercial Portal worker available with valid durable
+  enrollment and Portal job-signing keys even when MCC publisher trust is not
+  provisioned. Require that trust only while validating a delivered
+  MCC-signed bootstrap or scenario artifact, returning a typed failed terminal
+  receipt for missing or unknown signer keys without stopping later polling.
+
+## 1.5.252 - 2026-10-26
+
+- Start the commercial Portal worker from valid durable commercial enrollment,
+  independently of the passive, standalone, or corporate base profile.
+- Keep single-cycle execution and the corporate MCC lane unchanged; invalid,
+  revoked, detached, or incomplete commercial state fails closed and stops only
+  the commercial worker.
+
+## 1.5.251 - 2026-10-26
+
+- Add an explicit product User-Agent to every commercial Portal request so
+  standard WAF/Cloudflare rules do not classify MCD as generic Python urllib.
+- Add typed, redacted commercial transport diagnostics with stage, safe code,
+  HTTP status and retryability; response bodies, URLs and credentials are not
+  exposed by the CLI.
+
+## 1.5.250 - 2026-10-26
+
+- Restore the complete durable MCC-managed runtime snapshot after any local
+  reset or update, covering every host and instance setting rather than only
+  instance rows; false/zero values remain valid settings and only explicit
+  local or MCC tombstones delete values.
+- Align the self-hosted commercial lane with the installation-scoped Portal
+  Stage2 poll, adopt/inventory, signed receipt/state, batch command and cursor
+  contract while preserving the legacy v2, corporate and standalone paths.
+
+## 1.5.249 - 2026-10-26
+
+- Enforce the commercial Portal network boundary as an outbound-only MCD
+  transport: long-poll delivery, durable command cursor, pending delivery and
+  exponential outage backoff are persisted locally and replayed after restart.
+- Keep Portal commands queued until the next successful MCD outbound cycle;
+  no inbound listener, webhook, SSH path, bind, or public host reachability is
+  introduced. Corporate MCC and standalone scheduler paths remain separate.
+
+## 1.5.248 - 2026-10-26
+
+- Add opt-in MCC desired-runtime sync v3 producer/consumer with durable common
+  base, host pending intent, semantic-group three-way merge, conflict hold and
+  operator-resolution readback while retaining the legacy v2 path.
+- Reuse existing runtime-overrides application and ACK/readback primitives;
+  v3 outages, restart and idempotent replay never drop a local intent.
+
+## 1.5.247 - 2026-10-26
+
+- Add the exact Portal self-hosted MCD v2 lane: strict job binding, local-facts
+  revalidation, separately pinned and signed external artifacts, bounded
+  external runner execution, v2 stage/terminal receipts, and durable receipt
+  retry across restart/outage.
+- Keep installer, OS, Mautic, scenario and primitive recipes outside MCD; the
+  commercial worker no longer constructs the fixed onboarding handler registry.
+
+## 1.5.246 - 2026-10-26
+
+- Emit a bounded, secret-free durable terminal failure receipt for commercial
+  scenario execution errors before the rejected job ACK. Portal outages retain
+  the exact receipt for restart retry; no installer, OS, Mautic, or scenario
+  knowledge is added to MCD.
+- Keep the guarded patch-resolution contract synchronized with the release.
+
+## 1.5.245 - 2026-10-26
+
+- Make plugin inventory synchronization durable per instance. A successful
+  observation replaces the last-known canonical inventory; scan failures retain
+  that inventory and publish an explicit incomplete/error observation so MCC
+  never prunes settings or rows from a transient filesystem failure.
+- Persist pending inventory synchronization before plugin-operation terminal
+  receipts, retry it idempotently across daemon restart, and report the exact
+  `ok`, `pending`, or `error` outcome with digest and observation timestamps.
+- Add the versioned `mcd-plugin-inventory-sync-v1` wire contract and regression
+  coverage for manual changes, multi-instance deduplication, removals,
+  restart/retry/ACK, and stable change detection.
+- Synchronize the guarded Mautic patch-resolution contract with the released
+  agent version so the full upgrade/patch regression suite remains executable.
+
+## 1.5.244 - 2026-10-26
+
+- Apply the complete MCC-managed runtime snapshot on normal runtime polls as
+  well as startup/update recovery whenever MCC wins a non-stable field, so a
+  runtime include lost while MCD is running cannot leave settings only in
+  memory or restore only a partial projection.
+
+## 1.5.243 - 2026-10-26
+
+- Restore the complete MCC-managed runtime snapshot after any local runtime
+  loss, not only after an MCD update; preserve false, zero and empty values
+  without treating recovery as a new local settings change.
+
+## 1.5.242 - 2026-10-26
+
+- Keep a completed native plugin reload from failing when the optional MCC
+  catalog preflight is strictly blocked by an agent/contract compatibility
+  mismatch. No unvalidated catalog patch is applied; the next compatible
+  reconciliation can retry the remediation.
+- Add regression coverage for the files-applied/cache-reset/plugin-reload
+  completion path.
+
+## 1.5.241 - 2026-10-26
+
+- Restore every MCC-allowed runtime setting after an MCD update replaces or
+  truncates the mutable runtime include; explicit MCC tombstones remain the
+  only destructive signal during post-update recovery.
+
+## 1.5.240 - 2026-10-26
+
+- Reload the complete recovered runtime include before scheduler startup when
+  MCC bootstrap is deferred, so the in-memory daemon cannot retain a reset or
+  partial projection after an MCD update.
+
+## 1.5.239 - 2026-10-26
+
+- Fail the runtime-only archive builder and bridge QA when required import
+  closure files, including `mcd_agent/mcd_control.py`, are absent.
+
+## 1.5.238 - 2026-10-26
+
+- Run post-update runtime recovery before the first MCC poll so a previously
+  self-stamped empty local projection cannot outrank the canonical MCC
+  plugin-operation catalog.
+
 ## 1.5.237 - 2026-10-26
 
 - Restore the complete durable MCC runtime snapshot after an MCD

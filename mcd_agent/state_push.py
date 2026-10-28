@@ -15,7 +15,7 @@ import sqlite3
 import socket
 import subprocess
 import time
-from typing import Any
+from typing import Any, Mapping
 import uuid
 from urllib.parse import parse_qsl, urlsplit
 from urllib import request
@@ -42,6 +42,16 @@ from mcd_agent.commercial_portal import _host_fingerprint
 from mcd_agent.install_readiness import collect_mautic_install_readiness
 from mcd_agent.instance_size import collect_instance_sizes
 from mcd_agent.install_type import detect_install_type, is_complete_plugin_bundle, plugin_dir_candidates
+from mcd_agent.plugin_inventory import (
+    PLUGIN_INVENTORY_PENDING_KEY,
+    PLUGIN_INVENTORY_SYNC_SCHEMA,
+    canonical_inventory,
+    inventory_sha256,
+    observation as plugin_inventory_observation,
+    runtime_key as plugin_inventory_runtime_key,
+    sync_payload as plugin_inventory_sync_payload,
+    utc_now,
+)
 from mcd_agent.runtime_matrix import build_runtime_profile
 from mcd_agent.inventory import InstanceInventory, MauticInstall, ensure_seeded
 from mcd_agent.logical_issues import read_logical_issues_snapshot
@@ -157,6 +167,46 @@ def stable_change_payload(payload: dict[str, Any]) -> dict[str, Any]:
             cleaned.pop("checked_at_utc", None)
             out[key] = cleaned
     out.pop("signals_collected_at_ts", None)
+
+    # Plugin observations are collected on every state-push cycle. Their
+    # observation timestamps describe freshness, but must not make an
+    # otherwise unchanged payload look changed (especially when
+    # mcc_push_on_change is enabled). The digest/status/error fields remain in
+    # the change key, so a real inventory transition still pushes immediately.
+    observations = out.get("plugin_inventory_observations")
+    if isinstance(observations, list):
+        out["plugin_inventory_observations"] = [
+            {
+                key: value
+                for key, value in item.items()
+                if key not in {"observed_at_utc", "last_known_observed_at_utc"}
+            }
+            if isinstance(item, dict)
+            else item
+            for item in observations
+        ]
+    sync = out.get("plugin_inventory_sync")
+    if isinstance(sync, dict):
+        stable_sync = dict(sync)
+        stable_sync.pop("requested_at_utc", None)
+        stable_sync.pop("last_attempt_at_utc", None)
+        out["plugin_inventory_sync"] = stable_sync
+    instances = out.get("instances")
+    if isinstance(instances, list):
+        stable_instances = []
+        for item in instances:
+            if not isinstance(item, dict):
+                stable_instances.append(item)
+                continue
+            stable_item = dict(item)
+            plugin_inventory = stable_item.get("plugin_inventory")
+            if isinstance(plugin_inventory, dict):
+                stable_plugin_inventory = dict(plugin_inventory)
+                stable_plugin_inventory.pop("observed_at_utc", None)
+                stable_plugin_inventory.pop("last_known_observed_at_utc", None)
+                stable_item["plugin_inventory"] = stable_plugin_inventory
+            stable_instances.append(stable_item)
+        out["instances"] = stable_instances
     return out
 
 
@@ -1526,13 +1576,30 @@ def _candidate_roots(root: str) -> list[Path]:
 
 
 def _collect_installed_plugins(root: str, limit: int = 200) -> list[dict[str, str]]:
+    try:
+        return _scan_installed_plugins(root, limit=limit)
+    except Exception:
+        # Preserve the historical helper contract for callers that only need a
+        # best-effort display. State publication uses the strict scanner below
+        # and never turns a failed observation into an empty inventory.
+        return []
+
+
+def _scan_installed_plugins(
+    root: str,
+    limit: int = 200,
+    *,
+    allow_missing_dir_empty: bool = False,
+) -> list[dict[str, str]]:
     plugins_dir = None
     for p in plugin_dir_candidates(root):
         if p.exists() and p.is_dir():
             plugins_dir = p
             break
     if plugins_dir is None:
-        return []
+        if allow_missing_dir_empty:
+            return []
+        raise RuntimeError("plugin_directory_unavailable")
     rows: list[dict[str, str]] = []
     for name in sorted(os.listdir(plugins_dir)):
         if name.startswith("."):
@@ -1554,6 +1621,183 @@ def _collect_installed_plugins(root: str, limit: int = 200) -> list[dict[str, st
         if len(rows) >= limit:
             break
     return rows
+
+
+def _plugin_inventory_observation(
+    install: MauticInstall,
+    runtime_store: Any | None,
+    *,
+    allow_missing_dir_empty: bool = False,
+) -> dict[str, Any]:
+    """Observe one registry and preserve its last-known value on failure."""
+    uid = str(getattr(install, "instance_uid", "") or getattr(install, "root", "") or "").strip()
+    root = str(getattr(install, "root", "") or "").strip()
+    previous = runtime_store.get_runtime_sync(plugin_inventory_runtime_key(uid)) if runtime_store is not None else None
+    try:
+        rows = _scan_installed_plugins(root, allow_missing_dir_empty=allow_missing_dir_empty)
+        current = plugin_inventory_observation(
+            instance_uid=uid,
+            root=root,
+            inventory=rows,
+            status="ok",
+        )
+    except Exception as exc:
+        current = plugin_inventory_observation(
+            instance_uid=uid,
+            root=root,
+            inventory=[],
+            status="error",
+            error_type=type(exc).__name__,
+            error=str(exc),
+            previous=previous if isinstance(previous, dict) else None,
+        )
+    if runtime_store is not None:
+        semantic_fields = ("status", "complete", "last_known", "inventory", "inventory_sha256", "scan_error")
+        if not isinstance(previous, dict) or any(previous.get(key) != current.get(key) for key in semantic_fields):
+            runtime_store.put_runtime_sync(plugin_inventory_runtime_key(uid), current)
+    return current
+
+
+def _plugin_inventory_sync_pending(runtime_store: Any | None) -> dict[str, Any]:
+    if runtime_store is None:
+        return {}
+    raw = runtime_store.get_runtime_sync(PLUGIN_INVENTORY_PENDING_KEY)
+    return raw if isinstance(raw, dict) else {}
+
+
+def _queue_plugin_inventory_sync(runtime_store: Any, observation: dict[str, Any], *, operation_id: str) -> dict[str, Any]:
+    pending = _plugin_inventory_sync_pending(runtime_store)
+    items = dict(pending.get("items") or {}) if isinstance(pending.get("items"), dict) else {}
+    uid = str(observation.get("instance_uid") or "").strip()
+    items[uid] = {
+        "root": str(observation.get("root") or ""),
+        "inventory_sha256": str(observation.get("inventory_sha256") or ""),
+        "observed_at_utc": str(observation.get("observed_at_utc") or ""),
+    }
+    payload = {
+        "schema": PLUGIN_INVENTORY_SYNC_SCHEMA,
+        "status": "pending",
+        "items": items,
+        "requested_at_utc": str(pending.get("requested_at_utc") or utc_now()),
+        "last_attempt_at_utc": str(pending.get("last_attempt_at_utc") or ""),
+        "retry_count": int(pending.get("retry_count", 0) or 0),
+        "last_error": str(pending.get("last_error") or "")[:500],
+        "operation_id": str(operation_id or "").strip(),
+    }
+    runtime_store.put_runtime_sync(PLUGIN_INVENTORY_PENDING_KEY, payload)
+    return payload
+
+
+def _ack_plugin_inventory_sync(runtime_store: Any | None, payload: Mapping[str, Any]) -> None:
+    if runtime_store is None:
+        return
+    pending = _plugin_inventory_sync_pending(runtime_store)
+    items = dict(pending.get("items") or {}) if isinstance(pending.get("items"), dict) else {}
+    sent = payload.get("plugin_inventory_sync")
+    sent_items = sent.get("items") if isinstance(sent, Mapping) else []
+    for item in sent_items if isinstance(sent_items, list) else []:
+        if not isinstance(item, Mapping):
+            continue
+        uid = str(item.get("instance_uid") or "").strip()
+        current = items.get(uid)
+        if isinstance(current, Mapping) and (
+            str(current.get("inventory_sha256") or "") == str(item.get("inventory_sha256") or "")
+            and str(current.get("observed_at_utc") or "") == str(item.get("observed_at_utc") or "")
+        ):
+            items.pop(uid, None)
+    if items:
+        pending["items"] = items
+        pending["status"] = "pending"
+        runtime_store.put_runtime_sync(PLUGIN_INVENTORY_PENDING_KEY, pending)
+    else:
+        runtime_store.delete_runtime_sync([PLUGIN_INVENTORY_PENDING_KEY])
+
+
+def _mark_plugin_inventory_sync_failure(runtime_store: Any | None, message: str) -> None:
+    if runtime_store is None:
+        return
+    pending = _plugin_inventory_sync_pending(runtime_store)
+    if not pending.get("items"):
+        return
+    pending["status"] = "pending"
+    pending["last_attempt_at_utc"] = utc_now()
+    pending["retry_count"] = int(pending.get("retry_count", 0) or 0) + 1
+    pending["last_error"] = str(message or "state_push_failed")[:500]
+    runtime_store.put_runtime_sync(PLUGIN_INVENTORY_PENDING_KEY, pending)
+
+
+def _plugin_inventory_sync_payload(runtime_store: Any | None) -> dict[str, Any]:
+    return plugin_inventory_sync_payload(_plugin_inventory_sync_pending(runtime_store))
+
+
+def _store_for_plugin_inventory(cfg: AgentConfig, runtime_store: Any | None) -> tuple[Any, bool]:
+    if runtime_store is not None:
+        return runtime_store, False
+    from mcd_agent.daemon import TaskStore
+
+    return TaskStore(cfg.state_db_path, cfg), True
+
+
+def sync_plugin_inventory_after_operation(
+    cfg: AgentConfig,
+    install: MauticInstall,
+    *,
+    operation_id: str,
+    action: str = "",
+    runtime_store: Any | None = None,
+) -> dict[str, Any]:
+    """Persist an operation's inventory before its terminal receipt is emitted."""
+    store = None
+    owned = False
+    try:
+        # Production AgentConfig always provides state_db_path. Keep the
+        # terminal plugin-operation contract compatible with narrow callers and
+        # unit fixtures that intentionally provide no daemon persistence
+        # config: report the sync limitation in the receipt instead of
+        # aborting an otherwise successful plugin operation.
+        store, owned = _store_for_plugin_inventory(cfg, runtime_store)
+        observed = _plugin_inventory_observation(
+            install,
+            store,
+            allow_missing_dir_empty=str(action or "").strip().lower() in {"remove", "purge"},
+        )
+        _queue_plugin_inventory_sync(store, observed, operation_id=operation_id)
+        ok, message = push_state_now(cfg, include_signals=False, runtime_store=store)
+        pending = _plugin_inventory_sync_pending(store)
+        scan_failed = str(observed.get("status") or "") != "ok"
+        status = "error" if scan_failed else ("ok" if ok and not pending.get("items") else "pending")
+        if not ok:
+            failure = str(message or "state_push_failed")[:500]
+            # send() records transport failures itself. Avoid counting the
+            # same failed attempt twice, while still recording failures from
+            # a disabled/short-circuited push path.
+            if str(pending.get("last_error") or "") != failure:
+                pending["last_attempt_at_utc"] = utc_now()
+                pending["retry_count"] = int(pending.get("retry_count", 0) or 0) + 1
+                pending["last_error"] = failure
+                store.put_runtime_sync(PLUGIN_INVENTORY_PENDING_KEY, pending)
+        return {
+            "schema": PLUGIN_INVENTORY_SYNC_SCHEMA,
+            "status": status,
+            "inventory_sync_status": status,
+            "inventory_sha256": str(observed.get("inventory_sha256") or ""),
+            "observed_at_utc": str(observed.get("observed_at_utc") or ""),
+            "last_attempt_at_utc": str(pending.get("last_attempt_at_utc") or utc_now()),
+            "retry_count": int(pending.get("retry_count", 0) or 0),
+            "last_error": str(pending.get("last_error") or "")[:500],
+            "scan_error": observed.get("scan_error"),
+        }
+    except Exception as exc:
+        return {
+            "schema": PLUGIN_INVENTORY_SYNC_SCHEMA,
+            "status": "error",
+            "inventory_sync_status": "error",
+            "last_attempt_at_utc": utc_now(),
+            "last_error": f"{type(exc).__name__}: {exc}"[:500],
+        }
+    finally:
+        if owned and store is not None:
+            store.close()
 
 
 def _read_php_array_string(cfg_text: str, key: str) -> str:
@@ -1803,6 +2047,10 @@ class MCCStatePusher:
 
     def enabled(self) -> bool:
         return bool(self.cfg.mcc_push_enabled and self.cfg.mcc_url and self.cfg.mcc_token)
+
+    def _plugin_inventory_sync_pending(self) -> bool:
+        pending = _plugin_inventory_sync_pending(self.runtime_store)
+        return bool(isinstance(pending.get("items"), dict) and pending.get("items"))
 
     def _plugin_operations_runtime(self, root: str) -> list[dict[str, Any]]:
         if self.runtime_store is None:
@@ -2158,7 +2406,13 @@ class MCCStatePusher:
 
         interval_due = (now_ts - self.last_push_ts) >= max(1, int(self.cfg.mcc_push_interval_sec))
         change_due = bool(self.cfg.mcc_push_on_change and changed)
-        return (self._control_push_pending or interval_due or change_due or force_alert), changed
+        return (
+            self._control_push_pending
+            or self._plugin_inventory_sync_pending()
+            or interval_due
+            or change_due
+            or force_alert
+        ), changed
 
     def _execute_pending_control_jobs(
         self,
@@ -2311,8 +2565,11 @@ class MCCStatePusher:
         )
         from mcd_agent.mautic_release_authorization import runtime_capabilities as release_capabilities
         instances = []
+        plugin_inventory_observations: list[dict[str, Any]] = []
         for i in installs:
-            plugins = _collect_installed_plugins(i.root)
+            plugin_observation = _plugin_inventory_observation(i, self.runtime_store)
+            plugins = canonical_inventory(plugin_observation.get("inventory"))
+            plugin_inventory_observations.append(plugin_observation)
             sender = _detect_sender_profile(i.root, plugins)
             install_type = str(i.install_type or detect_install_type(i.root)).strip().lower() or "unknown"
             runtime_profile = build_runtime_profile(
@@ -2343,6 +2600,7 @@ class MCCStatePusher:
                     "docker_runtime_capability": getattr(i, "docker_runtime_capability", None) if str(i.runtime or "").strip().lower() == "docker" else None,
                     "runtime_profile": runtime_profile.safe_dict(),
                     "plugins": plugins,
+                    "plugin_inventory": plugin_observation,
                     "sender_type": str(sender.get("sender_type", "") or "").strip() or "unknown",
                     "sender_key": str(sender.get("sender_key", "") or "").strip() or "unknown",
                     "sender_title": str(sender.get("sender_title", "") or "").strip(),
@@ -2362,6 +2620,9 @@ class MCCStatePusher:
             "schema": "mcd-state-v1",
             "control_receipts": control_store.receipts(),
             "control_capabilities": {"schema": "mcd-control-capabilities-v1", "version": "1.0", "commands": ["docker_runtime_preflight_v1"]},
+            "inventory_sync_status": _plugin_inventory_sync_payload(self.runtime_store).get("status", "ok"),
+            "plugin_inventory_sync": _plugin_inventory_sync_payload(self.runtime_store),
+            "plugin_inventory_observations": plugin_inventory_observations,
             "docker_runtime_image_inventory_capability": docker_image_inventory_capability(),
             "docker_runtime_image_inventory": docker_image_inventory,
             "result_signing_key": result_key,
@@ -2463,6 +2724,7 @@ class MCCStatePusher:
                         except (ValueError, json.JSONDecodeError):
                             pass
                     self._control_push_pending = bool(executed_receipts)
+                    _ack_plugin_inventory_sync(self.runtime_store, payload)
                     mark_state_snapshot_push_result_mysql(
                         self.cfg,
                         payload_hash=payload_hash,
@@ -2476,6 +2738,7 @@ class MCCStatePusher:
                     delivered=False,
                     message=f"http {code}: {body.strip()}",
                 )
+                _mark_plugin_inventory_sync_failure(self.runtime_store, f"http {code}: {body.strip()}")
                 return False, f"http {code}: {body.strip()}"
         except HTTPError as e:
             try:
@@ -2491,6 +2754,7 @@ class MCCStatePusher:
                 delivered=False,
                 message=f"http {e.code}: {msg or e.reason}",
             )
+            _mark_plugin_inventory_sync_failure(self.runtime_store, f"http {e.code}: {msg or e.reason}")
             return False, f"http {e.code}: {msg or e.reason}"
         except URLError as e:
             mark_state_snapshot_push_result_mysql(
@@ -2499,6 +2763,7 @@ class MCCStatePusher:
                 delivered=False,
                 message=f"urlerror: {e.reason}",
             )
+            _mark_plugin_inventory_sync_failure(self.runtime_store, f"urlerror: {e.reason}")
             return False, f"urlerror: {e.reason}"
         except Exception as e:
             mark_state_snapshot_push_result_mysql(
@@ -2507,6 +2772,7 @@ class MCCStatePusher:
                 delivered=False,
                 message=str(e),
             )
+            _mark_plugin_inventory_sync_failure(self.runtime_store, str(e))
             return False, str(e)
 
 

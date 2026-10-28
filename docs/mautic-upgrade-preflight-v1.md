@@ -1,5 +1,39 @@
 # Guarded Mautic upgrade preflight v1
 
+## Dev candidate 1.6.0: prepared target input
+
+The prepared-target candidate keeps the existing `mautic-upgrade apply`
+contract and accepts an optional `mcd-mautic-prepared-target-input-v1` value.
+MCC builds the Composer/ZIP skeleton; MCD downloads it only from the configured
+HTTPS MCC endpoint with the existing Bearer API key, verifies exact size and
+SHA-256 plus the embedded file manifest, and applies the verified tree without
+invoking Composer on the host. `config`, `app/config`, and `var` remain from
+the live installation. Existing migration, health and full-tree rollback
+receipts are reused, and the receipt records `host_composer_invoked=false`.
+The prepared-target identity is target-only: ZIP uses
+`mautic-{target_version}-zip`; Composer uses
+`mautic-{target_version}-php{major.minor}-composer`. Source compatibility remains
+in the MCC scenario manifest and is never encoded in the prepared-target ID.
+The PHP matrix applies to Composer skeletons; the Composer identity's
+`php{major.minor}` must equal the selected host runtime PHP major/minor.
+Cross-PHP Composer cells are unsupported: MCD rejects a mismatch before
+downloading the artifact with `prepared_target_runtime_php_mismatch`. ZIP has
+one official upstream target artifact and no PHP matrix binding. If MCC has no
+exact Composer skeleton for the selected host runtime, MCC reports the typed
+`pending_artifact` state and does not route a host-side Composer fallback.
+The full MCC file manifest is accepted within a bounded 8 MiB input envelope.
+
+Each Composer cell's acceptance evidence binds the exact prepared-target SHA-256
+and catalog revision, the build/runtime PHP equality, and the apply, health,
+migration, rollback and idempotency receipts. A cell is not PASS when any of
+those receipts is absent or failed.
+
+This is the dev-only 1.6.0 continuation of the current MCD line, not a parallel
+implementation. Published channels remain at 1.5.268 until the MCC sandbox
+accepts prepared-skeleton parity; 1.5.268 is retained only for historical
+rollback/audit. The legacy hardcoded upgrade path remains present until that
+acceptance.
+
 `mcd-cli mautic-upgrade preflight --root INSTANCE --mode composer --target VERSION --json`
 emits one compact `MCD_UPGRADE_PREFLIGHT_EVIDENCE=` line with schema
 `mcd-mautic-upgrade-preflight-v1`. The evidence includes `run_id`, `root`,
