@@ -1138,6 +1138,7 @@ cycle без ручного `segments:update`, profile/capacity/data changes. Ad
 | heavy-plan deferral and durable pending guard | `mcd_agent/daemon.py` | `tests/test_segment_liveness.py`, live M6/M7 acceptance receipt |
 | self-update preserves ordinary application work and all durable queues | `mcd_agent/self_update.py`, `daemon.py`, systemd unit | `tests/test_self_update_version_reporting.py`, `tools/runtime_bridge_qa.py` (`mcd-runtime-bridge-qa-v1`) |
 | legacy source-tree to runtime-only transition is authority-safe and accepts complete split TOML config | `tools/mcd_runtime_bootstrap.py`, `tools/mcd_profile_authority_probe.py` | `tests/test_profile_authority_probe.py`, `tests/test_runtime_bootstrap_capture.py`, live `mcd-runtime-bootstrap-receipt-v1` |
+| activation-derived Portal material is imported atomically without new auth/job issuance | `mcd_agent/commercial_registration.py`, `mcd_agent/commercial_portal.py` | `tests/test_commercial_registration.py`, redacted `mcd-portal-registration-receipt-v1` |
 | result-signing identity bootstraps from MCD-owned config and gates signed control execution on MCC ACK | `mcd_agent/config.py`, `mcd_agent/result_signing.py`, `mcd_agent/state_push.py`, `mcd_agent/mcd_control.py` | `tests/test_result_signing.py`, `tests/test_mcd_control.py`, live `mcd-state-v1` identity/key/ACK and terminal-receipt evidence |
 | authority-safe desired runtime projection | `mcd_agent/config.py`, `mcd_agent/runtime_overrides.py` | `tests/test_runtime_override_direction.py`, `tests/test_runtime_stable_keys.py`, `tests/test_runtime_migration_adapter.py` |
 | natural b2bss/Adonis evidence | runtime TaskStore/MCC receipts | rollout acceptance (после package/install) |
@@ -1342,6 +1343,16 @@ shutdown MCD stops and joins only this worker, leaving corporate MCC and
 standalone work running. A restart re-reads the same durable registration and
 resumes without activation or token issuance; starting is idempotent and never
 creates a duplicate Portal worker.
+
+The existing activation-derived Portal credential is delivered through the
+`mcd-portal-activation-material-v1` bootstrap envelope. MCD imports that
+envelope locally and atomically into `CommercialState`; it never redeems the
+activation code, creates an agent/key/job, or performs a second registration.
+The importer validates the host fingerprint, agent key/public-key binding,
+Portal signing keys, commercial key and installation IDs. It preserves the
+cursor and pending receipts, and its redacted receipt contains no credential
+or private key. A missing or mismatched binding fails closed before the
+commercial worker can start.
 
 ### Managed-cloud versus self-hosted commercial boundary
 
