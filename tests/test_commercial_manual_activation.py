@@ -46,6 +46,11 @@ class ManualCommercialActivationTests(unittest.TestCase):
             self.assertNotIn("installation-bound-secret", json.dumps(first))
             self.assertEqual(state.get("commercial_portal_connection_state"), "pending_activation")
             self.assertEqual(state.get("commercial_agent_secret"), None)
+            pending = state.get("commercial_pending_activation")
+            assert pending["local_identity"] == "cluster1.mail.m1.rs"
+            assert pending["display_name"] == "Cluster 1"
+            assert pending["mautic_version"] == "7.2.2"
+            assert pending["application_root_fingerprint"] == "sha256:" + "b" * 64
 
     def test_explicit_activate_disconnect_and_reactivate_are_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as td:

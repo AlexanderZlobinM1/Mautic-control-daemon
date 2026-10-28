@@ -1373,6 +1373,16 @@ Subscription/entitlement expiry never changes this connection state; only the
 explicit operator `disconnect` does so. Expiry may affect feature admission,
 but it is not an implicit revoke or cancellation.
 
+The Portal registration identity is durable installation metadata. During
+inventory publication, the explicit registered `local_identity`,
+`display_name`, and Mautic version take precedence over a locally derived
+`instance_uid`, hostname, or cloned-host identity. The internal MCD
+`instance_uid` is retained as `source_instance_id` and is not rewritten.
+For a host with multiple Mautic instances, MCD does not guess which local row
+the registration refers to; it keeps native per-instance identities until an
+unambiguous binding is available. Restart, host rename, and template clone
+therefore cannot silently change the Portal installation identity.
+
 ### Managed-cloud versus self-hosted commercial boundary
 
 ### Opt-in MCC desired-runtime sync v3
