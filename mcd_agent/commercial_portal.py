@@ -1256,6 +1256,17 @@ class PortalClient:
         installation_ids = dict(installation_ids) if isinstance(installation_ids, dict) else {}
         installation_ids[local_identity] = str(result["installation_id"])
         self.state.put("installation_ids", installation_ids)
+        signing_keys = result.get("portal_job_signing_keys") or result.get("job_signing_keys")
+        if signing_keys is None and isinstance(result.get("portal"), dict):
+            signing_keys = result["portal"].get("job_signing_keys")
+        if isinstance(signing_keys, list):
+            signing_keys = {
+                str(item.get("key_id")): str(item.get("value"))
+                for item in signing_keys
+                if isinstance(item, Mapping) and item.get("key_id") and item.get("value")
+            }
+        if isinstance(signing_keys, dict) and signing_keys:
+            self.state.put("portal_job_signing_keys", signing_keys)
         return result
 
     def send_usage(self, *, installation_id: str, metric: str, observed_at: str, raw_value: int,

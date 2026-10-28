@@ -279,6 +279,8 @@ def _commercial_state_eligibility(config: AgentConfig) -> tuple[bool, str]:
     try:
         state = CommercialState(state_path)
         connection_state = str(state.get("commercial_portal_connection_state") or "").strip().lower()
+        if connection_state == "pending_activation":
+            return False, "commercial_state_pending_activation"
         revoked = bool(state.get("commercial_revoked")) or bool(state.get("commercial_detached")) or connection_state in {"revoked", "detached"}
         if revoked and not _commercial_pending_delivery(state):
             return False, "commercial_state_revoked"

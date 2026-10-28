@@ -1139,6 +1139,7 @@ cycle без ручного `segments:update`, profile/capacity/data changes. Ad
 | self-update preserves ordinary application work and all durable queues | `mcd_agent/self_update.py`, `daemon.py`, systemd unit | `tests/test_self_update_version_reporting.py`, `tools/runtime_bridge_qa.py` (`mcd-runtime-bridge-qa-v1`) |
 | legacy source-tree to runtime-only transition is authority-safe and accepts complete split TOML config | `tools/mcd_runtime_bootstrap.py`, `tools/mcd_profile_authority_probe.py` | `tests/test_profile_authority_probe.py`, `tests/test_runtime_bootstrap_capture.py`, live `mcd-runtime-bootstrap-receipt-v1` |
 | activation-derived Portal material is imported atomically without new auth/job issuance | `mcd_agent/commercial_registration.py`, `mcd_agent/commercial_portal.py` | `tests/test_commercial_registration.py`, redacted `mcd-portal-registration-receipt-v1` |
+| manual existing commercial-key fallback keeps pending/active/disconnected state idempotently | `mcd_agent/commercial_manual_activation.py`, `mcd_agent/commercial_portal.py`, `mcd_agent/daemon.py` | `tests/test_commercial_manual_activation.py`, redacted `mcd-commercial-manual-activation-receipt-v1` |
 | result-signing identity bootstraps from MCD-owned config and gates signed control execution on MCC ACK | `mcd_agent/config.py`, `mcd_agent/result_signing.py`, `mcd_agent/state_push.py`, `mcd_agent/mcd_control.py` | `tests/test_result_signing.py`, `tests/test_mcd_control.py`, live `mcd-state-v1` identity/key/ACK and terminal-receipt evidence |
 | authority-safe desired runtime projection | `mcd_agent/config.py`, `mcd_agent/runtime_overrides.py` | `tests/test_runtime_override_direction.py`, `tests/test_runtime_stable_keys.py`, `tests/test_runtime_migration_adapter.py` |
 | natural b2bss/Adonis evidence | runtime TaskStore/MCC receipts | rollout acceptance (после package/install) |
@@ -1353,6 +1354,24 @@ Portal signing keys, commercial key and installation IDs. It preserves the
 cursor and pending receipts, and its redacted receipt contains no credential
 or private key. A missing or mismatched binding fails closed before the
 commercial worker can start.
+
+#### Manual fallback for an existing commercial key
+
+If the normal Own-host bootstrap is unavailable, the operator may use the
+already-issued installation-bound commercial key through the MCD-owned manual
+fallback. The key is entered through a hidden prompt, stdin, or an explicit
+CLI argument for automation; it is never printed or included in receipts.
+MCD stores it in the existing mode-0600 `CommercialState`, sends the existing
+passive installation registration, and records
+`commercial_portal_connection_state=pending_activation`. The Portal tile then
+waits for explicit activation. Only an explicit `activate` changes the state
+to `active`; only an explicit `disconnect` changes it to `detached`. Repeated
+stage/activate/disconnect operations reuse the same key and registration
+identity idempotently. This path has no SSH, DNS-token, global-settings-key,
+or second authentication layer and does not create a job or activation code.
+Subscription/entitlement expiry never changes this connection state; only the
+explicit operator `disconnect` does so. Expiry may affect feature admission,
+but it is not an implicit revoke or cancellation.
 
 ### Managed-cloud versus self-hosted commercial boundary
 

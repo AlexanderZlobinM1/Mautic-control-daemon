@@ -18,6 +18,7 @@ dependencies = [
 mcd-agent = "mcd_agent.cli:main"
 mcd-cli = "mcd_agent.cli:main"
 mcd-scenario-runner = "mcd_agent.scenario_launcher:main"
+mcd-commercial-key = "mcd_agent.commercial_manual_activation:main"
 
 [tool.setuptools.packages.find]
 include = ["mcd_agent*"]
