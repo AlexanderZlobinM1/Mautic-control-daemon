@@ -78,6 +78,22 @@ class PortalRegistrationTests(unittest.TestCase):
             self.assertTrue(second["idempotent"])
             self.assertEqual(state.get("installation_ids"), {"cluster1.mail.m1.rs": "installation-existing"})
 
+    def test_import_accepts_installation_bound_commercial_key_material(self) -> None:
+        key = Ed25519PrivateKey.generate()
+        with tempfile.TemporaryDirectory() as td:
+            state = CommercialState(str(Path(td) / "state.sqlite"))
+            material = self._material(key)
+            material.pop("portal_agent_credential")
+            material["commercial_key"] = {
+                "commercial_key_id": "commercial_key_existing",
+                "secret": "installation-bound-secret",
+                "display_name": "test-key",
+            }
+            with patch("mcd_agent.commercial_registration._host_fingerprint", return_value="sha256:" + "a" * 64):
+                import_activation_material(state, material, agent_key_path=str(Path(td) / "unused.pem"))
+            self.assertEqual(state.get("portal_agent_credential"), "installation-bound-secret")
+            self.assertEqual(state.get("commercial_key_metadata"), {"commercial_key_id": "commercial_key_existing", "display_name": "test-key"})
+
 
 if __name__ == "__main__":
     unittest.main()

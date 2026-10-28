@@ -91,6 +91,22 @@ def _portal_api_base(source: Mapping[str, Any]) -> str:
     return base
 
 
+def _commercial_key(source: Mapping[str, Any]) -> tuple[str, str, dict[str, Any]]:
+    raw = source.get("commercial_key") or source.get("commercial_key_material")
+    if isinstance(raw, Mapping):
+        key_id = _text(_first(raw, "commercial_key_id", "key_id", "id"))
+        secret = _text(_first(raw, "credential", "secret", "value", "key"))
+        public = {
+            str(key): value
+            for key, value in raw.items()
+            if str(key).lower() not in {"credential", "secret", "value", "key", "token", "private_key"}
+        }
+        return key_id, secret, public
+    if raw not in (None, ""):
+        return _text(_first(source, "commercial_key_id")), _text(raw), {}
+    return _text(_first(source, "commercial_key_id")), "", {}
+
+
 def _signing_keys(source: Mapping[str, Any]) -> dict[str, str]:
     raw = _first(source, "portal_job_signing_keys", "job_signing_keys")
     portal = source.get("portal")
@@ -199,9 +215,10 @@ def import_activation_material(
     """Atomically install existing activation material without network I/O."""
     source = _unwrap(material)
     api_base = _portal_api_base(source)
-    credential = _text(_first(source, "portal_agent_credential", "agent_credential", "credential"))
+    commercial_key_id_from_material, commercial_key_secret, commercial_key_metadata = _commercial_key(source)
+    credential = _text(_first(source, "portal_agent_credential", "agent_credential", "credential")) or commercial_key_secret
     agent_id = _text(_first(source, "agent_id"))
-    commercial_key_id = _text(_first(source, "commercial_key_id"))
+    commercial_key_id = _text(_first(source, "commercial_key_id")) or commercial_key_id_from_material
     if not credential or not agent_id or not commercial_key_id:
         raise _error("portal_registration_binding_incomplete")
     expected_fingerprint = _host_fingerprint()
@@ -250,7 +267,12 @@ def import_activation_material(
         "portal_registration_material_schema": SCHEMA,
         "portal_registration_material_digest": material_digest,
     }
-    for key in ("commercial_key_metadata", "portal_registration_id"):
+    supplied_key_metadata = source.get("commercial_key_metadata")
+    if isinstance(supplied_key_metadata, Mapping):
+        commercial_key_metadata = {**commercial_key_metadata, **dict(supplied_key_metadata)}
+    if commercial_key_metadata:
+        updates["commercial_key_metadata"] = commercial_key_metadata
+    for key in ("portal_registration_id",):
         value = source.get(key)
         if value is not None:
             updates[key] = value
