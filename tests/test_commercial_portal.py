@@ -213,6 +213,14 @@ def test_installation_registration_defaults_to_passive_and_binds_agent():
         assert result["installation_id"] == "inst-1"
         assert captured["path"] == "agents/agent-1/installations"
         assert captured["payload"]["installation"]["activation_state"] == "passive"
+        assert state.get("commercial_installation_metadata") == {
+            "local-1": {
+                "local_identity": "local-1",
+                "display_name": "Tenant",
+                "mautic_version": "7.2.1",
+                "application_root_fingerprint": "sha256:" + "a" * 64,
+            }
+        }
         first_key = captured["idempotency_key"]
         client.register_installation(local_identity="local-1", display_name="Tenant", mautic_version="7.2.1", application_root_fingerprint="sha256:" + "a" * 64)
         assert captured["idempotency_key"] == first_key

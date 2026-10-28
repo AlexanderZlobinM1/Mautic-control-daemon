@@ -1,7 +1,12 @@
 from types import SimpleNamespace
 
 from mcd_agent.commercial_portal import CommercialState
-from mcd_agent.daemon import _commercial_state_eligibility, _default_commercial_worker_factory, _commercial_worker_allowed
+from mcd_agent.daemon import (
+    _commercial_registration_descriptor,
+    _commercial_state_eligibility,
+    _default_commercial_worker_factory,
+    _commercial_worker_allowed,
+)
 
 
 def _eligible_state(tmp_path, monkeypatch):
@@ -106,3 +111,43 @@ def test_default_factory_disables_without_portal_material(tmp_path, monkeypatch)
     factory = _default_commercial_worker_factory(SimpleNamespace(state_db_path=state_path))
     assert factory(None) is None
     assert state.get("commercial_worker_status")["status"] == "disabled"
+
+
+def test_portal_registration_identity_wins_over_host_derived_inventory_identity(tmp_path, monkeypatch):
+    state, _config = _eligible_state(tmp_path, monkeypatch)
+    state.put(
+        "commercial_installation_metadata",
+        {
+            "mautic.zlobin.com": {
+                "local_identity": "mautic.zlobin.com",
+                "display_name": "Mautic Zlobin",
+                "mautic_version": "7.2",
+            }
+        },
+    )
+    descriptor = _commercial_registration_descriptor(state, {"mautic.zlobin.com": "inst-1"}, "inst-1")
+    assert descriptor == {
+        "local_identity": "mautic.zlobin.com",
+        "display_name": "Mautic Zlobin",
+        "mautic_version": "7.2",
+    }
+
+
+def test_pending_portal_identity_precedes_stale_metadata(tmp_path, monkeypatch):
+    state, _config = _eligible_state(tmp_path, monkeypatch)
+    state.put(
+        "commercial_installation_metadata",
+        {"cluster1.mail.m1.rs": {"local_identity": "cluster1.mail.m1.rs", "display_name": "Cluster 1"}},
+    )
+    state.put(
+        "commercial_pending_activation",
+        {
+            "registration_id": "inst-1",
+            "local_identity": "mautic.zlobin.com",
+            "display_name": "Mautic Zlobin",
+            "mautic_version": "7.2",
+        },
+    )
+    descriptor = _commercial_registration_descriptor(state, {"cluster1.mail.m1.rs": "inst-1"}, "inst-1")
+    assert descriptor["local_identity"] == "mautic.zlobin.com"
+    assert descriptor["display_name"] == "Mautic Zlobin"

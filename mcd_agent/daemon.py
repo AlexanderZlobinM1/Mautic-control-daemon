@@ -260,6 +260,48 @@ _LOCAL_RUNTIME_ACCEPTED_KEY = "local_runtime_accepted"
 _MCD_RUNTIME_AGENT_VERSION_KEY = "mcd_runtime_agent_version"
 
 
+def _commercial_registration_descriptor(
+    state: CommercialState,
+    installation_ids: Mapping[str, Any],
+    installation_id: str,
+) -> dict[str, str]:
+    """Return the explicit Portal identity bound to one installation.
+
+    Portal registration identity is an installation-level product identity. It
+    must win over host-derived inventory names, which can change on a clone or
+    after a host restart. The pending activation record is checked first so a
+    just-staged identity cannot be replaced by a stale metadata projection.
+    """
+    target = str(installation_id or "").strip()
+    identity = ""
+    for candidate, bound in (installation_ids or {}).items():
+        if str(bound or "").strip() == target:
+            identity = str(candidate or "").strip()
+            break
+    pending = state.get("commercial_pending_activation")
+    if isinstance(pending, Mapping) and str(pending.get("registration_id") or "").strip() == target:
+        identity = str(pending.get("local_identity") or identity).strip()
+        candidate = {
+            "local_identity": identity,
+            "display_name": str(pending.get("display_name") or "").strip(),
+            "mautic_version": str(pending.get("mautic_version") or "").strip(),
+            "application_root_fingerprint": str(pending.get("application_root_fingerprint") or "").strip(),
+        }
+        if identity:
+            return {key: value for key, value in candidate.items() if value}
+    metadata = state.get("commercial_installation_metadata")
+    record = metadata.get(identity) if isinstance(metadata, Mapping) and identity else None
+    if not isinstance(record, Mapping):
+        return {"local_identity": identity} if identity else {}
+    result = {
+        "local_identity": str(record.get("local_identity") or identity).strip(),
+        "display_name": str(record.get("display_name") or "").strip(),
+        "mautic_version": str(record.get("mautic_version") or "").strip(),
+        "application_root_fingerprint": str(record.get("application_root_fingerprint") or "").strip(),
+    }
+    return {key: value for key, value in result.items() if value}
+
+
 def _commercial_pending_delivery(state: CommercialState) -> bool:
     pending = state.get("commercial_self_hosted_pending_delivery_v1")
     return isinstance(pending, Mapping) and isinstance(pending.get("job"), Mapping)
@@ -474,24 +516,39 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
                 def settings(values: Mapping[str, Any]) -> dict[str, Any]:
                     return build_standalone_settings_snapshot(values, revision=host_revision, sync=sync)
                 scoped = instance_desired_states(runtime, instances)
+                registration = _commercial_registration_descriptor(state, installations, _installation_id)
                 rows = []
                 for inst in instances:
                     uid = str(getattr(inst, "instance_uid", "") or "").strip()
                     if not uid:
                         continue
-                    rows.append(
-                        {
-                            "instance_id": uid,
-                            "display_name": str(getattr(inst, "name", "") or uid),
-                            "root": str(getattr(inst, "root", "") or uid),
-                            "mautic_version": str(getattr(inst, "mautic_major", None) or "unknown"),
-                            "status": "active" if Path(str(getattr(inst, "root", "") or "")).exists() else "missing",
-                            "capabilities": sorted(str(item) for item in (getattr(inst, "runtime_capabilities", []) or [])),
-                            "settings": settings(scoped.get(uid, {})),
-                        }
-                    )
+                    row_identity = uid
+                    row_display_name = str(getattr(inst, "name", "") or uid)
+                    row_mautic_version = str(getattr(inst, "mautic_major", None) or "unknown")
+                    # A Portal registration is for the selected installation,
+                    # not for the host's transient hostname. The single
+                    # installation case is unambiguous; retain native IDs in
+                    # a multi-instance host rather than guessing a mapping.
+                    if registration and len(instances) == 1:
+                        row_identity = registration.get("local_identity") or row_identity
+                        row_display_name = registration.get("display_name") or row_display_name
+                        row_mautic_version = registration.get("mautic_version") or row_mautic_version
+                    row = {
+                        "instance_id": row_identity,
+                        "display_name": row_display_name,
+                        "root": str(getattr(inst, "root", "") or uid),
+                        "mautic_version": row_mautic_version,
+                        "status": "active" if Path(str(getattr(inst, "root", "") or "")).exists() else "missing",
+                        "capabilities": sorted(str(item) for item in (getattr(inst, "runtime_capabilities", []) or [])),
+                        "settings": settings(scoped.get(uid, {})),
+                    }
+                    if registration and len(instances) == 1:
+                        row["local_identity"] = row_identity
+                        row["identity_source"] = "portal_registration"
+                        row["source_instance_id"] = uid
+                    rows.append(row)
                 rows.sort(key=lambda item: str(item["instance_id"]))
-                return {
+                snapshot = {
                     "schema": "portal-mcd-inventory-snapshot-v1",
                     "contract_version": "1.0",
                     "request_id": f"inventory-{int(time.time() * 1000)}",
@@ -517,6 +574,9 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
                     ),
                     "instances": rows,
                 }
+                if registration:
+                    snapshot["installation"] = dict(registration)
+                return snapshot
 
             worker = SelfHostedPortalWorker(
                 PortalClient(state),

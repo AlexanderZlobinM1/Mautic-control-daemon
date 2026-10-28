@@ -1256,6 +1256,18 @@ class PortalClient:
         installation_ids = dict(installation_ids) if isinstance(installation_ids, dict) else {}
         installation_ids[local_identity] = str(result["installation_id"])
         self.state.put("installation_ids", installation_ids)
+        # Keep the operator-supplied Portal identity durable. Inventory
+        # publication must not reconstruct it from a host-derived instance
+        # UID or hostname after a restart.
+        metadata = self.state.get("commercial_installation_metadata")
+        metadata = dict(metadata) if isinstance(metadata, dict) else {}
+        metadata[str(local_identity)] = {
+            "local_identity": str(local_identity),
+            "display_name": str(display_name),
+            "mautic_version": str(mautic_version),
+            "application_root_fingerprint": str(application_root_fingerprint),
+        }
+        self.state.put("commercial_installation_metadata", metadata)
         signing_keys = result.get("portal_job_signing_keys") or result.get("job_signing_keys")
         if signing_keys is None and isinstance(result.get("portal"), dict):
             signing_keys = result["portal"].get("job_signing_keys")
