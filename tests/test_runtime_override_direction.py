@@ -771,11 +771,21 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             path = Path(directory) / "mcd.toml"
             # The update/reset left a valid but empty runtime projection.
             path.write_text(
-                '[profile]\nname = "farm-hiload"\n\n[runtime]\nplugin_operations = {}\n',
+                '[profile]\nname = "farm-hiload"\n\n[runtime]\n'
+                'plugin_operations = {}\n'
+                'scheduler_host_max_parallel = 1\n',
                 encoding="utf-8",
             )
             cfg = SimpleNamespace(config_file_path=str(path))
             store = MemoryStore({"local_runtime": desired, "mcc_runtime": desired})
+
+            # The reset can leave a valid-looking default for one key while
+            # dropping the rest. Recovery must replace that stale value too,
+            # not only append the missing fields.
+            store.values["local_runtime"] = {
+                "plugin_operations": {},
+                "scheduler_host_max_parallel": 1,
+            }
 
             baseline, _ = daemon._initialize_local_runtime_baseline(cfg, store)
 

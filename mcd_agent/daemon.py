@@ -1185,6 +1185,78 @@ def _merge_recovered_runtime_values(
     return merged
 
 
+def _overlay_runtime_recovery_snapshot(
+    current_runtime: Mapping[str, Any],
+    recovery_runtime: Mapping[str, Any],
+    metadata: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Restore the complete MCC snapshot after detecting a runtime loss.
+
+    A loss can leave a mixture of missing keys and non-empty reset defaults.
+    Filling only absent values would therefore preserve part of the reset and
+    make the next restart look like a real MCD edit.  Once loss is detected,
+    every field present in the durable recovery snapshot is materialized.
+    A proven, non-bootstrap MCD edit remains authoritative for that field, and
+    an explicit local tombstone remains destructive.  Fields absent from the
+    snapshot are retained because absence is not a deletion signal.
+    """
+    restored = deepcopy(dict(current_runtime))
+    for raw_key, recovery_value in recovery_runtime.items():
+        key = str(raw_key)
+        if _is_instance_runtime_map_key(key) and isinstance(recovery_value, Mapping):
+            current_rows = restored.get(key)
+            current_rows = dict(current_rows) if isinstance(current_rows, Mapping) else {}
+            next_rows = dict(current_rows)
+            for raw_uid, value in recovery_value.items():
+                uid = str(raw_uid)
+                existing_uid = _matching_instance_runtime_entry(next_rows, uid)
+                stamp = _runtime_metadata_get(metadata, "instance", key, uid)
+                local_edit = (
+                    isinstance(stamp, Mapping)
+                    and str(stamp.get("source") or "").lower() == "mcd"
+                    and not str(stamp.get("event_id") or "").startswith("bootstrap:")
+                    and not bool(stamp.get("tombstone"))
+                )
+                local_delete = (
+                    isinstance(stamp, Mapping)
+                    and str(stamp.get("source") or "").lower() == "mcd"
+                    and bool(stamp.get("tombstone"))
+                    and not str(stamp.get("event_id") or "").startswith("bootstrap:")
+                )
+                if local_delete:
+                    if existing_uid is not None:
+                        next_rows.pop(existing_uid, None)
+                    continue
+                if not local_edit or existing_uid is None:
+                    if existing_uid is not None and existing_uid != uid:
+                        next_rows.pop(existing_uid, None)
+                    next_rows[uid] = deepcopy(value)
+            if next_rows:
+                restored[key] = next_rows
+            elif key in restored:
+                restored[key] = {}
+            continue
+
+        stamp = _runtime_metadata_get(metadata, "host", key)
+        local_edit = (
+            isinstance(stamp, Mapping)
+            and str(stamp.get("source") or "").lower() == "mcd"
+            and not str(stamp.get("event_id") or "").startswith("bootstrap:")
+            and not bool(stamp.get("tombstone"))
+        )
+        local_delete = (
+            isinstance(stamp, Mapping)
+            and str(stamp.get("source") or "").lower() == "mcd"
+            and bool(stamp.get("tombstone"))
+            and not str(stamp.get("event_id") or "").startswith("bootstrap:")
+        )
+        if local_delete:
+            restored.pop(key, None)
+        elif not local_edit:
+            restored[key] = deepcopy(recovery_value)
+    return restored
+
+
 def _merge_missing_plugin_operation_catalog(
     current_runtime: Mapping[str, Any],
     response: Mapping[str, Any],
@@ -2147,12 +2219,36 @@ def _initialize_local_runtime_baseline(
         stored = recovered_after_update
 
     # A package/update or failed config write may remove any part of the
-    # mutable file, not just an instance row. Restore the complete durable
-    # baseline, then fill from the latest MCC snapshot. Empty containers are
-    # treated as reset projections; false/zero values remain real settings.
+    # mutable file, not just an instance row. Build the complete recovery
+    # snapshot from the durable local baseline plus the latest MCC values.
+    # Missing fields in a partial MCC response are not deletions; an explicit
+    # tombstone remains the only destructive signal.
     raw_metadata = _runtime_metadata_normalize(store.get_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY))
-    recoverable = _merge_recovered_runtime_values(current, stored, raw_metadata)
-    recoverable = _merge_recovered_runtime_values(recoverable, remote_for_recovery, raw_metadata)
+    recovery_snapshot = deepcopy(stored)
+    for raw_key, remote_value in remote_for_recovery.items():
+        key = str(raw_key)
+        if _is_instance_runtime_map_key(key) and isinstance(remote_value, Mapping):
+            existing_rows = recovery_snapshot.get(key)
+            if not isinstance(existing_rows, Mapping):
+                recovery_snapshot[key] = deepcopy(dict(remote_value))
+            else:
+                merged_rows = dict(existing_rows)
+                for raw_uid, value in remote_value.items():
+                    if _matching_instance_runtime_entry(merged_rows, raw_uid) is None:
+                        merged_rows[str(raw_uid)] = deepcopy(value)
+                recovery_snapshot[key] = merged_rows
+        else:
+            recovery_snapshot[key] = deepcopy(remote_value)
+
+    # Once any part of the local projection is detected as lost, overlay the
+    # entire recovery snapshot. This deliberately replaces stale non-empty
+    # reset defaults as well as absent keys, so recovery cannot resurrect only
+    # the stable/instance subset while silently leaving other settings stale.
+    full_runtime_loss = _runtime_snapshot_loss_detected(current, recovery_snapshot)
+    if full_runtime_loss:
+        recoverable = _overlay_runtime_recovery_snapshot(current, recovery_snapshot, raw_metadata)
+    else:
+        recoverable = _merge_recovered_runtime_values(current, recovery_snapshot, raw_metadata)
     remote_metadata = _runtime_metadata_normalize(store.get_runtime_sync(_MCC_RUNTIME_METADATA_KEY))
     recoverable = _remove_remote_tombstoned_runtime_values(recoverable, remote_metadata)
     if recoverable != current:
