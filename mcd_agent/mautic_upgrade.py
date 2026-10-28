@@ -655,6 +655,7 @@ def _load_prepared_target_input(
         load_prepared_target_file,
         load_prepared_target_json,
         materialize_prepared_target,
+        validate_prepared_target_runtime,
     )
     try:
         prepared = load_prepared_target_file(file_path, input_sha256) if file_path else load_prepared_target_json(raw_json or "")
@@ -662,6 +663,17 @@ def _load_prepared_target_input(
             raise PreparedTargetError("prepared_target_target_binding_mismatch")
         if mode != "auto" and prepared["install_type"] != mode:
             raise PreparedTargetError("prepared_target_install_type_binding_mismatch")
+        if prepared["install_type"] == "composer":
+            php_probe = subprocess.run(
+                [str(config.php_bin or "php"), "-r", "echo PHP_MAJOR_VERSION.'.'.PHP_MINOR_VERSION;"],
+                cwd="/",
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            runtime_php = (php_probe.stdout or "").strip() if php_probe.returncode == 0 else ""
+            validate_prepared_target_runtime(prepared, runtime_php)
         artifact = download_prepared_target(config, prepared)
         return materialize_prepared_target(prepared, artifact, read_version=_target_version)
     except PreparedTargetError as exc:

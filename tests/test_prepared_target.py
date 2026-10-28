@@ -14,7 +14,9 @@ from mcd_agent.prepared_target import (
     download_prepared_target,
     materialize_prepared_target,
     merge_into_live,
+    prepared_target_php,
     validate_prepared_target,
+    validate_prepared_target_runtime,
 )
 
 
@@ -94,6 +96,23 @@ class PreparedTargetTests(unittest.TestCase):
     invalid["prepared_target_id"] = "mautic-7.1.4-composer"
     with self.assertRaisesRegex(PreparedTargetError, "prepared_target_id_invalid"):
         validate_prepared_target(invalid)
+
+  def test_composer_prepared_target_requires_exact_runtime_php_line(self):
+    prepared, _body = _fixture(Path("/tmp"))
+    self.assertEqual(prepared_target_php(prepared["prepared_target_id"]), "8.4")
+    self.assertEqual(validate_prepared_target_runtime(prepared, "8.4")["target_version"], "7.1.4")
+    with self.assertRaisesRegex(PreparedTargetError, "prepared_target_runtime_php_mismatch"):
+        validate_prepared_target_runtime(prepared, "8.3")
+    with self.assertRaisesRegex(PreparedTargetError, "prepared_target_runtime_php_unavailable"):
+        validate_prepared_target_runtime(prepared, "")
+
+  def test_zip_prepared_target_has_no_php_matrix_binding(self):
+    prepared, _body = _fixture(Path("/tmp"))
+    prepared = json.loads(json.dumps(prepared))
+    prepared["install_type"] = "zip"
+    prepared["prepared_target_id"] = "mautic-7.1.4-zip"
+    prepared["manifest"]["install_type"] = "zip"
+    self.assertEqual(validate_prepared_target_runtime(prepared, "8.3")["install_type"], "zip")
 
   def test_prepared_target_verifies_manifest_and_preserves_config_var(self):
     from tempfile import TemporaryDirectory

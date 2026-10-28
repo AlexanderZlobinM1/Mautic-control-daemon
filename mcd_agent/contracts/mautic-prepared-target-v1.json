@@ -11,7 +11,7 @@
     "zip": "mautic-{target_version}-zip",
     "composer": "mautic-{target_version}-php{major.minor}-composer",
     "source_compatibility": "carried by the MCC scenario manifest and never encoded in the prepared-target ID",
-    "php_matrix": "applies to Composer skeletons; ZIP has one official upstream target artifact"
+    "php_matrix": "Composer php{major.minor} must equal the selected host runtime PHP major.minor; cross-PHP cells are unsupported; ZIP has one official upstream target artifact"
   },
   "purpose": "MCC-built Composer or ZIP skeleton delivered to MCD without invoking Composer on the host",
   "transport": "MCD fetches only the bound artifact path from the configured HTTPS MCC URL with the existing MCC Bearer API key; no GitHub, DNS or alternate network fallback",
@@ -25,7 +25,22 @@
   "apply": "materialize the prepared application into the existing upgrade maintenance lifecycle, preserve config and var, run existing migration and health checks, and retain rollback evidence",
   "composer": {
     "host_invoked": false,
-    "host_composer_invoked": false
+    "host_composer_invoked": false,
+    "runtime_binding": "MCD probes the configured host PHP major.minor and rejects a Composer prepared-target identity mismatch before artifact download",
+    "missing_exact_skeleton": "MCC reports typed pending_artifact; MCD must not fall back to host Composer"
   },
-  "failure": "integrity, layout, version, migration or health failure is terminal and invokes the existing rollback path"
+  "evidence": {
+    "required_for_composer_cell": [
+      "exact_prepared_target_sha256",
+      "catalog_revision",
+      "build_php_equals_runtime_php",
+      "apply",
+      "health",
+      "migration",
+      "rollback",
+      "idempotency"
+    ],
+    "pass_rule": "all required receipts are present and passed"
+  },
+  "failure": "runtime binding, integrity, layout, version, migration or health failure is terminal and invokes the existing rollback path"
 }

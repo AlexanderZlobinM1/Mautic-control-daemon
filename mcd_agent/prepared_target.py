@@ -39,10 +39,35 @@ _INPUT_KEYS = {"schema", "prepared_target_id", "target_version", "install_type",
 _ARTIFACT_KEYS = {"path", "grant", "size_bytes", "sha256", "media_type"}
 _MANIFEST_KEYS = {"schema", "target_version", "install_type", "application_root_relative", "preserve_paths", "files"}
 _COMPOSER_ID_RE = re.compile(r"^mautic-(?P<target>[0-9]+\.[0-9]+\.[0-9]+)-php(?P<php>[0-9]+\.[0-9]+)-composer$")
+_PHP_MINOR_RE = re.compile(r"^[0-9]+\.[0-9]+$")
 
 
 class PreparedTargetError(ValueError):
     """Bounded, non-secret prepared-target rejection."""
+
+
+def prepared_target_php(prepared_target_id: str) -> str | None:
+    """Return the PHP major.minor bound to a Composer target identity."""
+    match = _COMPOSER_ID_RE.fullmatch(str(prepared_target_id or ""))
+    return match.group("php") if match else None
+
+
+def validate_prepared_target_runtime(value: Mapping[str, Any], runtime_php: str) -> dict[str, Any]:
+    """Require a Composer skeleton built for the exact runtime PHP line.
+
+    Cross-PHP Composer cells are intentionally unsupported. ZIP targets have
+    one official upstream artifact and therefore do not carry a PHP binding.
+    """
+    prepared = validate_prepared_target(value)
+    if prepared["install_type"] != "composer":
+        return prepared
+    expected = prepared_target_php(prepared["prepared_target_id"])
+    actual = str(runtime_php or "").strip()
+    if not expected or not _PHP_MINOR_RE.fullmatch(actual):
+        raise PreparedTargetError("prepared_target_runtime_php_unavailable")
+    if actual != expected:
+        raise PreparedTargetError("prepared_target_runtime_php_mismatch")
+    return prepared
 
 
 def _digest(value: bytes) -> str:

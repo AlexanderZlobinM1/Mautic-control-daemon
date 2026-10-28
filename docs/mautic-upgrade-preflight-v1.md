@@ -14,9 +14,19 @@ The prepared-target identity is target-only: ZIP uses
 `mautic-{target_version}-zip`; Composer uses
 `mautic-{target_version}-php{major.minor}-composer`. Source compatibility remains
 in the MCC scenario manifest and is never encoded in the prepared-target ID.
-The PHP matrix applies to Composer skeletons; ZIP has one official upstream
-target artifact. The full MCC file manifest is accepted within a bounded 8 MiB
-input envelope.
+The PHP matrix applies to Composer skeletons; the Composer identity's
+`php{major.minor}` must equal the selected host runtime PHP major/minor.
+Cross-PHP Composer cells are unsupported: MCD rejects a mismatch before
+downloading the artifact with `prepared_target_runtime_php_mismatch`. ZIP has
+one official upstream target artifact and no PHP matrix binding. If MCC has no
+exact Composer skeleton for the selected host runtime, MCC reports the typed
+`pending_artifact` state and does not route a host-side Composer fallback.
+The full MCC file manifest is accepted within a bounded 8 MiB input envelope.
+
+Each Composer cell's acceptance evidence binds the exact prepared-target SHA-256
+and catalog revision, the build/runtime PHP equality, and the apply, health,
+migration, rollback and idempotency receipts. A cell is not PASS when any of
+those receipts is absent or failed.
 
 This is the dev-only 1.6.0 continuation of the current MCD line, not a parallel
 implementation. Published channels remain at 1.5.268 until the MCC sandbox
