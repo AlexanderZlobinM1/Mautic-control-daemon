@@ -65,6 +65,21 @@ class ManualCommercialActivationTests(unittest.TestCase):
             self.assertEqual(state.get("portal_agent_credential"), "installation-bound-secret")
             self.assertFalse(bool(state.get("commercial_detached")))
 
+    def test_entitlement_expiry_never_revokes_or_requires_new_key(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            state = CommercialState(str(Path(td) / "state.sqlite"))
+            self._stage(
+                state,
+                lambda **_kwargs: {"installation_id": "installation-existing", "schema": "portal-mcd-installation-register-response-v1"},
+            )
+            state.put("subscription_entitlement_expires_at", "2020-01-01T00:00:00Z")
+            state.put("commercial_key_expires_at", "2020-01-01T00:00:00Z")
+            activate_manual_key(state)
+            self.assertEqual(state.get("commercial_portal_connection_state"), "active")
+            self.assertFalse(bool(state.get("commercial_revoked")))
+            self.assertFalse(bool(state.get("commercial_detached")))
+            self.assertEqual(state.get("portal_agent_credential"), "installation-bound-secret")
+
     def test_failed_registration_keeps_pending_state_for_retry(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             state = CommercialState(str(Path(td) / "state.sqlite"))
