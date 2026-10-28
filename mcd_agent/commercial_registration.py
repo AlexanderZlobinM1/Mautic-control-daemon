@@ -23,7 +23,13 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from mcd_agent import __version__
-from mcd_agent.commercial_portal import CommercialState, _b64, _host_fingerprint, canonical_json
+from mcd_agent.commercial_portal import (
+    CommercialState,
+    _b64,
+    _host_fingerprint,
+    _public_commercial_key_metadata,
+    canonical_json,
+)
 
 
 SCHEMA = "mcd-portal-activation-material-v1"
@@ -96,11 +102,7 @@ def _commercial_key(source: Mapping[str, Any]) -> tuple[str, str, dict[str, Any]
     if isinstance(raw, Mapping):
         key_id = _text(_first(raw, "commercial_key_id", "key_id", "id"))
         secret = _text(_first(raw, "credential", "secret", "value", "key"))
-        public = {
-            str(key): value
-            for key, value in raw.items()
-            if str(key).lower() not in {"credential", "secret", "value", "key", "token", "private_key"}
-        }
+        public = _public_commercial_key_metadata(raw)
         return key_id, secret, public
     if raw not in (None, ""):
         return _text(_first(source, "commercial_key_id")), _text(raw), {}
@@ -269,7 +271,10 @@ def import_activation_material(
     }
     supplied_key_metadata = source.get("commercial_key_metadata")
     if isinstance(supplied_key_metadata, Mapping):
-        commercial_key_metadata = {**commercial_key_metadata, **dict(supplied_key_metadata)}
+        commercial_key_metadata = {
+            **commercial_key_metadata,
+            **_public_commercial_key_metadata(supplied_key_metadata),
+        }
     if commercial_key_metadata:
         updates["commercial_key_metadata"] = commercial_key_metadata
     for key in ("portal_registration_id",):
