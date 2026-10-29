@@ -729,16 +729,32 @@ class ScenarioExecutor:
             raise ValueError("self_hosted_mcd_applicability_facts_mismatch")
         return observed
 
-    def run(self, job: Mapping[str, Any], *, portal_keys: Mapping[str, str], publisher_keys: Mapping[str, Any], context: Mapping[str, Any], expected_agent_id: str, expected_installation_id: str, expected_commercial_key_id: str, expected_host_fingerprint: str, bootstrap_artifact: bytes | None, scenario_artifact: bytes, receipt_sink: Callable[[dict[str, Any]], Any] | None = None) -> dict[str, Any]:
+    def run(self, job: Mapping[str, Any], *, portal_keys: Mapping[str, str], publisher_keys: Mapping[str, Any], context: Mapping[str, Any], expected_agent_id: str, expected_installation_id: str, expected_commercial_key_id: str, expected_host_fingerprint: str, bootstrap_artifact: bytes | None, scenario_artifact: bytes, receipt_sink: Callable[[dict[str, Any]], Any] | None = None, execution_key: str | None = None) -> dict[str, Any]:
         verified = verify_self_hosted_mcd_job(job, {}, expected_agent_id=expected_agent_id, expected_installation_id=expected_installation_id, expected_commercial_key_id=expected_commercial_key_id, expected_host_fingerprint=expected_host_fingerprint)
         binding = _binding_from_verified(verified)
         job_id = binding["job_id"]
         job_digest = hashlib.sha256(canonical_json(dict(job))).hexdigest()
+        execution_key = str(execution_key or f"job:{job_digest}").strip()
+        if not execution_key or len(execution_key) > 512:
+            raise ValueError("self_hosted_mcd_execution_key_invalid")
         prior = self._load(job_id)
-        if isinstance(prior, dict) and prior.get("job_digest") == job_digest and isinstance(prior.get("terminal"), dict):
-            # The signed job envelope is still revalidated above, but a
-            # terminal replay must not depend on today's artifact trust set.
-            return dict(prior["terminal"])
+        if isinstance(prior, dict):
+            executions = prior.get("executions")
+            if isinstance(executions, Mapping):
+                saved = executions.get(execution_key)
+                if isinstance(saved, Mapping) and saved.get("job_digest") == job_digest and isinstance(saved.get("terminal"), Mapping):
+                    # The signed job envelope is still revalidated above, but
+                    # a same-command replay must not depend on today's
+                    # artifact trust set or execute the runner twice.
+                    return dict(saved["terminal"])
+            elif (
+                "_retry_" not in execution_key
+                and prior.get("job_digest") == job_digest
+                and isinstance(prior.get("terminal"), Mapping)
+            ):
+                # Migrate a pre-execution-key record only for the original
+                # command. A distinct recovery command must execute once.
+                return dict(prior["terminal"])
         if verified["bootstrap_artifact"] is not None:
             if bootstrap_artifact is None:
                 raise ValueError("self_hosted_mcd_bootstrap_artifact_unavailable")
@@ -834,8 +850,19 @@ class ScenarioExecutor:
                 total=1,
                 runner_evidence=details,
             )
+        executions: dict[str, Any] = {}
+        if isinstance(prior, Mapping) and isinstance(prior.get("executions"), Mapping):
+            executions.update({str(key): dict(value) for key, value in prior["executions"].items() if isinstance(value, Mapping)})
+        executions[execution_key] = {"job_digest": job_digest, "terminal": terminal}
+        # Keep a bounded history so a sequence of guarded Portal recovery
+        # commands remains restart-safe without growing the local state.
+        if len(executions) > 8:
+            for key in list(executions)[:-8]:
+                executions.pop(key, None)
         saved = {
             "job_digest": job_digest,
+            "execution_key": execution_key,
+            "executions": executions,
             "terminal": terminal,
             "status": terminal["status"],
             "sequence": terminal["sequence"],
@@ -1438,7 +1465,12 @@ class SelfHostedPortalWorker:
                 scenario = self._outbound("scenario_download", lambda: self._download_scenario_artifact(scenario_pin))
             except _PortalTransportError as exc:
                 return self._delivery_failure(command, cursor_next=cursor_next, error=ValueError("self_hosted_mcd_artifact_unavailable"))
-            terminal = self.executor.run(command, portal_keys=self.portal_keys, publisher_keys=self.publisher_keys, context=self.context, expected_agent_id=self.agent_id, expected_installation_id=str(command["installation_id"]), expected_commercial_key_id=self.commercial_key_id, expected_host_fingerprint=self.host_fingerprint, bootstrap_artifact=bootstrap, scenario_artifact=scenario, receipt_sink=self._send_or_queue)
+            command_id = str(command.get("command_id") or "").strip()
+            delivery_cursor = command.get("delivery_cursor")
+            execution_key = ""
+            if command_id and isinstance(delivery_cursor, int) and not isinstance(delivery_cursor, bool):
+                execution_key = f"{command_id}:{delivery_cursor}"
+            terminal = self.executor.run(command, portal_keys=self.portal_keys, publisher_keys=self.publisher_keys, context=self.context, expected_agent_id=self.agent_id, expected_installation_id=str(command["installation_id"]), expected_commercial_key_id=self.commercial_key_id, expected_host_fingerprint=self.host_fingerprint, bootstrap_artifact=bootstrap, scenario_artifact=scenario, receipt_sink=self._send_or_queue, execution_key=execution_key or None)
             if self._pending():
                 # Keep the delivery and cursor pending until the next outbound
                 # cycle drains every signed receipt in order.  The executor's
