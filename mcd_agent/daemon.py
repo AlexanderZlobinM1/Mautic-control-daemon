@@ -597,6 +597,75 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
         state.put("commercial_worker_status", {"schema": "mcd-commercial-worker-status-v1", "status": "enabled", "installations": len(worker.installation_ids), "secret": None})
         return worker
     return build
+
+
+def _reconcile_commercial_worker(
+    config: AgentConfig,
+    *,
+    single_cycle: bool,
+    eligible: bool,
+    reason: str,
+    worker_factory: Callable[[threading.Event], SelfHostedPortalWorker | None] | None,
+    worker_thread: threading.Thread | None,
+    stop_event: threading.Event,
+    retry_after: float,
+    now: float,
+) -> tuple[threading.Thread | None, threading.Event, float]:
+    """Keep the independent Portal worker aligned with durable activation.
+
+    Activation is performed by a separate CLI/Portal operation while the
+    daemon normally remains running.  A failed or incomplete construction
+    must therefore remain retryable; it must not be hidden by a one-time
+    ``eligible`` transition.  The same reconciliation also repairs a worker
+    that exited unexpectedly without touching scheduler workers or slots.
+    """
+    if single_cycle:
+        return worker_thread, stop_event, retry_after
+
+    if not eligible:
+        if worker_thread is not None:
+            stop_event.set()
+            worker_thread.join(timeout=2.0)
+            worker_thread = None
+        return worker_thread, stop_event, 0.0
+
+    if worker_thread is not None and worker_thread.is_alive():
+        return worker_thread, stop_event, retry_after
+
+    if worker_thread is not None:
+        # The old thread is no longer live; make its stop state explicit before
+        # replacing it so a late wake-up cannot affect the new worker.
+        stop_event.set()
+        worker_thread.join(timeout=0.2)
+        worker_thread = None
+
+    if now < retry_after:
+        return worker_thread, stop_event, retry_after
+
+    stop_event = threading.Event()
+    try:
+        factory = worker_factory if callable(worker_factory) else _default_commercial_worker_factory(config)
+        worker = factory(stop_event)
+        if worker is None:
+            raise RuntimeError("commercial_worker_material_incomplete")
+        if not isinstance(worker, SelfHostedPortalWorker):
+            raise TypeError("commercial_worker_factory_invalid")
+        worker_thread = threading.Thread(
+            target=worker.run_forever,
+            args=(stop_event,),
+            kwargs={"interval_sec": max(0.1, float(getattr(config, "poll_interval_sec", 1) or 1))},
+            name="mcd-commercial-portal-worker",
+            daemon=True,
+        )
+        worker_thread.start()
+        logging.info("commercial Portal worker started after durable state reconcile")
+        return worker_thread, stop_event, 0.0
+    except Exception as exc:
+        # Keep activation retryable.  This is deliberately bounded so an
+        # incomplete material response cannot produce a tight factory loop.
+        retry_delay = max(1.0, min(30.0, float(getattr(config, "poll_interval_sec", 1) or 1) * 5.0))
+        logging.warning("commercial Portal worker start deferred (%s): %s", reason or "eligible", exc)
+        return None, stop_event, now + retry_delay
 _LOCAL_RUNTIME_METADATA_KEY = "local_runtime_metadata"
 _BACKUP_SCHEDULE_STATE_KEY = "backup_schedule_state"
 _BACKUP_SCHEDULE_STATE_LOCK = threading.RLock()
@@ -17433,27 +17502,23 @@ def run_loop(
     commercial_stop_event = threading.Event()
     commercial_thread: threading.Thread | None = None
     commercial_mode, commercial_mode_reason = _commercial_state_eligibility(config)
-    if commercial_mode and _commercial_worker_factory is None:
-        _commercial_worker_factory = _default_commercial_worker_factory(config)
-    if commercial_mode and _commercial_worker_allowed(config, single_cycle=single_cycle, factory=_commercial_worker_factory):
-        try:
-            commercial_worker = _commercial_worker_factory(commercial_stop_event)
-            if not isinstance(commercial_worker, SelfHostedPortalWorker):
-                raise TypeError("commercial_worker_factory_invalid")
-            commercial_thread = threading.Thread(
-                target=commercial_worker.run_forever,
-                args=(commercial_stop_event,),
-                kwargs={"interval_sec": max(0.1, float(getattr(config, "poll_interval_sec", 1) or 1))},
-                name="mcd-commercial-portal-worker",
-                daemon=True,
-            )
-            commercial_thread.start()
-        except Exception as exc:
-            logging.warning("commercial Portal worker was not started: %s", exc)
-    elif not commercial_mode:
+    commercial_worker_retry_after = 0.0
+    if not commercial_mode:
         logging.info("commercial Portal worker capability inactive: %s", commercial_mode_reason)
     commercial_profile_seen = commercial_mode
     commercial_reason_seen = commercial_mode_reason
+
+    commercial_thread, commercial_stop_event, commercial_worker_retry_after = _reconcile_commercial_worker(
+        config,
+        single_cycle=single_cycle,
+        eligible=commercial_mode,
+        reason=commercial_mode_reason,
+        worker_factory=_commercial_worker_factory,
+        worker_thread=commercial_thread,
+        stop_event=commercial_stop_event,
+        retry_after=commercial_worker_retry_after,
+        now=time.time(),
+    )
 
     priority_executor = _PriorityTaskExecutor()
     _ACTIVE_PRIORITY_EXECUTOR = priority_executor
@@ -19906,29 +19971,24 @@ def run_loop(
 
     while _test_stop_event is None or not _test_stop_event.is_set():
         current_commercial_mode, current_commercial_reason = _commercial_state_eligibility(config)
-        if current_commercial_mode != commercial_profile_seen and not single_cycle:
-            if not current_commercial_mode and commercial_thread is not None:
-                commercial_stop_event.set()
-                commercial_thread.join(timeout=2.0)
-                commercial_thread = None
-            elif current_commercial_mode and commercial_thread is None:
-                commercial_stop_event = threading.Event()
-                try:
-                    worker_factory = _default_commercial_worker_factory(config) if _commercial_worker_factory is None else _commercial_worker_factory
-                    worker = worker_factory(commercial_stop_event)
-                    if worker is not None:
-                        commercial_thread = threading.Thread(target=worker.run_forever, args=(commercial_stop_event,), kwargs={"interval_sec": max(0.1, float(getattr(config, "poll_interval_sec", 1) or 1))}, name="mcd-commercial-portal-worker", daemon=True)
-                        commercial_thread.start()
-                except Exception as exc:
-                    logging.warning("commercial Portal worker reload start failed: %s", exc)
-            elif current_commercial_mode and commercial_thread is not None:
-                logging.debug("commercial Portal worker already running; no duplicate start")
+        if current_commercial_mode != commercial_profile_seen:
             commercial_profile_seen = current_commercial_mode
-        elif not current_commercial_mode and commercial_reason_seen != current_commercial_reason:
+        if not current_commercial_mode and commercial_reason_seen != current_commercial_reason:
             logging.info("commercial Portal worker capability inactive: %s", current_commercial_reason)
             commercial_reason_seen = current_commercial_reason
         elif current_commercial_mode:
             commercial_reason_seen = current_commercial_reason
+        commercial_thread, commercial_stop_event, commercial_worker_retry_after = _reconcile_commercial_worker(
+            config,
+            single_cycle=single_cycle,
+            eligible=current_commercial_mode,
+            reason=current_commercial_reason,
+            worker_factory=_commercial_worker_factory,
+            worker_thread=commercial_thread,
+            stop_event=commercial_stop_event,
+            retry_after=commercial_worker_retry_after,
+            now=time.time(),
+        )
         if single_cycle:
             _monitor_authoritative_runtime()
         now = time.time()

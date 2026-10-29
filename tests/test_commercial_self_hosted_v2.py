@@ -388,6 +388,73 @@ def test_v21_worker_downloads_and_executes_only_scenario_artifact(monkeypatch) -
         assert worker.client.receipts[-1]["contract_version"] == SELF_HOSTED_MCD_CONTRACT_VERSION
 
 
+def test_activated_worker_polls_and_emits_terminal_receipt_v2(monkeypatch) -> None:
+    portal_key = Ed25519PrivateKey.generate()
+    publisher_key = Ed25519PrivateKey.generate()
+    job, _bootstrap, scenario, keys = _job(portal_key, publisher_key, contract_version=SELF_HOSTED_MCD_CONTRACT_VERSION)
+
+    class Portal:
+        def __init__(self) -> None:
+            self.adoptions: list[dict[str, object]] = []
+            self.receipts: list[dict[str, object]] = []
+
+        def adopt(self, **kwargs: object):
+            self.adoptions.append(kwargs)
+            return {"status": "adopted"}
+
+        def pull_job(self, **_: object):
+            return {"cursor": "cursor-active", "job": job}
+
+        def send_receipt(self, receipt: dict[str, object], **_: object):
+            self.receipts.append(receipt)
+            return {}
+
+    with TemporaryDirectory() as directory:
+        state = CommercialState(str(Path(directory) / "commercial.sqlite"))
+        state.put("commercial_portal_connection_state", "active")
+        events: list[bytes] = []
+        executor = SelfHostedScenarioExecutor(
+            state,
+            facts_reader=lambda **_: job["applicability"]["facts"],
+            runner=lambda **kwargs: events.append(kwargs["artifact"]) or {"status": "succeeded"},
+        )
+        monkeypatch.setattr("mcd_agent.commercial_self_hosted.download_external_artifact", lambda *_args, **_kwargs: scenario)
+        portal = Portal()
+        worker = SelfHostedPortalWorker(
+            portal,
+            executor,
+            installation_id="installation-1",
+            portal_keys={"portal-1": keys["portal-1"]},
+            publisher_keys={"publisher-1": keys["publisher-1"]},
+            context={},
+            commercial_key_id="commercial-key-1",
+            agent_id="agent-1",
+            host_fingerprint="sha256:" + "b" * 64,
+        )
+
+        result = worker.run_once()
+
+    assert result == {"status": "succeeded", "job_id": "job-1"}
+    assert portal.adoptions and portal.adoptions[0]["installation_id"] == "installation-1"
+    assert events == [scenario]
+    terminal = portal.receipts[-1]
+    assert terminal["schema"] == "mcd-self-hosted-terminal-receipt-v2"
+    validate_self_hosted_terminal_receipt(
+        terminal,
+        binding={
+            "job_id": job["job_id"],
+            "request_id": job["request_id"],
+            "account_id": job["account_id"],
+            "commercial_key_id": job["commercial_key_id"],
+            "agent_id": job["agent_id"],
+            "installation_id": job["installation_id"],
+            "host_fingerprint": job["host_fingerprint"],
+            "facts_digest": job["applicability"]["facts_digest"],
+            "scenario": job["scenario"],
+        },
+    )
+
+
 def test_v2_external_artifact_execution_has_exact_binding_and_no_handlers() -> None:
     portal = Ed25519PrivateKey.generate()
     publisher = Ed25519PrivateKey.generate()
