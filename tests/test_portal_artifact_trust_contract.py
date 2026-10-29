@@ -110,6 +110,22 @@ def test_activation_binding_is_atomic_on_persistence_failure() -> None:
         assert state.get("commercial_key_id") is None
 
 
+def test_activation_binding_reset_clears_only_binding_material() -> None:
+    with TemporaryDirectory() as directory:
+        state = CommercialState(str(Path(directory) / "commercial.sqlite"))
+        state.put("agent_id", "agent-reset")
+        state.put("portal_agent_credential", "credential-reset")
+        state.put("portal_api_base", "https://portal.example.test/api/v1/commercial")
+        state.put("commercial_portal_cursor", "42")
+        receipt = state.clear_activation_binding()
+        assert receipt["status"] == "reset"
+        assert "agent_id" in receipt["cleared_keys"]
+        assert state.get("agent_id") is None
+        assert state.get("portal_agent_credential") is None
+        assert state.get("portal_api_base") is None
+        assert state.get("commercial_portal_cursor") == "42"
+
+
 def test_trust_update_is_atomic_idempotent_and_rejects_stale_revision() -> None:
     with TemporaryDirectory() as directory:
         state = CommercialState(str(Path(directory) / "commercial.sqlite"))
