@@ -1161,7 +1161,7 @@ def test_v2_receipts_queue_in_order_across_portal_outage_and_restart(monkeypatch
         assert [receipt["sequence"] for receipt in fake.receipts[:2]] == [1, 2]
 
 
-def test_v2_drain_reconciles_receipts_already_advanced_on_portal() -> None:
+def test_v2_drain_retains_receipt_on_portal_sequence_regression() -> None:
     portal = Ed25519PrivateKey.generate()
     publisher = Ed25519PrivateKey.generate()
     job, _bootstrap, _scenario, keys = _job(portal, publisher)
@@ -1205,6 +1205,14 @@ def test_v2_drain_reconciles_receipts_already_advanced_on_portal() -> None:
             host_fingerprint="sha256:" + "b" * 64,
         )
 
-        assert worker._drain() is True
-        assert state.get("commercial_self_hosted_pending_receipts") == []
-        assert state.get("commercial_self_hosted_pending_delivery_v1") is None
+        assert worker._drain() is False
+        pending = state.get("commercial_self_hosted_pending_receipts")
+        assert isinstance(pending, list)
+        assert [item["idempotency_key"] for item in pending] == [
+            "job-1:scenario_dispatch:1",
+            "job-1:execution:2",
+            "job-1:terminal:3",
+        ]
+        assert state.get("commercial_self_hosted_pending_delivery_v1") is not None
+        assert state.get("commercial_portal_cursor") is None
+        assert worker.client.calls == 1

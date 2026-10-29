@@ -1055,23 +1055,14 @@ class SelfHostedPortalWorker:
         while pending:
             try:
                 self._send_receipt(pending[0])
-            except CommercialPortalError as exc:
-                # Portal may already have accepted a later contiguous receipt
-                # before MCD persisted the local queue (for example across a
-                # restart).  A sequence regression is therefore a durable
-                # reconciliation acknowledgement for this exact job receipt,
-                # not a transport failure and not a reason to replay work.
-                if exc.code != "receipt_sequence_regression":
-                    self._transport_failed("receipt_delivery")
-                    self.executor.state.put(_PENDING_KEY, pending)
-                    return False
-                self._transport_succeeded()
-                acknowledge_pending = getattr(getattr(self.executor, "artifact_store", None), "acknowledge_pending", None)
-                if callable(acknowledge_pending):
-                    acknowledge_pending()
-                drained_terminal = pending[0].get("schema") == SELF_HOSTED_MCD_TERMINAL_RECEIPT_SCHEMA
-                pending.pop(0)
+            except CommercialPortalError:
+                # Any non-2xx response, including a typed sequence regression,
+                # is not an acknowledgement of this exact idempotency key.
+                # Keep the durable receipt and delivery cursor unchanged until
+                # Portal explicitly accepts this receipt.
                 self.executor.state.put(_PENDING_KEY, pending)
+                self._transport_failed("receipt_delivery")
+                return False
             except Exception:
                 self._transport_failed("receipt_delivery")
                 self.executor.state.put(_PENDING_KEY, pending)
