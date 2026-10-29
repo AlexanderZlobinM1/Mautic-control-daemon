@@ -1237,7 +1237,10 @@ select `portal-self-hosted-executable-context-v1`; the frame validator accepts
 both that schema and the current MCD context schema without changing the
 primitive contract. Progress is checkpointed by
 immutable `job_id`; replay of the same signed job returns the durable terminal
-receipt without re-executing the runner.
+receipt without re-executing the runner only when the received command identity
+is the same. A distinct Portal recovery command has its own command/cursor
+execution identity and is executed exactly once, even though it retains the
+same job idempotency key.
 
 For the Mautic primitive context, the additive
 `mcd-scenario-primitive-context-v1` contract is validated by the same launcher
@@ -1332,9 +1335,10 @@ queued durably before the delivery is considered complete; the runner is never
 re-run just to deliver a receipt after restart. A poll/network failure before a
 delivery exists remains a transport retry and has no command to acknowledge.
 For Portal's same-job recovery command, the terminal continues at the next
-monotonic sequence/idempotency key after any terminal from the first attempt;
-draining that durable terminal completes the delivery and never re-runs the
-runner.
+monotonic sequence/idempotency key after any terminal from the first attempt.
+A distinct recovery command executes once under its own command/cursor key;
+retransmission of that same recovery command drains the durable terminal and
+never re-runs the runner.
 
 `daemon.run_loop` may start at most one Portal worker when the durable
 Portal enrollment is valid: HTTPS Portal base, one existing commercial API

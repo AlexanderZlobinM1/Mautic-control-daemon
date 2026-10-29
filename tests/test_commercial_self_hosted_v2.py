@@ -521,6 +521,45 @@ def test_v2_external_artifact_execution_has_exact_binding_and_no_handlers() -> N
         assert events == [scenario]
 
 
+def test_v2_distinct_recovery_command_executes_once_per_command_identity() -> None:
+    portal = Ed25519PrivateKey.generate()
+    publisher = Ed25519PrivateKey.generate()
+    job, bootstrap, scenario, keys = _job(portal, publisher)
+    calls = 0
+
+    def runner(**_kwargs):
+        nonlocal calls
+        calls += 1
+        return {"status": "succeeded", "execution": calls}
+
+    with TemporaryDirectory() as directory:
+        state = CommercialState(str(Path(directory) / "commercial.sqlite"))
+        executor = SelfHostedScenarioExecutor(
+            state,
+            facts_reader=lambda **_: job["applicability"]["facts"],
+            runner=runner,
+        )
+        kwargs = dict(
+            portal_keys={"portal-1": keys["portal-1"]},
+            publisher_keys={"publisher-1": keys["publisher-1"]},
+            context={},
+            expected_agent_id="agent-1",
+            expected_installation_id="installation-1",
+            expected_commercial_key_id="commercial-key-1",
+            expected_host_fingerprint="sha256:" + "b" * 64,
+            bootstrap_artifact=bootstrap,
+            scenario_artifact=scenario,
+        )
+        first = executor.run(job, execution_key="mcd_command_job-1:1", **kwargs)
+        retry = executor.run(job, execution_key="mcd_command_job-1_retry_3:4", **kwargs)
+        replay = executor.run(job, execution_key="mcd_command_job-1_retry_3:4", **kwargs)
+
+        assert first["status"] == "succeeded"
+        assert retry["result"]["execution"] == 2
+        assert replay == retry
+        assert calls == 2
+
+
 def test_v2_runner_failure_persists_bounded_evidence_and_replays_without_rerun() -> None:
     portal = Ed25519PrivateKey.generate()
     publisher = Ed25519PrivateKey.generate()
