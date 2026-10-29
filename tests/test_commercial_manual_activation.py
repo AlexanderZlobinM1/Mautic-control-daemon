@@ -15,17 +15,17 @@ from mcd_agent.commercial_manual_activation import (
 
 
 class ManualCommercialActivationTests(unittest.TestCase):
-    def _stage(self, state: CommercialState, register):
+    def _stage(self, state: CommercialState, register, *, agent_id="agent-existing", local_identity="cluster1.mail.m1.rs"):
         with patch("mcd_agent.commercial_manual_activation._host_fingerprint", return_value="sha256:" + "a" * 64), patch(
             "mcd_agent.commercial_manual_activation.PortalClient.register_installation", side_effect=register
         ):
             return stage_manual_key(
                 state,
                 portal_url="https://portal.sales-snap.com",
-                agent_id="agent-existing",
+                agent_id=agent_id,
                 commercial_key_id="commercial-key-existing",
                 commercial_key="installation-bound-secret",
-                local_identity="cluster1.mail.m1.rs",
+                local_identity=local_identity,
                 display_name="Cluster 1",
                 mautic_version="7.2.2",
                 application_root_fingerprint="sha256:" + "b" * 64,
@@ -101,6 +101,27 @@ class ManualCommercialActivationTests(unittest.TestCase):
             self.assertEqual(first["status"], "pending_activation")
             self.assertEqual(second["pending_registration_id"], "installation-existing")
             self.assertEqual(len(calls), 2)
+
+    def test_same_commercial_key_can_register_independent_connections(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            first = CommercialState(str(Path(td) / "first.sqlite"))
+            second = CommercialState(str(Path(td) / "second.sqlite"))
+            registrations = []
+
+            def register(**kwargs):
+                registrations.append(kwargs)
+                return {"installation_id": f"installation-{len(registrations)}", "schema": "portal-mcd-installation-register-response-v1"}
+
+            with patch("mcd_agent.commercial_manual_activation._host_fingerprint", return_value="sha256:" + "a" * 64), patch(
+                "mcd_agent.commercial_manual_activation.PortalClient.register_installation", side_effect=register
+            ):
+                self._stage(first, register, agent_id="agent-first", local_identity="first.example")
+                self._stage(second, register, agent_id="agent-second", local_identity="second.example")
+
+            self.assertEqual(len(registrations), 2)
+            self.assertEqual(first.get("commercial_key_id"), second.get("commercial_key_id"))
+            self.assertEqual(first.get("portal_agent_credential"), second.get("portal_agent_credential"))
+            self.assertNotEqual(first.get("agent_id"), second.get("agent_id"))
 
 
 if __name__ == "__main__":

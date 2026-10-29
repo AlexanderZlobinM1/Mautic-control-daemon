@@ -1,7 +1,7 @@
 """Interactive, secret-safe fallback for an existing Portal commercial key.
 
 This path is intentionally narrower than activation-code redemption. The
-operator pastes an already-issued installation-bound key at a hidden prompt;
+operator pastes an already-issued reusable commercial key at a hidden prompt;
 MCD stores it in its existing mode-0600 commercial state, registers the
 installation as passive, and waits for an explicit local ``activate``. The
 same key can then be reactivated after an explicit ``disconnect``.
@@ -95,11 +95,12 @@ def stage_manual_key(
     application_root_fingerprint: str,
     timeout_sec: int = 35,
 ) -> dict[str, Any]:
-    """Store and passively register an existing commercial key.
+    """Store and passively register one MCD connection using an existing key.
 
-    The key is accepted as a function argument so tests/bootstrap callers can
-    supply it, but the interactive CLI reads it with ``getpass`` and never
-    echoes or prints it.
+    The same commercial key may be registered by other independent MCD state
+    stores; this state only protects the local connection from rebinding to a
+    different key. The interactive CLI reads the key with ``getpass`` and
+    never echoes or prints it.
     """
     base_url = _require_https(portal_url)
     agent = _text(agent_id)
