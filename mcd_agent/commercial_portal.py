@@ -718,35 +718,6 @@ class CommercialState:
         with sqlite3.connect(self.path) as db:
             db.execute("DELETE FROM commercial_meta WHERE key=?", (str(key),))
 
-    def clear_activation_binding(self) -> dict[str, Any]:
-        """Remove only Portal activation material and return a safe receipt."""
-        keys = (
-            "portal_api_base",
-            "portal_agent_credential",
-            "agent_id",
-            "host_fingerprint",
-            "commercial_key_id",
-            "commercial_key_metadata",
-            "installation_ids",
-            "portal_registration_material_schema",
-            "portal_registration_material_digest",
-            "portal_job_signing_keys",
-            "portal_artifact_trust_v1",
-            "portal_artifact_signing_keys",
-            "portal_artifact_trust_revision",
-            "portal_artifact_trust_digest",
-            "portal_artifact_trust_domain",
-            "portal_artifact_trust_source",
-            "portal_artifact_trust_updates_v1",
-            "portal_mcc_publisher_keys",
-        )
-        with sqlite3.connect(self.path, timeout=30) as db:
-            db.execute("BEGIN IMMEDIATE")
-            placeholders = ",".join("?" for _ in keys)
-            rows = db.execute(f"SELECT key FROM commercial_meta WHERE key IN ({placeholders})", keys).fetchall()
-            db.execute(f"DELETE FROM commercial_meta WHERE key IN ({placeholders})", keys)
-        return {"schema": "mcd-commercial-activation-reset-v1", "status": "reset", "cleared_keys": sorted(str(row[0]) for row in rows)}
-
     def apply_portal_artifact_trust_update(self, command: Mapping[str, Any]) -> dict[str, Any]:
         """Atomically apply one Portal trust revision and remember its idempotency."""
         update = validate_portal_artifact_trust_update(command)
