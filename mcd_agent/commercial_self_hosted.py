@@ -56,6 +56,15 @@ from mcd_agent.commercial_portal import (
     portal_artifact_trust_keys,
     validate_portal_artifact_trust_update,
 )
+from mcd_agent.commercial_generic import (
+    COMMAND_JOB_SCHEMA,
+    STAGE_RECEIPT_SCHEMA as GENERIC_STAGE_RECEIPT_SCHEMA,
+    TERMINAL_RECEIPT_SCHEMA as GENERIC_TERMINAL_RECEIPT_SCHEMA,
+    validate_capability_inventory,
+    validate_generic_command_job,
+    validate_generic_stage_receipt,
+    validate_generic_terminal_receipt,
+)
 
 
 _RUNS_TABLE = "commercial_self_hosted_runs"
@@ -76,6 +85,8 @@ _MAX_RUNNER_PROGRESS_FRAMES = 256
 _MAX_RUNNER_STDERR_BYTES = 16 * 1024
 _MAX_RUNNER_DIAGNOSTIC_PREVIEW_BYTES = 2048
 _RUNNER_EVIDENCE_SCHEMA = "mcd-self-hosted-runner-evidence-v1"
+_GENERIC_INVENTORY_KEY = "commercial_portal_generic_capability_inventory_v1"
+_GENERIC_RUNS_KEY = "commercial_portal_generic_runs_v1"
 
 
 def _nonnegative_int(value: object) -> bool:
@@ -921,7 +932,7 @@ class SelfHostedPortalWorker:
     command before its receipt has been delivered.
     """
 
-    def __init__(self, client: Any, executor: ScenarioExecutor, *, installation_id: str | list[str], portal_keys: Mapping[str, str], publisher_keys: Mapping[str, Any], context: Mapping[str, Any], commercial_key_id: str, agent_id: str, host_fingerprint: str, poll_wait_seconds: int = _DEFAULT_LONG_POLL_SECONDS, backoff_base_seconds: float = _DEFAULT_BACKOFF_BASE_SECONDS, backoff_max_seconds: float = _DEFAULT_BACKOFF_MAX_SECONDS, clock: Callable[[], float] | None = None, inventory_provider: Callable[[str], Mapping[str, Any]] | None = None, runtime_command_handler: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None):
+    def __init__(self, client: Any, executor: ScenarioExecutor, *, installation_id: str | list[str], portal_keys: Mapping[str, str], publisher_keys: Mapping[str, Any], context: Mapping[str, Any], commercial_key_id: str, agent_id: str, host_fingerprint: str, poll_wait_seconds: int = _DEFAULT_LONG_POLL_SECONDS, backoff_base_seconds: float = _DEFAULT_BACKOFF_BASE_SECONDS, backoff_max_seconds: float = _DEFAULT_BACKOFF_MAX_SECONDS, clock: Callable[[], float] | None = None, inventory_provider: Callable[[str], Mapping[str, Any]] | None = None, runtime_command_handler: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None, capability_inventory_provider: Callable[[str], Mapping[str, Any]] | None = None, generic_command_handler: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None):
         self.client = client
         self.executor = executor
         self.installation_ids = [installation_id] if isinstance(installation_id, str) else [str(value) for value in installation_id]
@@ -940,6 +951,8 @@ class SelfHostedPortalWorker:
         self._clock = clock or time.time
         self.inventory_provider = inventory_provider
         self.runtime_command_handler = runtime_command_handler
+        self.capability_inventory_provider = capability_inventory_provider
+        self.generic_command_handler = generic_command_handler
         self._active_installation_id = self.installation_ids[0]
 
     def _pending(self) -> list[dict[str, Any]]:
@@ -1179,6 +1192,30 @@ class SelfHostedPortalWorker:
         self.executor.state.put(_ADOPTED_KEY, adopted)
         return True
 
+    def _publish_capabilities(self, installation_id: str) -> bool:
+        """Publish only the MCD primitives explicitly declared by the host."""
+        if self.capability_inventory_provider is None or not callable(getattr(self.client, "send_capability_inventory", None)):
+            return True
+        raw = self.capability_inventory_provider(installation_id)
+        if not isinstance(raw, Mapping):
+            raise ValueError("commercial_capability_inventory_provider_invalid")
+        inventory = validate_capability_inventory(raw)
+        if inventory["installation"]["installation_id"] != str(installation_id):
+            raise ValueError("commercial_capability_inventory_binding_mismatch")
+        sent = self.executor.state.get(_GENERIC_INVENTORY_KEY)
+        sent = dict(sent) if isinstance(sent, Mapping) else {}
+        prior = sent.get(str(installation_id))
+        if isinstance(prior, Mapping) and prior.get("inventory_sha256") == inventory["inventory_sha256"]:
+            return True
+        try:
+            self._outbound("capability_inventory", lambda: self.client.send_capability_inventory(installation_id=installation_id, inventory=inventory))
+        except _PortalTransportError:
+            return False
+        sent[str(installation_id)] = {"inventory_sha256": inventory["inventory_sha256"], "request_id": inventory["request_id"], "observed_at": inventory["observed_at"]}
+        self.executor.state.put(_GENERIC_INVENTORY_KEY, sent)
+        self.executor.state.put("commercial_portal_generic_capabilities_v1", {str(installation_id): inventory})
+        return True
+
     def _publish_inventory(self, installation_id: str) -> bool:
         if not callable(getattr(self.client, "send_inventory", None)) or self.inventory_provider is None:
             return True
@@ -1318,6 +1355,95 @@ class SelfHostedPortalWorker:
         self._finish_command(cursor_next=cursor_next)
         return {"status": status, "command_id": receipt["command_id"]}
 
+    def _generic_receipt(self, job: Mapping[str, Any], *, terminal: bool, sequence: int, status: str, result: Mapping[str, Any] | None = None, error: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        installation = dict(job["installation"])
+        payload: dict[str, Any] = {
+            "schema": GENERIC_TERMINAL_RECEIPT_SCHEMA if terminal else GENERIC_STAGE_RECEIPT_SCHEMA,
+            "contract_version": "1.0",
+            "job_id": str(job["job_id"]),
+            "request_id": str(job["request_id"]),
+            "command_id": str(job["command_id"]),
+            "installation": installation,
+            "sequence": sequence,
+            "status": status,
+        }
+        if terminal:
+            payload.update({"started_at": str(job.get("issued_at") or _utc()), "completed_at": _utc()})
+        else:
+            payload.update({"stage_id": "execute", "observed_at": _utc()})
+        if result is not None:
+            payload["result"] = _bounded_result(result)
+        if error is not None:
+            payload["error"] = {"code": str(error.get("code") or "commercial_generic_command_failed")[:120], "message": str(error.get("message") or "generic command failed")[:1024]}
+        if terminal:
+            return validate_generic_terminal_receipt(payload)
+        return validate_generic_stage_receipt(payload)
+
+    def _run_generic_command(self, command: Mapping[str, Any], *, cursor_next: str) -> dict[str, Any]:
+        """Run one advertised generic primitive with durable receipts."""
+        inventories = self.executor.state.get("commercial_portal_generic_capabilities_v1")
+        inventory_map = inventories if isinstance(inventories, Mapping) else {}
+        inventory = inventory_map.get(str(self._active_installation_id))
+        if not isinstance(inventory, Mapping):
+            return {"status": "blocked", "reason": "commercial_capability_inventory_unavailable"}
+        try:
+            job = validate_generic_command_job(command, inventory=inventory)
+        except Exception as exc:
+            return {"status": "rejected", "reason": str(exc)[:120]}
+        if job["installation"]["installation_id"] != str(self._active_installation_id):
+            return {"status": "rejected", "reason": "portal_mcd_generic_installation_mismatch"}
+        try:
+            expires = datetime.fromisoformat(str(job["expires_at"]).replace("Z", "+00:00")).timestamp()
+            issued = datetime.fromisoformat(str(job["issued_at"]).replace("Z", "+00:00")).timestamp()
+            if expires <= issued or float(self._clock()) >= expires:
+                raise ValueError("portal_mcd_generic_command_expired")
+        except (TypeError, ValueError, OverflowError) as exc:
+            reason = str(exc) if str(exc).startswith("portal_mcd_generic_") else "portal_mcd_generic_command_time_invalid"
+            terminal = self._generic_receipt(job, terminal=True, sequence=1, status="failed", error={"code": reason, "message": reason})
+            if not self._send_or_queue(terminal):
+                return {"status": "receipt_pending", "job_id": job["job_id"]}
+            self._finish_command(cursor_next=cursor_next)
+            return {"status": "failed", "job_id": job["job_id"]}
+
+        job_id = str(job["job_id"])
+        digest = hashlib.sha256(canonical_json(job)).hexdigest()
+        runs = self.executor.state.get(_GENERIC_RUNS_KEY)
+        runs = dict(runs) if isinstance(runs, Mapping) else {}
+        saved = runs.get(job_id)
+        if isinstance(saved, Mapping) and saved.get("job_digest") != digest:
+            return {"status": "rejected", "reason": "portal_mcd_generic_job_reuse_conflict"}
+        started_sent = bool(saved.get("started_sent")) if isinstance(saved, Mapping) else False
+        if not started_sent:
+            started = self._generic_receipt(job, terminal=False, sequence=1, status="started")
+            runs[job_id] = {"job_digest": digest, "started_sent": True}
+            self.executor.state.put(_GENERIC_RUNS_KEY, runs)
+            if not self._send_or_queue(started):
+                return {"status": "receipt_pending", "job_id": job_id}
+        saved = runs.get(job_id)
+        terminal_saved = saved.get("terminal") if isinstance(saved, Mapping) else None
+        if not isinstance(terminal_saved, Mapping):
+            try:
+                if self.generic_command_handler is None:
+                    raise ValueError("commercial_generic_command_handler_unconfigured")
+                result = self.generic_command_handler(dict(job))
+                result = dict(result) if isinstance(result, Mapping) else {"value": result}
+                status = "failed" if str(result.get("status") or "").lower() in {"failed", "error", "conflict"} else "succeeded"
+                error = {"code": str(result.get("reason") or "commercial_generic_command_failed"), "message": "generic primitive returned failure"} if status == "failed" else None
+            except Exception as exc:
+                result = None
+                status = "failed"
+                error = {"code": type(exc).__name__[:120], "message": str(exc)[:1024] or "generic primitive failed"}
+            terminal_saved = self._generic_receipt(job, terminal=True, sequence=2, status=status, result=result, error=error)
+            runs[job_id] = {"job_digest": digest, "started_sent": True, "terminal": terminal_saved}
+            if len(runs) > 64:
+                for key in list(runs)[:-64]:
+                    runs.pop(key, None)
+            self.executor.state.put(_GENERIC_RUNS_KEY, runs)
+        if not self._send_or_queue(dict(terminal_saved)):
+            return {"status": "receipt_pending", "job_id": job_id}
+        self._finish_command(cursor_next=cursor_next)
+        return {"status": str(terminal_saved["status"]), "job_id": job_id}
+
     def _run_runtime_command(self, command: Mapping[str, Any], *, cursor_next: str) -> dict[str, Any]:
         if str(command.get("schema") or "") != "mcc-desired-runtime-sync-v3" or int(command.get("desired_state_sync_protocol") or 0) != 3:
             receipt = self._command_receipt(command, status="failed", payload={"reason": "commercial_command_unsupported"})
@@ -1438,6 +1564,8 @@ class SelfHostedPortalWorker:
                     self._active_installation_id = active_installation_id
                     if not self._ensure_adopted(active_installation_id) or not self._publish_inventory(active_installation_id):
                         return {"status": "backoff", "retry_after": float(self._transport_state().get("retry_after") or 0.0)}
+                    if not self._publish_capabilities(active_installation_id):
+                        return {"status": "backoff", "retry_after": float(self._transport_state().get("retry_after") or 0.0)}
                     if callable(getattr(self.client, "adopt", None)) and not self._publish_active_state():
                         return {"status": "receipt_pending"}
                     delivery = self._outbound(
@@ -1472,6 +1600,8 @@ class SelfHostedPortalWorker:
             return self._run_noop(command, cursor_next=cursor_next)
         if command.get("schema") == "mcc-desired-runtime-sync-v3":
             return self._run_runtime_command(command, cursor_next=cursor_next)
+        if command.get("schema") == COMMAND_JOB_SCHEMA:
+            return self._run_generic_command(command, cursor_next=cursor_next)
         if command.get("schema") == PORTAL_ARTIFACT_TRUST_UPDATE_SCHEMA:
             return self._run_artifact_trust_update(command, cursor_next=cursor_next)
         if command.get("schema") not in {None, SELF_HOSTED_MCD_JOB_SCHEMA, "portal-mcd-job-delivery-v1"}:
