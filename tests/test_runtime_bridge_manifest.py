@@ -60,6 +60,20 @@ def test_current_bridge_source_has_the_published_self_contained_digest() -> None
     assert manifest["artifact_sha256"] == BRIDGE_SHA
 
 
+def test_bridge_revision_keeps_failed_immutable_artifact_untouched(tmp_path: Path) -> None:
+    bridge = tmp_path / "mcd_runtime_bootstrap.py"
+    bridge.write_bytes(b"bridge-v2\n")
+    manifest = build_manifest(
+        bridge,
+        **{
+            **_kwargs(),
+            "artifact_name": "mcd-runtime-1.6.0.bridge-r2.py",
+            "artifact_url": "https://servercontrol.sales-snap.com/mauticctl/mcd/mcd-runtime-1.6.0.bridge-r2.py",
+        },
+    )
+    assert manifest["artifact"] == "mcd-runtime-1.6.0.bridge-r2.py"
+
+
 @pytest.mark.parametrize("field", ["runtime_archive_sha256", "runtime_manifest_sha256", "qa_sidecar_sha256"])
 def test_bridge_manifest_rejects_unbound_runtime_digest(tmp_path: Path, field: str) -> None:
     bridge = tmp_path / "mcd_runtime_bootstrap.py"

@@ -52,8 +52,8 @@ def build_manifest(
     if not COMMIT_RE.fullmatch(source_commit):
         raise ValueError("source_commit must be a 40-character lowercase commit")
     artifact_name = str(artifact_name or "").strip()
-    if artifact_name != f"mcd-runtime-{version}.bridge.py":
-        raise ValueError("artifact_name must match the release version")
+    if not re.fullmatch(rf"mcd-runtime-{re.escape(version)}\.bridge(?:-r[1-9][0-9]*)?\.py", artifact_name):
+        raise ValueError("artifact_name must match the release version and optional bridge revision")
     artifact_url = str(artifact_url or "").strip()
     if not artifact_url.startswith("https://"):
         raise ValueError("artifact_url must use HTTPS")
