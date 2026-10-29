@@ -557,6 +557,7 @@ def test_v2_distinct_recovery_command_executes_once_per_command_identity() -> No
 
         assert first["status"] == "succeeded"
         assert retry["result"]["execution"] == 2
+        assert retry["sequence"] == 6
         assert replay == retry
         assert calls == 2
 
