@@ -1232,7 +1232,10 @@ non-shell local runner process and owns no installer, OS, Mautic, scenario or
 primitive recipe. Connection type (Portal self-host, Cloud, MCC direct or a
 future integration) changes only delivery/authentication; it never selects a
 different runner, frame, context or execution engine. No fixed onboarding
-stage registry is constructed on this path. Progress is checkpointed by
+stage registry is constructed on this path. A legacy self-hosted artifact may
+select `portal-self-hosted-executable-context-v1`; the frame validator accepts
+both that schema and the current MCD context schema without changing the
+primitive contract. Progress is checkpointed by
 immutable `job_id`; replay of the same signed job returns the durable terminal
 receipt without re-executing the runner.
 

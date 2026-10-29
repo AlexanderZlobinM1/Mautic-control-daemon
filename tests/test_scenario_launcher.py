@@ -14,7 +14,9 @@ import pytest
 from mcd_agent.scenario_launcher import (
     FRAME_HEADER,
     FRAME_MAGIC,
+    LEGACY_SCENARIO_CONTEXT_SCHEMA,
     SCENARIO_CONTEXT_SCHEMA,
+    build_scenario_context,
     encode_request_frame,
 )
 from mcd_agent.commercial_self_hosted import ExternalProcessPolicy, RunnerExecutionError
@@ -38,6 +40,24 @@ def test_frame_is_binary_artifact_plus_separate_context() -> None:
     assert frame[FRAME_HEADER.size : FRAME_HEADER.size + artifact_size] == artifact
     context = json.loads(frame[FRAME_HEADER.size + artifact_size :].decode("utf-8"))
     assert context["applicability"]["facts_digest"].startswith("sha256:")
+
+
+def test_self_hosted_artifact_can_select_legacy_context_schema() -> None:
+    job = {
+        "job_id": "job-legacy-context",
+        "request_id": "request-legacy-context",
+        "command_id": "command-legacy-context",
+        "idempotency_key": "idempotency-legacy-context",
+        "scenario": {
+            "scenario_id": "debian-family-self-hosted",
+            "revision": "3.0.0",
+            "artifact_revision": "3.0.0",
+            "artifact_digest": "sha256:" + "a" * 64,
+        },
+        "applicability": {"facts_digest": "sha256:" + "b" * 64},
+    }
+    context = build_scenario_context(job, context_schema=LEGACY_SCENARIO_CONTEXT_SCHEMA)
+    assert context["schema"] == LEGACY_SCENARIO_CONTEXT_SCHEMA
 
 
 def _primitive_context(artifact: bytes) -> dict[str, object]:

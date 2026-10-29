@@ -54,14 +54,16 @@ class ScenarioLauncherError(RuntimeError):
         self.code = code
 
 
-def build_scenario_context(job: Mapping[str, Any]) -> dict[str, Any]:
-    """Build the single canonical local execution context from a signed job."""
+def build_scenario_context(job: Mapping[str, Any], *, context_schema: str = SCENARIO_CONTEXT_SCHEMA) -> dict[str, Any]:
+    """Build the local execution context from a job for the selected artifact contract."""
+    if context_schema not in SCENARIO_CONTEXT_SCHEMAS:
+        raise ValueError("self_hosted_mcd_runner_context_schema_invalid")
     applicability = job.get("applicability") if isinstance(job.get("applicability"), Mapping) else {}
     parameters = job.get("parameters") if isinstance(job.get("parameters"), Mapping) else {}
     secret_references = job.get("secret_references") if isinstance(job.get("secret_references"), list) else []
     scenario = job.get("scenario") if isinstance(job.get("scenario"), Mapping) else {}
     payload: dict[str, Any] = {
-        "schema": SCENARIO_CONTEXT_SCHEMA,
+        "schema": context_schema,
         "contract_version": "1.0",
         "job": {
             "job_id": str(job.get("job_id") or ""),
