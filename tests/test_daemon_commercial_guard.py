@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import sys
 
 from mcd_agent.commercial_portal import CommercialState
 from mcd_agent.daemon import (
@@ -6,6 +7,7 @@ from mcd_agent.daemon import (
     _commercial_state_eligibility,
     _default_commercial_worker_factory,
     _commercial_worker_allowed,
+    _reconcile_commercial_worker,
 )
 
 
@@ -95,6 +97,7 @@ def test_registered_installation_survives_restart_without_activation(tmp_path, m
 
 def test_default_factory_validates_material_and_constructs_one_worker(tmp_path, monkeypatch):
     state, config = _eligible_state(tmp_path, monkeypatch)
+    monkeypatch.setattr("mcd_agent.daemon.default_scenario_runner_argv", lambda: [sys.executable])
     state.put("installation_ids", {"local-1": "inst-1", "local-2": "inst-2"})
     state.put("portal_job_signing_keys", {"portal-1": "key"})
     factory = _default_commercial_worker_factory(config)
@@ -111,6 +114,53 @@ def test_default_factory_disables_without_portal_material(tmp_path, monkeypatch)
     factory = _default_commercial_worker_factory(SimpleNamespace(state_db_path=state_path))
     assert factory(None) is None
     assert state.get("commercial_worker_status")["status"] == "disabled"
+
+
+def test_commercial_worker_retries_after_activation_material_is_temporarily_incomplete(monkeypatch):
+    class Worker:
+        def run_forever(self, stop_event, **_kwargs):
+            stop_event.wait(0.05)
+
+    monkeypatch.setattr("mcd_agent.daemon.SelfHostedPortalWorker", Worker)
+    calls = []
+
+    def factory(_stop_event):
+        calls.append(True)
+        return None if len(calls) == 1 else Worker()
+
+    import threading
+
+    stop_event = threading.Event()
+    thread, stop_event, retry_after = _reconcile_commercial_worker(
+        SimpleNamespace(poll_interval_sec=1),
+        single_cycle=False,
+        eligible=True,
+        reason="",
+        worker_factory=factory,
+        worker_thread=None,
+        stop_event=stop_event,
+        retry_after=0.0,
+        now=100.0,
+    )
+    assert thread is None
+    assert retry_after > 100.0
+
+    thread, stop_event, retry_after = _reconcile_commercial_worker(
+        SimpleNamespace(poll_interval_sec=1),
+        single_cycle=False,
+        eligible=True,
+        reason="",
+        worker_factory=factory,
+        worker_thread=thread,
+        stop_event=stop_event,
+        retry_after=retry_after,
+        now=retry_after,
+    )
+    assert thread is not None
+    assert retry_after == 0.0
+    assert calls == [True, True]
+    stop_event.set()
+    thread.join(timeout=1.0)
 
 
 def test_portal_registration_identity_wins_over_host_derived_inventory_identity(tmp_path, monkeypatch):

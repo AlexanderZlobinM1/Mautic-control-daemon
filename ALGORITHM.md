@@ -1140,6 +1140,7 @@ cycle без ручного `segments:update`, profile/capacity/data changes. Ad
 | legacy source-tree to runtime-only transition is authority-safe and accepts complete split TOML config | `tools/mcd_runtime_bootstrap.py`, `tools/mcd_profile_authority_probe.py` | `tests/test_profile_authority_probe.py`, `tests/test_runtime_bootstrap_capture.py`, live `mcd-runtime-bootstrap-receipt-v1` |
 | activation-derived Portal material is imported atomically without new auth/job issuance | `mcd_agent/commercial_registration.py`, `mcd_agent/commercial_portal.py` | `tests/test_commercial_registration.py`, redacted `mcd-portal-registration-receipt-v1` |
 | manual existing commercial-key fallback keeps pending/active/disconnected state idempotently | `mcd_agent/commercial_manual_activation.py`, `mcd_agent/commercial_portal.py`, `mcd_agent/daemon.py` | `tests/test_commercial_manual_activation.py`, redacted `mcd-commercial-manual-activation-receipt-v1` |
+| active Portal state is reconciled after daemon startup; incomplete construction and exited workers retry without duplicates | `mcd_agent/daemon.py:_reconcile_commercial_worker` | `tests/test_daemon_commercial_guard.py` activation-material retry; `tests/test_commercial_self_hosted_v2.py` activate -> poll -> terminal v2 |
 | result-signing identity bootstraps from MCD-owned config and gates signed control execution on MCC ACK | `mcd_agent/config.py`, `mcd_agent/result_signing.py`, `mcd_agent/state_push.py`, `mcd_agent/mcd_control.py` | `tests/test_result_signing.py`, `tests/test_mcd_control.py`, live `mcd-state-v1` identity/key/ACK and terminal-receipt evidence |
 | authority-safe desired runtime projection | `mcd_agent/config.py`, `mcd_agent/runtime_overrides.py` | `tests/test_runtime_override_direction.py`, `tests/test_runtime_stable_keys.py`, `tests/test_runtime_migration_adapter.py` |
 | natural b2bss/Adonis evidence | runtime TaskStore/MCC receipts | rollout acceptance (после package/install) |
@@ -1338,6 +1339,12 @@ eligibility switch; the Portal worker is an independent capability alongside
 the existing scheduler. The corporate MCC URL/token and base profile are not
 Portal eligibility switches. Missing or invalid Portal state, including an explicit
 revoke/detach marker, fails closed. Single-cycle mode never starts the worker.
+When activation changes durable state while the daemon is already running,
+the same reconcile loop must start the worker without a daemon restart. A
+transiently incomplete material set or an unexpectedly exited worker is
+retryable with bounded backoff; it must not be hidden by a one-time
+eligibility transition. Reconciliation starts at most one live worker and
+stops only that worker on revoke/detach.
 The worker owns only its Portal stop event and bounded thread; it does not
 enter scheduler admission, locks, or task slots. On revoke, detach, or
 shutdown MCD stops and joins only this worker, leaving corporate MCC and
