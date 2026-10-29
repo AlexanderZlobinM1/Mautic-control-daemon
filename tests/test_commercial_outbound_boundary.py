@@ -14,6 +14,8 @@ from mcd_agent.commercial_portal import (
     CommercialPortalError,
     CommercialState,
     PortalClient,
+    _IPv4HTTPSConnection,
+    _create_ipv4_connection,
     build_standalone_settings_snapshot,
     build_portal_mcd_poll_request,
     canonical_json,
@@ -356,6 +358,33 @@ def test_worker_persists_typed_poll_diagnostic(tmp_path):
     worker, state, _executor = _worker(tmp_path, Portal(), _Clock())
     assert worker.run_once() == {"status": "backoff", "retry_after": 101.0}
     assert state.get("commercial_portal_transport_v1")["last_error"] == "job_poll:portal_mcd_poll_response_binding_mismatch"
+
+
+def test_portal_https_transport_forces_ipv4_and_keeps_hostname_for_sni(monkeypatch):
+    seen = {}
+
+    class FakeSocket:
+        def settimeout(self, value):
+            seen["timeout"] = value
+
+        def connect(self, sockaddr):
+            seen["sockaddr"] = sockaddr
+
+        def close(self):
+            seen["closed"] = True
+
+    def fake_getaddrinfo(host, port, family, socktype):
+        seen["resolve"] = (host, port, family, socktype)
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.0.2.10", port))]
+
+    monkeypatch.setattr("mcd_agent.commercial_portal.socket.getaddrinfo", fake_getaddrinfo)
+    monkeypatch.setattr("mcd_agent.commercial_portal.socket.socket", lambda family, socktype, proto: FakeSocket())
+    sock = _create_ipv4_connection(("portal.example", 443), timeout=5)
+    assert seen["resolve"] == ("portal.example", 443, socket.AF_INET, socket.SOCK_STREAM)
+    assert seen["sockaddr"] == ("192.0.2.10", 443)
+    connection = _IPv4HTTPSConnection("portal.example", 443)
+    assert connection.host == "portal.example"
+    assert connection._create_connection is _create_ipv4_connection
 
 
 def test_stage2_adoption_and_batch_commands_are_durable_and_ordered(tmp_path):

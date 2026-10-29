@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import http.client
 import json
 import os
 from pathlib import Path
@@ -121,6 +122,49 @@ def _portal_http_error_from_exception(*, stage: str, exc: HTTPError) -> Commerci
 
 def _portal_transport_error(*, stage: str) -> CommercialPortalError:
     return CommercialPortalError(stage=stage, code="commercial_portal_transport_error", retryable=True)
+
+
+def _create_ipv4_connection(address: tuple[str, int], timeout: float | object = socket._GLOBAL_DEFAULT_TIMEOUT, source_address: tuple[str, int] | None = None) -> socket.socket:
+    """Create a TCP connection using only A records while retaining the host name."""
+    host, port = address
+    last_error: OSError | None = None
+    infos = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)
+    for family, socktype, proto, _canonname, sockaddr in infos:
+        sock: socket.socket | None = None
+        try:
+            sock = socket.socket(family, socktype, proto)
+            if timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
+                sock.settimeout(timeout)
+            if source_address is not None:
+                sock.bind(source_address)
+            sock.connect(sockaddr)
+            return sock
+        except OSError as exc:
+            last_error = exc
+            if sock is not None:
+                sock.close()
+    if last_error is not None:
+        raise last_error
+    raise OSError(f"no IPv4 address for {host}")
+
+
+class _IPv4HTTPSConnection(http.client.HTTPSConnection):
+    """HTTPS connection with IPv4 TCP and hostname-based TLS/SNI."""
+
+    def __init__(self, *args: Any, **kwargs: Any):
+        super().__init__(*args, **kwargs)
+        self._create_connection = _create_ipv4_connection
+
+
+class _IPv4HTTPSHandler(request.HTTPSHandler):
+    def https_open(self, req: request.Request):
+        return self.do_open(_IPv4HTTPSConnection, req, context=self._context)
+
+
+def _portal_urlopen(req: request.Request, *, timeout: int, context: ssl.SSLContext):
+    """Open Portal HTTPS over IPv4 without changing the URL host/SNI."""
+    opener = request.build_opener(_IPv4HTTPSHandler(context=context))
+    return opener.open(req, timeout=timeout)
 
 
 def _b64(value: bytes) -> str:
@@ -693,7 +737,7 @@ def download_external_artifact(uri: str, *, expected_size: int, timeout_sec: int
         raise ValueError("self_hosted_mcd_artifact_size_invalid")
     req = request.Request(uri, headers={"Accept": "application/octet-stream", "User-Agent": PORTAL_USER_AGENT}, method="GET")
     try:
-        with request.urlopen(req, timeout=max(1, min(60, int(timeout_sec))), context=ssl.create_default_context()) as response:
+        with _portal_urlopen(req, timeout=max(1, min(60, int(timeout_sec))), context=ssl.create_default_context()) as response:
             body = response.read(expected + 1)
     except HTTPError as exc:
         raise _portal_http_error(stage="artifact.download", status=exc.code) from exc
@@ -997,7 +1041,7 @@ class PortalClient:
         headers["User-Agent"] = PORTAL_USER_AGENT
         req = request.Request(base + "/" + path.lstrip("/"), data=body, headers=headers, method=method)
         try:
-            with request.urlopen(req, timeout=self.timeout_sec, context=ssl.create_default_context()) as response:
+            with _portal_urlopen(req, timeout=self.timeout_sec, context=ssl.create_default_context()) as response:
                 raw = response.read(2 * 1024 * 1024 + 1)
         except HTTPError as exc:
             raise _portal_http_error_from_exception(stage="portal.request", exc=exc) from exc
@@ -1083,7 +1127,7 @@ class PortalClient:
             raise ValueError("commercial_artifact_size_invalid")
         req = request.Request(base + "/" + path.lstrip("/"), headers={"Authorization": "Bearer " + str(self.state.get("portal_agent_credential")), "X-Portal-Contract": CONTRACT, "X-Portal-Artifact-Grant": grant, "User-Agent": PORTAL_USER_AGENT}, method="GET")
         try:
-            with request.urlopen(req, timeout=self.timeout_sec, context=ssl.create_default_context()) as response:
+            with _portal_urlopen(req, timeout=self.timeout_sec, context=ssl.create_default_context()) as response:
                 body = response.read(expected + 1)
         except HTTPError as exc:
             raise _portal_http_error(stage="artifact.download", status=exc.code) from exc
@@ -1142,7 +1186,7 @@ class PortalClient:
         headers = {"Authorization": "Bearer " + str(self.state.get("portal_agent_credential")), "X-Portal-Contract": CONTRACT, "X-Content-Digest": normalized, "User-Agent": PORTAL_USER_AGENT}
         req = request.Request(base + "/" + path, headers=headers, method="GET")
         try:
-            with request.urlopen(req, timeout=self.timeout_sec, context=ssl.create_default_context()) as response:
+            with _portal_urlopen(req, timeout=self.timeout_sec, context=ssl.create_default_context()) as response:
                 body = response.read(expected + 1)
         except HTTPError as exc:
             raise _portal_http_error(stage="generic_artifact.download", status=exc.code) from exc
@@ -1195,7 +1239,7 @@ class PortalClient:
         headers = {"Content-Type": "application/json", "X-Portal-Contract": CONTRACT, "X-Request-Id": _b64(os.urandom(16)), "Idempotency-Key": payload["idempotency_key"], "User-Agent": PORTAL_USER_AGENT}
         req = request.Request(base_url.rstrip("/") + "/api/v1/commercial/activations/redeem", data=body, headers=headers, method="POST")
         try:
-            with request.urlopen(req, timeout=self.timeout_sec, context=ssl.create_default_context()) as response:
+            with _portal_urlopen(req, timeout=self.timeout_sec, context=ssl.create_default_context()) as response:
                 raw = response.read(2 * 1024 * 1024 + 1)
         except HTTPError as exc:
             raise _portal_http_error(stage="activation", status=exc.code) from exc

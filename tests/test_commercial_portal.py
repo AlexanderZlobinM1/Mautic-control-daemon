@@ -119,7 +119,7 @@ def test_all_portal_http_requests_use_product_user_agent(monkeypatch, tmp_path):
         requests.append(req)
         return Response()
 
-    monkeypatch.setattr("mcd_agent.commercial_portal.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("mcd_agent.commercial_portal._portal_urlopen", fake_urlopen)
     state = CommercialState(str(tmp_path / "state.sqlite"))
     state.put("portal_api_base", "https://portal.example/api/v1/commercial")
     state.put("portal_agent_credential", "credential")
@@ -193,7 +193,7 @@ def test_activation_failures_are_typed_and_secret_free(monkeypatch, tmp_path, fa
     def fail_urlopen(_req, **_kwargs):
         raise failure
 
-    monkeypatch.setattr("mcd_agent.commercial_portal.request.urlopen", fail_urlopen)
+    monkeypatch.setattr("mcd_agent.commercial_portal._portal_urlopen", fail_urlopen)
     state = CommercialState(str(tmp_path / "state.sqlite"))
     client = PortalClient(state)
 
@@ -221,7 +221,7 @@ def test_portal_error_code_is_preserved_for_durable_receipt_reconciliation(monke
             io.BytesIO(b'{"schema":"portal-error-v1","code":"receipt_sequence_regression"}'),
         )
 
-    monkeypatch.setattr("mcd_agent.commercial_portal.request.urlopen", fail_urlopen)
+    monkeypatch.setattr("mcd_agent.commercial_portal._portal_urlopen", fail_urlopen)
     state = CommercialState(str(tmp_path / "state.sqlite"))
     state.put("portal_api_base", "https://portal.example/api/v1/commercial")
     state.put("portal_agent_credential", "credential")
