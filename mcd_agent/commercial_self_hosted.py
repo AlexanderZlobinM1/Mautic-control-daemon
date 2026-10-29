@@ -45,6 +45,7 @@ from mcd_agent.commercial_portal import (
     SELF_HOSTED_MCD_ROLLBACK_STATUSES,
     PORTAL_ARTIFACT_TRUST_UPDATE_SCHEMA,
     CommercialState,
+    CommercialPortalError,
     STANDALONE_SETTINGS_SNAPSHOT_SCHEMA,
     build_standalone_settings_snapshot,
     canonical_json,
@@ -948,17 +949,35 @@ class SelfHostedPortalWorker:
         while pending:
             try:
                 self._send_receipt(pending[0])
+            except CommercialPortalError as exc:
+                # Portal may already have accepted a later contiguous receipt
+                # before MCD persisted the local queue (for example across a
+                # restart).  A sequence regression is therefore a durable
+                # reconciliation acknowledgement for this exact job receipt,
+                # not a transport failure and not a reason to replay work.
+                if exc.code != "receipt_sequence_regression":
+                    self._transport_failed("receipt_delivery")
+                    self.executor.state.put(_PENDING_KEY, pending)
+                    return False
+                self._transport_succeeded()
+                acknowledge_pending = getattr(getattr(self.executor, "artifact_store", None), "acknowledge_pending", None)
+                if callable(acknowledge_pending):
+                    acknowledge_pending()
+                drained_terminal = pending[0].get("schema") == SELF_HOSTED_MCD_TERMINAL_RECEIPT_SCHEMA
+                pending.pop(0)
+                self.executor.state.put(_PENDING_KEY, pending)
             except Exception:
                 self._transport_failed("receipt_delivery")
                 self.executor.state.put(_PENDING_KEY, pending)
                 return False
-            self._transport_succeeded()
-            acknowledge_pending = getattr(getattr(self.executor, "artifact_store", None), "acknowledge_pending", None)
-            if callable(acknowledge_pending):
-                acknowledge_pending()
-            drained_terminal = pending[0].get("schema") == SELF_HOSTED_MCD_TERMINAL_RECEIPT_SCHEMA
-            pending.pop(0)
-            self.executor.state.put(_PENDING_KEY, pending)
+            else:
+                self._transport_succeeded()
+                acknowledge_pending = getattr(getattr(self.executor, "artifact_store", None), "acknowledge_pending", None)
+                if callable(acknowledge_pending):
+                    acknowledge_pending()
+                drained_terminal = pending[0].get("schema") == SELF_HOSTED_MCD_TERMINAL_RECEIPT_SCHEMA
+                pending.pop(0)
+                self.executor.state.put(_PENDING_KEY, pending)
         if drained_terminal:
             saved = self._pending_delivery()
             if saved:

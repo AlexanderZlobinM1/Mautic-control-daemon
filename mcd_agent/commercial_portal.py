@@ -84,15 +84,32 @@ class CommercialPortalError(RuntimeError):
         return payload
 
 
-def _portal_http_error(*, stage: str, status: int) -> CommercialPortalError:
+def _portal_http_error(*, stage: str, status: int, code: str | None = None) -> CommercialPortalError:
     normalized_stage = re.sub(r"[^a-z0-9]+", "_", str(stage).lower()).strip("_") or "request"
     normalized_status = int(status)
+    normalized_code = re.sub(r"[^a-z0-9_]+", "_", str(code or "").lower()).strip("_")
+    if not normalized_code or len(normalized_code) > 120:
+        normalized_code = f"commercial_{normalized_stage}_http_{normalized_status}"
     return CommercialPortalError(
         stage=stage,
-        code=f"commercial_{normalized_stage}_http_{normalized_status}",
+        code=normalized_code,
         http_status=normalized_status,
         retryable=normalized_status in {408, 425, 429} or normalized_status >= 500,
     )
+
+
+def _portal_http_error_from_exception(*, stage: str, exc: HTTPError) -> CommercialPortalError:
+    """Keep a bounded, typed Portal error code without retaining response data."""
+    code = ""
+    try:
+        raw = exc.read(64 * 1024)
+        payload = json.loads(raw.decode("utf-8")) if raw else {}
+        candidate = payload.get("code") if isinstance(payload, Mapping) else None
+        if isinstance(candidate, str) and re.fullmatch(r"[a-z0-9_]{1,120}", candidate):
+            code = candidate
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        pass
+    return _portal_http_error(stage=stage, status=exc.code, code=code or None)
 
 
 def _portal_transport_error(*, stage: str) -> CommercialPortalError:
@@ -921,7 +938,7 @@ class PortalClient:
             with request.urlopen(req, timeout=self.timeout_sec, context=ssl.create_default_context()) as response:
                 raw = response.read(2 * 1024 * 1024 + 1)
         except HTTPError as exc:
-            raise _portal_http_error(stage="portal.request", status=exc.code) from exc
+            raise _portal_http_error_from_exception(stage="portal.request", exc=exc) from exc
         except (URLError, TimeoutError, OSError) as exc:
             raise _portal_transport_error(stage="portal.request") from exc
         if len(raw) > 2 * 1024 * 1024:
