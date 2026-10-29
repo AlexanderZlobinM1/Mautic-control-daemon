@@ -18,6 +18,25 @@ def test_normalized_detector_facts_are_data_driven(tmp_path, monkeypatch):
     assert "primitive_versions" in exposed_capabilities()
 
 
+def test_default_facts_restore_truthful_preflight_capabilities(tmp_path, monkeypatch):
+    path = tmp_path / "os-release"
+    path.write_text('ID=ubuntu\nVERSION_ID="24.04"\n', encoding="utf-8")
+    monkeypatch.setattr(
+        "mcd_agent.commercial_detector.shutil.which",
+        lambda name: "/usr/bin/apt-get" if name == "apt-get" else "/usr/bin/tool" if name in {"dpkg", "curl", "systemctl"} else None,
+    )
+    monkeypatch.setattr("mcd_agent.commercial_detector.os.geteuid", lambda: 0)
+    facts = read_normalized_local_facts(os_release_path=str(path), machine="x86_64")
+    assert facts["capabilities"] == [
+        "dpkg",
+        "os_like:debian",
+        "package:curl",
+        "package_manager:apt-get",
+        "root_sudo",
+        "service_manager:systemd",
+    ]
+
+
 def test_detector_mismatch_unsupported_and_ambiguous_fail_closed(tmp_path, monkeypatch):
     path = tmp_path / "os-release"
     path.write_text("ID=debian\nVERSION_ID=13\n", encoding="utf-8")

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import platform
 import shutil
+import subprocess
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -26,6 +28,38 @@ _APPLICABILITY_FACT_KEYS = (
     "capabilities",
     "target_kind",
 )
+
+
+def _detected_host_capabilities(*, os_id: str, package_manager: str) -> list[str]:
+    """Return truthful host/preflight capabilities, not MCD feature labels."""
+    capabilities = {f"package_manager:{package_manager}"}
+    if os_id in {"debian", "ubuntu", "linuxmint", "pop"}:
+        capabilities.add("os_like:debian")
+    if shutil.which("dpkg"):
+        capabilities.add("dpkg")
+    if shutil.which("curl"):
+        capabilities.add("package:curl")
+    if shutil.which("systemctl"):
+        capabilities.add("service_manager:systemd")
+    root_sudo = False
+    try:
+        root_sudo = os.geteuid() == 0
+    except AttributeError:
+        pass
+    if not root_sudo and shutil.which("sudo"):
+        try:
+            root_sudo = subprocess.run(
+                ["sudo", "-n", "true"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+            ).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            root_sudo = False
+    if root_sudo:
+        capabilities.add("root_sudo")
+    return sorted(capabilities)
 
 
 def validate_portal_scenario_resolution(value: Mapping[str, Any], *, expected_digest: str | None = None) -> dict[str, Any]:
@@ -75,7 +109,8 @@ def read_normalized_local_facts(*, os_release_path: str = "/etc/os-release", mac
         raise ValueError("commercial_detector_facts_ambiguous")
     if target_kind not in {"new_server", "existing_server"}:
         raise ValueError("commercial_detector_target_kind_invalid")
-    return {"os_id": os_id, "os_version": version, "architecture": arch, "package_manager": managers[0], "capabilities": sorted(set(capabilities or ["package_manager.query"])), "target_kind": target_kind, "detector_schema": SCHEMA}
+    observed_capabilities = list(capabilities) if capabilities is not None else _detected_host_capabilities(os_id=os_id, package_manager=managers[0])
+    return {"os_id": os_id, "os_version": version, "architecture": arch, "package_manager": managers[0], "capabilities": sorted(set(observed_capabilities)), "target_kind": target_kind, "detector_schema": SCHEMA}
 
 
 def normalize_applicability_facts(value: Mapping[str, Any], *, require_detector_schema: bool = False) -> dict[str, Any]:

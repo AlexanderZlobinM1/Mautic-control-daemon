@@ -1219,8 +1219,12 @@ reader and capability context, so the coordinate is stable across unchanged
 polls, restart, replay, and Portal outage; its durable inventory hash and
 revision include the field. Missing detector facts fail closed. Scenario
 `required_capabilities` remain Portal-side applicability predicates and are
-never synthesized into this signed facts mapping. Older Portal consumers may
+never synthesized into this facts mapping. Older Portal consumers may
 ignore the additive field.
+The producer reports truthful host/preflight capabilities such as
+`package_manager:<name>`, `os_like:debian`, `dpkg`, `package:curl`,
+`service_manager:systemd`, `root_sudo`, and the observed `network_egress`
+capability; MCD feature labels are not substituted for these host facts.
 
 The only MCD execution primitive is the contract's `scenario.apply` v1.0. MCD
 passes the latest verified external scenario artifact to one allowlisted,
