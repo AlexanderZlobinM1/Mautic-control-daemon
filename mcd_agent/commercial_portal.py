@@ -675,10 +675,18 @@ class CommercialState:
             db.execute("CREATE TABLE IF NOT EXISTS commercial_nonces (nonce TEXT PRIMARY KEY, seen_at REAL NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS commercial_receipts (job_id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS commercial_usage_sequences (metric TEXT PRIMARY KEY, value INTEGER NOT NULL)")
-            # Agent and Portal signing material is retired. Existing state is
-            # scrubbed on first open; the commercial lane uses only the
-            # existing API credential over HTTPS and SHA-256 artifact checks.
-            db.execute("DELETE FROM commercial_meta WHERE key IN ('agent_private_key','agent_key_id','portal_job_signing_keys')")
+            # Agent, Portal job-signing, and artifact-signing material is
+            # retired. Existing state is scrubbed on open; the commercial
+            # lane uses only the API credential over HTTPS and SHA-256 checks.
+            db.execute(
+                "DELETE FROM commercial_meta WHERE key IN ("
+                "'agent_private_key','agent_key_id','portal_job_signing_keys',"
+                "'portal_artifact_trust_v1','portal_artifact_signing_keys',"
+                "'portal_artifact_trust_revision','portal_artifact_trust_digest',"
+                "'portal_artifact_trust_domain','portal_artifact_trust_source',"
+                "'portal_artifact_trust_updates_v1','portal_mcc_publisher_keys'"
+                ")"
+            )
         try:
             os.chmod(self.path, 0o600)
         except OSError:
@@ -1157,22 +1165,10 @@ class PortalClient:
         self.state.put("agent_id", result["agent_id"])
         self.state.put("host_fingerprint", host_fingerprint)
         self.state.delete("portal_job_signing_keys")
-        artifact_trust = result["portal"].get("artifact_trust")
-        artifact_signing_keys = result["portal"].get("artifact_signing_keys")
-        if artifact_trust is not None:
-            normalized_trust = validate_portal_artifact_trust(artifact_trust, code="commercial_activation_artifact_trust_invalid")
-            if artifact_signing_keys is not None:
-                supplied = _normalize_artifact_trust_keys(artifact_signing_keys, "commercial_activation_artifact_trust_invalid")
-                if supplied != normalized_trust["keys"]:
-                    raise CommercialPortalError(stage="activation", code="commercial_activation_artifact_trust_mismatch")
-            self.state.put("portal_artifact_trust_v1", normalized_trust)
-            self.state.put("portal_artifact_signing_keys", {item["key_id"]: item for item in normalized_trust["keys"]})
-            self.state.put("portal_artifact_trust_revision", normalized_trust["trust_revision"])
-            self.state.put("portal_artifact_trust_digest", normalized_trust["trust_digest"])
-            self.state.put("portal_artifact_trust_domain", normalized_trust["trust_domain"])
-            self.state.put("portal_artifact_trust_source", "portal")
-        elif artifact_signing_keys is not None:
-            raise CommercialPortalError(stage="activation", code="commercial_activation_artifact_trust_invalid")
+        # Portal activation is authenticated by the HTTPS API credential and
+        # host binding.  Legacy artifact-trust fields, including signing-key
+        # material, are intentionally ignored.  Artifact integrity is checked
+        # later by exact size/SHA-256 after authenticated HTTPS download.
         commercial_key = result.get("commercial_key") or result.get("commercial_key_metadata")
         if isinstance(commercial_key, dict) and commercial_key.get("commercial_key_id"):
             self.state.put("commercial_key_id", str(commercial_key["commercial_key_id"]))

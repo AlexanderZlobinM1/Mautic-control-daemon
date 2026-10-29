@@ -67,7 +67,7 @@ def test_portal_fixture_vectors_are_exact_and_domains_are_separate() -> None:
     assert verified_poll["commands"][0]["schema"] == "portal-mcd-artifact-trust-update-v1"
 
 
-def test_activation_persists_canonical_portal_artifact_trust() -> None:
+def test_activation_ignores_legacy_portal_artifact_trust() -> None:
     with TemporaryDirectory() as directory:
         state = CommercialState(str(Path(directory) / "commercial.sqlite"))
         client = PortalClient(state, activation_transport=lambda *_: {
@@ -82,10 +82,8 @@ def test_activation_persists_canonical_portal_artifact_trust() -> None:
             },
         })
         assert client.activate("https://portal.example.test", "activation", "1.5.257")["status"] == "activated"
-        assert state.get("portal_artifact_trust_v1") == FIXTURE["artifact_trust"]
-        assert state.get("portal_artifact_trust_revision") == 1
-        assert state.get("portal_artifact_trust_digest") == FIXTURE["artifact_trust"]["trust_digest"]
-        assert state.get("portal_artifact_signing_keys")["portal-artifact-fixture-1"]["status"] == "active"
+        assert state.get("portal_artifact_trust_v1") is None
+        assert state.get("portal_artifact_signing_keys") is None
 
 
 def test_trust_update_is_atomic_idempotent_and_rejects_stale_revision() -> None:

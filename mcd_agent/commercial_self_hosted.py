@@ -1603,7 +1603,12 @@ class SelfHostedPortalWorker:
         if command.get("schema") == COMMAND_JOB_SCHEMA:
             return self._run_generic_command(command, cursor_next=cursor_next)
         if command.get("schema") == PORTAL_ARTIFACT_TRUST_UPDATE_SCHEMA:
-            return self._run_artifact_trust_update(command, cursor_next=cursor_next)
+            # Signing/key trust updates are retired.  Artifact integrity is
+            # enforced by the pinned size/SHA-256 check after HTTPS download.
+            receipt = self._command_receipt(command, status="failed", payload={"reason": "commercial_artifact_trust_layer_unsupported"})
+            if self._send_or_queue(receipt):
+                self._finish_command(cursor_next=cursor_next)
+            return {"status": "failed", "reason": "commercial_artifact_trust_layer_unsupported"}
         if command.get("schema") not in {None, SELF_HOSTED_MCD_JOB_SCHEMA, "portal-mcd-job-delivery-v1"}:
             receipt = self._command_receipt(command, status="failed", payload={"reason": "commercial_command_unsupported"})
             if self._send_or_queue(receipt):
