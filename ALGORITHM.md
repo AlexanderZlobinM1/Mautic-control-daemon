@@ -1240,7 +1240,9 @@ immutable `job_id`; replay of the same signed job returns the durable terminal
 receipt without re-executing the runner only when the received command identity
 is the same. A distinct Portal recovery command has its own command/cursor
 execution identity and is executed exactly once, even though it retains the
-same job idempotency key.
+same job idempotency key. The identity is derived again from the verified
+`command_id` and `delivery_cursor` inside MCD, so a legacy caller cannot
+silently downgrade a distinct recovery delivery to the old job-only key.
 
 For the Mautic primitive context, the additive
 `mcd-scenario-primitive-context-v1` contract is validated by the same launcher
