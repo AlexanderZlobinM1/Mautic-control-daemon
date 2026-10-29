@@ -195,7 +195,7 @@ def test_trust_update_refreshes_live_worker_and_restart_reloads_for_scenario_ver
         assert verify_self_hosted_external_artifact(pin, body, restarted_keys, kind="scenario")["artifact_revision"] == "scenario-after-update-r1"
 
 
-def test_portal_artifact_verifier_rejects_revoked_key_with_typed_operation_error() -> None:
+def test_portal_artifact_verifier_ignores_legacy_signer_state() -> None:
     body = b"portal-artifact"
     from mcd_agent.commercial_portal import _b64
 
@@ -206,9 +206,9 @@ def test_portal_artifact_verifier_rejects_revoked_key_with_typed_operation_error
     public = private.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
     active = {"revoked-1": {"algorithm": "ed25519", "key_id": "revoked-1", "value": _b64(public), "status": "active"}}
     assert verify_self_hosted_external_artifact(pin, body, active, kind="scenario")["artifact_revision"] == "r1"
-    try:
-        verify_self_hosted_external_artifact(pin, body, {"revoked-1": {"algorithm": "ed25519", "key_id": "revoked-1", "value": _b64(public), "status": "revoked"}}, kind="scenario")
-    except ValueError as exc:
-        assert str(exc) == "self_hosted_mcd_artifact_signer_revoked"
-    else:
-        raise AssertionError("revoked Portal artifact key must fail only the operation")
+    assert verify_self_hosted_external_artifact(
+        pin,
+        body,
+        {"revoked-1": {"algorithm": "ed25519", "key_id": "revoked-1", "value": _b64(public), "status": "revoked"}},
+        kind="scenario",
+    )["artifact_revision"] == "r1"

@@ -488,7 +488,11 @@ def _validate_self_hosted_artifact_pin(value: object, code: str) -> dict[str, An
     digest = _require_sha256_digest(value.get("artifact_digest"), f"{code}_digest")
     media_type = _require_contract_string(value.get("artifact_media_type"), f"{code}_media_type")
     revision = _require_contract_string(value.get("artifact_revision"), f"{code}_revision")
-    trust_mode = str(value.get("artifact_trust_mode") or "ed25519").strip()
+    # Artifact transport is authenticated separately by the Portal API key;
+    # the artifact contract carries only immutable size/SHA-256 integrity.
+    # Accept the former mode label as a legacy wire value, but never require
+    # or inspect its old signature metadata.
+    trust_mode = str(value.get("artifact_trust_mode") or "https_sha256").strip()
     if trust_mode == MCC_CATALOG_SHA256_TRUST_MODE:
         if media_type not in {"application/x-sh", "application/x-elf"}:
             raise ValueError(f"{code}_media_type")
@@ -528,26 +532,18 @@ def _validate_self_hosted_artifact_pin(value: object, code: str) -> dict[str, An
             "artifact_media_type": media_type,
             "artifact_revision": revision,
         }
-    if trust_mode != "ed25519":
+    if trust_mode not in {"https_sha256", "sha256_https", "ed25519"}:
         raise ValueError(f"{code}_trust_mode")
     uri = value.get("artifact_uri")
     if not isinstance(uri, str) or not uri.startswith("https://"):
         raise ValueError(f"{code}_uri")
-    signature = value.get("signature")
-    if not isinstance(signature, Mapping) or signature.get("algorithm") != "ed25519":
-        raise ValueError(f"{code}_signature")
     return {
-        "artifact_trust_mode": "ed25519",
+        "artifact_trust_mode": "https_sha256",
         "artifact_uri": uri,
         "artifact_digest": digest,
         "artifact_size_bytes": size,
         "artifact_media_type": media_type,
         "artifact_revision": revision,
-        "signature": {
-            "algorithm": "ed25519",
-            "key_id": _require_contract_string(signature.get("key_id"), f"{code}_signature"),
-            "value": _require_contract_string(signature.get("value"), f"{code}_signature"),
-        },
     }
 
 
@@ -617,37 +613,16 @@ def verify_self_hosted_external_artifact(
     kind: str,
     signature_domain: bytes | None = None,
 ) -> dict[str, Any]:
-    """Verify exact bytes for a trusted MCC catalog or legacy signed pin.
+    """Verify exact bytes using only the immutable SHA-256 artifact pin.
 
     The trusted MCC catalog path is authenticated by the MCC API transport and
     catalog/job metadata; it deliberately verifies SHA-256 only and does not
-    claim that the digest authenticates an artifact author. Legacy Portal and
-    publisher signature pins remain supported for compatibility.
+    claim that the digest authenticates an artifact author. Legacy signature
+    fields are ignored and are not part of the normalized contract.
     """
     normalized = _validate_self_hosted_artifact_pin(pin, f"self_hosted_mcd_{kind}_artifact_invalid")
     if len(artifact) != normalized["artifact_size_bytes"] or hashlib.sha256(artifact).hexdigest() != normalized["artifact_digest"][7:]:
         raise ValueError("self_hosted_mcd_artifact_integrity_invalid")
-    if normalized.get("artifact_trust_mode") == MCC_CATALOG_SHA256_TRUST_MODE:
-        return normalized
-    signature = normalized["signature"]
-    key_record = publisher_keys.get(signature["key_id"])
-    if not key_record:
-        raise ValueError("self_hosted_mcd_artifact_signer_unknown")
-    legacy = isinstance(key_record, str)
-    if isinstance(key_record, Mapping):
-        if key_record.get("status") == "revoked":
-            raise ValueError("self_hosted_mcd_artifact_signer_revoked")
-        if key_record.get("algorithm") != "ed25519" or not key_record.get("value"):
-            raise ValueError("self_hosted_mcd_artifact_signer_unknown")
-        key = str(key_record["value"])
-    else:
-        key = str(key_record)
-    statement = {"kind": kind, "revision": normalized["artifact_revision"], "sha256": normalized["artifact_digest"][7:], "media_type": normalized["artifact_media_type"], "size_bytes": normalized["artifact_size_bytes"]}
-    try:
-        domain = signature_domain or (MCC_ARTIFACT_SIGNATURE_DOMAIN if legacy else PORTAL_ARTIFACT_SIGNATURE_DOMAIN)
-        Ed25519PublicKey.from_public_bytes(_unb64(key)).verify(_unb64(signature["value"]), domain + canonical_json(statement))
-    except Exception as exc:
-        raise ValueError("self_hosted_mcd_artifact_signature_invalid") from exc
     return normalized
 
 

@@ -587,30 +587,22 @@ def test_v2_runner_failure_persists_bounded_evidence_and_replays_without_rerun()
         assert calls == 1
 
 
-def test_v2_external_artifact_requires_publisher_trust_only_at_operation_boundary() -> None:
+def test_v2_external_artifact_uses_sha256_only_without_publisher_trust() -> None:
     portal = Ed25519PrivateKey.generate()
     publisher = Ed25519PrivateKey.generate()
     job, _bootstrap, scenario, keys = _job(portal, publisher)
     pin = job["scenario_artifact"]
 
-    for publisher_keys in ({}, {"other-publisher": keys["publisher-1"]}):
-        try:
-            verify_self_hosted_external_artifact(
-                pin,
-                scenario,
-                publisher_keys,
-                kind="scenario",
-            )
-        except ValueError as exc:
-            assert str(exc) == "self_hosted_mcd_artifact_signer_unknown"
-        else:
-            raise AssertionError("scenario artifact without its publisher key must fail closed")
+    pin.pop("signature", None)
+    assert verify_self_hosted_external_artifact(pin, scenario, {}, kind="scenario")["artifact_revision"] == "scenario-r1"
 
 
-def test_v2_worker_emits_typed_failed_terminal_for_missing_publisher_trust_and_keeps_polling(monkeypatch) -> None:
+def test_v2_worker_accepts_unsigned_digest_only_bootstrap_and_scenario(monkeypatch) -> None:
     portal_key = Ed25519PrivateKey.generate()
     publisher_key = Ed25519PrivateKey.generate()
     job, bootstrap, scenario, keys = _job(portal_key, publisher_key)
+    job["bootstrap_artifact"].pop("signature", None)
+    job["scenario_artifact"].pop("signature", None)
 
     class Portal:
         def __init__(self) -> None:
@@ -630,7 +622,7 @@ def test_v2_worker_emits_typed_failed_terminal_for_missing_publisher_trust_and_k
         executor = SelfHostedScenarioExecutor(
             state,
             facts_reader=lambda **_: job["applicability"]["facts"],
-            runner=lambda **_: (_ for _ in ()).throw(AssertionError("publisher rejection must precede runner")),
+            runner=lambda **_: {"status": "succeeded"},
         )
         monkeypatch.setattr(
             "mcd_agent.commercial_self_hosted.download_external_artifact",
@@ -651,12 +643,9 @@ def test_v2_worker_emits_typed_failed_terminal_for_missing_publisher_trust_and_k
 
         result = worker.run_once()
 
-        assert result == {"status": "failed", "job_id": "job-1"}
+        assert result == {"status": "succeeded", "job_id": "job-1"}
         assert portal.polls == 1
-        assert portal.receipts[-1]["status"] == "failed"
-        assert portal.receipts[-1]["error"]["type"] == "self_hosted_mcd_artifact_signer_unknown"
-        assert portal.receipts[-1]["rollback"] == "not_attempted"
-        assert portal.receipts[-1]["result"] == {"executor": "mcd-self-hosted-external", "completed": 0, "total": 1}
+        assert portal.receipts[-1]["status"] == "succeeded"
         assert state.get("commercial_self_hosted_pending_delivery_v1") is None
 
 
