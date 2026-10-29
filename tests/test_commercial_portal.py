@@ -49,6 +49,7 @@ def test_signed_job_time_boundaries_fail_closed():
 
 def test_activation_uses_only_exact_unauthenticated_path_and_stores_validated_state():
     received = []
+    activation_payload = {}
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
@@ -75,13 +76,19 @@ def test_activation_uses_only_exact_unauthenticated_path_and_stores_validated_st
     try:
         with tempfile.TemporaryDirectory() as td:
             state = CommercialState(str(Path(td) / "state.sqlite"))
-            client = PortalClient(state, activation_transport=lambda _base, _payload: {
+            def activation_transport(_base, payload):
+                activation_payload.update(payload)
+                return {
                 "schema": "portal-mcd-activation-response-v1", "contract_version": "1.0",
                 "agent_id": "agent-1", "agent_credential": "credential-1",
                 "portal": {"job_signing_keys": [{"algorithm": "ed25519", "key_id": "portal-1", "value": "a" * 43}]},
-            })
+                }
+            client = PortalClient(state, activation_transport=activation_transport)
             result = client.activate(f"https://127.0.0.1:{server.server_port}", "activation", "1.5.200")
             assert result["status"] == "activated"
+            assert "public_key" not in activation_payload["agent"]
+            assert state.get("agent_private_key") is None
+            assert state.get("agent_key_id") is None
             assert state.commercial_enabled
             assert not received
             with pytest.raises(RuntimeError, match="commercial_portal_not_activated"):
@@ -125,7 +132,7 @@ def test_all_portal_http_requests_use_product_user_agent(monkeypatch, tmp_path):
     assert all(req.get_header("User-agent") == PORTAL_USER_AGENT for req in requests)
 
 
-def test_authenticated_artifact_download_requires_api_key_and_optional_host_allowlist(tmp_path):
+def test_authenticated_artifact_download_requires_api_key(tmp_path):
     state = CommercialState(str(tmp_path / "state.sqlite"))
     state.put("portal_api_base", "https://portal.example/api/v1/commercial")
     client = PortalClient(state)
@@ -133,13 +140,38 @@ def test_authenticated_artifact_download_requires_api_key_and_optional_host_allo
         client.download_artifact(path="artifacts/a", grant="grant", expected_size=2)
 
     state.put("portal_agent_credential", "credential")
-    state.put("portal_api_allowed_hosts", ["mcc.example", "65.21.54.91"])
-    with pytest.raises(ValueError, match="commercial_portal_host_not_allowlisted"):
-        client.download_artifact(path="artifacts/a", grant="grant", expected_size=2)
 
-    state.put("portal_api_allowed_hosts", ["portal.example"])
-    # The allowlist is optional; once the exact FQDN is allowed, the normal
-    # authenticated request path is reached (the network is not exercised).
+
+def test_inventory_and_adopt_use_api_key_envelope_without_agent_signature(monkeypatch, tmp_path):
+    state = CommercialState(str(tmp_path / "state.sqlite"))
+    state.put("portal_api_base", "https://portal.example/api/v1/commercial")
+    state.put("portal_agent_credential", "commercial-api-key")
+    state.put("agent_id", "agent-1")
+    state.put("host_fingerprint", "sha256:" + "a" * 64)
+    state.put("commercial_key_id", "commercial-key-1")
+    captured = []
+    client = PortalClient(state)
+
+    def fake_request(method, path, payload, idempotency_key):
+        captured.append((method, path, payload, idempotency_key))
+        return {"status": "attached"}
+
+    client._request = fake_request
+    monkeypatch.setattr("mcd_agent.commercial_portal.verify_portal_mcd_attach_response", lambda response, **_kwargs: response)
+    inventory = {
+        "schema": "portal-mcd-inventory-snapshot-v1",
+        "contract_version": "1.0",
+        "agent_signature": {"algorithm": "ed25519", "key_id": "legacy", "value": "legacy"},
+        "binding": {"agent_id": "agent-1", "installation_id": "installation-1", "host_fingerprint": "sha256:" + "a" * 64, "commercial_key_id": "commercial-key-1"},
+    }
+
+    client.adopt(installation_id="installation-1", inventory=inventory, request_id="request-1", idempotency_key="adopt-1")
+    client.send_inventory(installation_id="installation-1", inventory=inventory, request_id="request-1", idempotency_key="inventory-1")
+
+    assert len(captured) == 2
+    assert all("agent_signature" not in item[2]["inventory"] for item in captured)
+    assert captured[0][2]["binding"] == inventory["binding"]
+    assert captured[1][2]["binding"] == inventory["binding"]
 
 
 @pytest.mark.parametrize(

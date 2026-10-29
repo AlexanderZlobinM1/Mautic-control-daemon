@@ -20,8 +20,6 @@
     "portal_agent_credential": {"type": "string", "minLength": 1},
     "host_fingerprint": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
     "commercial_key_id": {"type": "string", "minLength": 1},
-    "agent_key_id": {"type": "string", "minLength": 1},
-    "agent_private_key": {"type": "string", "minLength": 1},
     "portal_job_signing_keys": {
       "oneOf": [
         {"type": "object", "minProperties": 1, "additionalProperties": {"type": "string", "minLength": 1}},

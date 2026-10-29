@@ -18,10 +18,8 @@ from datetime import datetime, timezone
 from typing import Any, Mapping
 from urllib import request
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
 
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from mcd_agent import __version__
 
 CONTRACT = "com.sales-snap.portal-commercial/1.0"
@@ -43,7 +41,7 @@ PORTAL_MCD_MAX_LONG_POLL_MS = 30_000
 PORTAL_MCD_MAX_BACKOFF_MS = 300_000
 STANDALONE_SETTINGS_SNAPSHOT_SCHEMA = "mcd-standalone-settings-snapshot-v1"
 INVENTORY_STATE_SCHEMA = "mcd-commercial-inventory-state-v1"
-INVENTORY_VOLATILE_FIELDS = frozenset({"request_id", "observed_at", "agent_signature"})
+INVENTORY_VOLATILE_FIELDS = frozenset({"request_id", "observed_at"})
 MCC_ARTIFACT_SIGNATURE_DOMAIN = b"com.sales-snap.portal-mcc/artifact-signature/1.0\n"
 PORTAL_ARTIFACT_SIGNATURE_DOMAIN = b"com.sales-snap.portal/artifact-signature/1.0\n"
 PORTAL_ARTIFACT_TRUST_SCHEMA = "portal-artifact-trust-v1"
@@ -178,37 +176,6 @@ def _without_signature(job: Mapping[str, Any]) -> dict[str, Any]:
 def _require_https(url: str) -> None:
     if not str(url).lower().startswith("https://"):
         raise ValueError("commercial_portal_https_required")
-
-
-def _require_allowed_portal_host(url: str, state: "CommercialState") -> None:
-    """Enforce an optional exact FQDN/IP allowlist for authenticated API calls."""
-    raw = state.get("portal_api_allowed_hosts")
-    if raw in (None, "", []):
-        return
-    if isinstance(raw, str):
-        allowed = {raw.strip().lower()} if raw.strip() else set()
-    elif isinstance(raw, (list, tuple, set)):
-        allowed = {str(item).strip().lower() for item in raw if str(item).strip()}
-    else:
-        raise ValueError("commercial_portal_allowed_hosts_invalid")
-    if not allowed:
-        return
-    parsed = urlparse(str(url))
-    hostname = str(parsed.hostname or "").strip().lower()
-    if not hostname:
-        raise ValueError("commercial_portal_host_not_allowlisted")
-    if hostname in allowed:
-        return
-    try:
-        resolved = {
-            str(item[4][0]).strip().lower()
-            for item in socket.getaddrinfo(hostname, parsed.port or 443, type=socket.SOCK_STREAM)
-            if item[4] and item[4][0]
-        }
-    except OSError as exc:
-        raise ValueError("commercial_portal_host_not_allowlisted") from exc
-    if not resolved.intersection(allowed):
-        raise ValueError("commercial_portal_host_not_allowlisted")
 
 
 def build_portal_mcd_poll_request(*, request_id: str, idempotency_key: str, binding: Mapping[str, str], cursor: str | None, wait_ms: int, backoff_ms: int) -> dict[str, Any]:
@@ -765,6 +732,9 @@ class CommercialState:
             db.execute("CREATE TABLE IF NOT EXISTS commercial_nonces (nonce TEXT PRIMARY KEY, seen_at REAL NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS commercial_receipts (job_id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS commercial_usage_sequences (metric TEXT PRIMARY KEY, value INTEGER NOT NULL)")
+            # Agent Ed25519 material is retired. Existing state is scrubbed on
+            # first open; Portal inventory/adopt use the commercial API key.
+            db.execute("DELETE FROM commercial_meta WHERE key IN ('agent_private_key','agent_key_id')")
         try:
             os.chmod(self.path, 0o600)
         except OSError:
@@ -778,6 +748,10 @@ class CommercialState:
     def put(self, key: str, value: Any) -> None:
         with sqlite3.connect(self.path) as db:
             db.execute("INSERT INTO commercial_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, json.dumps(value, ensure_ascii=True, sort_keys=True)))
+
+    def delete(self, key: str) -> None:
+        with sqlite3.connect(self.path) as db:
+            db.execute("DELETE FROM commercial_meta WHERE key=?", (str(key),))
 
     def apply_portal_artifact_trust_update(self, command: Mapping[str, Any]) -> dict[str, Any]:
         """Atomically apply one Portal trust revision and remember its idempotency."""
@@ -1007,7 +981,6 @@ class PortalClient:
         if not base or not self.state.get("portal_agent_credential"):
             raise RuntimeError("commercial_portal_not_activated")
         _require_https(base)
-        _require_allowed_portal_host(base, self.state)
         body = None if payload is None else canonical_json(payload)
         headers = {"Authorization": "Bearer " + str(self.state.get("portal_agent_credential")), "X-Portal-Contract": CONTRACT, "X-Request-Id": _b64(os.urandom(16)), "User-Agent": PORTAL_USER_AGENT}
         if body is not None:
@@ -1096,7 +1069,6 @@ class PortalClient:
         if not base or not self.state.get("portal_agent_credential"):
             raise RuntimeError("commercial_portal_not_activated")
         _require_https(base)
-        _require_allowed_portal_host(base, self.state)
         expected = int(expected_size)
         if expected < 0 or expected > MAX_ARTIFACT_BYTES:
             raise ValueError("commercial_artifact_size_invalid")
@@ -1114,11 +1086,8 @@ class PortalClient:
 
     def send_receipt(self, payload: dict[str, Any], *, installation_id: str | None = None) -> dict[str, Any]:
         agent_id = str(self.state.get("agent_id") or "")
-        private = Ed25519PrivateKey.from_private_bytes(_unb64(str(self.state.get("agent_private_key") or "")))
-        signed = dict(payload)
-        signed.pop("agent_signature", None)
         payload = dict(payload)
-        payload["agent_signature"] = {"algorithm": "ed25519", "key_id": str(self.state.get("agent_key_id") or ""), "value": _b64(private.sign(canonical_json(signed)))}
+        payload.pop("agent_signature", None)
         installation = str(installation_id or payload.get("installation_id") or self.state.get("commercial_active_installation_id") or "")
         adopt_schema = {"portal-mcd-command-noop-receipt-v1", "portal-mcd-command-receipt-v1", "portal-mcd-connection-state-v1"}
         if str(payload.get("schema") or "") in adopt_schema:
@@ -1128,13 +1097,6 @@ class PortalClient:
         else:
             path = f"agents/{agent_id}/receipts"
         return self._request("POST", path, payload, idempotency_key=str(payload.get("idempotency_key") or payload.get("job_id") or ""))
-
-    def _agent_signed(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        private = Ed25519PrivateKey.from_private_bytes(_unb64(str(self.state.get("agent_private_key") or "")))
-        signed = dict(payload)
-        signed.pop("agent_signature", None)
-        signed["agent_signature"] = {"algorithm": "ed25519", "key_id": str(self.state.get("agent_key_id") or ""), "value": _b64(private.sign(canonical_json({key: value for key, value in payload.items() if key != "agent_signature"})))}
-        return signed
 
     def _commercial_binding(self, installation_id: str) -> dict[str, str]:
         return {
@@ -1147,7 +1109,12 @@ class PortalClient:
     def adopt(self, *, installation_id: str, inventory: Mapping[str, Any], request_id: str | None = None, idempotency_key: str | None = None) -> dict[str, Any]:
         request_id = str(request_id or _b64(os.urandom(16)))
         idempotency_key = str(idempotency_key or _b64(os.urandom(16)))
-        body = {"schema": "portal-mcd-adopt-request-v1", "contract_version": PORTAL_MCD_ADOPT_CONTRACT_VERSION, "request_id": request_id, "idempotency_key": idempotency_key, "binding": self._commercial_binding(installation_id), "inventory": dict(inventory)}
+        unsigned_inventory = dict(inventory)
+        # Adopt/inventory are authenticated by the existing commercial API
+        # credential over HTTPS. Agent Ed25519 signatures are deliberately not
+        # part of this wire envelope.
+        unsigned_inventory.pop("agent_signature", None)
+        body = {"schema": "portal-mcd-adopt-request-v1", "contract_version": PORTAL_MCD_ADOPT_CONTRACT_VERSION, "request_id": request_id, "idempotency_key": idempotency_key, "binding": self._commercial_binding(installation_id), "inventory": unsigned_inventory}
         response = self._request("POST", f"agents/{body['binding']['agent_id']}/installations/{installation_id}/adopt", body, idempotency_key=idempotency_key)
         portal_keys = self.state.get("portal_job_signing_keys")
         return verify_portal_mcd_attach_response(
@@ -1161,7 +1128,9 @@ class PortalClient:
     def send_inventory(self, *, installation_id: str, inventory: Mapping[str, Any], request_id: str | None = None, idempotency_key: str | None = None) -> dict[str, Any]:
         request_id = str(request_id or inventory.get("request_id") or _b64(os.urandom(16)))
         idempotency_key = str(idempotency_key or request_id)
-        body = {"request_id": request_id, "idempotency_key": idempotency_key, "binding": self._commercial_binding(installation_id), "inventory": dict(inventory)}
+        unsigned_inventory = dict(inventory)
+        unsigned_inventory.pop("agent_signature", None)
+        body = {"request_id": request_id, "idempotency_key": idempotency_key, "binding": self._commercial_binding(installation_id), "inventory": unsigned_inventory}
         return self._request("POST", f"agents/{body['binding']['agent_id']}/installations/{installation_id}/inventory", body, idempotency_key=idempotency_key)
 
     def _activation_request(self, base_url: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1187,13 +1156,10 @@ class PortalClient:
 
     def activate(self, base_url: str, activation_code: str, agent_version: str) -> dict[str, Any]:
         _require_https(base_url)
-        key = Ed25519PrivateKey.generate()
-        public = key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
-        private = key.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption())
         host_fingerprint = _host_fingerprint()
         machine = platform.machine().lower()
         normalized_platform = "linux-arm64" if machine in {"aarch64", "arm64"} else "linux-amd64" if machine in {"x86_64", "amd64"} else "linux-" + machine
-        payload = {"schema": "portal-mcd-activation-request-v1", "contract_version": CONTRACT_VERSION, "activation_code": activation_code, "agent": {"public_key": {"algorithm": "ed25519", "key_id": "agent-" + _b64(public)[:22], "value": _b64(public)}, "host_fingerprint": host_fingerprint, "agent_version": agent_version, "platform": normalized_platform}, "supported_contract_versions": [CONTRACT_VERSION], "idempotency_key": _b64(os.urandom(16))}
+        payload = {"schema": "portal-mcd-activation-request-v1", "contract_version": CONTRACT_VERSION, "activation_code": activation_code, "agent": {"host_fingerprint": host_fingerprint, "agent_version": agent_version, "platform": normalized_platform}, "supported_contract_versions": [CONTRACT_VERSION], "idempotency_key": _b64(os.urandom(16))}
         result = self._activation_request(base_url, payload)
         if result.get("schema") != "portal-mcd-activation-response-v1" or result.get("contract_version") != CONTRACT_VERSION:
             raise CommercialPortalError(stage="activation", code="commercial_activation_response_schema_invalid")
@@ -1206,8 +1172,6 @@ class PortalClient:
         self.state.put("portal_agent_credential", result["agent_credential"])
         self.state.put("agent_id", result["agent_id"])
         self.state.put("host_fingerprint", host_fingerprint)
-        self.state.put("agent_private_key", _b64(private))
-        self.state.put("agent_key_id", payload["agent"]["public_key"]["key_id"])
         self.state.put("portal_job_signing_keys", {x["key_id"]: x["value"] for x in signing_keys})
         artifact_trust = result["portal"].get("artifact_trust")
         artifact_signing_keys = result["portal"].get("artifact_signing_keys")

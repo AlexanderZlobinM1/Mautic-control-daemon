@@ -8,8 +8,8 @@ open a network connection.
 
 from __future__ import annotations
 
-import argparse
 import base64
+import argparse
 import hashlib
 import json
 import os
@@ -18,9 +18,6 @@ import sqlite3
 import sys
 from typing import Any, Mapping
 from urllib.parse import urlparse
-
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from mcd_agent import __version__
 from mcd_agent.commercial_portal import (
@@ -37,7 +34,6 @@ from mcd_agent.commercial_portal import (
 SCHEMA = "mcd-portal-activation-material-v1"
 CONTRACT_VERSION = "1.0"
 _ACCEPTED_SCHEMAS = frozenset({SCHEMA, "portal-mcd-registration-delivery-v1", "sales-snap-registration-v1"})
-_DEFAULT_AGENT_KEY_PATH = "/etc/mcd/portal-agent.key"
 
 
 class RegistrationMaterialError(ValueError):
@@ -136,57 +132,6 @@ def _signing_keys(source: Mapping[str, Any]) -> dict[str, str]:
     return values
 
 
-def _private_key_value(
-    source: Mapping[str, Any],
-    key_path: str,
-    *,
-    existing_private_key: object = None,
-) -> tuple[str, str]:
-    raw = _first(source, "agent_private_key", "agent_private_key_b64", "private_key")
-    if raw in (None, "") and existing_private_key not in (None, ""):
-        # Recovery material intentionally need not retransmit the agent key:
-        # it is already protected in the local CommercialState.  A supplied
-        # material key still wins, while the file remains the last fallback
-        # for installations provisioned outside the state database.
-        raw = existing_private_key
-    private: bytes
-    if raw not in (None, ""):
-        text = _text(raw)
-        if text.startswith("-----BEGIN"):
-            try:
-                loaded = serialization.load_pem_private_key(text.encode(), password=None)
-                if not isinstance(loaded, Ed25519PrivateKey):
-                    raise _error("portal_registration_private_key_invalid")
-                private = loaded.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption())
-            except RegistrationMaterialError:
-                raise
-            except Exception as exc:
-                raise _error("portal_registration_private_key_invalid") from exc
-        else:
-            private = _b64decode(text)
-    else:
-        path = Path(key_path)
-        try:
-            loaded = serialization.load_pem_private_key(path.read_bytes(), password=None)
-            if not isinstance(loaded, Ed25519PrivateKey):
-                raise _error("portal_registration_private_key_invalid")
-            private = loaded.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption())
-        except RegistrationMaterialError:
-            raise
-        except Exception as exc:
-            raise _error("portal_registration_private_key_unavailable") from exc
-    if len(private) != 32:
-        raise _error("portal_registration_private_key_invalid")
-    public = Ed25519PrivateKey.from_private_bytes(private).public_key().public_bytes(
-        serialization.Encoding.Raw, serialization.PublicFormat.Raw
-    )
-    derived_key_id = "agent-" + _b64(public)[:22]
-    supplied_key_id = _text(_first(source, "agent_key_id", "public_key_id"))
-    if supplied_key_id and supplied_key_id != derived_key_id:
-        raise _error("portal_registration_agent_key_mismatch")
-    return _b64(private), derived_key_id
-
-
 def _installation_ids(source: Mapping[str, Any]) -> dict[str, str]:
     raw = _first(source, "installation_ids")
     if isinstance(raw, Mapping):
@@ -238,8 +183,6 @@ def _atomic_put(state: CommercialState, values: Mapping[str, Any]) -> None:
 def import_activation_material(
     state: CommercialState,
     material: Mapping[str, Any],
-    *,
-    agent_key_path: str = _DEFAULT_AGENT_KEY_PATH,
 ) -> dict[str, Any]:
     """Atomically install existing activation material without network I/O."""
     source = _unwrap(material)
@@ -254,11 +197,6 @@ def import_activation_material(
     supplied_fingerprint = _text(_first(source, "host_fingerprint"))
     if supplied_fingerprint and supplied_fingerprint != expected_fingerprint:
         raise _error("portal_registration_host_mismatch")
-    private_key, agent_key_id = _private_key_value(
-        source,
-        agent_key_path,
-        existing_private_key=state.get("agent_private_key"),
-    )
     signing_keys = _signing_keys(source)
     incoming_installations = _installation_ids(source)
     artifact_trust = _artifact_trust(source)
@@ -280,7 +218,6 @@ def import_activation_material(
         "portal_api_base": api_base,
         "agent_id": agent_id,
         "host_fingerprint": expected_fingerprint,
-        "agent_key_id": agent_key_id,
         "commercial_key_id": commercial_key_id,
         "portal_job_signing_keys": signing_keys,
         "installation_ids": merged_installations,
@@ -294,8 +231,6 @@ def import_activation_material(
         "portal_agent_credential": credential,
         "agent_id": agent_id,
         "host_fingerprint": expected_fingerprint,
-        "agent_private_key": private_key,
-        "agent_key_id": agent_key_id,
         "portal_job_signing_keys": signing_keys,
         "commercial_key_id": commercial_key_id,
         "installation_ids": merged_installations,
@@ -329,6 +264,8 @@ def import_activation_material(
     if state.get("commercial_portal_connection_state") in (None, ""):
         updates["commercial_portal_connection_state"] = "passive"
     _atomic_put(state, updates)
+    state.delete("agent_private_key")
+    state.delete("agent_key_id")
     return {
         "schema": "mcd-portal-registration-receipt-v1",
         "contract_version": CONTRACT_VERSION,
@@ -337,7 +274,6 @@ def import_activation_material(
         "agent_id": agent_id,
         "installation_ids": merged_installations,
         "commercial_key_id": commercial_key_id,
-        "agent_key_id": agent_key_id,
         "host_fingerprint": expected_fingerprint,
         "material_digest": material_digest,
     }
@@ -362,7 +298,6 @@ def _read_material(args: argparse.Namespace) -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Import existing Portal activation material into MCD")
     parser.add_argument("--state-db", required=True)
-    parser.add_argument("--agent-key-path", default=_DEFAULT_AGENT_KEY_PATH)
     parser.add_argument("--registration-file", default="")
     parser.add_argument("--registration-json", default="")
     parser.add_argument("--json", action="store_true")
@@ -371,7 +306,6 @@ def main(argv: list[str] | None = None) -> int:
         receipt = import_activation_material(
             CommercialState(args.state_db),
             _read_material(args),
-            agent_key_path=args.agent_key_path,
         )
     except RegistrationMaterialError as exc:
         receipt = {"schema": "mcd-portal-registration-receipt-v1", "contract_version": CONTRACT_VERSION, "status": "failed", "code": str(exc)}

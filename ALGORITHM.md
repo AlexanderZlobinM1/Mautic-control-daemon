@@ -1322,8 +1322,8 @@ draining that durable terminal completes the delivery and never re-runs the
 runner.
 
 `daemon.run_loop` may start at most one Portal worker when the durable
-Portal enrollment is valid: HTTPS Portal base, credential, agent and
-commercial-key identity, host binding, at least one installation binding, and
+Portal enrollment is valid: HTTPS Portal base, one existing commercial API
+credential, commercial-key identity, host binding, at least one installation binding, and
 Portal job-signing keys must all be present. Portal artifact trust is not
 activation material and is not a worker-start gate: poll, adopt, inventory,
 settings, noop, and receipt operations use Portal job-signing keys only. The
@@ -1361,8 +1361,8 @@ The existing activation-derived Portal credential is delivered through the
 `mcd-portal-activation-material-v1` bootstrap envelope. MCD imports that
 envelope locally and atomically into `CommercialState`; it never redeems the
 activation code, creates an agent/key/job, or performs a second registration.
-The importer validates the host fingerprint, agent key/public-key binding,
-Portal signing keys, commercial key and installation IDs. It preserves the
+The importer validates the host fingerprint, Portal signing keys, commercial
+key and installation IDs, and removes legacy agent key material. It preserves the
 cursor and pending receipts, and its redacted receipt contains no credential
 or private key. A missing or mismatched binding fails closed before the
 commercial worker can start.
@@ -1480,7 +1480,7 @@ diagnostics.
 Before processing a delivery MCD durably records the delivery, its prior
 cursor, next cursor and installation binding. Stage2 uses the exact
 installation-scoped poll, adopt/inventory and adopt-receipts routes. The
-complete signed inventory is sent on adoption and on subsequent changes. Every
+complete inventory is sent over HTTPS on adoption and on subsequent changes. Every
 returned command is retained in order; the cursor advances only after the
 terminal receipt for each command and all earlier receipts are accepted by
 Portal. A daemon restart therefore resumes the saved batch or the durable
@@ -1493,7 +1493,7 @@ to transport failures, not to local signature/applicability rejection.
 
 Inventory publication has its own durable revision ledger per installation.
 MCD canonicalizes the complete inventory and removes only transport-volatility
-fields `request_id`, `observed_at`, and `agent_signature`; every other durable
+fields `request_id` and `observed_at`; every other durable
 field (MCD version, profile, settings, instances, capabilities, binding and
 revision) participates in the hash. A changed durable hash increments
 `snapshot_revision` exactly once under the state-store transaction; unchanged

@@ -11,10 +11,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from mcd_agent.commercial_portal import CommercialState
-from mcd_agent.commercial_registration import (
-    SCHEMA,
-    import_activation_material,
-)
+from mcd_agent.commercial_registration import SCHEMA, import_activation_material
 
 
 def _b64(value: bytes) -> str:
@@ -22,8 +19,7 @@ def _b64(value: bytes) -> str:
 
 
 class PortalRegistrationTests(unittest.TestCase):
-    def _material(self, key: Ed25519PrivateKey, *, fingerprint: str = "") -> dict[str, object]:
-        public = key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    def _material(self, *, fingerprint: str = "") -> dict[str, object]:
         signing = Ed25519PrivateKey.generate().public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
         return {
             "schema": SCHEMA,
@@ -32,22 +28,19 @@ class PortalRegistrationTests(unittest.TestCase):
             "portal_agent_credential": "activation-derived-credential",
             "agent_id": "agent-existing",
             "host_fingerprint": fingerprint,
-            "agent_private_key": _b64(key.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption())),
-            "agent_key_id": "agent-" + _b64(public)[:22],
             "portal_job_signing_keys": {"portal-existing": _b64(signing)},
             "commercial_key_id": "commercial_key_existing",
             "installation_ids": {"cluster1.mail.m1.rs": "installation-existing"},
         }
 
     def test_import_material_is_atomic_complete_and_network_free(self) -> None:
-        key = Ed25519PrivateKey.generate()
         with tempfile.TemporaryDirectory() as td:
             state = CommercialState(str(Path(td) / "state.sqlite"))
             state.put("commercial_portal_cursor", "17")
             with patch("mcd_agent.commercial_registration._host_fingerprint", return_value="sha256:" + "a" * 64), patch(
                 "mcd_agent.commercial_portal._host_fingerprint", return_value="sha256:" + "a" * 64
             ):
-                receipt = import_activation_material(state, self._material(key), agent_key_path=str(Path(td) / "unused.pem"))
+                receipt = import_activation_material(state, self._material())
             self.assertEqual(receipt["status"], "configured")
             self.assertEqual(receipt["agent_id"], "agent-existing")
             self.assertEqual(state.get("commercial_portal_cursor"), "17")
@@ -56,34 +49,31 @@ class PortalRegistrationTests(unittest.TestCase):
             self.assertEqual(state.get("portal_agent_credential"), "activation-derived-credential")
 
     def test_import_rejects_host_mismatch_and_does_not_write(self) -> None:
-        key = Ed25519PrivateKey.generate()
         with tempfile.TemporaryDirectory() as td:
             state = CommercialState(str(Path(td) / "state.sqlite"))
-            material = self._material(key, fingerprint="sha256:" + "b" * 64)
+            material = self._material(fingerprint="sha256:" + "b" * 64)
             with patch("mcd_agent.commercial_registration._host_fingerprint", return_value="sha256:" + "a" * 64):
                 with self.assertRaisesRegex(ValueError, "portal_registration_host_mismatch"):
-                    import_activation_material(state, material, agent_key_path=str(Path(td) / "unused.pem"))
+                    import_activation_material(state, material)
             self.assertIsNone(state.get("portal_agent_credential"))
 
     def test_import_preserves_existing_binding_and_is_idempotent(self) -> None:
-        key = Ed25519PrivateKey.generate()
         with tempfile.TemporaryDirectory() as td:
             state = CommercialState(str(Path(td) / "state.sqlite"))
-            material = self._material(key)
+            material = self._material()
             with patch("mcd_agent.commercial_registration._host_fingerprint", return_value="sha256:" + "a" * 64), patch(
                 "mcd_agent.commercial_portal._host_fingerprint", return_value="sha256:" + "a" * 64
             ):
-                first = import_activation_material(state, material, agent_key_path=str(Path(td) / "unused.pem"))
-                second = import_activation_material(state, material, agent_key_path=str(Path(td) / "unused.pem"))
+                first = import_activation_material(state, material)
+                second = import_activation_material(state, material)
             self.assertFalse(first["idempotent"])
             self.assertTrue(second["idempotent"])
             self.assertEqual(state.get("installation_ids"), {"cluster1.mail.m1.rs": "installation-existing"})
 
     def test_import_accepts_installation_bound_commercial_key_material(self) -> None:
-        key = Ed25519PrivateKey.generate()
         with tempfile.TemporaryDirectory() as td:
             state = CommercialState(str(Path(td) / "state.sqlite"))
-            material = self._material(key)
+            material = self._material()
             material.pop("portal_agent_credential")
             material["commercial_key"] = {
                 "commercial_key_id": "commercial_key_existing",
@@ -91,52 +81,45 @@ class PortalRegistrationTests(unittest.TestCase):
                 "display_name": "test-key",
             }
             with patch("mcd_agent.commercial_registration._host_fingerprint", return_value="sha256:" + "a" * 64):
-                import_activation_material(state, material, agent_key_path=str(Path(td) / "unused.pem"))
+                import_activation_material(state, material)
             self.assertEqual(state.get("portal_agent_credential"), "installation-bound-secret")
             self.assertEqual(state.get("commercial_key_metadata"), {"commercial_key_id": "commercial_key_existing", "display_name": "test-key"})
 
     def test_import_persists_canonical_portal_artifact_trust_atomically(self) -> None:
-        key = Ed25519PrivateKey.generate()
-        fixture = json.loads(
-            (Path(__file__).parent / "fixtures" / "portal-artifact-trust-v1.json").read_text()
-        )
-        material = self._material(key)
+        fixture = json.loads((Path(__file__).parent / "fixtures" / "portal-artifact-trust-v1.json").read_text())
+        material = self._material()
         material["portal_artifact_trust_v1"] = fixture["artifact_trust"]
         with tempfile.TemporaryDirectory() as td:
             state = CommercialState(str(Path(td) / "state.sqlite"))
             with patch("mcd_agent.commercial_registration._host_fingerprint", return_value="sha256:" + "a" * 64):
-                import_activation_material(state, material, agent_key_path=str(Path(td) / "unused.pem"))
+                import_activation_material(state, material)
             self.assertEqual(state.get("portal_artifact_trust_v1"), fixture["artifact_trust"])
             self.assertEqual(state.get("portal_artifact_trust_revision"), 1)
             self.assertEqual(state.get("portal_artifact_trust_digest"), fixture["artifact_trust"]["trust_digest"])
-            self.assertEqual(
-                state.get("portal_artifact_signing_keys")["portal-artifact-fixture-1"]["status"],
-                "active",
-            )
+            self.assertEqual(state.get("portal_artifact_signing_keys")["portal-artifact-fixture-1"]["status"], "active")
 
     def test_import_rejects_invalid_artifact_trust_before_writing(self) -> None:
-        key = Ed25519PrivateKey.generate()
-        material = self._material(key)
+        material = self._material()
         material["portal_artifact_trust_v1"] = {"schema": "portal-artifact-trust-v1"}
         with tempfile.TemporaryDirectory() as td:
             state = CommercialState(str(Path(td) / "state.sqlite"))
             with patch("mcd_agent.commercial_registration._host_fingerprint", return_value="sha256:" + "a" * 64):
                 with self.assertRaisesRegex(ValueError, "portal_registration_artifact_trust_invalid"):
-                    import_activation_material(state, material, agent_key_path=str(Path(td) / "unused.pem"))
+                    import_activation_material(state, material)
             self.assertIsNone(state.get("portal_agent_credential"))
 
-    def test_import_reuses_existing_agent_key_when_recovery_material_omits_it(self) -> None:
-        key = Ed25519PrivateKey.generate()
-        private_value = _b64(key.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption()))
-        material = self._material(key)
-        material.pop("agent_private_key")
+    def test_import_scrubs_legacy_agent_key_state_and_ignores_legacy_material(self) -> None:
+        material = self._material()
+        material["agent_private_key"] = "legacy-private-material"
+        material["agent_key_id"] = "legacy-agent-key"
         with tempfile.TemporaryDirectory() as td:
             state = CommercialState(str(Path(td) / "state.sqlite"))
-            state.put("agent_private_key", private_value)
+            state.put("agent_private_key", "legacy-private-state")
+            state.put("agent_key_id", "legacy-agent-key")
             with patch("mcd_agent.commercial_registration._host_fingerprint", return_value="sha256:" + "a" * 64):
-                receipt = import_activation_material(state, material, agent_key_path=str(Path(td) / "missing.pem"))
-            self.assertEqual(receipt["agent_key_id"], material["agent_key_id"])
-            self.assertEqual(state.get("agent_private_key"), private_value)
+                import_activation_material(state, material)
+            self.assertIsNone(state.get("agent_private_key"))
+            self.assertIsNone(state.get("agent_key_id"))
 
 
 if __name__ == "__main__":

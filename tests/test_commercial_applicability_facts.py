@@ -1,13 +1,9 @@
 from __future__ import annotations
 
-import base64
 import json
 from pathlib import Path
 
 import pytest
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
-
 from mcd_agent.commercial_detector import (
     APPLICABILITY_FACTS_CONTRACT_VERSION,
     APPLICABILITY_FACTS_SCHEMA,
@@ -16,7 +12,7 @@ from mcd_agent.commercial_detector import (
     build_applicability_facts_snapshot,
     normalize_applicability_facts,
 )
-from mcd_agent.commercial_portal import CommercialState, PortalClient, build_standalone_settings_snapshot, canonical_json
+from mcd_agent.commercial_portal import CommercialState, build_standalone_settings_snapshot
 from mcd_agent.commercial_self_hosted import SelfHostedPortalWorker, SelfHostedScenarioExecutor
 
 
@@ -71,7 +67,7 @@ def test_guard_rejects_added_or_removed_capabilities_and_producer_fails_without_
         )
 
 
-def test_tampering_changes_canonical_digest_and_signed_inventory_binding(tmp_path: Path) -> None:
+def test_tampering_changes_canonical_digest_and_inventory_has_no_agent_signature(tmp_path: Path) -> None:
     snapshot = build_applicability_facts_snapshot(
         target_kind="existing_server",
         capabilities=list(PORTAL_LOCAL_FACTS_CAPABILITIES),
@@ -81,11 +77,6 @@ def test_tampering_changes_canonical_digest_and_signed_inventory_binding(tmp_pat
     tampered["facts"]["capabilities"].append("unexpected")
     assert applicability_facts_digest(tampered["facts"]) != snapshot["facts_digest"]
 
-    key = Ed25519PrivateKey.generate()
-    state = CommercialState(str(tmp_path / "signed.sqlite"))
-    state.put("agent_private_key", base64.urlsafe_b64encode(key.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption())).rstrip(b"=").decode())
-    state.put("agent_key_id", "agent-test")
-    client = PortalClient(state)
     inventory = {
         "schema": "portal-mcd-inventory-snapshot-v1",
         "contract_version": "1.0",
@@ -99,15 +90,7 @@ def test_tampering_changes_canonical_digest_and_signed_inventory_binding(tmp_pat
         "complete": True,
         "applicability_facts": snapshot,
     }
-    signed = client._agent_signed(inventory)
-    signature = signed["agent_signature"]
-    public = Ed25519PublicKey.from_public_bytes(key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw))
-    unsigned = {key: value for key, value in signed.items() if key != "agent_signature"}
-    decoded = base64.urlsafe_b64decode(str(signature["value"]) + "=" * (-len(str(signature["value"])) % 4))
-    public.verify(decoded, canonical_json(unsigned))
-    unsigned["binding"] = {**unsigned["binding"], "installation_id": "other-installation"}
-    with pytest.raises(Exception):
-        public.verify(decoded, canonical_json(unsigned))
+    assert "agent_signature" not in inventory
 
 
 def test_inventory_revision_is_stable_then_bumps_once_for_facts_change_and_legacy_consumer_works(tmp_path: Path) -> None:
