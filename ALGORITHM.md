@@ -480,7 +480,7 @@ config на его profile baseline и только после этого при
    scheduler barrier, installs and imports the wheel before the atomic source
    switch, retains bounded rollback material, and records a bootstrap receipt.
    The bridge is delivered as the detached HTTPS artifact
-   `mcd-runtime-<version>.bridge.py`; `mcd-runtime-bridge-package-v1` binds
+   `mcd-runtime-<version>.bridge[-rN].py`; `mcd-runtime-bridge-package-v1` binds
    its SHA-256, source commit, runtime archive SHA, runtime manifest SHA, and
    bridge-QA sidecar SHA. The host accepts it only after exact SHA checks and
    runs the bridge locally; the runtime archive remains unchanged.
