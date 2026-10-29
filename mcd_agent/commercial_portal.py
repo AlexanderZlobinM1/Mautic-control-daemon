@@ -17,6 +17,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Mapping
 from urllib import request
+from urllib.parse import quote
 from urllib.error import HTTPError, URLError
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -1037,7 +1038,54 @@ class PortalClient:
             path = f"agents/{agent_id}/installations/{installation}/adopt-receipts"
         else:
             path = f"agents/{agent_id}/receipts"
-        return self._request("POST", path, payload, idempotency_key=str(payload.get("idempotency_key") or payload.get("job_id") or ""))
+        if payload.get("schema") in {"portal-mcd-generic-stage-receipt-v1", "portal-mcd-generic-terminal-receipt-v1"}:
+            idempotency_key = f"{payload.get('job_id')}:{payload.get('sequence')}"
+        else:
+            idempotency_key = str(payload.get("idempotency_key") or payload.get("job_id") or "")
+        return self._request("POST", path, payload, idempotency_key=idempotency_key)
+
+    def send_capability_inventory(self, *, installation_id: str, inventory: Mapping[str, Any]) -> dict[str, Any]:
+        """Publish the latest declared generic primitive inventory."""
+        agent_id = str(self.state.get("agent_id") or "")
+        payload = dict(inventory)
+        request_id = str(payload.get("request_id") or "")
+        if not agent_id or not installation_id or not request_id:
+            raise ValueError("commercial_capability_inventory_identity_missing")
+        return self._request(
+            "POST",
+            f"agents/{agent_id}/installations/{installation_id}/capabilities",
+            payload,
+            idempotency_key=request_id,
+        )
+
+    def download_generic_artifact(self, *, digest: str, expected_size: int) -> bytes:
+        """Download a Portal generic artifact using the existing commercial key."""
+        normalized = str(digest or "").lower()
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", normalized):
+            raise ValueError("commercial_generic_artifact_digest_invalid")
+        expected = int(expected_size)
+        if expected <= 0 or expected > MAX_ARTIFACT_BYTES:
+            raise ValueError("commercial_generic_artifact_size_invalid")
+        agent_id = str(self.state.get("agent_id") or "")
+        base = str(self.state.get("portal_api_base") or "").rstrip("/")
+        if not agent_id or not base or not self.state.get("portal_agent_credential"):
+            raise RuntimeError("commercial_portal_not_activated")
+        _require_https(base)
+        path = f"self-hosted/artifacts/{quote(normalized, safe='')}"
+        headers = {"Authorization": "Bearer " + str(self.state.get("portal_agent_credential")), "X-Portal-Contract": CONTRACT, "X-Content-Digest": normalized, "User-Agent": PORTAL_USER_AGENT}
+        req = request.Request(base + "/" + path, headers=headers, method="GET")
+        try:
+            with request.urlopen(req, timeout=self.timeout_sec, context=ssl.create_default_context()) as response:
+                body = response.read(expected + 1)
+        except HTTPError as exc:
+            raise _portal_http_error(stage="generic_artifact.download", status=exc.code) from exc
+        except (URLError, TimeoutError, OSError) as exc:
+            raise _portal_transport_error(stage="generic_artifact.download") from exc
+        if len(body) != expected:
+            raise CommercialPortalError(stage="generic_artifact.download", code="commercial_generic_artifact_size_mismatch")
+        if hashlib.sha256(body).hexdigest() != normalized[7:]:
+            raise CommercialPortalError(stage="generic_artifact.download", code="commercial_generic_artifact_digest_mismatch")
+        return body
 
     def _commercial_binding(self, installation_id: str) -> dict[str, str]:
         return {

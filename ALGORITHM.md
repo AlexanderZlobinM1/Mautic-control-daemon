@@ -1523,3 +1523,45 @@ acknowledged pins. A missing hash at legacy revision `0` performs one safe
 baseline migration; corrupted or regressive state fails closed. Portal acceptance
 pins the same hash/revision, and a failed publication retries that revision
 without creating a new one.
+
+### OWH-AUTO и generic command broker Portal↔MCD
+
+Автоматическая первая установка OWH является отдельным self-hosted потоком.
+MCD принимает только `portal-owh-auto-install-request-v1`, проверяет совпадение
+`target.dns_name` и `target.local_identity`, HTTPS-политику и единственный
+commercial API key. `agent_id` и `portal_api_base` не добавляются в payload:
+MCD получает их из уже установленной runtime-конфигурации и до любого запроса
+останавливается с `owh_auto_worker_config_missing`, если они отсутствуют.
+Ответ регистрации должен быть `activated` с активным automatic state; ручного
+Activate для этого пути нет. Manual enrollment остаётся отдельным pending-путём
+с `install_scenarios=false`.
+
+После активации MCD последовательно обрабатывает ровно четыре внешние стадии:
+`base_packages`, `database_cache`, `web_stack`, `mautic`. На каждой стадии он
+формирует запрос latest-compatible из наблюдаемых фактов текущего хоста,
+получает внешний artifact, принимает только HTTPS URI, положительный размер и
+`sha256:<64 lowercase hex>`, скачивает содержимое и сверяет размер/хеш. MCD не
+содержит команды установки, версий Ubuntu, hostname/IP или Mautic-правил:
+исполнение делегируется внешнему сценарию через фиксированный generic executor.
+После каждой стадии сохраняются stage receipts, затем terminal receipt; API key
+не попадает ни в receipt, ни в журнал, ни в UI. При сбое стадия закрывается
+failed receipt и terminal failure, недостающий artifact не считается успешным.
+
+Для уже подключённого MCD generic broker использует существующий outbound
+HTTPS poll. MCD публикует через
+`POST .../agents/{agentId}/installations/{installationId}/capabilities` только
+валидированный capability inventory с self-digest SHA-256. Portal job принимается
+только при exact match с последним опубликованным inventory: capability, command,
+version, `execution=generic_primitive` и `mutates_state` должны совпасть. Shell,
+script, argv, executable, sudo, пароль, ключ, token и подпись отклоняются до
+исполнения. Generic primitive вызывается тем же внедрённым MCD handler, который
+использует локальные typed primitives; arbitrary shell route отсутствует.
+
+Для generic job MCD сначала durable фиксирует `started` receipt, затем вызывает
+handler и durable фиксирует terminal result. Receipt sequence — монотонный,
+Portal idempotency — `{job_id}:{sequence}`. При недоступном Portal receipt
+остаётся в общей durable очереди; после рестарта worker сначала дренирует её,
+восстанавливает сохранённый result и не запускает primitive повторно. Cursor
+продвигается только после принятого terminal receipt. Этот канал не является
+MCC-каналом: публикация MCD-кандидата и продвижение в `test`/`approved` всегда
+передаются треду **Publish MCD**; MCC лишь регистрирует каталог.
