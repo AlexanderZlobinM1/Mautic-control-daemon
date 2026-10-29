@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mcd-agent"
-version = "1.6.9"
+version = "1.6.10"
 description = "MauticControlDaemon host agent"
 requires-python = ">=3.10"
 readme = "README.md"
