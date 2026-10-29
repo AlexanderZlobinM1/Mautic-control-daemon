@@ -16,6 +16,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives import serialization
 
 from mcd_agent.commercial_portal import CommercialPortalError, CommercialState, PORTAL_USER_AGENT, PortalClient, canonical_json, download_external_artifact, verify_signed_job
+from mcd_agent.commercial_capabilities import build_capability_manifest
 
 
 def test_signed_job_is_verified_and_replay_state_is_durable():
@@ -172,6 +173,12 @@ def test_inventory_and_adopt_use_api_key_envelope_without_agent_signature(monkey
     assert all("agent_signature" not in item[2]["inventory"] for item in captured)
     assert captured[0][2]["binding"] == inventory["binding"]
     assert captured[1][2]["binding"] == inventory["binding"]
+
+
+def test_external_portal_capability_manifest_has_no_agent_key_identity():
+    manifest = build_capability_manifest(agent_version="1.6.3")
+    assert manifest["platform"]["os_ids"] == ["external_portal_catalog"]
+    assert "public_key_id" not in manifest["provenance"]
 
 
 @pytest.mark.parametrize(

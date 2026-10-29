@@ -1208,6 +1208,11 @@ for compatibility; bootstrap is not part of the registered scenario
 operation. MCD never imports MCC credentials or scenario rules, and Portal
 remains only the connector/UI for this lane.
 
+The commercial API credential and host binding described below apply only to
+external OWH MCD hosts. The internal SalesSnap path is instance-bound; it does
+not create a separate host/MCD key entity and does not introduce a replacement
+token or signature identity.
+
 The signed `portal-mcd-inventory-snapshot-v1` also carries the additive
 `applicability_facts` coordinate (`mcd-portal-applicability-facts-v1`, contract
 version `1.0`). Its `facts` mapping is the complete normalized value used by
