@@ -609,7 +609,8 @@ def test_inventory_revision_ignores_transport_fields_and_bumps_once_per_durable_
     restarted.inventory_provider = lambda _installation: dict(current["value"])
     assert restarted.run_once()["status"] == "idle"
     assert restarted_state.get("commercial_inventory_state_v1")["installations"]["installation-1"]["snapshot_revision"] == 2
-    assert len(portal.inventories) == 2
+    assert len(portal.inventories) == 3
+    assert portal.inventories[-1]["snapshot_revision"] == "2"
 
 
 def test_inventory_revision_changes_for_settings_and_instances_and_replays_same_revision_after_outage(tmp_path):

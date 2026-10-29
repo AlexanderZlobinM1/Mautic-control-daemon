@@ -64,7 +64,7 @@
     "unknown_state": "unknown, interrupted or partially observed mutation requires rollback state attempted/failed or blocked; it is never reported succeeded"
   },
   "mcd_ownership": {
-    "mcd": ["signed job admission", "host/artifact binding", "timeout", "transport", "durable stage and terminal receipts", "idempotency", "rollback state"],
+    "mcd": ["API-authenticated job admission", "host/artifact binding", "timeout", "HTTPS transport", "SHA-256 artifact integrity", "durable stage and terminal receipts", "idempotency", "rollback state"],
     "portal_or_mcc": ["scenario policy", "artifact bytes and active catalog metadata", "selected primitive fields", "applicability facts and pins"],
     "excluded": ["installer recipe", "Mautic version selection", "raw credentials", "upgrade-version branching"]
   }

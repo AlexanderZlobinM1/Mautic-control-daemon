@@ -2,7 +2,7 @@
 
 This module deliberately knows only the v2 wire contract and a bounded external
 runner process.  It contains no installer, OS, Mautic, scenario, or primitive
-recipes.  Those belong to the signed external artifact and its Portal-owned
+recipes.  Those belong to the versioned external artifact and its Portal-owned
 runner.
 """
 
@@ -278,7 +278,7 @@ def _verified_shape_for_terminal(command: Mapping[str, Any], *, expected_agent_i
 
     This is not an admission path and never authorizes execution. It exists so
     an expired, malformed, or locally disabled leased command can still receive
-    a signed, bounded terminal receipt when Portal supplied enough binding
+    a bounded typed terminal receipt when Portal supplied enough binding
     material to identify it.
     """
     job = _delivery_job(command)
@@ -402,7 +402,7 @@ class ExternalProcessPolicy:
 
     The launcher receives a framed artifact/context request on stdin.  It is
     the only MCD-owned execution path in this boundary; scenario policy remains
-    in the signed delivered artifact.
+    in the versioned delivered artifact.
     """
 
     def __init__(self, argv: list[str] | tuple[str, ...] | None, *, timeout_sec: int = 1800):
@@ -956,6 +956,11 @@ class SelfHostedPortalWorker:
         self.capability_inventory_provider = capability_inventory_provider
         self.generic_command_handler = generic_command_handler
         self._active_installation_id = self.installation_ids[0]
+        # A daemon restart is also the supported recovery point for a stale
+        # Portal projection. Publish one complete inventory on the first
+        # outbound cycle even when the durable content hash is unchanged;
+        # subsequent cycles remain hash/idempotency gated.
+        self._publish_inventory_on_startup = True
 
     def _pending(self) -> list[dict[str, Any]]:
         raw = self.executor.state.get(_PENDING_KEY)
@@ -1232,7 +1237,7 @@ class SelfHostedPortalWorker:
             pinned_revision = int(pinned.get("snapshot_revision") or -1) if isinstance(pinned, Mapping) else -1
         except (TypeError, ValueError):
             raise ValueError("commercial_inventory_state_invalid")
-        if isinstance(pinned, Mapping) and str(pinned.get("durable_hash") or "") == durable_hash and pinned_revision == revision:
+        if not self._publish_inventory_on_startup and isinstance(pinned, Mapping) and str(pinned.get("durable_hash") or "") == durable_hash and pinned_revision == revision:
             return True
         try:
             self._outbound("inventory", lambda: self._send_inventory(installation_id, inventory))
@@ -1241,6 +1246,7 @@ class SelfHostedPortalWorker:
         acknowledge = getattr(self.executor.state, "acknowledge_inventory", None)
         if callable(acknowledge):
             acknowledge(installation_id=installation_id, inventory=inventory)
+        self._publish_inventory_on_startup = False
         return True
 
     def _send_inventory(self, installation_id: str, inventory: Mapping[str, Any]) -> Any:
@@ -1643,7 +1649,7 @@ class SelfHostedPortalWorker:
             terminal = self.executor.run(command, portal_keys=self.portal_keys, publisher_keys=self.publisher_keys, context=self.context, expected_agent_id=self.agent_id, expected_installation_id=str(command["installation_id"]), expected_commercial_key_id=self.commercial_key_id, expected_host_fingerprint=self.host_fingerprint, bootstrap_artifact=bootstrap, scenario_artifact=scenario, receipt_sink=self._send_or_queue, execution_key=execution_key or None)
             if self._pending():
                 # Keep the delivery and cursor pending until the next outbound
-                # cycle drains every signed receipt in order.  The executor's
+                # cycle drains every typed receipt in order.  The executor's
                 # durable terminal makes the following replay idempotent.
                 return {"status": terminal.get("status"), "job_id": str(command["job_id"]), "receipt_pending": True}
             self._finish_command(cursor_next=cursor_next)

@@ -250,15 +250,14 @@ def test_v21_registered_scenario_job_has_no_bootstrap_artifact() -> None:
     assert verified["bootstrap_artifact"] is None
 
 
-def test_v21_portal_fixture_matches_signed_cross_component_vector() -> None:
+def test_v21_portal_fixture_matches_unsigned_cross_component_vector() -> None:
     fixture_path = Path(__file__).parent / "fixtures" / "portal-self-hosted-mcd-v2.1-job.json"
     job = json.loads(fixture_path.read_text(encoding="utf-8"))
-    public_key = (fixture_path.with_suffix(".public-key")).read_text(encoding="utf-8").strip()
     expected_hash = (fixture_path.with_suffix(".sha256")).read_text(encoding="utf-8").strip()
 
     verified = verify_self_hosted_mcd_job(
         job,
-        {job["portal_signature"]["key_id"]: public_key},
+        {},
         expected_agent_id=job["agent_id"],
         expected_installation_id=job["installation_id"],
         expected_commercial_key_id=job["commercial_key_id"],
@@ -268,6 +267,8 @@ def test_v21_portal_fixture_matches_signed_cross_component_vector() -> None:
 
     assert verified["contract_version"] == SELF_HOSTED_MCD_CONTRACT_VERSION
     assert "bootstrap_artifact" not in job
+    assert "portal_signature" not in job
+    assert "signature" not in job["scenario_artifact"]
     assert hashlib.sha256(canonical_json(job)).hexdigest() == expected_hash
 
 

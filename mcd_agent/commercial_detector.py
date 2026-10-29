@@ -81,8 +81,7 @@ def validate_portal_scenario_resolution(value: Mapping[str, Any], *, expected_di
             raise ValueError("commercial_portal_resolution_not_unique")
         match = matches[0]
         artifact = match.get("artifact") if isinstance(match, dict) else None
-        signature = match.get("signature") if isinstance(match, dict) else None
-        if match.get("lifecycle") != "published" or not isinstance(artifact, dict) or not str(artifact.get("digest", "")).startswith("sha256:") or not isinstance(signature, dict):
+        if match.get("lifecycle") != "published" or not isinstance(artifact, dict) or not str(artifact.get("digest", "")).startswith("sha256:"):
             raise ValueError("commercial_portal_resolution_artifact_invalid")
         if expected_digest and artifact["digest"] != expected_digest:
             raise ValueError("commercial_portal_resolution_digest_mismatch")

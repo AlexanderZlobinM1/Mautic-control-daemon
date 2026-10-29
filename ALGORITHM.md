@@ -1202,7 +1202,10 @@ validate a Portal/job signing key or `portal_signature`. The additive contract
 version `2.1` is the registered-installation path: its
 `execution.primitive` is `scenario.apply`, and `bootstrap_artifact` must be
 absent. MCD accepts downloaded artifacts only when size and SHA-256 match the
-immutable artifact pin/catalog entry. MCD never imports MCC credentials or
+immutable artifact pin/catalog entry. Portal sends the self-hosted job and
+artifact pin without `portal_signature`, `signature`, public-key or trust-store
+fields; MCD admission is based on the HTTPS API credential, exact binding,
+expiry/idempotency, and the pinned size/SHA-256 values. MCD never imports MCC credentials or
 scenario rules, and Portal remains only the connector/UI for this lane.
 
 The commercial API credential and host binding described below apply only to
@@ -1238,7 +1241,7 @@ stage registry is constructed on this path. A legacy self-hosted artifact may
 select `portal-self-hosted-executable-context-v1`; the frame validator accepts
 both that schema and the current MCD context schema without changing the
 primitive contract. Progress is checkpointed by
-immutable `job_id`; replay of the same signed job returns the durable terminal
+immutable `job_id`; replay of the same API-authenticated job returns the durable terminal
 receipt without re-executing the runner only when the received command identity
 is the same. A distinct Portal recovery command has its own command/cursor
 execution identity and is executed exactly once, even though it retains the
@@ -1283,7 +1286,7 @@ during this delivery sequence.
 The executable scenario bridge follows the generic
 `mcd-scenario-executable-context-v1` contract. The old
 `portal-self-hosted-executable-context-v1` value is accepted only as a
-compatibility data label and never creates a second execution path. The signed
+compatibility data label and never creates a second execution path. The versioned
 artifact must be `application/x-sh` or `application/x-elf`; the legacy
 declarative JSON artifact remains audit-only and is never dispatched. MCD sends
 the artifact and canonical context in the 88-byte `SSMCDX01` frame: exact
@@ -1511,7 +1514,7 @@ completed scenario. A Portal/network failure leaves commands queued at Portal
 and records an exponential, durable retry deadline. The next outbound cycle
 drains receipts first, then resumes the saved batch or polls with the last
 cursor; no scheduler or standalone work is blocked. Backoff is applied only
-to transport failures, not to local signature/applicability rejection.
+to transport failures, not to local validation/applicability rejection.
 
 Inventory publication has its own durable revision ledger per installation.
 MCD canonicalizes the complete inventory and removes only transport-volatility

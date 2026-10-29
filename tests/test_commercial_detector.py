@@ -51,7 +51,7 @@ def test_detector_mismatch_unsupported_and_ambiguous_fail_closed(tmp_path, monke
 
 def test_portal_resolution_requires_one_published_external_artifact():
     facts = {"os_id": "ubuntu", "os_version": "24.04", "architecture": "amd64", "package_manager": "apt-get", "capabilities": [], "target_kind": "new_server"}
-    response = {"schema": "portal-scenario-resolve-response-v1", "contract_version": "1.0", "status": "matched", "detected_facts": facts, "matches": [{"scenario_id": "s1", "revision": "r1", "lifecycle": "published", "artifact": {"digest": "sha256:" + "a" * 64, "size_bytes": 1, "media_type": "application/octet-stream"}, "signature": {"algorithm": "ed25519", "key_id": "k", "value": "sig"}}]}
+    response = {"schema": "portal-scenario-resolve-response-v1", "contract_version": "1.0", "status": "matched", "detected_facts": facts, "matches": [{"scenario_id": "s1", "revision": "r1", "lifecycle": "published", "artifact": {"digest": "sha256:" + "a" * 64, "size_bytes": 1, "media_type": "application/octet-stream"}}]}
     assert validate_portal_scenario_resolution(response)["status"] == "matched"
     with pytest.raises(ValueError, match="not_unique"):
         validate_portal_scenario_resolution({**response, "matches": []})
