@@ -211,6 +211,33 @@ def test_activation_failures_are_typed_and_secret_free(monkeypatch, tmp_path, fa
     assert "secret-response" not in str(error)
 
 
+def test_portal_error_code_is_preserved_for_durable_receipt_reconciliation(monkeypatch, tmp_path):
+    def fail_urlopen(_req, **_kwargs):
+        raise HTTPError(
+            "https://portal.example/receipts",
+            409,
+            "conflict",
+            {},
+            io.BytesIO(b'{"schema":"portal-error-v1","code":"receipt_sequence_regression"}'),
+        )
+
+    monkeypatch.setattr("mcd_agent.commercial_portal.request.urlopen", fail_urlopen)
+    state = CommercialState(str(tmp_path / "state.sqlite"))
+    state.put("portal_api_base", "https://portal.example/api/v1/commercial")
+    state.put("portal_agent_credential", "credential")
+    client = PortalClient(state)
+
+    with pytest.raises(CommercialPortalError) as raised:
+        client._request("POST", "agents/agent-1/receipts", {"idempotency_key": "receipt-1"}, idempotency_key="receipt-1")
+
+    assert raised.value.as_dict() == {
+        "stage": "portal.request",
+        "code": "receipt_sequence_regression",
+        "retryable": False,
+        "http_status": 409,
+    }
+
+
 
 
 def test_https_and_strict_z_timestamps_are_required():

@@ -20,6 +20,7 @@ from mcd_agent.commercial_portal import (
     canonical_json,
     verify_self_hosted_mcd_job,
     verify_self_hosted_external_artifact,
+    CommercialPortalError,
 )
 from mcd_agent.commercial_self_hosted import (
     RunnerExecutionError,
@@ -887,3 +888,52 @@ def test_v2_receipts_queue_in_order_across_portal_outage_and_restart(monkeypatch
         restarted.run_once()
         assert state.get("commercial_self_hosted_pending_receipts") == []
         assert [receipt["sequence"] for receipt in fake.receipts[:2]] == [1, 2]
+
+
+def test_v2_drain_reconciles_receipts_already_advanced_on_portal() -> None:
+    portal = Ed25519PrivateKey.generate()
+    publisher = Ed25519PrivateKey.generate()
+    job, _bootstrap, _scenario, keys = _job(portal, publisher)
+
+    class FakePortal:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def send_receipt(self, _receipt: dict[str, object], **_: object):
+            self.calls += 1
+            if self.calls < 3:
+                raise CommercialPortalError(stage="portal.request", code="receipt_sequence_regression", http_status=409)
+            return {}
+
+        def pull_job(self, **_: object):
+            return None
+
+    with TemporaryDirectory() as directory:
+        state = CommercialState(str(Path(directory) / "commercial.sqlite"))
+        state.put(
+            "commercial_self_hosted_pending_delivery_v1",
+            {"cursor": "2", "cursor_next": "3", "installation_id": "installation-1", "job": {"commands": [job]}},
+        )
+        state.put(
+            "commercial_self_hosted_pending_receipts",
+            [
+                {"schema": "mcd-self-hosted-stage-receipt-v2", "job_id": "job-1", "sequence": 1, "idempotency_key": "job-1:scenario_dispatch:1"},
+                {"schema": "mcd-self-hosted-stage-receipt-v2", "job_id": "job-1", "sequence": 2, "idempotency_key": "job-1:execution:2"},
+                {"schema": "mcd-self-hosted-terminal-receipt-v2", "job_id": "job-1", "sequence": 3, "idempotency_key": "job-1:terminal:3"},
+            ],
+        )
+        worker = SelfHostedPortalWorker(
+            FakePortal(),
+            SelfHostedScenarioExecutor(state, runner=lambda **_: {"status": "succeeded"}),
+            installation_id="installation-1",
+            portal_keys={"portal-1": keys["portal-1"]},
+            publisher_keys={"publisher-1": keys["publisher-1"]},
+            context={},
+            commercial_key_id="commercial-key-1",
+            agent_id="agent-1",
+            host_fingerprint="sha256:" + "b" * 64,
+        )
+
+        assert worker._drain() is True
+        assert state.get("commercial_self_hosted_pending_receipts") == []
+        assert state.get("commercial_self_hosted_pending_delivery_v1") is None

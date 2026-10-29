@@ -1306,6 +1306,14 @@ use `mcd-self-hosted-terminal-receipt-v2`, `succeeded|failed`, explicit
 bounded and secret-free. Every unsent stage or terminal receipt is durable and
 retried in order after Portal outage or MCD restart.
 
+If Portal responds to a durable receipt with the typed non-retryable
+`receipt_sequence_regression`, MCD treats that response as reconciliation of
+the same job's already-advanced contiguous receipt history, removes only that
+receipt from the local queue, and continues draining in order. It never
+re-executes the runner and never creates a replacement job. Release
+publication is performed by the dedicated `Publish MCD` process; MCC only
+registers/serves the catalog metadata used by MCD.
+
 The commercial transport worker is a separate non-blocking Portal lane:
 `pull_job` → exact v2 job admission → pinned artifact download(s) → local facts
 guard → generic runner → ordered stage/terminal receipts. A 2.1 registered
