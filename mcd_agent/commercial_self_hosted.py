@@ -773,7 +773,18 @@ class ScenarioExecutor:
                 # command. A distinct recovery command must execute once.
                 return dict(prior["terminal"])
         started_at = _utc()
-        sequence = 0
+        prior_sequence = 0
+        if isinstance(prior, Mapping):
+            try:
+                prior_sequence = max(0, int(prior.get("sequence") or 0))
+            except (TypeError, ValueError):
+                prior_sequence = 0
+        is_recovery = "_retry_" in str(job.get("command_id") or "") or "_retry_" in execution_key
+        # Stage and terminal receipts for a distinct recovery continue the
+        # job's monotonic receipt sequence.  Starting again at 1 makes the
+        # Portal see the recovery terminal as the old terminal and return a
+        # receipt conflict even though the command identity is new.
+        sequence = prior_sequence if is_recovery else 0
         runner_evidence: Mapping[str, Any] | None = None
 
         def emit(stage_id: str, status: str, result: object = None, error: Mapping[str, Any] | None = None) -> bool:
