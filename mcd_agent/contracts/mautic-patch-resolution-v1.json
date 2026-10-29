@@ -1,6 +1,6 @@
 {
   "schema": "mcd-mautic-patch-resolution-v1",
-  "minimum_agent_version": "1.6.2",
+  "minimum_agent_version": "1.6.3",
   "features": {"typed_execution_context_v1": true, "facts_receipt_binding_v1": true, "typed_context_preflight_v1": true, "release_transition_authorization_v3": true, "prepared_target_input_v1": true},
   "prepared_target_input": {
     "schema": "mcd-mautic-prepared-target-input-v1",
