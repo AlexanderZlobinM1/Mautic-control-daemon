@@ -25,6 +25,7 @@ from typing import Any, Callable, Mapping
 
 from mcd_agent.commercial_detector import read_normalized_applicability_facts, read_normalized_local_facts
 from mcd_agent.scenario_launcher import (
+    LEGACY_SCENARIO_CONTEXT_SCHEMA,
     SCENARIO_CONTEXT_SCHEMA,
     SCENARIO_OUTPUT_SCHEMAS,
     build_scenario_context,
@@ -425,7 +426,7 @@ class ExternalProcessPolicy:
         if context is None:
             context_job = dict(job)
             context_job["scenario"] = scenario
-            payload: Mapping[str, Any] = build_scenario_context(context_job)
+            payload: Mapping[str, Any] = build_scenario_context(context_job, context_schema=LEGACY_SCENARIO_CONTEXT_SCHEMA)
         else:
             payload = dict(context)
         try:
@@ -780,7 +781,10 @@ class ScenarioExecutor:
                     }
                 )
                 context_job["scenario"] = context_scenario
-                encode_request_frame(scenario_artifact, build_scenario_context(context_job))
+                encode_request_frame(
+                    scenario_artifact,
+                    build_scenario_context(context_job, context_schema=LEGACY_SCENARIO_CONTEXT_SCHEMA),
+                )
             except (ValueError, TypeError) as exc:
                 raise ScenarioArtifactStoreError("scenario_store_context_incompatible") from exc
             delivery = self.artifact_store.deliver(
