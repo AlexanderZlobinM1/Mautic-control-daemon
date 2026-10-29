@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -604,6 +605,55 @@ def test_v2_recovery_identity_is_derived_from_verified_command_when_cursor_is_te
         assert retry["result"]["execution"] == 2
         assert replay == retry
         assert calls == 2
+
+
+def test_v2_admission_failure_persists_distinct_recovery_terminal() -> None:
+    portal = Ed25519PrivateKey.generate()
+    publisher = Ed25519PrivateKey.generate()
+    job, bootstrap, scenario, keys = _job(portal, publisher)
+    job["command_id"] = "mcd_command_job-1_retry_4"
+    job["delivery_cursor"] = "5"
+    job["applicability"] = {
+        **job["applicability"],
+        "facts": {**job["applicability"]["facts"], "capabilities": ["wrong-capability"]},
+    }
+    job["applicability"]["facts_digest"] = _digest(
+        canonical_json({**job["applicability"]["facts"], "capabilities": ["wrong-capability"]})
+    )
+    _resign(job, portal)
+
+    with TemporaryDirectory() as directory:
+        state = CommercialState(str(Path(directory) / "commercial.sqlite"))
+        executor = SelfHostedScenarioExecutor(
+            state,
+            facts_reader=lambda **_: {
+                "os_id": "ubuntu",
+                "os_version": "24.04",
+                "architecture": "amd64",
+                "package_manager": "apt-get",
+                "capabilities": ["package_manager.query"],
+                "target_kind": "existing_server",
+            },
+            runner=lambda **_: {"status": "succeeded"},
+        )
+        terminal = executor.run(
+            job,
+            portal_keys={"portal-1": keys["portal-1"]},
+            publisher_keys={"publisher-1": keys["publisher-1"]},
+            context={},
+            expected_agent_id="agent-1",
+            expected_installation_id="installation-1",
+            expected_commercial_key_id="commercial-key-1",
+            expected_host_fingerprint="sha256:" + "b" * 64,
+            bootstrap_artifact=bootstrap,
+            scenario_artifact=scenario,
+        )
+
+        assert terminal["status"] == "failed"
+        with sqlite3.connect(state.path) as db:
+            saved = json.loads(db.execute("SELECT payload FROM commercial_self_hosted_runs WHERE job_id=?", ("job-1",)).fetchone()[0])
+        assert "mcd_command_job-1_retry_4:5" in saved["executions"]
+        assert saved["executions"]["mcd_command_job-1_retry_4:5"]["terminal"] == terminal
 
 
 def test_v2_runner_failure_persists_bounded_evidence_and_replays_without_rerun() -> None:

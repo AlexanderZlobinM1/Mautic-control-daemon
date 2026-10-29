@@ -73,7 +73,7 @@ from mcd_agent.cleanup_schedule import (
 )
 from mcd_agent.cluster_assets import guard_cluster_assets
 from mcd_agent.custom_scripts import cached_custom_manifest_keys, cleanup_custom_cache, fetch_custom_manifest
-from mcd_agent.commercial_detector import build_applicability_facts_snapshot, read_normalized_local_facts
+from mcd_agent.commercial_detector import PORTAL_LOCAL_FACTS_CAPABILITIES, build_applicability_facts_snapshot, read_normalized_local_facts
 from mcd_agent.db import MauticDB
 from mcd_agent.db_watchdog import collect_db_watchdog_snapshot, effective_db_watchdog_config
 from mcd_agent.email_counters import repair_campaign_email_counters
@@ -469,8 +469,11 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
                     "blocked_keys": list(applied.get("blocked_keys", [])),
                 }
 
-            local_fact_probe = read_normalized_local_facts()
-            local_facts_capabilities = sorted(set(local_fact_probe["capabilities"]) | {"network_egress"})
+            # Portal job applicability uses the stable MCD capability
+            # vocabulary.  Host probes (dpkg, systemd, package:curl, etc.)
+            # are useful diagnostics but are not the signed Portal facts and
+            # must not make a valid recovery command fail closed locally.
+            local_facts_capabilities = list(PORTAL_LOCAL_FACTS_CAPABILITIES)
             portal_context = {
                 "platform": "linux-arm64" if platform.machine().lower() in {"aarch64", "arm64"} else "linux-amd64",
                 "runtime": "host",
