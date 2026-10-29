@@ -125,6 +125,19 @@ class PortalRegistrationTests(unittest.TestCase):
                     import_activation_material(state, material, agent_key_path=str(Path(td) / "unused.pem"))
             self.assertIsNone(state.get("portal_agent_credential"))
 
+    def test_import_reuses_existing_agent_key_when_recovery_material_omits_it(self) -> None:
+        key = Ed25519PrivateKey.generate()
+        private_value = _b64(key.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption()))
+        material = self._material(key)
+        material.pop("agent_private_key")
+        with tempfile.TemporaryDirectory() as td:
+            state = CommercialState(str(Path(td) / "state.sqlite"))
+            state.put("agent_private_key", private_value)
+            with patch("mcd_agent.commercial_registration._host_fingerprint", return_value="sha256:" + "a" * 64):
+                receipt = import_activation_material(state, material, agent_key_path=str(Path(td) / "missing.pem"))
+            self.assertEqual(receipt["agent_key_id"], material["agent_key_id"])
+            self.assertEqual(state.get("agent_private_key"), private_value)
+
 
 if __name__ == "__main__":
     unittest.main()

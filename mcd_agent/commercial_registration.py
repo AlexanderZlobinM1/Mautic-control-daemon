@@ -136,8 +136,19 @@ def _signing_keys(source: Mapping[str, Any]) -> dict[str, str]:
     return values
 
 
-def _private_key_value(source: Mapping[str, Any], key_path: str) -> tuple[str, str]:
+def _private_key_value(
+    source: Mapping[str, Any],
+    key_path: str,
+    *,
+    existing_private_key: object = None,
+) -> tuple[str, str]:
     raw = _first(source, "agent_private_key", "agent_private_key_b64", "private_key")
+    if raw in (None, "") and existing_private_key not in (None, ""):
+        # Recovery material intentionally need not retransmit the agent key:
+        # it is already protected in the local CommercialState.  A supplied
+        # material key still wins, while the file remains the last fallback
+        # for installations provisioned outside the state database.
+        raw = existing_private_key
     private: bytes
     if raw not in (None, ""):
         text = _text(raw)
@@ -243,7 +254,11 @@ def import_activation_material(
     supplied_fingerprint = _text(_first(source, "host_fingerprint"))
     if supplied_fingerprint and supplied_fingerprint != expected_fingerprint:
         raise _error("portal_registration_host_mismatch")
-    private_key, agent_key_id = _private_key_value(source, agent_key_path)
+    private_key, agent_key_id = _private_key_value(
+        source,
+        agent_key_path,
+        existing_private_key=state.get("agent_private_key"),
+    )
     signing_keys = _signing_keys(source)
     incoming_installations = _installation_ids(source)
     artifact_trust = _artifact_trust(source)
