@@ -1,7 +1,7 @@
 {
   "schema": "mcd-mautic-prepared-target-input-v1",
   "candidate": {
-    "agent_version": "1.6.1",
+    "agent_version": "1.6.5",
     "lineage": "current-mcd-prepared-target",
     "approved_baseline": "1.5.268",
     "baseline_role": "historical-rollback-audit-only",
