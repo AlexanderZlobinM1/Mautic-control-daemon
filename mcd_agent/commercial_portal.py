@@ -1230,6 +1230,70 @@ class PortalClient:
         self.state.delete("portal_job_signing_keys")
         return result
 
+    def register_host(self, *, local_identity: str, display_name: str) -> dict[str, Any]:
+        """Register the host/MCD binding before any Mautic instance exists."""
+        identity = _require_contract_string(local_identity, "commercial_host_identity_invalid")
+        name = _require_contract_string(display_name, "commercial_host_display_name_invalid")
+        agent_id = _require_contract_string(self.state.get("agent_id"), "commercial_host_agent_missing")
+        requests = self.state.get("host_registration_requests")
+        requests = dict(requests) if isinstance(requests, Mapping) else {}
+        previous = requests.get(identity)
+        fingerprint = hashlib.sha256(canonical_json({"local_identity": identity, "display_name": name})).hexdigest()
+        if isinstance(previous, Mapping) and str(previous.get("fingerprint") or "") != fingerprint:
+            raise ValueError("commercial_host_registration_idempotency_conflict")
+        idempotency_key = str(previous.get("idempotency_key")) if isinstance(previous, Mapping) else _b64(os.urandom(16))
+        payload = {
+            "schema": "portal-mcd-host-register-request-v1",
+            "contract_version": CONTRACT_VERSION,
+            "registration_kind": "host",
+            "idempotency_key": idempotency_key,
+            "host": {"local_identity": identity, "display_name": name},
+        }
+        requests[identity] = {"fingerprint": fingerprint, "idempotency_key": idempotency_key}
+        self.state.put("host_registration_requests", requests)
+        result = self._request("POST", f"agents/{agent_id}/installations", payload, idempotency_key=idempotency_key)
+        installation = result.get("installation")
+        connection = result.get("connection")
+        if (
+            result.get("schema") != "portal-mcd-host-register-response-v1"
+            or result.get("contract_version") != CONTRACT_VERSION
+            or result.get("registration_kind") != "host"
+            or not isinstance(installation, Mapping)
+            or not isinstance(connection, Mapping)
+            or not installation.get("id")
+            or str(installation.get("agent_id") or "") != agent_id
+            or str(installation.get("local_identity") or "") != identity
+            or str(installation.get("display_name") or "") != name
+            or installation.get("status") != "passive"
+            or connection.get("status") != "active"
+            or connection.get("channel_contract") != CONTRACT_VERSION
+            or connection.get("last_inventory_revision") is not None
+        ):
+            raise RuntimeError("commercial_host_registration_response_invalid")
+        installation_id = str(installation["id"])
+        installation_ids = self.state.get("installation_ids")
+        installation_ids = dict(installation_ids) if isinstance(installation_ids, Mapping) else {}
+        existing = installation_ids.get(identity)
+        if existing and str(existing) != installation_id:
+            raise ValueError("commercial_host_registration_identity_conflict")
+        installation_ids[identity] = installation_id
+        metadata = self.state.get("commercial_installation_metadata")
+        metadata = dict(metadata) if isinstance(metadata, Mapping) else {}
+        metadata[identity] = {
+            "registration_kind": "host",
+            "local_identity": identity,
+            "display_name": name,
+        }
+        self.state.put_many(
+            {
+                "installation_ids": installation_ids,
+                "commercial_installation_metadata": metadata,
+                "host_registration_requests": requests,
+            },
+            delete_keys=("portal_job_signing_keys",),
+        )
+        return result
+
     def send_usage(self, *, installation_id: str, metric: str, observed_at: str, raw_value: int,
                    cadence_policy_seconds: int, evidence_ref: str, sequence: int,
                    sample_id: str, reset_type: str = "none") -> dict[str, Any]:

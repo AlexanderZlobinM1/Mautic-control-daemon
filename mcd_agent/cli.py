@@ -2108,7 +2108,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     commercial = sub.add_parser("commercial", help="Portal commercial transport (explicit activation only)")
     commercial.add_argument("--config", default=default_cfg)
-    commercial.add_argument("op", choices=["status", "activate", "register"])
+    commercial.add_argument("op", choices=["status", "activate", "register", "register-host"])
     commercial.add_argument("--portal-url", default="")
     commercial.add_argument("--activation-code", default="")
     commercial.add_argument("--local-identity", default="")
@@ -2468,6 +2468,11 @@ def main() -> int:
                 "portal_api_base": state.get("portal_api_base") if state.commercial_enabled else None,
                 "mcc_configured": bool(cfg.mcc_url and cfg.mcc_token),
             }
+        elif args.op == "register-host":
+            required = (args.local_identity, args.display_name)
+            if not all(required):
+                parser.error("commercial register-host requires --local-identity and --display-name")
+            payload = PortalClient(state).register_host(local_identity=args.local_identity, display_name=args.display_name)
         elif args.op == "activate":
             if not args.portal_url or not args.activation_code:
                 parser.error("commercial activate requires --portal-url and --activation-code")
