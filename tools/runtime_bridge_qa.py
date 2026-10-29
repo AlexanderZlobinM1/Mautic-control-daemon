@@ -87,6 +87,44 @@ def _archive_metadata(path: Path) -> dict[str, str]:
     }
 
 
+def _self_contained_bridge_capture(python: str, bridge_path: Path) -> dict[str, object]:
+    """Prove the transported bridge has no undeclared probe sidecar."""
+    with tempfile.TemporaryDirectory(prefix="mcd-runtime-bridge-self-contained-") as tmp:
+        root = Path(tmp)
+        copy = root / "mcd_runtime_bootstrap.py"
+        copy.write_bytes(bridge_path.read_bytes())
+        install = root / "install"
+        (install / "etc").mkdir(parents=True)
+        (install / "var").mkdir()
+        config = install / "etc" / "mcd.toml"
+        config.write_text("[runtime]\n", encoding="utf-8")
+        result = _run(
+            [
+                python,
+                str(copy),
+                "--capture-profile-authority",
+                "--install-dir",
+                str(install),
+                "--config",
+                str(config),
+                "--json",
+            ],
+            cwd=root,
+        )
+        try:
+            payload = json.loads(result.stdout)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("self-contained bridge returned invalid JSON") from exc
+        if not isinstance(payload, dict) or payload.get("schema") != "mcd-profile-authority-probe-v1":
+            raise RuntimeError("self-contained bridge returned an invalid authority receipt")
+        return {
+            "status": "passed",
+            "external_probe_required": False,
+            "capture_schema": payload["schema"],
+            "selection_exists": bool(payload.get("selection_exists")),
+        }
+
+
 def _cfg(root: Path) -> SimpleNamespace:
     return SimpleNamespace(
         state_db_path=str(root / "install" / "var" / "state.db"),
@@ -142,6 +180,10 @@ def main(argv: list[str] | None = None) -> int:
         raise RuntimeError(f"runtime-only archive is missing required import files: {missing_runtime_files}")
 
     bridge = _load_bridge()
+    bridge_self_contained = _self_contained_bridge_capture(
+        args.python,
+        Path(__file__).with_name("mcd_runtime_bootstrap.py"),
+    )
     worker: subprocess.Popen[str] | None = None
     with tempfile.TemporaryDirectory(prefix="mcd-runtime-bridge-qa-") as tmp:
         root = Path(tmp)
@@ -446,6 +488,7 @@ def main(argv: list[str] | None = None) -> int:
                 "cron_version_regression": "passed",
                 "cron_version_regression_test": "tests/test_mode_cron_wrappers.py",
             },
+            "bridge_self_contained": bridge_self_contained,
             "bridge_receipt": receipt,
             "taskstore_preserved": preserved,
             "worker_pid_preserved": worker.poll() is None,
