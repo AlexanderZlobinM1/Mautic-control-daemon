@@ -128,6 +128,27 @@ class _PortalTransportError(RuntimeError):
     """A delivery transport failure, kept separate from local job rejection."""
 
 
+def _artifact_download_failure(error: BaseException) -> RunnerExecutionError:
+    """Keep artifact failures typed without exposing URLs or transport data."""
+    cause = error.__cause__ if isinstance(error, _PortalTransportError) and error.__cause__ is not None else error
+    evidence: dict[str, Any] = {"stage": "artifact_download"}
+    if isinstance(cause, CommercialPortalError):
+        code = str(cause.code)[:120]
+        if cause.http_status is not None:
+            failure_class = "http"
+            evidence["http_status"] = cause.http_status
+        elif "size_mismatch" in code or "integrity" in code or "digest" in code:
+            failure_class = "digest_or_size"
+        else:
+            failure_class = "transport"
+        evidence.update({"failure_class": failure_class, "cause_code": code})
+    elif isinstance(cause, ValueError):
+        evidence.update({"failure_class": "pre_request_validation", "cause_code": _error_code(cause)})
+    else:
+        evidence.update({"failure_class": "transport", "cause_code": type(cause).__name__[:80] or "unknown"})
+    return RunnerExecutionError("self_hosted_mcd_artifact_unavailable", evidence=evidence)
+
+
 def _utc() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -1645,7 +1666,7 @@ class SelfHostedPortalWorker:
                     bootstrap = self._outbound("bootstrap_download", lambda: self._download_scenario_artifact(bootstrap_pin))
                 scenario = self._outbound("scenario_download", lambda: self._download_scenario_artifact(scenario_pin))
             except _PortalTransportError as exc:
-                return self._delivery_failure(command, cursor_next=cursor_next, error=ValueError("self_hosted_mcd_artifact_unavailable"))
+                return self._delivery_failure(command, cursor_next=cursor_next, error=_artifact_download_failure(exc))
             command_id = str(command.get("command_id") or "").strip()
             delivery_cursor = command.get("delivery_cursor")
             execution_key = ""

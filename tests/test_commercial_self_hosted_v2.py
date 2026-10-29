@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import json
 import sqlite3
@@ -27,6 +28,7 @@ from mcd_agent.commercial_self_hosted import (
     RunnerExecutionError,
     SelfHostedPortalWorker,
     SelfHostedScenarioExecutor,
+    _artifact_download_failure,
     validate_self_hosted_stage_receipt,
     validate_self_hosted_terminal_receipt,
 )
@@ -525,6 +527,85 @@ def test_activated_worker_polls_and_emits_terminal_receipt_v2(monkeypatch) -> No
             "scenario": job["scenario"],
         },
     )
+
+
+def test_v21_retry_with_same_artifact_pin_downloads_again_and_keeps_context_binding(monkeypatch) -> None:
+    portal_key = Ed25519PrivateKey.generate()
+    publisher_key = Ed25519PrivateKey.generate()
+    first, _bootstrap, scenario, keys = _job(portal_key, publisher_key, contract_version=SELF_HOSTED_MCD_CONTRACT_VERSION)
+    first["job_id"] = "job-first"
+    first["request_id"] = "request-first"
+    first["idempotency_key"] = "request-first:scenario-r1"
+    first["parameters"] = {"context_binding": "job-first:portal-ubuntu-24-04:scenario-r1"}
+    first["command_id"] = "mcd_command_job-first"
+    first["delivery_cursor"] = 6
+    second = copy.deepcopy(first)
+    second["job_id"] = "job-second"
+    second["request_id"] = "request-second"
+    second["idempotency_key"] = "request-second:scenario-r1"
+    second["command_id"] = "mcd_command_job-second"
+    second["delivery_cursor"] = 7
+    second["parameters"] = {"context_binding": "job-second:portal-ubuntu-24-04:scenario-r1"}
+
+    class Portal:
+        def __init__(self) -> None:
+            self.jobs = [first, second]
+            self.receipts: list[dict[str, object]] = []
+            self.downloads = 0
+
+        def pull_job(self, **_: object):
+            job = self.jobs.pop(0) if self.jobs else None
+            return {"cursor": str(job["delivery_cursor"] if job else 7), "job": job} if job else None
+
+        def send_receipt(self, receipt: dict[str, object], **_: object):
+            self.receipts.append(receipt)
+            return {}
+
+    with TemporaryDirectory() as directory:
+        state = CommercialState(str(Path(directory) / "commercial.sqlite"))
+        executor = SelfHostedScenarioExecutor(
+            state,
+            facts_reader=lambda **_: first["applicability"]["facts"],
+            runner=lambda **_: {"status": "succeeded"},
+        )
+        portal = Portal()
+
+        def download(uri: str, expected_size: int) -> bytes:
+            portal.downloads += 1
+            assert uri == first["scenario_artifact"]["artifact_uri"]
+            assert expected_size == len(scenario)
+            return scenario
+
+        monkeypatch.setattr("mcd_agent.commercial_self_hosted.download_external_artifact", download)
+        worker = SelfHostedPortalWorker(
+            portal,
+            executor,
+            installation_id="installation-1",
+            portal_keys={"portal-1": keys["portal-1"]},
+            publisher_keys={"publisher-1": keys["publisher-1"]},
+            context={},
+            commercial_key_id="commercial-key-1",
+            agent_id="agent-1",
+            host_fingerprint="sha256:" + "b" * 64,
+        )
+
+        assert worker.run_once() == {"status": "succeeded", "job_id": "job-first"}
+        assert worker.run_once() == {"status": "succeeded", "job_id": "job-second"}
+        assert portal.downloads == 2
+        assert [receipt["job_id"] for receipt in portal.receipts if receipt["schema"] == "mcd-self-hosted-terminal-receipt-v2"] == ["job-first", "job-second"]
+
+
+def test_artifact_download_failure_receipt_keeps_bounded_failure_class() -> None:
+    error = _artifact_download_failure(ValueError("self_hosted_mcd_artifact_uri_invalid"))
+    assert isinstance(error, RunnerExecutionError)
+    assert error.code == "self_hosted_mcd_artifact_unavailable"
+    assert error.evidence == {"stage": "artifact_download", "failure_class": "pre_request_validation", "cause_code": "self_hosted_mcd_artifact_uri_invalid"}
+
+    http = _artifact_download_failure(CommercialPortalError(stage="artifact.download", code="commercial_artifact_http_503", http_status=503, retryable=True))
+    assert http.evidence == {"stage": "artifact_download", "failure_class": "http", "cause_code": "commercial_artifact_http_503", "http_status": 503}
+
+    size = _artifact_download_failure(CommercialPortalError(stage="artifact.download", code="self_hosted_mcd_artifact_size_mismatch"))
+    assert size.evidence == {"stage": "artifact_download", "failure_class": "digest_or_size", "cause_code": "self_hosted_mcd_artifact_size_mismatch"}
 
 
 def test_v2_external_artifact_execution_has_exact_binding_and_no_handlers() -> None:
