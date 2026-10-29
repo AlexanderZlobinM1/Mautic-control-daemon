@@ -479,6 +479,11 @@ config на его profile baseline и только после этого при
    verifies the exact archive/manifest, uses the same update lease and
    scheduler barrier, installs and imports the wheel before the atomic source
    switch, retains bounded rollback material, and records a bootstrap receipt.
+   The bridge is delivered as the detached HTTPS artifact
+   `mcd-runtime-<version>.bridge.py`; `mcd-runtime-bridge-package-v1` binds
+   its SHA-256, source commit, runtime archive SHA, runtime manifest SHA, and
+   bridge-QA sidecar SHA. The host accepts it only after exact SHA checks and
+   runs the bridge locally; the runtime archive remains unchanged.
    The sidecar must accept the complete valid split TOML graph, including
    array-of-table sections, while never writing configuration.
    The MCD runtime always supplies an MCD-owned default
