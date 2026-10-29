@@ -86,6 +86,30 @@ def test_activation_ignores_legacy_portal_artifact_trust() -> None:
         assert state.get("portal_artifact_signing_keys") is None
 
 
+def test_activation_binding_is_atomic_on_persistence_failure() -> None:
+    with TemporaryDirectory() as directory:
+        state = CommercialState(str(Path(directory) / "commercial.sqlite"))
+        client = PortalClient(state, activation_transport=lambda *_: {
+            "schema": "portal-mcd-activation-response-v1",
+            "contract_version": "1.0",
+            "agent_id": "agent-fixture-atomic",
+            "agent_credential": "credential-atomic",
+            "portal": {},
+            "commercial_key": {"commercial_key_id": "commercial-atomic", "unsupported": {1, 2}},
+        })
+        try:
+            client.activate("https://portal.example.test", "activation", "1.5.257")
+        except TypeError:
+            pass
+        else:
+            raise AssertionError("activation persistence failure must be surfaced")
+        assert state.get("portal_api_base") is None
+        assert state.get("portal_agent_credential") is None
+        assert state.get("agent_id") is None
+        assert state.get("host_fingerprint") is None
+        assert state.get("commercial_key_id") is None
+
+
 def test_trust_update_is_atomic_idempotent_and_rejects_stale_revision() -> None:
     with TemporaryDirectory() as directory:
         state = CommercialState(str(Path(directory) / "commercial.sqlite"))

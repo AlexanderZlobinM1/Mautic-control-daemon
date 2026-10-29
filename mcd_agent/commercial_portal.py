@@ -701,6 +701,19 @@ class CommercialState:
         with sqlite3.connect(self.path) as db:
             db.execute("INSERT INTO commercial_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, json.dumps(value, ensure_ascii=True, sort_keys=True)))
 
+    def put_many(self, values: Mapping[str, Any], *, delete_keys: tuple[str, ...] = ()) -> None:
+        """Commit a related state transition as one durable transaction."""
+        with sqlite3.connect(self.path, timeout=30) as db:
+            db.execute("BEGIN IMMEDIATE")
+            for key in delete_keys:
+                db.execute("DELETE FROM commercial_meta WHERE key=?", (str(key),))
+            for key, value in values.items():
+                db.execute(
+                    "INSERT INTO commercial_meta(key,value) VALUES(?,?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (str(key), json.dumps(value, ensure_ascii=True, sort_keys=True)),
+                )
+
     def delete(self, key: str) -> None:
         with sqlite3.connect(self.path) as db:
             db.execute("DELETE FROM commercial_meta WHERE key=?", (str(key),))
@@ -1160,21 +1173,23 @@ class PortalClient:
             raise CommercialPortalError(stage="activation", code="commercial_activation_response_schema_invalid")
         if not result.get("agent_id") or not result.get("agent_credential") or not isinstance(result.get("portal"), dict):
             raise CommercialPortalError(stage="activation", code="commercial_activation_response_fields_invalid")
-        self.state.put("portal_api_base", base_url.rstrip("/") + "/api/v1/commercial")
-        self.state.put("portal_agent_credential", result["agent_credential"])
-        self.state.put("agent_id", result["agent_id"])
-        self.state.put("host_fingerprint", host_fingerprint)
-        self.state.delete("portal_job_signing_keys")
         # Portal activation is authenticated by the HTTPS API credential and
         # host binding.  Legacy artifact-trust fields, including signing-key
         # material, are intentionally ignored.  Artifact integrity is checked
         # later by exact size/SHA-256 after authenticated HTTPS download.
         commercial_key = result.get("commercial_key") or result.get("commercial_key_metadata")
+        updates: dict[str, Any] = {
+            "portal_api_base": base_url.rstrip("/") + "/api/v1/commercial",
+            "portal_agent_credential": result["agent_credential"],
+            "agent_id": result["agent_id"],
+            "host_fingerprint": host_fingerprint,
+        }
         if isinstance(commercial_key, dict) and commercial_key.get("commercial_key_id"):
-            self.state.put("commercial_key_id", str(commercial_key["commercial_key_id"]))
-            self.state.put("commercial_key_metadata", _public_commercial_key_metadata(commercial_key))
+            updates["commercial_key_id"] = str(commercial_key["commercial_key_id"])
+            updates["commercial_key_metadata"] = _public_commercial_key_metadata(commercial_key)
         elif result.get("commercial_key_id"):
-            self.state.put("commercial_key_id", str(result["commercial_key_id"]))
+            updates["commercial_key_id"] = str(result["commercial_key_id"])
+        self.state.put_many(updates, delete_keys=("portal_job_signing_keys",))
         return {"status": "activated", "agent_id": result["agent_id"], "contract_version": CONTRACT_VERSION}
 
     def register_installation(self, *, local_identity: str, display_name: str, mautic_version: str, application_root_fingerprint: str, activation_state: str = "passive") -> dict[str, Any]:
