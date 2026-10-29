@@ -864,7 +864,7 @@ class ScenarioExecutor:
             delivery_receipt_emitted = emit(
                 "scenario_dispatch",
                 "succeeded",
-                {"status": "accepted", "artifact_delivery": delivery["receipt"]},
+                {"status": "accepted", "stage_selection": verified.get("stage_selection"), "artifact_delivery": delivery["receipt"]},
             )
             active_artifact = Path(delivery["artifact_path"]).read_bytes()
             if delivery_receipt_emitted:
@@ -872,8 +872,10 @@ class ScenarioExecutor:
             if self.runner is None:
                 raise ValueError("self_hosted_mcd_runner_unconfigured")
             result = self.runner(artifact=active_artifact, job=verified["job"], facts=facts)
-            emit("execution", "succeeded", result)
-            terminal = {**binding, "schema": SELF_HOSTED_MCD_TERMINAL_RECEIPT_SCHEMA, "contract_version": str(verified.get("contract_version") or SELF_HOSTED_MCD_CONTRACT_VERSION), "sequence": sequence + 1, "idempotency_key": f"{binding['job_id']}:terminal:{sequence + 1}", "status": "succeeded", "observed_at": _utc(), "started_at": started_at, "completed_at": _utc(), "result": _bounded_result(result), "rollback": "not_attempted"}
+            execution_result = dict(result) if isinstance(result, Mapping) else {"value": result}
+            execution_result["stage_selection"] = verified.get("stage_selection")
+            emit("execution", "succeeded", execution_result)
+            terminal = {**binding, "schema": SELF_HOSTED_MCD_TERMINAL_RECEIPT_SCHEMA, "contract_version": str(verified.get("contract_version") or SELF_HOSTED_MCD_CONTRACT_VERSION), "sequence": sequence + 1, "idempotency_key": f"{binding['job_id']}:terminal:{sequence + 1}", "status": "succeeded", "observed_at": _utc(), "started_at": started_at, "completed_at": _utc(), "result": _bounded_result(execution_result), "rollback": "not_attempted"}
             validate_self_hosted_terminal_receipt(terminal, binding=binding)
         except Exception as exc:
             evidence = getattr(exc, "evidence", None)

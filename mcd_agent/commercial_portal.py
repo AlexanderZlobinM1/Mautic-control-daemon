@@ -35,6 +35,12 @@ SELF_HOSTED_MCD_STAGE_IDS = frozenset({"scenario_dispatch", "execution"})
 SELF_HOSTED_MCD_STAGE_STATUSES = frozenset({"queued", "running", "waiting", "succeeded", "failed"})
 SELF_HOSTED_MCD_TERMINAL_STATUSES = frozenset({"succeeded", "failed"})
 SELF_HOSTED_MCD_ROLLBACK_STATUSES = frozenset({"not_attempted", "succeeded", "failed"})
+SELF_HOSTED_MCD_SCENARIO_STAGES = (
+    ("base_packages", "ensure_supported_base_packages"),
+    ("database_cache", "provision_database_and_cache"),
+    ("web_stack", "configure_web_and_vhost"),
+    ("mautic", "composer_install_current_mautic"),
+)
 PORTAL_MCD_ADOPT_CONTRACT_VERSION = "1.0"
 PORTAL_MCD_POLL_REQUEST_SCHEMA = "portal-mcd-poll-request-v1"
 PORTAL_MCD_POLL_RESPONSE_SCHEMA = "portal-mcd-poll-response-v1"
@@ -610,6 +616,27 @@ def verify_self_hosted_mcd_job(
     execution = job.get("execution")
     if not isinstance(execution, Mapping) or execution.get("primitive") != "scenario.apply" or execution.get("version") != "1.0":
         raise ValueError("self_hosted_mcd_execution_invalid")
+    stage_selection = job.get("stage_selection")
+    if contract_version == SELF_HOSTED_MCD_CONTRACT_VERSION:
+        if not isinstance(stage_selection, Mapping):
+            raise ValueError("self_hosted_mcd_stage_selection_missing")
+        expected_stages = {stage: (sequence, operation) for sequence, (stage, operation) in enumerate(SELF_HOSTED_MCD_SCENARIO_STAGES, 1)}
+        if set(stage_selection) != {"stage_id", "sequence", "operation", "depends_on"}:
+            raise ValueError("self_hosted_mcd_stage_selection_invalid")
+        stage_id = stage_selection.get("stage_id")
+        sequence = stage_selection.get("sequence")
+        operation = stage_selection.get("operation")
+        depends_on = stage_selection.get("depends_on")
+        if stage_id not in expected_stages or isinstance(sequence, bool) or not isinstance(sequence, int) or expected_stages[stage_id][0] != sequence or operation != expected_stages[stage_id][1] or not isinstance(depends_on, list):
+            raise ValueError("self_hosted_mcd_stage_selection_invalid")
+        expected_dependencies = [item[0] for item in SELF_HOSTED_MCD_SCENARIO_STAGES[: sequence - 1]]
+        if depends_on != expected_dependencies:
+            raise ValueError("self_hosted_mcd_stage_selection_order_invalid")
+        execution_stage = execution.get("stage")
+        if not isinstance(execution_stage, Mapping) or set(execution_stage) != {"stage_id", "sequence", "operation"} or dict(execution_stage) != {key: stage_selection[key] for key in ("stage_id", "sequence", "operation")}:
+            raise ValueError("self_hosted_mcd_execution_stage_mismatch")
+    elif stage_selection is not None:
+        raise ValueError("self_hosted_mcd_stage_selection_forbidden")
     issued_text = _require_contract_string(job.get("issued_at"), "self_hosted_mcd_job_time_invalid")
     expires_text = _require_contract_string(job.get("expires_at"), "self_hosted_mcd_job_time_invalid")
     try:
@@ -620,7 +647,7 @@ def verify_self_hosted_mcd_job(
     current = time.time() if now is None else float(now)
     if expires <= issued or current < issued - 60 or current >= expires:
         raise ValueError("self_hosted_mcd_job_expired_or_not_yet_valid")
-    return {"job": dict(job), "contract_version": str(contract_version), "scenario": scenario, "facts": facts, "bootstrap_artifact": bootstrap, "scenario_artifact": scenario_artifact, "job_id": identity["job_id"], "idempotency_key": identity["idempotency_key"], "host_fingerprint": host_fingerprint}
+    return {"job": dict(job), "contract_version": str(contract_version), "scenario": scenario, "facts": facts, "bootstrap_artifact": bootstrap, "scenario_artifact": scenario_artifact, "stage_selection": dict(stage_selection) if isinstance(stage_selection, Mapping) else None, "job_id": identity["job_id"], "idempotency_key": identity["idempotency_key"], "host_fingerprint": host_fingerprint}
 
 
 def verify_self_hosted_external_artifact(

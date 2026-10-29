@@ -125,6 +125,9 @@ def _job(portal: Ed25519PrivateKey, publisher: Ed25519PrivateKey, *, contract_ve
     }
     if contract_version == SELF_HOSTED_MCD_LEGACY_CONTRACT_VERSION:
         job["bootstrap_artifact"] = _artifact("bootstrap", "bootstrap-r1", bootstrap, publisher)
+    else:
+        job["stage_selection"] = {"stage_id": "base_packages", "sequence": 1, "operation": "ensure_supported_base_packages", "depends_on": []}
+        job["execution"]["stage"] = {"stage_id": "base_packages", "sequence": 1, "operation": "ensure_supported_base_packages"}
     unsigned = dict(job)
     unsigned.pop("portal_signature")
     job["portal_signature"] = {"algorithm": "ed25519", "key_id": "portal-1", "value": _b64(portal.sign(canonical_json(unsigned)))}
@@ -155,6 +158,56 @@ def test_v2_job_rejects_scenario_artifact_revision_mismatch() -> None:
         assert str(exc) == "self_hosted_mcd_scenario_revision_mismatch"
     else:
         raise AssertionError("scenario and artifact revisions must be immutable together")
+
+
+def test_v21_job_requires_ordered_stage_selection() -> None:
+    portal = Ed25519PrivateKey.generate()
+    publisher = Ed25519PrivateKey.generate()
+    job, _bootstrap, _scenario, keys = _job(portal, publisher, contract_version=SELF_HOSTED_MCD_CONTRACT_VERSION)
+    job.pop("stage_selection")
+    unsigned = dict(job)
+    unsigned.pop("portal_signature")
+    job["portal_signature"] = {"algorithm": "ed25519", "key_id": "portal-1", "value": _b64(portal.sign(canonical_json(unsigned)))}
+    try:
+        verify_self_hosted_mcd_job(
+            job,
+            {"portal-1": keys["portal-1"]},
+            expected_agent_id="agent-1",
+            expected_installation_id="installation-1",
+            expected_commercial_key_id="commercial-key-1",
+            expected_host_fingerprint="sha256:" + "b" * 64,
+        )
+    except ValueError as exc:
+        assert str(exc) == "self_hosted_mcd_stage_selection_missing"
+    else:
+        raise AssertionError("v2.1 full-plan jobs must not bypass explicit stage selection")
+
+
+def test_v21_job_rejects_stage_order_and_execution_mismatch() -> None:
+    portal = Ed25519PrivateKey.generate()
+    publisher = Ed25519PrivateKey.generate()
+    job, _bootstrap, _scenario, keys = _job(portal, publisher, contract_version=SELF_HOSTED_MCD_CONTRACT_VERSION)
+    job["stage_selection"] = {"stage_id": "database_cache", "sequence": 2, "operation": "provision_database_and_cache", "depends_on": []}
+    unsigned = dict(job)
+    unsigned.pop("portal_signature")
+    job["portal_signature"] = {"algorithm": "ed25519", "key_id": "portal-1", "value": _b64(portal.sign(canonical_json(unsigned)))}
+    try:
+        verify_self_hosted_mcd_job(job, {"portal-1": keys["portal-1"]}, expected_agent_id="agent-1", expected_installation_id="installation-1", expected_commercial_key_id="commercial-key-1", expected_host_fingerprint="sha256:" + "b" * 64)
+    except ValueError as exc:
+        assert str(exc) == "self_hosted_mcd_stage_selection_order_invalid"
+    else:
+        raise AssertionError("stage dependencies must be ordered")
+    job["stage_selection"]["depends_on"] = ["base_packages"]
+    job["execution"]["stage"]["operation"] = "wrong"
+    unsigned = dict(job)
+    unsigned.pop("portal_signature")
+    job["portal_signature"] = {"algorithm": "ed25519", "key_id": "portal-1", "value": _b64(portal.sign(canonical_json(unsigned)))}
+    try:
+        verify_self_hosted_mcd_job(job, {"portal-1": keys["portal-1"]}, expected_agent_id="agent-1", expected_installation_id="installation-1", expected_commercial_key_id="commercial-key-1", expected_host_fingerprint="sha256:" + "b" * 64)
+    except ValueError as exc:
+        assert str(exc) == "self_hosted_mcd_execution_stage_mismatch"
+    else:
+        raise AssertionError("execution stage metadata must match selection")
 
 
 def test_unsigned_v2_job_is_accepted_without_portal_signing_keys() -> None:
