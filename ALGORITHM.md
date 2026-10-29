@@ -1375,8 +1375,10 @@ commercial worker can start.
 #### Manual fallback for an existing commercial key
 
 If the normal Own-host bootstrap is unavailable, the operator may use the
-already-issued installation-bound commercial key through the MCD-owned manual
-fallback. The key is entered through a hidden prompt, stdin, or an explicit
+already-issued reusable commercial API key through the MCD-owned manual
+fallback. One key may register unlimited independent external OWH MCD
+connections; each registration has its own instance/activation state. The key
+is entered through a hidden prompt, stdin, or an explicit
 CLI argument for automation; it is never printed or included in receipts.
 MCD stores it in the existing mode-0600 `CommercialState`, sends the existing
 passive installation registration, and records
