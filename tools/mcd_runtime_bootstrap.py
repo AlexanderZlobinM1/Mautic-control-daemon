@@ -27,9 +27,10 @@ input for the bridge only; the active supervisor imports the installed wheel.
 from __future__ import annotations
 
 import argparse
+import ast
+import base64
 from contextlib import contextmanager
 import hashlib
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -447,21 +448,164 @@ def _backup_lock_probe(install_dir: Path, config: Path) -> dict[str, Any]:
     return {"enabled": bool(payload.get("enabled")), "active": False}
 
 
-def _capture_profile_authority(install_dir: Path, config: Path) -> dict[str, Any]:
-    """Capture through the co-transported, stdlib-only authority sidecar."""
+_PROFILE_AUTHORITY_SCHEMA = "mcd-profile-authority-probe-v1"
+_PROFILE_SELECTION_FILE = "hardware-profile-selection.json"
 
-    probe_path = Path(__file__).with_name("mcd_profile_authority_probe.py")
-    if not probe_path.is_file():
-        raise BridgeError(f"profile-authority probe sidecar is missing: {probe_path}")
-    spec = importlib.util.spec_from_file_location("mcd_profile_authority_probe_bridge", probe_path)
-    if spec is None or spec.loader is None:
-        raise BridgeError(f"profile-authority probe sidecar cannot load: {probe_path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+
+def _profile_strip_toml_comment(line: str) -> str:
+    quote = ""
+    escaped = False
+    for index, char in enumerate(line):
+        if quote == '"':
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quote = ""
+        elif quote == "'":
+            if char == "'":
+                quote = ""
+        elif char in {'"', "'"}:
+            quote = char
+        elif char == "#":
+            return line[:index]
+    if quote:
+        raise BridgeError("unterminated string while reading include.files")
+    return line
+
+
+def _profile_array_depth(value: str) -> int:
+    depth = 0
+    quote = ""
+    escaped = False
+    for char in value:
+        if quote == '"':
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quote = ""
+        elif quote == "'":
+            if char == "'":
+                quote = ""
+        elif char in {'"', "'"}:
+            quote = char
+        elif char == "[":
+            depth += 1
+        elif char == "]":
+            depth -= 1
+            if depth < 0:
+                raise BridgeError("malformed include.files array")
+    if quote:
+        raise BridgeError("unterminated string in include.files array")
+    return depth
+
+
+def _profile_include_files(config: Path) -> list[Path]:
     try:
-        return module.capture(install_dir=install_dir, config=config)
-    except Exception as exc:  # noqa: BLE001 - convert probe failures to bridge fail-closed errors
-        raise BridgeError(f"profile-authority probe failed: {exc}") from exc
+        text = config.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise BridgeError(f"cannot read declared config file {config}: {exc}") from exc
+    section = ""
+    value_parts: list[str] | None = None
+    values: list[str] | None = None
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        clean = _profile_strip_toml_comment(lines[index]).strip()
+        index += 1
+        if not clean:
+            continue
+        if clean.startswith("["):
+            match = re.fullmatch(
+                r"(?:\[\s*([A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*)\s*\]|"
+                r"\[\[\s*([A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*)\s*\]\])",
+                clean,
+            )
+            if not match:
+                raise BridgeError(f"malformed TOML section in {config}")
+            section = match.group(1) or match.group(2)
+            continue
+        if section != "include":
+            continue
+        if "=" not in clean:
+            raise BridgeError(f"malformed include declaration in {config}")
+        key, first_value = clean.split("=", 1)
+        if key.strip() != "files":
+            continue
+        if value_parts is not None:
+            raise BridgeError(f"duplicate include.files declaration in {config}")
+        value_parts = [first_value.strip()]
+        depth = _profile_array_depth(value_parts[0])
+        while depth > 0 and index < len(lines):
+            value_parts.append(_profile_strip_toml_comment(lines[index]).strip())
+            index += 1
+            depth = _profile_array_depth("\n".join(value_parts))
+        if depth != 0:
+            raise BridgeError(f"unterminated include.files array in {config}")
+        try:
+            parsed = ast.literal_eval("\n".join(value_parts))
+        except (SyntaxError, ValueError) as exc:
+            raise BridgeError(f"malformed include.files value in {config}") from exc
+        if not isinstance(parsed, list) or any(not isinstance(item, str) or not item.strip() for item in parsed):
+            raise BridgeError(f"include.files must be a non-empty-string array in {config}")
+        values = [item.strip() for item in parsed]
+    if value_parts is None:
+        return []
+    return [
+        (config.parent / item).resolve() if not Path(item).is_absolute() else Path(item).resolve()
+        for item in values or []
+    ]
+
+
+def _profile_config_files(config: Path) -> list[dict[str, Any]]:
+    if not config.is_file():
+        raise BridgeError(f"declared config file is missing: {config}")
+    files: list[dict[str, Any]] = []
+    seen: set[Path] = set()
+
+    def visit(path: Path) -> None:
+        resolved = path.resolve()
+        if resolved in seen:
+            return
+        seen.add(resolved)
+        files.append({"path": str(resolved), "exists": resolved.is_file()})
+        for child in _profile_include_files(resolved):
+            if not child.is_file():
+                raise BridgeError(f"declared include file is missing: {child}")
+            visit(child)
+
+    visit(config)
+    return files
+
+
+def _profile_mutable_config_path(config: Path) -> Path:
+    direct = _profile_include_files(config)
+    existing = [path for path in direct if path.is_file()]
+    return existing[-1] if existing else config
+
+
+def _capture_profile_authority(install_dir: Path, config: Path) -> dict[str, Any]:
+    """Capture profile authority without a co-transported probe sidecar."""
+    files = _profile_config_files(config)
+    selection_path = install_dir / "var" / _PROFILE_SELECTION_FILE
+    exists = selection_path.is_file()
+    raw = selection_path.read_bytes() if exists else b""
+    return {
+        "schema": _PROFILE_AUTHORITY_SCHEMA,
+        "read_only": True,
+        "capture_phase": "pre_runtime_install",
+        "install_dir": str(install_dir),
+        "config_path": str(config),
+        "config_mutable_path": str(_profile_mutable_config_path(config)),
+        "config_files": files,
+        "selection_path": str(selection_path),
+        "selection_exists": exists,
+        "selection_sha256": _sha256(selection_path) if exists else "",
+        "selection_bytes_base64": base64.b64encode(raw).decode("ascii"),
+    }
 
 
 def _pause_path(install_dir: Path) -> Path:

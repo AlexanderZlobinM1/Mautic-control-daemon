@@ -62,7 +62,9 @@ def test_bootstrap_capture_preserves_absent_selection_state(tmp_path):
 
 
 def test_bootstrap_capture_cli_is_read_only_and_legacy_compatible(tmp_path):
-    bridge_path = Path(__file__).resolve().parents[1] / "tools" / "mcd_runtime_bootstrap.py"
+    source_bridge_path = Path(__file__).resolve().parents[1] / "tools" / "mcd_runtime_bootstrap.py"
+    bridge_path = tmp_path / "mcd_runtime_bootstrap.py"
+    bridge_path.write_bytes(source_bridge_path.read_bytes())
     install = tmp_path / "mcd"
     entrypoint = install / "etc" / "mcd.toml"
     entrypoint.parent.mkdir(parents=True)
