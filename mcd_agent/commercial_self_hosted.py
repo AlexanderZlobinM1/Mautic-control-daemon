@@ -1056,6 +1056,9 @@ class SelfHostedPortalWorker:
         etag = str(settings.get("etag") or "") if isinstance(settings, Mapping) else ""
         if values is None or etag != standalone_settings_etag(values):
             raise ValueError("commercial_standalone_settings_etag_invalid")
+        # Legacy callers may still provide the retired agent signature. Never
+        # let it enter the durable inventory hash or outbound envelope.
+        inventory.pop("agent_signature", None)
         prepare = getattr(self.executor.state, "prepare_inventory_snapshot", None)
         if not callable(prepare):
             raise ValueError("commercial_inventory_state_unavailable")
@@ -1065,7 +1068,6 @@ class SelfHostedPortalWorker:
         # Keep request identity stable for retries of the same durable
         # revision, while excluding it from the durable content hash.
         inventory["request_id"] = f"inventory-{revision}-{durable_hash[7:]}"
-        inventory.pop("agent_signature", None)
         # The inventory snapshot and noop consumer must use durable values
         # across restart; do not recompute a second settings hash in the worker.
         self.executor.state.put(
@@ -1083,9 +1085,6 @@ class SelfHostedPortalWorker:
         if adopted.get(installation_id):
             return True
         inventory = self._inventory(installation_id)
-        signer = getattr(self.client, "_agent_signed", None)
-        if callable(signer) and not inventory.get("agent_signature"):
-            inventory = signer(inventory)
         try:
             self._outbound("adopt", lambda: self.client.adopt(installation_id=installation_id, inventory=inventory))
         except _PortalTransportError:
@@ -1101,9 +1100,6 @@ class SelfHostedPortalWorker:
         if not callable(getattr(self.client, "send_inventory", None)) or self.inventory_provider is None:
             return True
         inventory = self._inventory(installation_id)
-        signer = getattr(self.client, "_agent_signed", None)
-        if callable(signer) and not inventory.get("agent_signature"):
-            inventory = signer(inventory)
         state = self.executor.state.get("commercial_inventory_state_v1")
         installations = state.get("installations") if isinstance(state, Mapping) else None
         record = installations.get(str(installation_id)) if isinstance(installations, Mapping) else None
