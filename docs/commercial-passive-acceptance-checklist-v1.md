@@ -45,7 +45,8 @@ mcd-cli commercial --config "$MCD_CONFIG" activate \
 
 Expected activation evidence is redacted JSON containing:
 `schema=portal-mcd-activation-response-v1`, `contract_version=1.0`, one
-`agent_id`, credential expiry, and Portal job signing keys. Never print or
+`agent_id`, and credential expiry. No Portal job signing key is required or
+persisted. Never print or
 persist the raw activation code or credential in evidence.
 
 Register the one disposable installation in passive state:
@@ -76,23 +77,19 @@ The following must remain unchanged throughout acceptance:
 - corporate MCC configuration and credentials;
 - standalone configuration and behavior.
 
-Any missing Portal URL, credential/host binding, agent/install identity, or
-Portal job signing key is a typed `disabled` status and blocks the outbound
-worker. Portal artifact trust is not activation material and its absence must
-not disable Portal polling, adoption, inventory, settings, noop, or receipt
-delivery. It is required only when MCD validates a delivered Portal-signed
-bootstrap or scenario artifact; a missing/unknown/revoked key must produce the
-typed `self_hosted_mcd_artifact_signer_unknown` or
-`self_hosted_mcd_artifact_signer_revoked` operation failure and a durable failed
-terminal receipt. A legacy `portal_mcc_publisher_keys` map is accepted only as
-a deprecated fallback while canonical Portal trust is absent.
+Any missing Portal URL, credential/host binding, or agent/install identity is a
+typed `disabled` status and blocks the outbound worker. Portal polling,
+adoption, inventory, settings, noop, receipt delivery and job admission use
+only the commercial API key over HTTPS. Downloaded artifacts are accepted only
+when size and SHA-256 match the immutable pin/catalog entry; no Portal or
+publisher signing key is required.
 
 ## 4. Portal-only no-op job and receipt
 
 Portal delivers one harmless bounded scenario through
 `portal-mcd-job-delivery-v1`. The package must contain:
 
-- exact Portal artifact digest, immutable revision and artifact signature;
+- exact Portal artifact digest and immutable revision;
 - applicable MCD contract/capabilities;
 - `package.download.path` and short-lived `grant`;
 - installation and agent scope matching the registered identities.
@@ -101,10 +98,10 @@ Expected sequence:
 
 1. outbound HTTPS poll only to `https://portal.sales-snap.com`;
 2. exact artifact download through Portal grant;
-3. Portal job signature and Portal artifact trust verification;
+3. API-key-authenticated response validation and SHA-256 artifact verification;
 4. passive/no-op typed stages only;
 5. `mcd-onboarding-stage-receipt-v1` stage receipts;
-6. one signed `mcd-onboarding-terminal-receipt-v1`.
+6. one `mcd-onboarding-terminal-receipt-v1`.
 
 No direct MCC connection, MCC credential, cron mutation, scheduled Mautic work,
 or tenant mutation is permitted. Capture destination/request metadata without

@@ -9,7 +9,6 @@
     "agent_id",
     "portal_agent_credential",
     "commercial_key_id",
-    "portal_job_signing_keys",
     "installation_ids"
   ],
   "properties": {
@@ -20,12 +19,6 @@
     "portal_agent_credential": {"type": "string", "minLength": 1},
     "host_fingerprint": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
     "commercial_key_id": {"type": "string", "minLength": 1},
-    "portal_job_signing_keys": {
-      "oneOf": [
-        {"type": "object", "minProperties": 1, "additionalProperties": {"type": "string", "minLength": 1}},
-        {"type": "array", "minItems": 1, "items": {"type": "object", "required": ["algorithm", "key_id", "value"]}}
-      ]
-    },
     "installation_ids": {"type": "object", "minProperties": 1, "additionalProperties": {"type": "string", "minLength": 1}},
     "portal_artifact_trust_v1": {"type": "object", "minProperties": 1},
     "portal_registration_id": {"type": "string"},

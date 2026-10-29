@@ -728,7 +728,7 @@ class ScenarioExecutor:
         return observed
 
     def run(self, job: Mapping[str, Any], *, portal_keys: Mapping[str, str], publisher_keys: Mapping[str, Any], context: Mapping[str, Any], expected_agent_id: str, expected_installation_id: str, expected_commercial_key_id: str, expected_host_fingerprint: str, bootstrap_artifact: bytes | None, scenario_artifact: bytes, receipt_sink: Callable[[dict[str, Any]], Any] | None = None) -> dict[str, Any]:
-        verified = verify_self_hosted_mcd_job(job, portal_keys, expected_agent_id=expected_agent_id, expected_installation_id=expected_installation_id, expected_commercial_key_id=expected_commercial_key_id, expected_host_fingerprint=expected_host_fingerprint)
+        verified = verify_self_hosted_mcd_job(job, {}, expected_agent_id=expected_agent_id, expected_installation_id=expected_installation_id, expected_commercial_key_id=expected_commercial_key_id, expected_host_fingerprint=expected_host_fingerprint)
         binding = _binding_from_verified(verified)
         job_id = binding["job_id"]
         job_digest = hashlib.sha256(canonical_json(dict(job))).hexdigest()

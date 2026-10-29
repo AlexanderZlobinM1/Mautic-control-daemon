@@ -155,6 +155,22 @@ def test_v2_job_rejects_scenario_artifact_revision_mismatch() -> None:
         raise AssertionError("scenario and artifact revisions must be immutable together")
 
 
+def test_unsigned_v2_job_is_accepted_without_portal_signing_keys() -> None:
+    portal = Ed25519PrivateKey.generate()
+    publisher = Ed25519PrivateKey.generate()
+    job, _bootstrap, _scenario, _keys = _job(portal, publisher)
+    job.pop("portal_signature", None)
+    verified = verify_self_hosted_mcd_job(
+        job,
+        {},
+        expected_agent_id="agent-1",
+        expected_installation_id="installation-1",
+        expected_commercial_key_id="commercial-key-1",
+        expected_host_fingerprint="sha256:" + "b" * 64,
+    )
+    assert verified["job_id"] == "job-1"
+
+
 def _resign(job: dict[str, object], portal: Ed25519PrivateKey) -> None:
     unsigned = dict(job)
     unsigned.pop("portal_signature", None)

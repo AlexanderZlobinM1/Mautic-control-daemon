@@ -18,6 +18,7 @@ from mcd_agent.commercial_portal import (
     canonical_json,
     inventory_durable_hash,
     standalone_settings_etag,
+    verify_portal_mcd_attach_response,
     verify_portal_mcd_poll_response,
 )
 from mcd_agent.commercial_self_hosted import SelfHostedPortalWorker
@@ -199,6 +200,49 @@ def test_exact_poll_envelope_is_mcd_to_portal_and_response_is_signed():
     assert parsed["commands"][0]["command_id"] == "noop-1"
 
 
+def test_unsigned_poll_response_is_accepted_without_portal_signing_keys():
+    binding = {"agent_id": "agent-1", "installation_id": "installation-1", "host_fingerprint": "sha256:" + "a" * 64, "commercial_key_id": "commercial-key-1"}
+    response = {
+        "schema": "portal-mcd-poll-response-v1",
+        "contract_version": "1.0",
+        "request_id": "request-unsigned",
+        "idempotency_key": "poll-unsigned",
+        "binding": binding,
+        "next_cursor": "cursor-unsigned",
+        "commands": [],
+        "retry_after_ms": 0,
+    }
+    parsed = verify_portal_mcd_poll_response(
+        response,
+        public_keys={},
+        expected_request_id="request-unsigned",
+        expected_idempotency_key="poll-unsigned",
+        expected_binding=binding,
+    )
+    assert parsed == {"next_cursor": "cursor-unsigned", "commands": [], "retry_after_ms": 0}
+
+
+def test_unsigned_attach_response_is_accepted_without_portal_signing_keys():
+    binding = {"agent_id": "agent-1", "installation_id": "installation-1", "host_fingerprint": "sha256:" + "a" * 64, "commercial_key_id": "commercial-key-1"}
+    response = {
+        "schema": "portal-mcd-attach-v1",
+        "contract_version": "1.0",
+        "request_id": "request-unsigned",
+        "idempotency_key": "adopt-unsigned",
+        "binding": binding,
+        "status": "attached",
+        "connection": {"status": "active", "channel_contract": "1.0"},
+        "inventory": {"schema": "portal-mcd-inventory-snapshot-v1", "complete": True},
+    }
+    assert verify_portal_mcd_attach_response(
+        response,
+        public_keys={},
+        expected_request_id="request-unsigned",
+        expected_idempotency_key="adopt-unsigned",
+        expected_binding=binding,
+    ) == response
+
+
 def test_portal_client_posts_poll_envelope_and_keeps_cursor_until_worker_commit(tmp_path):
     private = Ed25519PrivateKey.generate()
     public = base64.urlsafe_b64encode(private.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)).rstrip(b"=").decode()
@@ -210,6 +254,7 @@ def test_portal_client_posts_poll_envelope_and_keeps_cursor_until_worker_commit(
     state.put("commercial_key_id", "commercial-key-1")
     state.put("portal_job_signing_keys", {"portal-1": public})
     captured = {}
+    state = CommercialState(str(tmp_path / "commercial.sqlite"))
     client = PortalClient(state)
 
     def fake_request(method, path, payload, idempotency_key):
@@ -237,6 +282,35 @@ def test_portal_client_posts_poll_envelope_and_keeps_cursor_until_worker_commit(
     assert captured["payload"]["direction"] == "mcd_to_portal"
     assert captured["payload"]["wait_ms"] == 30_000
     assert state.get("commercial_portal_cursor") is None
+
+
+def test_portal_client_accepts_unsigned_poll_and_does_not_read_signing_state(tmp_path):
+    state = CommercialState(str(tmp_path / "commercial.sqlite"))
+    state.put("portal_api_base", "https://portal.example/api/v1/commercial")
+    state.put("portal_agent_credential", "credential")
+    state.put("agent_id", "agent-1")
+    state.put("host_fingerprint", "sha256:" + "a" * 64)
+    state.put("commercial_key_id", "commercial-key-1")
+    state.put("portal_job_signing_keys", {"legacy": "must-be-scrubbed"})
+    state = CommercialState(str(tmp_path / "commercial.sqlite"))
+    client = PortalClient(state)
+
+    def fake_request(_method, _path, payload, idempotency_key):
+        assert idempotency_key == payload["idempotency_key"]
+        return {
+            "schema": "portal-mcd-poll-response-v1",
+            "contract_version": "1.0",
+            "request_id": payload["request_id"],
+            "idempotency_key": payload["idempotency_key"],
+            "binding": payload["binding"],
+            "next_cursor": "cursor-unsigned",
+            "commands": [],
+            "retry_after_ms": 0,
+        }
+
+    client._request = fake_request
+    assert client.pull_job(installation_id="installation-1", cursor="", wait_seconds=30) is None
+    assert state.get("portal_job_signing_keys") is None
 
 
 def test_stage2_adoption_and_batch_commands_are_durable_and_ordered(tmp_path):

@@ -167,12 +167,6 @@ def _host_fingerprint() -> str:
     return "sha256:" + hashlib.sha256(socket.gethostname().encode()).hexdigest()
 
 
-def _without_signature(job: Mapping[str, Any]) -> dict[str, Any]:
-    result = dict(job)
-    result.pop("portal_signature", None)
-    return result
-
-
 def _require_https(url: str) -> None:
     if not str(url).lower().startswith("https://"):
         raise ValueError("commercial_portal_https_required")
@@ -202,8 +196,8 @@ def build_portal_mcd_poll_request(*, request_id: str, idempotency_key: str, bind
     }
 
 
-def verify_portal_mcd_poll_response(response: Mapping[str, Any], *, public_keys: Mapping[str, str], expected_request_id: str, expected_idempotency_key: str, expected_binding: Mapping[str, str]) -> dict[str, Any]:
-    """Validate and authenticate the signed Portal poll response."""
+def verify_portal_mcd_poll_response(response: Mapping[str, Any], *, public_keys: Mapping[str, str] | None = None, expected_request_id: str, expected_idempotency_key: str, expected_binding: Mapping[str, str]) -> dict[str, Any]:
+    """Validate an unsigned API-key-authenticated Portal poll response."""
     if response.get("schema") != PORTAL_MCD_POLL_RESPONSE_SCHEMA or response.get("contract_version") != PORTAL_MCD_ADOPT_CONTRACT_VERSION:
         raise ValueError("portal_mcd_poll_response_invalid")
     if response.get("request_id") != expected_request_id or response.get("idempotency_key") != expected_idempotency_key:
@@ -214,25 +208,14 @@ def verify_portal_mcd_poll_response(response: Mapping[str, Any], *, public_keys:
     next_cursor = response.get("next_command_cursor", response.get("next_cursor"))
     commands = response.get("commands")
     retry_after_ms = response.get("retry_after_ms")
-    signature = response.get("portal_signature")
-    if not ((isinstance(next_cursor, str) and next_cursor) or (isinstance(next_cursor, int) and not isinstance(next_cursor, bool) and next_cursor >= 0)) or not isinstance(commands, list) or any(not isinstance(command, Mapping) for command in commands) or isinstance(retry_after_ms, bool) or not isinstance(retry_after_ms, int) or retry_after_ms < 0 or retry_after_ms > PORTAL_MCD_MAX_BACKOFF_MS or not isinstance(signature, Mapping):
+    if not ((isinstance(next_cursor, str) and next_cursor) or (isinstance(next_cursor, int) and not isinstance(next_cursor, bool) and next_cursor >= 0)) or not isinstance(commands, list) or any(not isinstance(command, Mapping) for command in commands) or isinstance(retry_after_ms, bool) or not isinstance(retry_after_ms, int) or retry_after_ms < 0 or retry_after_ms > PORTAL_MCD_MAX_BACKOFF_MS:
         raise ValueError("portal_mcd_poll_response_invalid")
-    key_id = str(signature.get("key_id") or "")
-    key = public_keys.get(key_id)
-    if not key or signature.get("algorithm") != "ed25519":
-        raise ValueError("portal_mcd_poll_response_signer_unknown")
-    unsigned = dict(response)
-    unsigned.pop("portal_signature", None)
-    try:
-        Ed25519PublicKey.from_public_bytes(_unb64(key)).verify(_unb64(str(signature.get("value") or "")), canonical_json(unsigned))
-    except Exception as exc:
-        raise ValueError("portal_mcd_poll_response_signature_invalid") from exc
     _assert_no_contract_secrets(response)
     return {"next_cursor": str(next_cursor), "commands": [dict(command) for command in commands], "retry_after_ms": retry_after_ms}
 
 
-def verify_portal_mcd_attach_response(response: Mapping[str, Any], *, public_keys: Mapping[str, str], expected_request_id: str, expected_idempotency_key: str, expected_binding: Mapping[str, str]) -> dict[str, Any]:
-    """Validate the signed installation binding returned by Portal adoption."""
+def verify_portal_mcd_attach_response(response: Mapping[str, Any], *, public_keys: Mapping[str, str] | None = None, expected_request_id: str, expected_idempotency_key: str, expected_binding: Mapping[str, str]) -> dict[str, Any]:
+    """Validate the API-key-authenticated installation binding returned by adoption."""
     if response.get("schema") != "portal-mcd-attach-v1" or response.get("contract_version") != PORTAL_MCD_ADOPT_CONTRACT_VERSION:
         raise ValueError("portal_mcd_attach_response_invalid")
     if response.get("request_id") != expected_request_id or response.get("idempotency_key") != expected_idempotency_key:
@@ -242,25 +225,14 @@ def verify_portal_mcd_attach_response(response: Mapping[str, Any], *, public_key
         raise ValueError("portal_mcd_attach_response_binding_mismatch")
     connection = response.get("connection")
     inventory = response.get("inventory")
-    signature = response.get("portal_signature")
-    if response.get("status") not in {"attached", "already_attached"} or not isinstance(connection, Mapping) or connection.get("status") != "active" or connection.get("channel_contract") != PORTAL_MCD_ADOPT_CONTRACT_VERSION or not isinstance(inventory, Mapping) or inventory.get("schema") != "portal-mcd-inventory-snapshot-v1" or inventory.get("complete") is not True or not isinstance(signature, Mapping):
+    if response.get("status") not in {"attached", "already_attached"} or not isinstance(connection, Mapping) or connection.get("status") != "active" or connection.get("channel_contract") != PORTAL_MCD_ADOPT_CONTRACT_VERSION or not isinstance(inventory, Mapping) or inventory.get("schema") != "portal-mcd-inventory-snapshot-v1" or inventory.get("complete") is not True:
         raise ValueError("portal_mcd_attach_response_invalid")
-    key_id = str(signature.get("key_id") or "")
-    key = public_keys.get(key_id)
-    if not key or signature.get("algorithm") != "ed25519":
-        raise ValueError("portal_mcd_attach_response_signer_unknown")
-    unsigned = dict(response)
-    unsigned.pop("portal_signature", None)
-    try:
-        Ed25519PublicKey.from_public_bytes(_unb64(key)).verify(_unb64(str(signature.get("value") or "")), canonical_json(unsigned))
-    except Exception as exc:
-        raise ValueError("portal_mcd_attach_response_signature_invalid") from exc
     _assert_no_contract_secrets(response)
     return dict(response)
 
 
-def verify_signed_job(job: Mapping[str, Any], public_keys: Mapping[str, str], *, now: float | None = None) -> dict[str, Any]:
-    """Validate the immutable Portal job envelope before any executor call."""
+def verify_signed_job(job: Mapping[str, Any], public_keys: Mapping[str, str] | None = None, *, now: float | None = None) -> dict[str, Any]:
+    """Validate a Portal job envelope without a second signing-key layer."""
     import time
 
     if job.get("schema") != "portal-mcd-job-delivery-v1" or job.get("contract_version") != CONTRACT_VERSION:
@@ -268,7 +240,7 @@ def verify_signed_job(job: Mapping[str, Any], public_keys: Mapping[str, str], *,
     item = job.get("job")
     if not isinstance(item, dict):
         raise ValueError("commercial_job_missing")
-    required = ("job_id", "idempotency_key", "agent_id", "installation_id", "command", "issued_at", "expires_at", "nonce", "scope", "package", "portal_signature")
+    required = ("job_id", "idempotency_key", "agent_id", "installation_id", "command", "issued_at", "expires_at", "nonce", "scope", "package")
     if any(not item.get(key) for key in required):
         raise ValueError("commercial_job_fields_missing")
     current = time.time() if now is None else float(now)
@@ -283,8 +255,7 @@ def verify_signed_job(job: Mapping[str, Any], public_keys: Mapping[str, str], *,
         raise ValueError("commercial_job_expired_or_not_yet_valid")
     scope = item["scope"]
     package = item["package"]
-    signature = item["portal_signature"]
-    if not isinstance(scope, dict) or not isinstance(package, dict) or not isinstance(signature, dict):
+    if not isinstance(scope, dict) or not isinstance(package, dict):
         raise ValueError("commercial_job_shape_invalid")
     if item["scope"].get("agent_id") != item["agent_id"] or item["scope"].get("installation_id") != item["installation_id"]:
         raise ValueError("commercial_job_scope_mismatch")
@@ -304,14 +275,6 @@ def verify_signed_job(job: Mapping[str, Any], public_keys: Mapping[str, str], *,
     size = int(package.get("size_bytes") or 0)
     if size < 0 or size > MAX_ARTIFACT_BYTES:
         raise ValueError("commercial_package_size_invalid")
-    key_id = str(signature.get("key_id") or "")
-    key = public_keys.get(key_id)
-    if not key or signature.get("algorithm") != "ed25519":
-        raise ValueError("commercial_job_signer_unknown")
-    try:
-        Ed25519PublicKey.from_public_bytes(_unb64(key)).verify(_unb64(str(signature["value"])), canonical_json(_without_signature(item)))
-    except Exception as exc:
-        raise ValueError("commercial_job_signature_invalid") from exc
     applicability = package.get("applicability")
     if not isinstance(applicability, dict):
         raise ValueError("commercial_package_applicability_missing")
@@ -605,7 +568,7 @@ def verify_self_hosted_mcd_job(
     contract_version = job.get("contract_version")
     if job.get("schema") != SELF_HOSTED_MCD_JOB_SCHEMA or contract_version not in SELF_HOSTED_MCD_CONTRACT_VERSIONS:
         raise ValueError("self_hosted_mcd_job_invalid")
-    required = ("job_id", "request_id", "idempotency_key", "account_id", "commercial_key_id", "agent_id", "installation_id", "host_fingerprint", "scenario", "applicability", "scenario_artifact", "execution", "issued_at", "expires_at", "nonce", "portal_signature")
+    required = ("job_id", "request_id", "idempotency_key", "account_id", "commercial_key_id", "agent_id", "installation_id", "host_fingerprint", "scenario", "applicability", "scenario_artifact", "execution", "issued_at", "expires_at", "nonce")
     if any(not job.get(key) for key in required):
         raise ValueError("self_hosted_mcd_job_fields_missing")
     identity = {key: _require_contract_string(job.get(key), "self_hosted_mcd_job_invalid") for key in ("job_id", "request_id", "idempotency_key", "account_id", "commercial_key_id", "agent_id", "installation_id", "nonce")}
@@ -643,19 +606,6 @@ def verify_self_hosted_mcd_job(
     current = time.time() if now is None else float(now)
     if expires <= issued or current < issued - 60 or current >= expires:
         raise ValueError("self_hosted_mcd_job_expired_or_not_yet_valid")
-    signature = job.get("portal_signature")
-    if not isinstance(signature, Mapping) or signature.get("algorithm") != "ed25519":
-        raise ValueError("self_hosted_mcd_signature_invalid")
-    key_id = _require_contract_string(signature.get("key_id"), "self_hosted_mcd_signature_invalid")
-    key = portal_keys.get(key_id)
-    if not key:
-        raise ValueError("self_hosted_mcd_signer_unknown")
-    try:
-        unsigned = dict(job)
-        unsigned.pop("portal_signature", None)
-        Ed25519PublicKey.from_public_bytes(_unb64(str(key))).verify(_unb64(str(signature.get("value") or "")), canonical_json(unsigned))
-    except Exception as exc:
-        raise ValueError("self_hosted_mcd_signature_invalid") from exc
     return {"job": dict(job), "contract_version": str(contract_version), "scenario": scenario, "facts": facts, "bootstrap_artifact": bootstrap, "scenario_artifact": scenario_artifact, "job_id": identity["job_id"], "idempotency_key": identity["idempotency_key"], "host_fingerprint": host_fingerprint}
 
 
@@ -732,9 +682,10 @@ class CommercialState:
             db.execute("CREATE TABLE IF NOT EXISTS commercial_nonces (nonce TEXT PRIMARY KEY, seen_at REAL NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS commercial_receipts (job_id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS commercial_usage_sequences (metric TEXT PRIMARY KEY, value INTEGER NOT NULL)")
-            # Agent Ed25519 material is retired. Existing state is scrubbed on
-            # first open; Portal inventory/adopt use the commercial API key.
-            db.execute("DELETE FROM commercial_meta WHERE key IN ('agent_private_key','agent_key_id')")
+            # Agent and Portal signing material is retired. Existing state is
+            # scrubbed on first open; the commercial lane uses only the
+            # existing API credential over HTTPS and SHA-256 artifact checks.
+            db.execute("DELETE FROM commercial_meta WHERE key IN ('agent_private_key','agent_key_id','portal_job_signing_keys')")
         try:
             os.chmod(self.path, 0o600)
         except OSError:
@@ -1040,10 +991,8 @@ class PortalClient:
             backoff_ms=backoff_ms,
         )
         result = self._request("POST", f"agents/{agent_id}/installations/{installation_id}/poll", payload, idempotency_key=str(request_state["idempotency_key"]))
-        keys = self.state.get("portal_job_signing_keys")
         verified = verify_portal_mcd_poll_response(
             result,
-            public_keys=keys if isinstance(keys, dict) else {},
             expected_request_id=str(request_state["request_id"]),
             expected_idempotency_key=str(request_state["idempotency_key"]),
             expected_binding=binding,
@@ -1116,10 +1065,8 @@ class PortalClient:
         unsigned_inventory.pop("agent_signature", None)
         body = {"schema": "portal-mcd-adopt-request-v1", "contract_version": PORTAL_MCD_ADOPT_CONTRACT_VERSION, "request_id": request_id, "idempotency_key": idempotency_key, "binding": self._commercial_binding(installation_id), "inventory": unsigned_inventory}
         response = self._request("POST", f"agents/{body['binding']['agent_id']}/installations/{installation_id}/adopt", body, idempotency_key=idempotency_key)
-        portal_keys = self.state.get("portal_job_signing_keys")
         return verify_portal_mcd_attach_response(
             response,
-            public_keys=portal_keys if isinstance(portal_keys, dict) else {},
             expected_request_id=request_id,
             expected_idempotency_key=idempotency_key,
             expected_binding=body["binding"],
@@ -1165,14 +1112,11 @@ class PortalClient:
             raise CommercialPortalError(stage="activation", code="commercial_activation_response_schema_invalid")
         if not result.get("agent_id") or not result.get("agent_credential") or not isinstance(result.get("portal"), dict):
             raise CommercialPortalError(stage="activation", code="commercial_activation_response_fields_invalid")
-        signing_keys = result["portal"].get("job_signing_keys")
-        if not isinstance(signing_keys, list) or any(not isinstance(item, dict) or not item.get("key_id") or item.get("algorithm") != "ed25519" or not item.get("value") for item in signing_keys):
-            raise CommercialPortalError(stage="activation", code="commercial_activation_signing_keys_invalid")
         self.state.put("portal_api_base", base_url.rstrip("/") + "/api/v1/commercial")
         self.state.put("portal_agent_credential", result["agent_credential"])
         self.state.put("agent_id", result["agent_id"])
         self.state.put("host_fingerprint", host_fingerprint)
-        self.state.put("portal_job_signing_keys", {x["key_id"]: x["value"] for x in signing_keys})
+        self.state.delete("portal_job_signing_keys")
         artifact_trust = result["portal"].get("artifact_trust")
         artifact_signing_keys = result["portal"].get("artifact_signing_keys")
         if artifact_trust is not None:
@@ -1232,17 +1176,7 @@ class PortalClient:
             "application_root_fingerprint": str(application_root_fingerprint),
         }
         self.state.put("commercial_installation_metadata", metadata)
-        signing_keys = result.get("portal_job_signing_keys") or result.get("job_signing_keys")
-        if signing_keys is None and isinstance(result.get("portal"), dict):
-            signing_keys = result["portal"].get("job_signing_keys")
-        if isinstance(signing_keys, list):
-            signing_keys = {
-                str(item.get("key_id")): str(item.get("value"))
-                for item in signing_keys
-                if isinstance(item, Mapping) and item.get("key_id") and item.get("value")
-            }
-        if isinstance(signing_keys, dict) and signing_keys:
-            self.state.put("portal_job_signing_keys", signing_keys)
+        self.state.delete("portal_job_signing_keys")
         return result
 
     def send_usage(self, *, installation_id: str, metric: str, observed_at: str, raw_value: int,
