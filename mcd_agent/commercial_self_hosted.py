@@ -772,12 +772,6 @@ class ScenarioExecutor:
                 # Migrate a pre-execution-key record only for the original
                 # command. A distinct recovery command must execute once.
                 return dict(prior["terminal"])
-        if verified["bootstrap_artifact"] is not None:
-            if bootstrap_artifact is None:
-                raise ValueError("self_hosted_mcd_bootstrap_artifact_unavailable")
-            verify_self_hosted_external_artifact(verified["bootstrap_artifact"], bootstrap_artifact, publisher_keys, kind="bootstrap")
-        verify_self_hosted_external_artifact(verified["scenario_artifact"], scenario_artifact, publisher_keys, kind="scenario")
-        facts = self._local_facts(verified["facts"], context)
         started_at = _utc()
         sequence = 0
         runner_evidence: Mapping[str, Any] | None = None
@@ -802,6 +796,17 @@ class ScenarioExecutor:
             return True
 
         try:
+            # Admission failures after the signed envelope is verified must
+            # enter the same durable terminal path as runner failures.  In
+            # particular, a recovery command must not be cursor-acknowledged
+            # from the worker's outer exception handler while losing its
+            # command execution identity and terminal history.
+            if verified["bootstrap_artifact"] is not None:
+                if bootstrap_artifact is None:
+                    raise ValueError("self_hosted_mcd_bootstrap_artifact_unavailable")
+                verify_self_hosted_external_artifact(verified["bootstrap_artifact"], bootstrap_artifact, publisher_keys, kind="bootstrap")
+            verify_self_hosted_external_artifact(verified["scenario_artifact"], scenario_artifact, publisher_keys, kind="scenario")
+            facts = self._local_facts(verified["facts"], context)
             # Validate the exact frame/context compatibility before activation;
             # this only serializes and validates the request and never starts
             # the runner.
