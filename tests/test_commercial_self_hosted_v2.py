@@ -697,6 +697,67 @@ def test_v2_distinct_recovery_command_executes_once_per_command_identity() -> No
         assert calls == 2
 
 
+def test_v2_requeue_requires_exact_durable_terminal_binding() -> None:
+    portal = Ed25519PrivateKey.generate()
+    publisher = Ed25519PrivateKey.generate()
+    job, bootstrap, scenario, keys = _job(portal, publisher)
+    with TemporaryDirectory() as directory:
+        state = CommercialState(str(Path(directory) / "commercial.sqlite"))
+        executor = SelfHostedScenarioExecutor(
+            state,
+            facts_reader=lambda **_: job["applicability"]["facts"],
+            runner=lambda **_: {"status": "succeeded"},
+        )
+        terminal = executor.run(
+            job,
+            portal_keys={"portal-1": keys["portal-1"]},
+            publisher_keys={"publisher-1": keys["publisher-1"]},
+            context={},
+            expected_agent_id="agent-1",
+            expected_installation_id="installation-1",
+            expected_commercial_key_id="commercial-key-1",
+            expected_host_fingerprint="sha256:" + "b" * 64,
+            bootstrap_artifact=bootstrap,
+            scenario_artifact=scenario,
+            execution_key="mcd_command_job-1_retry_3:11",
+        )
+        worker = SelfHostedPortalWorker(
+            object(),
+            executor,
+            installation_id="installation-1",
+            portal_keys={"portal-1": keys["portal-1"]},
+            publisher_keys={"publisher-1": keys["publisher-1"]},
+            context={},
+            commercial_key_id="commercial-key-1",
+            agent_id="agent-1",
+            host_fingerprint="sha256:" + "b" * 64,
+        )
+        digest = hashlib.sha256(canonical_json(terminal)).hexdigest()
+        queued = worker.requeue_durable_terminal_receipt(
+            job_id="job-1",
+            command_id="mcd_command_job-1_retry_3",
+            delivery_cursor=11,
+            sequence=int(terminal["sequence"]),
+            idempotency_key=str(terminal["idempotency_key"]),
+            payload_sha256=digest,
+        )
+        assert queued["status"] == "queued"
+        assert state.get("commercial_self_hosted_pending_receipts") == [terminal]
+        try:
+            worker.requeue_durable_terminal_receipt(
+                job_id="job-1",
+                command_id="mcd_command_job-1_retry_3",
+                delivery_cursor=11,
+                sequence=int(terminal["sequence"]),
+                idempotency_key=str(terminal["idempotency_key"]),
+                payload_sha256="0" * 64,
+            )
+        except ValueError as exc:
+            assert str(exc) == "self_hosted_mcd_recovery_payload_mismatch"
+        else:
+            raise AssertionError("recovery must reject a mismatched durable payload digest")
+
+
 def test_v2_recovery_identity_is_derived_from_verified_command_when_cursor_is_text() -> None:
     portal = Ed25519PrivateKey.generate()
     publisher = Ed25519PrivateKey.generate()

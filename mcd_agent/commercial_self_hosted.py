@@ -741,6 +741,14 @@ class ScenarioExecutor:
             row = db.execute(f"SELECT payload FROM {_RUNS_TABLE} WHERE job_id=?", (job_id,)).fetchone()
         return json.loads(row[0]) if row else None
 
+    def durable_terminal(self, *, job_id: str, execution_key: str) -> dict[str, Any] | None:
+        """Return one exact terminal from the worker's durable execution history."""
+        prior = self._load(job_id)
+        executions = prior.get("executions") if isinstance(prior, Mapping) else None
+        saved = executions.get(execution_key) if isinstance(executions, Mapping) else None
+        terminal = saved.get("terminal") if isinstance(saved, Mapping) else None
+        return dict(terminal) if isinstance(terminal, Mapping) else None
+
     def _save(self, job_id: str, payload: Mapping[str, Any]) -> None:
         with sqlite3.connect(self.state.path) as db:
             db.execute(f"INSERT INTO {_RUNS_TABLE}(job_id,payload) VALUES(?,?) ON CONFLICT(job_id) DO UPDATE SET payload=excluded.payload", (job_id, json.dumps(payload, sort_keys=True)))
@@ -998,6 +1006,61 @@ class SelfHostedPortalWorker:
         if not any(str(item.get("idempotency_key") or "") == identity for item in pending):
             pending.append(dict(receipt))
         self.executor.state.put(_PENDING_KEY, pending)
+
+    def requeue_durable_terminal_receipt(
+        self,
+        *,
+        job_id: str,
+        command_id: str,
+        delivery_cursor: int,
+        sequence: int,
+        idempotency_key: str,
+        payload_sha256: str,
+    ) -> dict[str, Any]:
+        """Requeue one exact terminal already persisted by this worker."""
+        if not isinstance(job_id, str) or not job_id.strip():
+            raise ValueError("self_hosted_mcd_recovery_job_invalid")
+        if not isinstance(command_id, str) or not command_id.strip():
+            raise ValueError("self_hosted_mcd_recovery_command_invalid")
+        if not isinstance(delivery_cursor, int) or isinstance(delivery_cursor, bool) or delivery_cursor < 1:
+            raise ValueError("self_hosted_mcd_recovery_cursor_invalid")
+        if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < 1:
+            raise ValueError("self_hosted_mcd_recovery_sequence_invalid")
+        if not isinstance(idempotency_key, str) or not idempotency_key.strip():
+            raise ValueError("self_hosted_mcd_recovery_idempotency_invalid")
+        if not isinstance(payload_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", payload_sha256):
+            raise ValueError("self_hosted_mcd_recovery_payload_digest_invalid")
+        execution_key = f"{command_id}:{delivery_cursor}"
+        loader = getattr(self.executor, "durable_terminal", None)
+        terminal = loader(job_id=job_id, execution_key=execution_key) if callable(loader) else None
+        if not isinstance(terminal, Mapping):
+            raise ValueError("self_hosted_mcd_recovery_terminal_missing")
+        terminal = dict(terminal)
+        binding = {key: terminal.get(key) for key in ("job_id", "request_id", "account_id", "commercial_key_id", "agent_id", "installation_id", "host_fingerprint", "facts_digest", "scenario")}
+        try:
+            validate_self_hosted_terminal_receipt(terminal, binding=binding)
+        except (TypeError, ValueError, KeyError) as exc:
+            raise ValueError("self_hosted_mcd_recovery_terminal_invalid") from exc
+        if (
+            terminal.get("job_id") != job_id
+            or terminal.get("sequence") != sequence
+            or terminal.get("idempotency_key") != idempotency_key
+            or terminal.get("agent_id") != self.agent_id
+            or terminal.get("installation_id") != self._active_installation_id
+            or terminal.get("commercial_key_id") != self.commercial_key_id
+            or terminal.get("host_fingerprint") != self.host_fingerprint
+        ):
+            raise ValueError("self_hosted_mcd_recovery_binding_mismatch")
+        digest = hashlib.sha256(canonical_json(terminal)).hexdigest()
+        if digest != payload_sha256:
+            raise ValueError("self_hosted_mcd_recovery_payload_mismatch")
+        pending = self._pending()
+        if pending:
+            if any(str(item.get("idempotency_key") or "") != idempotency_key for item in pending):
+                raise ValueError("self_hosted_mcd_recovery_queue_busy")
+            return {"status": "already_queued", "job_id": job_id, "sequence": sequence, "idempotency_key": idempotency_key, "payload_sha256": digest}
+        self._queue(terminal)
+        return {"status": "queued", "job_id": job_id, "sequence": sequence, "idempotency_key": idempotency_key, "payload_sha256": digest}
 
     def _send_or_queue(self, receipt: dict[str, Any]) -> bool:
         if self._pending():

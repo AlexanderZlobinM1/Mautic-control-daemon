@@ -1331,6 +1331,14 @@ Portal-side state is reconciled. It never re-executes the runner or creates a
 replacement job. Release publication is performed by the dedicated `Publish
 MCD` process; MCC only registers/serves the catalog metadata used by MCD.
 
+If a historical runtime already lost a pending receipt after a non-2xx
+response, recovery may requeue only the exact terminal found in
+`commercial_self_hosted_runs`. The worker requires the exact job id, command id,
+delivery cursor, sequence, idempotency key, current installation binding and
+canonical payload SHA-256; any mismatch is rejected. Recovery queues the saved
+payload for normal worker delivery and never reconstructs it, starts the job, or
+changes the host.
+
 The commercial transport worker is a separate non-blocking Portal lane:
 `pull_job` → exact v2 job admission → pinned artifact download(s) → local facts
 guard → generic runner → ordered stage/terminal receipts. A 2.1 registered
