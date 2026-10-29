@@ -1045,12 +1045,18 @@ class PortalClient:
             backoff_ms=backoff_ms,
         )
         result = self._request("POST", f"agents/{agent_id}/installations/{installation_id}/poll", payload, idempotency_key=str(request_state["idempotency_key"]))
-        verified = verify_portal_mcd_poll_response(
-            result,
-            expected_request_id=str(request_state["request_id"]),
-            expected_idempotency_key=str(request_state["idempotency_key"]),
-            expected_binding=binding,
-        )
+        try:
+            verified = verify_portal_mcd_poll_response(
+                result,
+                expected_request_id=str(request_state["request_id"]),
+                expected_idempotency_key=str(request_state["idempotency_key"]),
+                expected_binding=binding,
+            )
+        except ValueError as exc:
+            code = str(exc)
+            if not re.fullmatch(r"[a-z0-9_]{1,120}", code):
+                code = "portal_mcd_poll_response_invalid"
+            raise CommercialPortalError(stage="poll.response_validation", code=code, retryable=False) from exc
         self.state.put("commercial_portal_poll_request", None)
         retry_after_ms = int(verified["retry_after_ms"])
         self.state.put("commercial_portal_server_retry_after", time.time() + (retry_after_ms / 1000.0))

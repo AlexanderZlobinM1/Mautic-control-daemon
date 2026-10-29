@@ -1124,6 +1124,9 @@ class SelfHostedPortalWorker:
     def _outbound(self, operation: str, call: Callable[[], Any]) -> Any:
         try:
             value = call()
+        except CommercialPortalError as exc:
+            retry_after = self._transport_failed(f"{operation}:{exc.code}")
+            raise _PortalTransportError(f"{operation}:{exc.code}:retry_after={retry_after:.3f}") from exc
         except Exception as exc:
             retry_after = self._transport_failed(operation)
             raise _PortalTransportError(f"{operation}:retry_after={retry_after:.3f}") from exc

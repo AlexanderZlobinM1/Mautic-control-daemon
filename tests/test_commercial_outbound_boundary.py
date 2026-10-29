@@ -11,6 +11,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from mcd_agent.commercial_portal import (
     PORTAL_MCD_POLL_REQUEST_SCHEMA,
+    CommercialPortalError,
     CommercialState,
     PortalClient,
     build_standalone_settings_snapshot,
@@ -311,6 +312,50 @@ def test_portal_client_accepts_unsigned_poll_and_does_not_read_signing_state(tmp
     client._request = fake_request
     assert client.pull_job(installation_id="installation-1", cursor="", wait_seconds=30) is None
     assert state.get("portal_job_signing_keys") is None
+
+
+def test_poll_response_validation_is_typed_and_bounded(tmp_path):
+    state = CommercialState(str(tmp_path / "commercial.sqlite"))
+    state.put("portal_api_base", "https://portal.example/api/v1/commercial")
+    state.put("portal_agent_credential", "credential")
+    state.put("agent_id", "agent-1")
+    state.put("host_fingerprint", "sha256:" + "a" * 64)
+    state.put("commercial_key_id", "commercial-key-1")
+    client = PortalClient(state)
+
+    def fake_request(_method, _path, payload, idempotency_key):
+        return {
+            "schema": "portal-mcd-poll-response-v1",
+            "contract_version": "1.0",
+            "request_id": payload["request_id"],
+            "idempotency_key": idempotency_key,
+            "binding": {**payload["binding"], "installation_id": "wrong-installation"},
+            "next_cursor": "cursor-10",
+            "commands": [],
+            "retry_after_ms": 0,
+        }
+
+    client._request = fake_request
+    with pytest.raises(CommercialPortalError) as raised:
+        client.pull_job(installation_id="installation-1", cursor="9", wait_seconds=30)
+    assert raised.value.stage == "poll.response_validation"
+    assert raised.value.code == "portal_mcd_poll_response_binding_mismatch"
+    assert raised.value.retryable is False
+    assert state.get("commercial_portal_poll_request")["cursor"] == "9"
+
+
+def test_worker_persists_typed_poll_diagnostic(tmp_path):
+    class Portal:
+        def pull_job(self, **_kwargs):
+            raise CommercialPortalError(
+                stage="poll.response_validation",
+                code="portal_mcd_poll_response_binding_mismatch",
+                retryable=False,
+            )
+
+    worker, state, _executor = _worker(tmp_path, Portal(), _Clock())
+    assert worker.run_once() == {"status": "backoff", "retry_after": 101.0}
+    assert state.get("commercial_portal_transport_v1")["last_error"] == "job_poll:portal_mcd_poll_response_binding_mismatch"
 
 
 def test_stage2_adoption_and_batch_commands_are_durable_and_ordered(tmp_path):
