@@ -1557,6 +1557,15 @@ script, argv, executable, sudo, пароль, ключ, token и подпись 
 исполнения. Generic primitive вызывается тем же внедрённым MCD handler, который
 использует локальные typed primitives; arbitrary shell route отсутствует.
 
+В релизе MCD 1.6.15 фактический inventory содержит только безопасные
+read-only-примитивы: `read_host_facts`, `check_prerequisites`, `check_web_php`,
+`check_mysql` и `check_redis` (каждый `version=1.0`,
+`execution=generic_primitive`, `mutates_state=false`, с собственным
+`input_schema_ref`). Вход этих примитивов обязан быть пустым объектом.
+Установка Mautic из архива пока не публикуется как generic capability: для неё
+нужен отдельный artifact-bound typed contract; Portal не может прислать такой
+шаг под видом произвольной generic-команды.
+
 Для generic job MCD сначала durable фиксирует `started` receipt, затем вызывает
 handler и durable фиксирует terminal result. Receipt sequence — монотонный,
 Portal idempotency — `{job_id}:{sequence}`. При недоступном Portal receipt

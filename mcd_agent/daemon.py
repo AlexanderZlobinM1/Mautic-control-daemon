@@ -74,6 +74,7 @@ from mcd_agent.cleanup_schedule import (
 from mcd_agent.cluster_assets import guard_cluster_assets
 from mcd_agent.custom_scripts import cached_custom_manifest_keys, cleanup_custom_cache, fetch_custom_manifest
 from mcd_agent.commercial_detector import PORTAL_LOCAL_FACTS_CAPABILITIES, build_applicability_facts_snapshot, read_normalized_local_facts
+from mcd_agent.commercial_primitives import build_capability_inventory, execute_generic_primitive
 from mcd_agent.db import MauticDB
 from mcd_agent.db_watchdog import collect_db_watchdog_snapshot, effective_db_watchdog_config
 from mcd_agent.email_counters import repair_campaign_email_counters
@@ -582,6 +583,13 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
                     snapshot["installation"] = dict(registration)
                 return snapshot
 
+            def capability_inventory(_installation_id: str) -> Mapping[str, Any]:
+                registration = _commercial_registration_descriptor(state, installations, _installation_id)
+                dns_name = str(registration.get("local_identity") or "").strip().lower()
+                if "." not in dns_name:
+                    raise ValueError("commercial_generic_identity_unavailable")
+                return build_capability_inventory(installation_id=_installation_id, dns_name=dns_name)
+
             worker = SelfHostedPortalWorker(
                 PortalClient(state),
                 SelfHostedScenarioExecutor(state, runner=runner.run),
@@ -594,6 +602,8 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
                 host_fingerprint=host_fingerprint,
                 inventory_provider=inventory_snapshot,
                 runtime_command_handler=handle_runtime_command,
+                capability_inventory_provider=capability_inventory,
+                generic_command_handler=execute_generic_primitive,
             )
         except Exception:
             disabled("commercial_worker_material_invalid")
