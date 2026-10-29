@@ -734,7 +734,24 @@ class ScenarioExecutor:
         binding = _binding_from_verified(verified)
         job_id = binding["job_id"]
         job_digest = hashlib.sha256(canonical_json(dict(job))).hexdigest()
-        execution_key = str(execution_key or f"job:{job_digest}").strip()
+        # The worker normally supplies command_id:delivery_cursor.  Derive it
+        # again from the verified envelope as a safety net: a valid Portal
+        # delivery must never fall back to the legacy job-only identity merely
+        # because a cursor arrived as a JSON string or an older caller omitted
+        # the optional helper argument.  A distinct recovery command must be
+        # allowed to execute once even when its job_id is unchanged.
+        if not execution_key:
+            command_id = str(job.get("command_id") or "").strip()
+            raw_cursor = job.get("delivery_cursor")
+            try:
+                delivery_cursor = int(raw_cursor) if raw_cursor is not None and not isinstance(raw_cursor, bool) else 0
+            except (TypeError, ValueError):
+                delivery_cursor = 0
+            if command_id and delivery_cursor > 0:
+                execution_key = f"{command_id}:{delivery_cursor}"
+            else:
+                execution_key = f"job:{job_digest}"
+        execution_key = str(execution_key).strip()
         if not execution_key or len(execution_key) > 512:
             raise ValueError("self_hosted_mcd_execution_key_invalid")
         prior = self._load(job_id)

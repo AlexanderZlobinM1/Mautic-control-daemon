@@ -560,6 +560,52 @@ def test_v2_distinct_recovery_command_executes_once_per_command_identity() -> No
         assert calls == 2
 
 
+def test_v2_recovery_identity_is_derived_from_verified_command_when_cursor_is_text() -> None:
+    portal = Ed25519PrivateKey.generate()
+    publisher = Ed25519PrivateKey.generate()
+    job, bootstrap, scenario, keys = _job(portal, publisher)
+    calls = 0
+
+    def runner(**_kwargs):
+        nonlocal calls
+        calls += 1
+        return {"status": "succeeded", "execution": calls}
+
+    with TemporaryDirectory() as directory:
+        state = CommercialState(str(Path(directory) / "commercial.sqlite"))
+        executor = SelfHostedScenarioExecutor(
+            state,
+            facts_reader=lambda **_: job["applicability"]["facts"],
+            runner=runner,
+        )
+        kwargs = dict(
+            portal_keys={"portal-1": keys["portal-1"]},
+            publisher_keys={"publisher-1": keys["publisher-1"]},
+            context={},
+            expected_agent_id="agent-1",
+            expected_installation_id="installation-1",
+            expected_commercial_key_id="commercial-key-1",
+            expected_host_fingerprint="sha256:" + "b" * 64,
+            bootstrap_artifact=bootstrap,
+            scenario_artifact=scenario,
+        )
+        job["command_id"] = "mcd_command_job-1"
+        job["delivery_cursor"] = "1"
+        _resign(job, portal)
+        first = executor.run(job, **kwargs)
+
+        job["command_id"] = "mcd_command_job-1_retry_4"
+        job["delivery_cursor"] = "5"
+        _resign(job, portal)
+        retry = executor.run(job, **kwargs)
+        replay = executor.run(job, **kwargs)
+
+        assert first["status"] == "succeeded"
+        assert retry["result"]["execution"] == 2
+        assert replay == retry
+        assert calls == 2
+
+
 def test_v2_runner_failure_persists_bounded_evidence_and_replays_without_rerun() -> None:
     portal = Ed25519PrivateKey.generate()
     publisher = Ed25519PrivateKey.generate()
