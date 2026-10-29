@@ -29,6 +29,8 @@ from mcd_agent.commercial_portal import (
     _host_fingerprint,
     _public_commercial_key_metadata,
     canonical_json,
+    portal_artifact_trust_keys,
+    validate_portal_artifact_trust,
 )
 
 
@@ -197,6 +199,20 @@ def _installation_ids(source: Mapping[str, Any]) -> dict[str, str]:
     return result
 
 
+def _artifact_trust(source: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Normalize optional Portal artifact trust from activation material."""
+    raw = _first(source, "portal_artifact_trust_v1", "artifact_trust")
+    portal = source.get("portal")
+    if raw is None and isinstance(portal, Mapping):
+        raw = _first(portal, "portal_artifact_trust_v1", "artifact_trust")
+    if raw is None:
+        return None
+    try:
+        return validate_portal_artifact_trust(raw, code="portal_registration_artifact_trust_invalid")
+    except ValueError as exc:
+        raise _error(str(exc)) from exc
+
+
 def _atomic_put(state: CommercialState, values: Mapping[str, Any]) -> None:
     with sqlite3.connect(state.path, timeout=30) as db:
         db.execute("BEGIN IMMEDIATE")
@@ -230,6 +246,7 @@ def import_activation_material(
     private_key, agent_key_id = _private_key_value(source, agent_key_path)
     signing_keys = _signing_keys(source)
     incoming_installations = _installation_ids(source)
+    artifact_trust = _artifact_trust(source)
 
     existing_agent = _text(state.get("agent_id"))
     if existing_agent and existing_agent != agent_id:
@@ -253,6 +270,8 @@ def import_activation_material(
         "portal_job_signing_keys": signing_keys,
         "installation_ids": merged_installations,
     }
+    if artifact_trust is not None:
+        digest_payload["portal_artifact_trust_v1"] = artifact_trust
     material_digest = hashlib.sha256(canonical_json(digest_payload)).hexdigest()
     previous_digest = _text(state.get("portal_registration_material_digest"))
     updates: dict[str, Any] = {
@@ -269,6 +288,17 @@ def import_activation_material(
         "portal_registration_material_schema": SCHEMA,
         "portal_registration_material_digest": material_digest,
     }
+    if artifact_trust is not None:
+        updates.update(
+            {
+                "portal_artifact_trust_v1": artifact_trust,
+                "portal_artifact_signing_keys": portal_artifact_trust_keys(artifact_trust),
+                "portal_artifact_trust_revision": artifact_trust["trust_revision"],
+                "portal_artifact_trust_digest": artifact_trust["trust_digest"],
+                "portal_artifact_trust_domain": artifact_trust["trust_domain"],
+                "portal_artifact_trust_source": "portal",
+            }
+        )
     supplied_key_metadata = source.get("commercial_key_metadata")
     if isinstance(supplied_key_metadata, Mapping):
         commercial_key_metadata = {
