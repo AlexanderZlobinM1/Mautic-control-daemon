@@ -8,7 +8,6 @@ open a network connection.
 
 from __future__ import annotations
 
-import base64
 import argparse
 import hashlib
 import json
@@ -46,13 +45,6 @@ def _error(code: str) -> RegistrationMaterialError:
 
 def _text(value: object) -> str:
     return str(value or "").strip()
-
-
-def _b64decode(value: str) -> bytes:
-    try:
-        return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
-    except Exception as exc:
-        raise _error("portal_registration_base64_invalid") from exc
 
 
 def _unwrap(raw: Mapping[str, Any]) -> dict[str, Any]:
@@ -105,31 +97,6 @@ def _commercial_key(source: Mapping[str, Any]) -> tuple[str, str, dict[str, Any]
     if raw not in (None, ""):
         return _text(_first(source, "commercial_key_id")), _text(raw), {}
     return _text(_first(source, "commercial_key_id")), "", {}
-
-
-def _signing_keys(source: Mapping[str, Any]) -> dict[str, str]:
-    raw = _first(source, "portal_job_signing_keys", "job_signing_keys")
-    portal = source.get("portal")
-    if raw is None and isinstance(portal, Mapping):
-        raw = _first(portal, "portal_job_signing_keys", "job_signing_keys")
-    values: dict[str, str] = {}
-    if isinstance(raw, Mapping):
-        iterable = [{"key_id": key, "value": value, "algorithm": "ed25519"} for key, value in raw.items()]
-    elif isinstance(raw, list):
-        iterable = raw
-    else:
-        raise _error("portal_registration_signing_keys_invalid")
-    for item in iterable:
-        if not isinstance(item, Mapping) or _text(item.get("algorithm")) != "ed25519":
-            raise _error("portal_registration_signing_keys_invalid")
-        key_id = _text(item.get("key_id"))
-        value = _text(item.get("value"))
-        if not key_id or len(_b64decode(value)) != 32:
-            raise _error("portal_registration_signing_keys_invalid")
-        values[key_id] = value
-    if not values:
-        raise _error("portal_registration_signing_keys_invalid")
-    return values
 
 
 def _installation_ids(source: Mapping[str, Any]) -> dict[str, str]:
@@ -197,7 +164,6 @@ def import_activation_material(
     supplied_fingerprint = _text(_first(source, "host_fingerprint"))
     if supplied_fingerprint and supplied_fingerprint != expected_fingerprint:
         raise _error("portal_registration_host_mismatch")
-    signing_keys = _signing_keys(source)
     incoming_installations = _installation_ids(source)
     artifact_trust = _artifact_trust(source)
 
@@ -219,7 +185,6 @@ def import_activation_material(
         "agent_id": agent_id,
         "host_fingerprint": expected_fingerprint,
         "commercial_key_id": commercial_key_id,
-        "portal_job_signing_keys": signing_keys,
         "installation_ids": merged_installations,
     }
     if artifact_trust is not None:
@@ -231,7 +196,6 @@ def import_activation_material(
         "portal_agent_credential": credential,
         "agent_id": agent_id,
         "host_fingerprint": expected_fingerprint,
-        "portal_job_signing_keys": signing_keys,
         "commercial_key_id": commercial_key_id,
         "installation_ids": merged_installations,
         "agent_version": _text(_first(source, "agent_version")) or __version__,
@@ -266,6 +230,7 @@ def import_activation_material(
     _atomic_put(state, updates)
     state.delete("agent_private_key")
     state.delete("agent_key_id")
+    state.delete("portal_job_signing_keys")
     return {
         "schema": "mcd-portal-registration-receipt-v1",
         "contract_version": CONTRACT_VERSION,

@@ -1143,7 +1143,7 @@ cycle без ручного `segments:update`, profile/capacity/data changes. Ad
 | heavy-plan deferral and durable pending guard | `mcd_agent/daemon.py` | `tests/test_segment_liveness.py`, live M6/M7 acceptance receipt |
 | self-update preserves ordinary application work and all durable queues | `mcd_agent/self_update.py`, `daemon.py`, systemd unit | `tests/test_self_update_version_reporting.py`, `tools/runtime_bridge_qa.py` (`mcd-runtime-bridge-qa-v1`) |
 | legacy source-tree to runtime-only transition is authority-safe and accepts complete split TOML config | `tools/mcd_runtime_bootstrap.py`, `tools/mcd_profile_authority_probe.py` | `tests/test_profile_authority_probe.py`, `tests/test_runtime_bootstrap_capture.py`, live `mcd-runtime-bootstrap-receipt-v1` |
-| activation-derived Portal material is imported atomically without new auth/job issuance; job signing keys and supplied `portal_artifact_trust_v1` are validated and persisted together, reusing the existing local agent key during recovery when the delivery omits it | `mcd_agent/commercial_registration.py`, `mcd_agent/commercial_portal.py` | `tests/test_commercial_registration.py`, `tests/test_portal_artifact_trust_contract.py`, redacted `mcd-portal-registration-receipt-v1` |
+| activation-derived Portal material is imported atomically without new auth/job issuance; commercial API-key transport, host binding and installation IDs are validated and persisted while legacy agent/Portal signing-key state is scrubbed | `mcd_agent/commercial_registration.py`, `mcd_agent/commercial_portal.py` | `tests/test_commercial_registration.py`, `tests/test_commercial_outbound_boundary.py`, redacted `mcd-portal-registration-receipt-v1` |
 | manual existing commercial-key fallback keeps pending/active/disconnected state idempotently | `mcd_agent/commercial_manual_activation.py`, `mcd_agent/commercial_portal.py`, `mcd_agent/daemon.py` | `tests/test_commercial_manual_activation.py`, redacted `mcd-commercial-manual-activation-receipt-v1` |
 | active Portal state is reconciled after daemon startup; incomplete construction and exited workers retry without duplicates | `mcd_agent/daemon.py:_reconcile_commercial_worker` | `tests/test_daemon_commercial_guard.py` activation-material retry; `tests/test_commercial_self_hosted_v2.py` activate -> poll -> terminal v2 |
 | result-signing identity bootstraps from MCD-owned config and gates signed control execution on MCC ACK | `mcd_agent/config.py`, `mcd_agent/result_signing.py`, `mcd_agent/state_push.py`, `mcd_agent/mcd_control.py` | `tests/test_result_signing.py`, `tests/test_mcd_control.py`, live `mcd-state-v1` identity/key/ACK and terminal-receipt evidence |
@@ -1194,26 +1194,21 @@ local file when the entrypoint only supplies defaults or MCC bootstrap fields.
 Commercial MCD is an outbound-only Portal lane. A delivered
 `portal-self-hosted-mcd-job-v2` is admitted only after exact account, commercial
 key, agent, installation, host, scenario and applicability binding, local-facts
-revalidation, expiry, nonce, idempotency and Portal signature validation. The
-additive contract version `2.1` is the registered-installation path: its
-`execution.primitive` is `scenario.apply`, it requires the signed scenario
-artifact, and `bootstrap_artifact` must be absent. The trusted internal MCC
-catalog path carries an active catalog revision, executable artifact metadata
-and SHA-256 through the authenticated MCC/Portal API; MCD downloads through
-that API and accepts bytes only when size and SHA-256 match the immutable
-catalog entry. SHA-only integrity does not authenticate an artifact author and
-is never accepted for an unknown or untrusted external source. Legacy
-contract `2.0` and legacy publisher-signed artifact pins remain accepted only
-for compatibility; bootstrap is not part of the registered scenario
-operation. MCD never imports MCC credentials or scenario rules, and Portal
-remains only the connector/UI for this lane.
+revalidation, expiry, nonce and idempotency checks. The commercial API key over
+HTTPS is the only transport authentication; MCD does not require, persist or
+validate a Portal/job signing key or `portal_signature`. The additive contract
+version `2.1` is the registered-installation path: its
+`execution.primitive` is `scenario.apply`, and `bootstrap_artifact` must be
+absent. MCD accepts downloaded artifacts only when size and SHA-256 match the
+immutable artifact pin/catalog entry. MCD never imports MCC credentials or
+scenario rules, and Portal remains only the connector/UI for this lane.
 
 The commercial API credential and host binding described below apply only to
 external OWH MCD hosts. The internal SalesSnap path is instance-bound; it does
 not create a separate host/MCD key entity and does not introduce a replacement
 token or signature identity.
 
-The signed `portal-mcd-inventory-snapshot-v1` also carries the additive
+The API-key-authenticated `portal-mcd-inventory-snapshot-v1` also carries the additive
 `applicability_facts` coordinate (`mcd-portal-applicability-facts-v1`, contract
 version `1.0`). Its `facts` mapping is the complete normalized value used by
 the local execution guard: `os_id`, `os_version`, `architecture`,
@@ -1315,7 +1310,7 @@ metadata only; raw credentials and future quota, billing or tariff semantics
 are not part of MCD.
 
 Once Portal has leased and MCD has durably accepted a delivery, every local
-outcome closes through a signed terminal receipt: expiry, malformed or failed
+outcome closes through a terminal receipt: expiry, malformed or failed
 admission, revoked/disabled Portal state, artifact unavailability, and runner
 exceptions are typed and bounded. A receipt that cannot be sent immediately is
 queued durably before the delivery is considered complete; the runner is never
@@ -1328,17 +1323,12 @@ runner.
 
 `daemon.run_loop` may start at most one Portal worker when the durable
 Portal enrollment is valid: HTTPS Portal base, one existing commercial API
-credential, commercial-key identity, host binding, at least one installation binding, and
-Portal job-signing keys must all be present. Portal artifact trust is not
-activation material and is not a worker-start gate: poll, adopt, inventory,
-settings, noop, and receipt operations use Portal job-signing keys only. The
-trusted MCC SHA-only path does not load or require artifact signer keys; it
-requires the authenticated API transport and active catalog binding. The
-canonical `portal_artifact_signing_keys` set is seeded by activation and can be
-replaced only by a bound, time-valid, monotonically increasing
-`portal-mcd-artifact-trust-update-v1` command delivered in the signed poll
-response. A legacy `portal_mcc_publisher_keys` map is read only while canonical
-Portal trust is absent and is deprecated for legacy signed artifact pins.
+credential, commercial-key identity, host binding, and at least one
+installation binding must all be present. No Portal job-signing keys are
+required. Poll, adopt, inventory, settings, noop, receipt and job delivery use
+only the existing commercial API key over HTTPS. Artifact acceptance is
+SHA-256-only and does not load or require artifact signer keys; legacy signing
+key values are ignored and scrubbed from local state.
 Unknown/stale/mismatched SHA or an authenticated API failure rejects only that
 operation with a durable failed terminal receipt. The live worker remains
 available for later outbound polling; a restart reloads the same durable
@@ -1366,8 +1356,8 @@ The existing activation-derived Portal credential is delivered through the
 `mcd-portal-activation-material-v1` bootstrap envelope. MCD imports that
 envelope locally and atomically into `CommercialState`; it never redeems the
 activation code, creates an agent/key/job, or performs a second registration.
-The importer validates the host fingerprint, Portal signing keys, commercial
-key and installation IDs, and removes legacy agent key material. It preserves the
+The importer validates the host fingerprint, commercial key and installation
+IDs, and removes legacy agent/Portal signing-key material. It preserves the
 cursor and pending receipts, and its redacted receipt contains no credential
 or private key. A missing or mismatched binding fails closed before the
 commercial worker can start.

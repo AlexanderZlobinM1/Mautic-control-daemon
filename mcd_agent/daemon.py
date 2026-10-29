@@ -377,7 +377,6 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
         credential = str(state.get("portal_agent_credential") or "")
         agent_id = str(state.get("agent_id") or "")
         installations = state.get("installation_ids")
-        portal_keys = state.get("portal_job_signing_keys")
         # Portal artifact trust is operation-scoped material. It is needed only
         # when a delivered scenario's external artifacts are verified; it is
         # not a worker-start gate. Canonical Portal trust wins. The old MCC
@@ -395,7 +394,7 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
         key_metadata = state.get("commercial_key_metadata")
         commercial_key_id = str(state.get("commercial_key_id") or (key_metadata.get("commercial_key_id") if isinstance(key_metadata, dict) else "") or "")
         host_fingerprint = str(state.get("host_fingerprint") or "")
-        if not base.startswith("https://") or not credential or not agent_id or not commercial_key_id or not host_fingerprint or not isinstance(installations, dict) or not installations or not isinstance(portal_keys, dict) or not portal_keys:
+        if not base.startswith("https://") or not credential or not agent_id or not commercial_key_id or not host_fingerprint or not isinstance(installations, dict) or not installations:
             disabled("portal_runtime_material_incomplete")
             return None
         try:
@@ -582,7 +581,7 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
                 PortalClient(state),
                 SelfHostedScenarioExecutor(state, runner=runner.run),
                 installation_id=sorted(str(value) for value in installations.values()),
-                portal_keys={str(key): str(value) for key, value in portal_keys.items()},
+                portal_keys={},
                 publisher_keys={str(key): value for key, value in publisher_keys.items() if isinstance(value, (str, dict))},
                 context=portal_context,
                 commercial_key_id=commercial_key_id,
