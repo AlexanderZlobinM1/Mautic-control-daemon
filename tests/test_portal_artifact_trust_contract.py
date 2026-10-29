@@ -105,7 +105,7 @@ def test_trust_update_is_atomic_idempotent_and_rejects_stale_revision() -> None:
             raise AssertionError("same revision with a different digest must fail closed")
 
 
-def test_worker_applies_signed_poll_update_across_outage_and_restart() -> None:
+def test_worker_rejects_legacy_artifact_trust_update_without_persisting_state() -> None:
     class Portal:
         def __init__(self) -> None:
             self.fail_once = True
@@ -136,25 +136,10 @@ def test_worker_applies_signed_poll_update_across_outage_and_restart() -> None:
             host_fingerprint=FIXTURE["update_command"]["binding"]["host_fingerprint"],
             clock=lambda: 1793059260.0,
         )
-        assert worker.run_once()["status"] == "receipt_pending"
-        assert state.get("portal_artifact_trust_revision") == 1
-        restarted = SelfHostedPortalWorker(
-            portal,
-            SelfHostedScenarioExecutor(state),
-            installation_id="installation-fixture-1",
-            portal_keys={"portal-job-fixture-1": FIXTURE["job_signing_public_key"]["value"]},
-            publisher_keys={},
-            context={},
-            commercial_key_id="commercial-fixture-1",
-            agent_id="agent-fixture-1",
-            host_fingerprint=FIXTURE["update_command"]["binding"]["host_fingerprint"],
-            clock=lambda: 1793059260.0,
-        )
-        result = restarted.run_once()
-        assert result["status"] == "succeeded"
-        assert state.get("commercial_self_hosted_pending_receipts") == []
-        assert state.get("commercial_portal_cursor") == "12"
-        assert portal.receipts[-1]["schema"] == "portal-mcd-command-receipt-v1"
+        assert worker.run_once()["status"] == "failed"
+        assert state.get("portal_artifact_trust_revision") is None
+        assert state.get("portal_artifact_signing_keys") is None
+        assert state.get("commercial_portal_cursor") is None
 
 
 def test_trust_update_refreshes_live_worker_and_restart_reloads_for_scenario_verify() -> None:
