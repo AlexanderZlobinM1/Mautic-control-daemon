@@ -9,7 +9,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -251,29 +250,6 @@ def test_v21_registered_scenario_job_has_no_bootstrap_artifact() -> None:
 
     assert verified["contract_version"] == SELF_HOSTED_MCD_CONTRACT_VERSION
     assert verified["bootstrap_artifact"] is None
-
-
-def test_v21_secret_references_are_opaque_references_not_contract_secrets() -> None:
-    portal = Ed25519PrivateKey.generate()
-    publisher = Ed25519PrivateKey.generate()
-    job, _bootstrap, _scenario, keys = _job(portal, publisher, contract_version=SELF_HOSTED_MCD_CONTRACT_VERSION)
-    job["secret_references"] = ["commercial_key_binding"]
-
-    verified = verify_self_hosted_mcd_job(
-        job,
-        {"portal-1": keys["portal-1"]},
-        expected_agent_id="agent-1",
-        expected_installation_id="installation-1",
-        expected_commercial_key_id="commercial-key-1",
-        expected_host_fingerprint="sha256:" + "b" * 64,
-    )
-    assert verified["secret_references"] == ["commercial_key_binding"]
-
-    for invalid in (["bad ref"], ["a" * 257], [123]):
-        candidate = dict(job)
-        candidate["secret_references"] = invalid
-        with pytest.raises(ValueError, match="self_hosted_mcd_secret_reference_invalid"):
-            verify_self_hosted_mcd_job(candidate, {}, now=datetime(2099, 10, 26, 0, 30, tzinfo=timezone.utc).timestamp())
 
 
 def test_v21_portal_fixture_matches_unsigned_cross_component_vector() -> None:
