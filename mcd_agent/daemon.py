@@ -564,7 +564,6 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
                         "settings": settings(runtime),
                     },
                     "applicability_facts": build_applicability_facts_snapshot(
-                        target_kind="existing_server",
                         capabilities=list(portal_context["local_facts_capabilities"]),
                     ),
                     "instances": rows,

@@ -15,6 +15,8 @@ from mcd_agent.commercial_portal import canonical_json
 SCHEMA = "mcd-scenario-detector-v1"
 APPLICABILITY_FACTS_SCHEMA = "mcd-portal-applicability-facts-v1"
 APPLICABILITY_FACTS_CONTRACT_VERSION = "1.0"
+HOST_CLASSIFICATION_EVIDENCE_SCHEMA = "mcd-host-classification-evidence-v1"
+HOST_CLASSIFICATION_EVIDENCE_CONTRACT_VERSION = "1.0"
 PORTAL_LOCAL_FACTS_CAPABILITIES = (
     "package_manager.query",
     "portal_scenario_execution_v1",
@@ -27,7 +29,127 @@ _APPLICABILITY_FACT_KEYS = (
     "package_manager",
     "capabilities",
     "target_kind",
+    "classification_reason",
+    "classification_evidence",
 )
+_REQUIRED_APPLICABILITY_FACT_KEYS = _APPLICABILITY_FACT_KEYS[:6]
+
+_CLASSIFICATION_GROUPS = {
+    "mautic_installation": {
+        "binaries": (),
+        "paths": (),
+        "services": (),
+    },
+    "web_server": {
+        "binaries": ("nginx", "apache2", "httpd"),
+        "paths": ("/etc/nginx", "/etc/apache2", "/etc/httpd"),
+        "services": ("nginx", "apache2", "httpd"),
+    },
+    "database": {
+        "binaries": ("mysql", "mariadb", "mysqld", "mariadbd"),
+        "paths": ("/etc/mysql", "/etc/my.cnf", "/etc/mariadb"),
+        "services": ("mysql", "mariadb", "mysqld"),
+    },
+    "cache": {
+        "binaries": ("redis-server",),
+        "paths": ("/etc/redis", "/etc/redis/redis.conf"),
+        "services": ("redis", "redis-server"),
+    },
+    "php_runtime": {
+        "binaries": ("php", "php-fpm"),
+        "paths": ("/etc/php", "/usr/lib/php"),
+        "services": ("php-fpm", "php8.4-fpm", "php8.3-fpm", "php8.2-fpm", "php8.1-fpm"),
+    },
+}
+
+
+def _active_services(names: tuple[str, ...]) -> list[str]:
+    systemctl = shutil.which("systemctl")
+    if not systemctl:
+        return []
+    active: list[str] = []
+    for name in names:
+        try:
+            result = subprocess.run(
+                [systemctl, "is-active", "--quiet", name],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if result.returncode == 0:
+            active.append(name)
+    return active
+
+
+def _probe_group(*, binaries: tuple[str, ...], paths: tuple[str, ...], services: tuple[str, ...]) -> dict[str, Any]:
+    installed_markers = [f"binary:{name}" for name in binaries if shutil.which(name)]
+    installed_markers.extend(f"path:{path}" for path in paths if Path(path).exists())
+    active_markers = [f"service:{name}" for name in _active_services(services)]
+    return {
+        "installed": bool(installed_markers),
+        "active": bool(active_markers),
+        "markers": sorted(set(installed_markers + active_markers)),
+    }
+
+
+def _probe_mautic_installation() -> dict[str, Any]:
+    markers: list[str] = []
+    roots = (Path("/var/www"), Path("/srv/www"), Path("/opt/mautic"))
+    for root in roots:
+        candidates = [root / "bin" / "console", root / "app" / "console"]
+        if root.is_dir():
+            try:
+                children = sorted((item for item in root.iterdir() if item.is_dir()), key=lambda item: str(item))[:128]
+            except OSError:
+                children = []
+            for child in children:
+                candidates.extend((child / "bin" / "console", child / "app" / "console"))
+        for candidate in candidates:
+            try:
+                if candidate.is_file():
+                    markers.append(f"path:{candidate}")
+            except OSError:
+                continue
+    return {"installed": bool(markers), "active": False, "markers": sorted(set(markers))}
+
+
+def _read_host_classification_probes() -> dict[str, dict[str, Any]]:
+    probes = {name: _probe_group(**config) for name, config in _CLASSIFICATION_GROUPS.items()}
+    probes["mautic_installation"] = _probe_mautic_installation()
+    return probes
+
+
+def classify_host(*, probes: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Classify the host using bounded read-only probes.
+
+    ``new_server`` is deliberately conservative: it is emitted only when no
+    Mautic installation and no web/database/cache/PHP stack marker is present.
+    The MCD service is never a classification marker.
+    """
+    source = probes if probes is not None else _read_host_classification_probes()
+    normalized: dict[str, dict[str, Any]] = {}
+    for name in _CLASSIFICATION_GROUPS:
+        value = source.get(name) if isinstance(source, Mapping) else None
+        if not isinstance(value, Mapping):
+            value = {}
+        markers = value.get("markers")
+        markers = sorted(set(str(item).strip() for item in markers if str(item).strip())) if isinstance(markers, list) else []
+        installed = value.get("installed") is True or bool(markers and not all(item.startswith("service:") for item in markers))
+        active = value.get("active") is True or any(item.startswith("service:") for item in markers)
+        normalized[name] = {"installed": bool(installed), "active": bool(active), "markers": markers}
+    blockers = [name for name, value in normalized.items() if value["installed"] or value["active"]]
+    target_kind = "new_server" if not blockers else "existing_server"
+    reason = "clean_host_no_mautic_or_server_stack" if not blockers else "existing_server_markers:" + ",".join(blockers)
+    evidence = {
+        "schema": HOST_CLASSIFICATION_EVIDENCE_SCHEMA,
+        "contract_version": HOST_CLASSIFICATION_EVIDENCE_CONTRACT_VERSION,
+        "probes": normalized,
+        "excluded_from_classification": ["mcd.service"],
+    }
+    return {"target_kind": target_kind, "reason": reason, "evidence": evidence}
 
 
 def _detected_host_capabilities(*, os_id: str, package_manager: str) -> list[str]:
@@ -90,7 +212,7 @@ def validate_portal_scenario_resolution(value: Mapping[str, Any], *, expected_di
     return {"schema": value["schema"], "contract_version": "1.0", "status": status, "detected_facts": dict(facts), "matches": matches}
 
 
-def read_normalized_local_facts(*, os_release_path: str = "/etc/os-release", machine: str | None = None, target_kind: str = "existing_server", capabilities: list[str] | None = None) -> dict[str, Any]:
+def read_normalized_local_facts(*, os_release_path: str = "/etc/os-release", machine: str | None = None, target_kind: str | None = None, capabilities: list[str] | None = None, classification_probes: Mapping[str, Any] | None = None) -> dict[str, Any]:
     values: dict[str, str] = {}
     try:
         for line in Path(os_release_path).read_text(encoding="utf-8").splitlines():
@@ -106,10 +228,21 @@ def read_normalized_local_facts(*, os_release_path: str = "/etc/os-release", mac
     managers = [name for name in ("apt-get", "dnf", "yum", "apk") if shutil.which(name)]
     if not os_id or not version or not arch or len(managers) != 1:
         raise ValueError("commercial_detector_facts_ambiguous")
-    if target_kind not in {"new_server", "existing_server"}:
+    if target_kind is not None and target_kind not in {"new_server", "existing_server"}:
         raise ValueError("commercial_detector_target_kind_invalid")
     observed_capabilities = list(capabilities) if capabilities is not None else _detected_host_capabilities(os_id=os_id, package_manager=managers[0])
-    return {"os_id": os_id, "os_version": version, "architecture": arch, "package_manager": managers[0], "capabilities": sorted(set(observed_capabilities)), "target_kind": target_kind, "detector_schema": SCHEMA}
+    classification = classify_host(probes=classification_probes)
+    return {
+        "os_id": os_id,
+        "os_version": version,
+        "architecture": arch,
+        "package_manager": managers[0],
+        "capabilities": sorted(set(observed_capabilities)),
+        "target_kind": classification["target_kind"],
+        "classification_reason": classification["reason"],
+        "classification_evidence": classification["evidence"],
+        "detector_schema": SCHEMA,
+    }
 
 
 def normalize_applicability_facts(value: Mapping[str, Any], *, require_detector_schema: bool = False) -> dict[str, Any]:
@@ -117,10 +250,10 @@ def normalize_applicability_facts(value: Mapping[str, Any], *, require_detector_
     if not isinstance(value, Mapping):
         raise ValueError("commercial_applicability_facts_invalid")
     allowed = set(_APPLICABILITY_FACT_KEYS) | {"detector_schema"}
-    if set(value) - allowed or any(key not in value for key in _APPLICABILITY_FACT_KEYS):
+    if set(value) - allowed or any(key not in value for key in _REQUIRED_APPLICABILITY_FACT_KEYS):
         raise ValueError("commercial_applicability_facts_invalid")
     normalized: dict[str, Any] = {}
-    for key in _APPLICABILITY_FACT_KEYS:
+    for key in _REQUIRED_APPLICABILITY_FACT_KEYS:
         if key == "capabilities":
             capabilities = value.get(key)
             if not isinstance(capabilities, list) or any(not isinstance(item, str) or not item.strip() for item in capabilities):
@@ -131,6 +264,39 @@ def normalize_applicability_facts(value: Mapping[str, Any], *, require_detector_
         if not isinstance(item, str) or not item.strip():
             raise ValueError("commercial_applicability_facts_invalid")
         normalized[key] = str(item).strip()
+    reason = value.get("classification_reason")
+    evidence = value.get("classification_evidence")
+    if (reason is None) != (evidence is None):
+        raise ValueError("commercial_applicability_classification_invalid")
+    if reason is not None:
+        if not isinstance(reason, str) or not reason.strip() or len(reason) > 256:
+            raise ValueError("commercial_applicability_classification_invalid")
+        if not isinstance(evidence, Mapping) or set(evidence) != {"schema", "contract_version", "probes", "excluded_from_classification"}:
+            raise ValueError("commercial_applicability_classification_invalid")
+        if evidence.get("schema") != HOST_CLASSIFICATION_EVIDENCE_SCHEMA or evidence.get("contract_version") != HOST_CLASSIFICATION_EVIDENCE_CONTRACT_VERSION:
+            raise ValueError("commercial_applicability_classification_invalid")
+        excluded = evidence.get("excluded_from_classification")
+        probes = evidence.get("probes")
+        if excluded != ["mcd.service"] or not isinstance(probes, Mapping) or set(probes) != set(_CLASSIFICATION_GROUPS):
+            raise ValueError("commercial_applicability_classification_invalid")
+        normalized_probes: dict[str, Any] = {}
+        for name in _CLASSIFICATION_GROUPS:
+            probe = probes.get(name)
+            if not isinstance(probe, Mapping) or set(probe) != {"installed", "active", "markers"}:
+                raise ValueError("commercial_applicability_classification_invalid")
+            if not isinstance(probe.get("installed"), bool) or not isinstance(probe.get("active"), bool):
+                raise ValueError("commercial_applicability_classification_invalid")
+            markers = probe.get("markers")
+            if not isinstance(markers, list) or any(not isinstance(item, str) or not item.strip() for item in markers) or markers != sorted(set(markers)):
+                raise ValueError("commercial_applicability_classification_invalid")
+            normalized_probes[name] = {"installed": probe["installed"], "active": probe["active"], "markers": list(markers)}
+        normalized["classification_reason"] = reason.strip()
+        normalized["classification_evidence"] = {
+            "schema": HOST_CLASSIFICATION_EVIDENCE_SCHEMA,
+            "contract_version": HOST_CLASSIFICATION_EVIDENCE_CONTRACT_VERSION,
+            "probes": normalized_probes,
+            "excluded_from_classification": ["mcd.service"],
+        }
     detector_schema = value.get("detector_schema")
     if detector_schema is None:
         if require_detector_schema:
@@ -149,14 +315,14 @@ def applicability_facts_digest(value: Mapping[str, Any]) -> str:
     return "sha256:" + hashlib.sha256(canonical_json(normalized)).hexdigest()
 
 
-def read_normalized_applicability_facts(*, target_kind: str, capabilities: list[str] | None, facts_reader: Any = read_normalized_local_facts, require_detector_schema: bool = False) -> dict[str, Any]:
+def read_normalized_applicability_facts(*, target_kind: str | None, capabilities: list[str] | None, facts_reader: Any = read_normalized_local_facts, require_detector_schema: bool = False) -> dict[str, Any]:
     """Read and normalize facts using the same reader/context as the job guard."""
     observed = facts_reader(target_kind=target_kind, capabilities=capabilities)
     return normalize_applicability_facts(observed, require_detector_schema=require_detector_schema)
 
 
-def build_applicability_facts_snapshot(*, target_kind: str, capabilities: list[str] | None, facts_reader: Any = read_normalized_local_facts) -> dict[str, Any]:
-    """Build the signed, additive inventory coordinate consumed by Portal."""
+def build_applicability_facts_snapshot(*, target_kind: str | None = None, capabilities: list[str] | None, facts_reader: Any = read_normalized_local_facts) -> dict[str, Any]:
+    """Build the read-only inventory coordinate consumed by Portal."""
     facts = read_normalized_applicability_facts(
         target_kind=target_kind,
         capabilities=capabilities,

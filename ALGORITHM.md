@@ -1218,9 +1218,14 @@ The API-key-authenticated `portal-mcd-inventory-snapshot-v1` also carries the ad
 version `1.0`). Its `facts` mapping is the complete normalized value used by
 the local execution guard: `os_id`, `os_version`, `architecture`,
 `package_manager`, sorted unique `capabilities`, `target_kind`, and
-`detector_schema`. `facts_digest` hashes the same mapping after removing only
-`detector_schema`. Inventory publication and `scenario.apply` use the same
-reader and capability context, so the coordinate is stable across unchanged
+`detector_schema`. It also carries MCD-owned `classification_reason` and
+`classification_evidence` from the read-only
+`mcd-host-classification-evidence-v1` probes. MCD defaults to
+`existing_server`; it emits `new_server` only when no Mautic installation and
+no installed or active web server, database, cache, or PHP runtime marker is
+present. `mcd.service` is explicitly excluded. `facts_digest` hashes the same
+mapping after removing only `detector_schema`. Inventory publication and
+`scenario.apply` use the same reader and capability context, so the coordinate is stable across unchanged
 polls, restart, replay, and Portal outage; its durable inventory hash and
 revision include the field. Missing detector facts fail closed. Scenario
 `required_capabilities` remain Portal-side applicability predicates and are

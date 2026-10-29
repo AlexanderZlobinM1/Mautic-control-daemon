@@ -2,7 +2,17 @@ from pathlib import Path
 
 import pytest
 
-from mcd_agent.commercial_detector import detector_digest, read_normalized_local_facts, validate_portal_scenario_resolution, validate_scenario_detector
+from mcd_agent.commercial_detector import (
+    PORTAL_LOCAL_FACTS_CAPABILITIES,
+    build_applicability_facts_snapshot,
+    classify_host,
+    detector_digest,
+    read_normalized_local_facts,
+    validate_portal_scenario_resolution,
+    validate_scenario_detector,
+)
+from mcd_agent.commercial_portal import CommercialState
+from mcd_agent.commercial_self_hosted import SelfHostedScenarioExecutor
 from mcd_agent.commercial_onboarding import exposed_capabilities
 
 
@@ -35,6 +45,50 @@ def test_default_facts_restore_truthful_preflight_capabilities(tmp_path, monkeyp
         "root_sudo",
         "service_manager:systemd",
     ]
+
+
+def test_host_classification_is_conservative_and_excludes_mcd_service():
+    clean = {
+        name: {"installed": False, "active": False, "markers": []}
+        for name in ("mautic_installation", "web_server", "database", "cache", "php_runtime")
+    }
+    classified = classify_host(probes=clean)
+    assert classified["target_kind"] == "new_server"
+    assert classified["reason"] == "clean_host_no_mautic_or_server_stack"
+    assert classified["evidence"]["excluded_from_classification"] == ["mcd.service"]
+
+    occupied = {**clean, "php_runtime": {"installed": True, "active": False, "markers": ["path:/etc/php"]}}
+    classified = classify_host(probes=occupied)
+    assert classified["target_kind"] == "existing_server"
+    assert classified["reason"] == "existing_server_markers:php_runtime"
+    assert "mcd.service" not in classified["evidence"]["probes"]["php_runtime"]["markers"]
+
+
+def test_emitted_clean_facts_are_consumed_by_self_hosted_stage_guard(tmp_path, monkeypatch):
+    os_release = tmp_path / "os-release"
+    os_release.write_text("ID=ubuntu\nVERSION_ID=24.04\n", encoding="utf-8")
+    monkeypatch.setattr("mcd_agent.commercial_detector.shutil.which", lambda name: "/usr/bin/apt-get" if name == "apt-get" else None)
+    clean = {
+        name: {"installed": False, "active": False, "markers": []}
+        for name in ("mautic_installation", "web_server", "database", "cache", "php_runtime")
+    }
+
+    def reader(**kwargs):
+        return read_normalized_local_facts(
+            os_release_path=str(os_release),
+            machine="x86_64",
+            capabilities=kwargs.get("capabilities"),
+            classification_probes=clean,
+        )
+
+    snapshot = build_applicability_facts_snapshot(capabilities=list(PORTAL_LOCAL_FACTS_CAPABILITIES), facts_reader=reader)
+    expected = dict(snapshot["facts"])
+    expected.pop("detector_schema", None)
+    executor = SelfHostedScenarioExecutor(CommercialState(str(tmp_path / "commercial.sqlite")), facts_reader=reader)
+    observed = executor._local_facts(expected, {"local_facts_capabilities": list(PORTAL_LOCAL_FACTS_CAPABILITIES)})
+    assert observed == expected
+    assert observed["target_kind"] == "new_server"
+    assert observed["classification_evidence"]["schema"] == "mcd-host-classification-evidence-v1"
 
 
 def test_detector_mismatch_unsupported_and_ambiguous_fail_closed(tmp_path, monkeypatch):

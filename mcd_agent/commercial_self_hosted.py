@@ -736,6 +736,11 @@ class ScenarioExecutor:
         observed["capabilities"] = sorted(set(str(item) for item in observed.get("capabilities", [])))
         normalized_expected = dict(expected)
         normalized_expected["capabilities"] = sorted(set(str(item) for item in expected.get("capabilities", [])))
+        # Legacy 2.0/early 2.1 jobs may omit the additive host-classification
+        # coordinate; when present, it is part of the exact revalidation.
+        for key in ("classification_reason", "classification_evidence"):
+            if key not in normalized_expected:
+                observed.pop(key, None)
         if observed != normalized_expected:
             raise ValueError("self_hosted_mcd_applicability_facts_mismatch")
         return observed

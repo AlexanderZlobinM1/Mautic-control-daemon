@@ -484,8 +484,21 @@ def _validate_self_hosted_facts(value: object) -> dict[str, Any]:
         "capabilities": sorted(set(str(item).strip() for item in capabilities)),
         "target_kind": str(value["target_kind"]),
     }
-    if set(value) != set(normalized):
+    optional = {"detector_schema", "classification_reason", "classification_evidence"}
+    if set(value) - set(normalized) - optional:
         raise ValueError("self_hosted_mcd_facts_invalid")
+    if "detector_schema" in value:
+        if not isinstance(value["detector_schema"], str) or not str(value["detector_schema"]).strip():
+            raise ValueError("self_hosted_mcd_facts_invalid")
+    if ("classification_reason" in value) != ("classification_evidence" in value):
+        raise ValueError("self_hosted_mcd_facts_invalid")
+    if "classification_reason" in value:
+        reason = value["classification_reason"]
+        evidence = value["classification_evidence"]
+        if not isinstance(reason, str) or not reason.strip() or len(reason) > 256 or not isinstance(evidence, Mapping):
+            raise ValueError("self_hosted_mcd_facts_invalid")
+        normalized["classification_reason"] = reason.strip()
+        normalized["classification_evidence"] = dict(evidence)
     return normalized
 
 
