@@ -435,12 +435,28 @@ def portal_artifact_trust_keys(value: object) -> dict[str, dict[str, Any] | str]
 def _assert_no_contract_secrets(value: object) -> None:
     if isinstance(value, Mapping):
         for key, child in value.items():
+            if key == "secret_references":
+                continue
             if re.search(r"password|private.?key|secret|activation.?code|agent.?credential|enrollment.?token|access.?token", str(key), re.I):
                 raise ValueError("self_hosted_mcd_secret_in_contract")
             _assert_no_contract_secrets(child)
     elif isinstance(value, list):
         for child in value:
             _assert_no_contract_secrets(child)
+
+
+def _validate_self_hosted_secret_references(value: object) -> list[str]:
+    if not isinstance(value, list):
+        raise ValueError("self_hosted_mcd_secret_references_invalid")
+    if any(
+        not isinstance(item, str)
+        or not item
+        or len(item) > 256
+        or any(char not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:/-" for char in item)
+        for item in value
+    ):
+        raise ValueError("self_hosted_mcd_secret_reference_invalid")
+    return [str(item) for item in value]
 
 
 def _public_commercial_key_metadata(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -598,6 +614,9 @@ def verify_self_hosted_mcd_job(
     if not isinstance(job, Mapping):
         raise ValueError("self_hosted_mcd_job_invalid")
     _assert_no_contract_secrets(job)
+    secret_references = None
+    if "secret_references" in job:
+        secret_references = _validate_self_hosted_secret_references(job.get("secret_references"))
     contract_version = job.get("contract_version")
     if job.get("schema") != SELF_HOSTED_MCD_JOB_SCHEMA or contract_version not in SELF_HOSTED_MCD_CONTRACT_VERSIONS:
         raise ValueError("self_hosted_mcd_job_invalid")
@@ -660,7 +679,7 @@ def verify_self_hosted_mcd_job(
     current = time.time() if now is None else float(now)
     if expires <= issued or current < issued - 60 or current >= expires:
         raise ValueError("self_hosted_mcd_job_expired_or_not_yet_valid")
-    return {"job": dict(job), "contract_version": str(contract_version), "scenario": scenario, "facts": facts, "bootstrap_artifact": bootstrap, "scenario_artifact": scenario_artifact, "stage_selection": dict(stage_selection) if isinstance(stage_selection, Mapping) else None, "job_id": identity["job_id"], "idempotency_key": identity["idempotency_key"], "host_fingerprint": host_fingerprint}
+    return {"job": dict(job), "contract_version": str(contract_version), "scenario": scenario, "facts": facts, "bootstrap_artifact": bootstrap, "scenario_artifact": scenario_artifact, "stage_selection": dict(stage_selection) if isinstance(stage_selection, Mapping) else None, "secret_references": secret_references, "job_id": identity["job_id"], "idempotency_key": identity["idempotency_key"], "host_fingerprint": host_fingerprint}
 
 
 def verify_self_hosted_external_artifact(
