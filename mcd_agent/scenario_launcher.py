@@ -17,6 +17,7 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Mapping
+from mcd_agent.portal_identity import identity_coordinate
 
 
 FRAME_MAGIC = b"SSMCDX01"
@@ -80,6 +81,8 @@ def build_scenario_context(job: Mapping[str, Any], *, context_schema: str = SCEN
         "secret_references": [str(item) for item in secret_references],
     }
     primitive_context = job.get("primitive_context")
+    if job.get("identity_kind") == "dns":
+        payload["job"].update({**identity_coordinate(job), "agent_id": str(job.get("agent_id") or ""), "installation_id": str(job.get("installation_id") or "")})
     if isinstance(primitive_context, Mapping):
         payload["primitive_context"] = dict(primitive_context)
     return payload
@@ -155,6 +158,10 @@ def _validate_context(
     if not isinstance(job, Mapping) or not isinstance(scenario, Mapping) or not isinstance(applicability, Mapping) or not isinstance(parameters, Mapping) or not isinstance(references, list):
         raise ScenarioLauncherError("self_hosted_mcd_runner_context_invalid")
     required_job = ("job_id", "request_id", "command_id", "idempotency_key")
+    if job.get("identity_kind") == "dns":
+        identity_coordinate(job)
+        if not job.get("agent_id") or not job.get("installation_id"):
+            raise ScenarioLauncherError("self_hosted_mcd_runner_context_invalid")
     required_scenario = ("scenario_id", "revision", "artifact_revision", "artifact_digest")
     if any(not isinstance(job.get(key), str) or not job.get(key) for key in required_job) or any(not isinstance(scenario.get(key), str) or not scenario.get(key) for key in required_scenario):
         raise ScenarioLauncherError("self_hosted_mcd_runner_context_invalid")
@@ -206,7 +213,7 @@ def _validate_primitive_context(
     binding = value.get("binding")
     required_binding = (
         "job_id", "request_id", "command_id", "idempotency_key", "scenario_id",
-        "scenario_revision", "artifact_revision", "artifact_digest", "host_fingerprint", "facts_digest",
+        "scenario_revision", "artifact_revision", "artifact_digest", "facts_digest",
     )
     if not isinstance(binding, Mapping) or any(not isinstance(binding.get(key), str) or not binding.get(key) for key in required_binding):
         raise ScenarioLauncherError("self_hosted_mcd_runner_primitive_binding_invalid")
@@ -219,13 +226,18 @@ def _validate_primitive_context(
         "scenario_revision": scenario.get("revision"),
         "artifact_revision": scenario.get("artifact_revision"),
         "artifact_digest": scenario.get("artifact_digest"),
-        "host_fingerprint": binding.get("host_fingerprint"),
+        **identity_coordinate(binding),
         "facts_digest": applicability.get("facts_digest"),
     }
     for key in required_binding:
         if key != "host_fingerprint" and binding.get(key) != expected_binding[key]:
             raise ScenarioLauncherError("self_hosted_mcd_runner_primitive_binding_mismatch")
-    if not _valid_digest(str(binding.get("host_fingerprint"))) or binding.get("facts_digest") != expected_binding["facts_digest"]:
+    if binding.get("identity_kind") == "dns":
+        if job.get("identity_kind") != "dns" or identity_coordinate(binding) != identity_coordinate(job):
+            raise ScenarioLauncherError("self_hosted_mcd_runner_primitive_binding_mismatch")
+    elif not _valid_digest(str(binding.get("host_fingerprint"))):
+        raise ScenarioLauncherError("self_hosted_mcd_runner_primitive_binding_mismatch")
+    if binding.get("facts_digest") != expected_binding["facts_digest"]:
         raise ScenarioLauncherError("self_hosted_mcd_runner_primitive_binding_mismatch")
 
     application = value.get("application")

@@ -63,8 +63,7 @@ def test_completed_replay_requires_exact_durable_install(installer, tmp_path, mo
     unit.write_text(installer.PASSIVE_UNIT)
     args = SimpleNamespace(runtime_version="1.6.25", archive_sha256="a" * 64, manifest_sha256="b" * 64, bridge_sha256="c" * 64, request_id="fixture", portal_api_base="https://portal.example.com/api/v1/commercial")
     receipt = {"schema": "mcd-passive-install-receipt-v1", "version": args.runtime_version, "archive_sha256": args.archive_sha256, "manifest_sha256": args.manifest_sha256, "bridge_sha256": args.bridge_sha256, "request_id": "fixture", "local_identity": "site.example.invalid", "activation_state": "passive", "service_started": False, "agent_id": "agent-1", "installation_id": "installation-1"}
-    import hashlib
-    receipt["host_fingerprint"] = "sha256:" + hashlib.sha256(installer.socket.gethostname().encode()).hexdigest()
+    receipt["identity_kind"] = "dns"
     if mismatch == "unit":
         unit.write_text("wrong")
     elif mismatch == "missing_database":

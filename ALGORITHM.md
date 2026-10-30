@@ -1424,6 +1424,18 @@ another enrollment. Foreign/partial installations fail closed and stay intact.
 Evidence: tests/test_passive_install.py, tools/passive_install_qa.py; double-only
 QA must not be presented as real Portal/systemd acceptance.
 
+New one-key OWH enrollment uses `identity_kind="dns"` and plain `local_identity`
+with server-issued agent/installation IDs. Material schema is
+`mcd-portal-enrollment-material-v1`, contract 1.0. No hostname/DNS digest is
+computed, stored or required for this branch; mixed DNS/fingerprint coordinates
+are rejected. Import, eligibility, poll, inventory, connection/terminal receipts,
+self-hosted jobs and executable context carry the same DNS coordinate. Existing
+legacy/manual fingerprint data and routes retain their original behavior. The
+new idempotency namespace is `:dns-enroll-v1` / `:dns-host-v1`, preserving history.
+Evidence: tests/test_portal_dns_identity.py (host-hash function fails if called,
+DNS import/replay, legacy preservation, poll/receipts, admitted/expired jobs,
+primitive context); runtime 1.6.26 is required for the new material contract.
+
 If the normal Own-host bootstrap is unavailable, the operator may use the
 already-issued reusable commercial API key through the MCD-owned manual
 fallback. One key may register unlimited independent external OWH MCD

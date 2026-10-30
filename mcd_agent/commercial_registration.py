@@ -19,6 +19,7 @@ from typing import Any, Mapping
 from urllib.parse import urlparse
 
 from mcd_agent import __version__
+from mcd_agent.portal_identity import dns_identity, identity_coordinate
 from mcd_agent.commercial_portal import (
     CommercialState,
     _b64,
@@ -30,7 +31,7 @@ from mcd_agent.commercial_portal import (
 
 SCHEMA = "mcd-portal-activation-material-v1"
 CONTRACT_VERSION = "1.0"
-_ACCEPTED_SCHEMAS = frozenset({SCHEMA, "portal-mcd-registration-delivery-v1", "sales-snap-registration-v1"})
+_ACCEPTED_SCHEMAS = frozenset({SCHEMA, "portal-mcd-registration-delivery-v1", "sales-snap-registration-v1", "mcd-portal-enrollment-material-v1"})
 
 
 class RegistrationMaterialError(ValueError):
@@ -137,6 +138,8 @@ def import_activation_material(
 ) -> dict[str, Any]:
     """Atomically install existing activation material without network I/O."""
     source = _unwrap(material)
+    if source.get("schema") == "mcd-portal-enrollment-material-v1":
+        return _import_dns_enrollment(state, source)
     api_base = _portal_api_base(source)
     commercial_key_id_from_material, commercial_key_secret, commercial_key_metadata = _commercial_key(source)
     credential = _text(_first(source, "portal_agent_credential", "agent_credential", "credential")) or commercial_key_secret
@@ -211,6 +214,34 @@ def import_activation_material(
         "host_fingerprint": expected_fingerprint,
         "material_digest": material_digest,
     }
+
+
+def _import_dns_enrollment(state: CommercialState, source: Mapping[str, Any]) -> dict[str, Any]:
+    coordinate = identity_coordinate(source)
+    if coordinate.get("identity_kind") != "dns":
+        raise _error("portal_registration_dns_required")
+    base = _portal_api_base(source)
+    names = ("account_id", "agent_id", "commercial_key_id", "portal_agent_credential")
+    values = {key: _text(source.get(key)) for key in names}
+    if not all(values.values()):
+        raise _error("portal_registration_binding_incomplete")
+    installations = _installation_ids(source)
+    if set(installations) != {coordinate["local_identity"]}:
+        raise _error("portal_registration_installation_mismatch")
+    old_agent = state.get("agent_id")
+    if old_agent and state.get("identity_kind") != "dns":
+        raise _error("portal_registration_legacy_binding_preserved")
+    if state.get("host_fingerprint"):
+        raise _error("portal_registration_dns_fingerprint_forbidden")
+    updates = {**values, **coordinate, "portal_api_base": base, "installation_ids": installations}
+    if old_agent and any(state.get(key) != value for key, value in updates.items()):
+        raise _error("portal_registration_binding_mismatch")
+    updates["agent_version"] = __version__
+    updates["portal_registration_material_schema"] = "mcd-portal-enrollment-material-v1"
+    if state.get("commercial_portal_connection_state") in (None, ""):
+        updates["commercial_portal_connection_state"] = "passive"
+    _atomic_put(state, updates)
+    return {"schema": "mcd-portal-registration-receipt-v1", "contract_version": "1.0", "status": "configured", "idempotent": bool(old_agent), **coordinate, "account_id": values["account_id"], "agent_id": values["agent_id"], "commercial_key_id": values["commercial_key_id"], "installation_ids": installations}
 
 
 def _read_material(args: argparse.Namespace) -> dict[str, Any]:
