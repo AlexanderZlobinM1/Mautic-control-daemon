@@ -3,6 +3,7 @@ from __future__ import annotations
 import fcntl
 import gzip
 import json
+import math
 import os
 import re
 import shutil
@@ -1431,8 +1432,8 @@ def _cfg_with_profile_payload(cfg: AgentConfig, payload: dict[str, Any]) -> Agen
             backup_ssh_port=int(storage.get("port")) if storage.get("port") is not None else out.backup_ssh_port,
             backup_ssh_user=str(storage.get("user")).strip() if storage.get("user") else out.backup_ssh_user,
             backup_ssh_remote_path=str(storage.get("remote_path")).strip() if storage.get("remote_path") else out.backup_ssh_remote_path,
-            backup_ssh_key_file=str(storage.get("key_file")).strip() if storage.get("key_file") else out.backup_ssh_key_file,
-            backup_ssh_password=str(storage.get("password")) if storage.get("password") else out.backup_ssh_password,
+            backup_ssh_key_file=str(storage.get("key_file") or "").strip() if "key_file" in storage else out.backup_ssh_key_file,
+            backup_ssh_password=str(storage.get("password") or "") if "password" in storage else out.backup_ssh_password,
         )
     if mydumper:
         out = replace(
@@ -1446,7 +1447,7 @@ def _cfg_with_profile_payload(cfg: AgentConfig, payload: dict[str, Any]) -> Agen
             backup_mysql_host=str(mysql.get("host")).strip() if mysql.get("host") else out.backup_mysql_host,
             backup_mysql_port=int(mysql.get("port")) if mysql.get("port") is not None else out.backup_mysql_port,
             backup_mysql_user=str(mysql.get("user")).strip() if mysql.get("user") else out.backup_mysql_user,
-            backup_mysql_password=str(mysql.get("password")) if mysql.get("password") else out.backup_mysql_password,
+            backup_mysql_password=str(mysql.get("password") or "") if "password" in mysql else out.backup_mysql_password,
             backup_mysql_database=str(mysql.get("database")).strip() if mysql.get("database") else out.backup_mysql_database,
         )
     if archive:
@@ -1458,6 +1459,9 @@ def _cfg_with_profile_payload(cfg: AgentConfig, payload: dict[str, Any]) -> Agen
             if isinstance(archive.get("paths"), list)
             else out.backup_archive_paths,
         )
+    schedule = _profile_schedule_payload(payload)
+    if schedule:
+        out = replace(out, **{f"backup_schedule_{key}": value for key, value in schedule.items()})
     return out
 
 
@@ -1589,7 +1593,7 @@ def _effective_cfg(cfg: AgentConfig) -> AgentConfig:
     p = backup_profile_get(cfg)
     if not p:
         return cfg
-    return _cfg_with_profile_payload(cfg, p)
+    return _cfg_with_profile_payload(cfg, canonical_backup_profile(p))
 
 
 def _validate_cfg(cfg: AgentConfig) -> None:
@@ -6234,11 +6238,22 @@ def backup_state_for_push(config: AgentConfig) -> dict[str, Any]:
 
 def backup_profile_for_push(config: AgentConfig) -> dict[str, Any]:
     cfg = _effective_cfg(config)
+    profile = backup_profile_get(config)
+    requested = canonical_backup_profile({key: value for key, value in profile.items() if not key.startswith("_")})
+    if requested:
+        return _backup_profile_readback(requested, _backup_profile_effective_values(cfg, source=profile.get("source", "profile_db")))
     if not cfg.backup_enabled:
         return {"enabled": False}
-    profile = backup_profile_get(config)
+    return _backup_profile_effective_values(cfg, source=profile.get("source", "profile_db" if profile else "config"))
+
+
+def _backup_profile_effective_values(cfg: AgentConfig, *, source: str = "profile_db") -> dict[str, Any]:
+    """Read actual candidate values without reapplying an older DB profile."""
     payload: dict[str, Any] = {
         "enabled": bool(cfg.backup_enabled),
+        "method": cfg.backup_method,
+        "remote_root_dir": cfg.backup_remote_root_dir,
+        "retention_copies": int(cfg.backup_retention_copies),
         "storage": {
             "kind": _backup_storage_kind(cfg),
             "local_path": cfg.backup_local_path,
@@ -6257,6 +6272,7 @@ def backup_profile_for_push(config: AgentConfig) -> dict[str, Any]:
             "password": cfg.backup_mysql_password or "",
             "database": cfg.backup_mysql_database or "",
         },
+        "mydumper": {"threads": int(cfg.backup_mydumper_threads), "myloader_threads": int(cfg.backup_myloader_threads)},
         "archive": {
             "enabled": bool(cfg.backup_archive_enabled),
             "name": cfg.backup_archive_name,
@@ -6270,13 +6286,45 @@ def backup_profile_for_push(config: AgentConfig) -> dict[str, Any]:
             "quiet_window_min": int(cfg.backup_schedule_quiet_window_min),
             "pre_pause_sec": int(cfg.backup_schedule_pre_pause_sec),
         },
-        "source": "profile_db" if profile else "config",
+        "source": source,
     }
     return payload
 
 
 BACKUP_PROFILE_SYNC_SCHEMA = "mcd-backup-profile-v1"
 BACKUP_PROFILE_SYNC_VERSION = 1
+
+
+def canonical_backup_profile(profile: dict[str, Any]) -> dict[str, Any]:
+    """The published MCC V1 transport-to-effective projection."""
+    normalized = json.loads(json.dumps(profile))
+    settings = normalized.pop("settings", None)
+    schedule = normalized.get("schedule")
+    schedule_values = dict(schedule) if isinstance(schedule, dict) else {}
+    if isinstance(settings, dict):
+        if "backup_enabled" in settings:
+            normalized["enabled"] = settings["backup_enabled"]
+        for key in ("enabled", "interval_sec", "quiet_hour", "quiet_minute", "quiet_window_min", "pre_pause_sec"):
+            if f"backup_schedule_{key}" in settings:
+                schedule_values[key] = settings[f"backup_schedule_{key}"]
+    if schedule_values or "schedule" in normalized:
+        normalized["schedule"] = schedule_values
+    return normalized
+
+
+def _backup_profile_readback(requested: dict[str, Any], effective: dict[str, Any]) -> dict[str, Any]:
+    """Verify exactly the requested canonical fields, never echo unknowns."""
+    out: dict[str, Any] = {}
+    for key, value in requested.items():
+        if key not in effective:
+            raise RuntimeError("unsupported_profile_field")
+        if isinstance(value, dict):
+            if not isinstance(effective[key], dict):
+                raise RuntimeError("invalid_profile_field")
+            out[key] = _backup_profile_readback(value, effective[key])
+        else:
+            out[key] = effective[key]
+    return out
 
 
 def backup_profile_sync_hash(profile: dict[str, Any]) -> str:
@@ -6317,30 +6365,44 @@ def backup_profile_apply_sync(config: AgentConfig, envelope: object) -> tuple[Ag
     desired_hash = str(envelope.get("profile_sha256") or "").strip().lower()
     if not desired_hash or desired_hash != backup_profile_sync_hash(profile):
         return config, {"schema": BACKUP_PROFILE_SYNC_SCHEMA, "version": BACKUP_PROFILE_SYNC_VERSION, "status": "unsynced", "reason": "desired_hash_mismatch"}
+    profile = canonical_backup_profile(profile)
+    expected_effective_hash = backup_profile_sync_hash(profile)
+    if "source" in profile and not isinstance(profile["source"], str):
+        return config, {"schema": BACKUP_PROFILE_SYNC_SCHEMA, "version": BACKUP_PROFILE_SYNC_VERSION, "status": "error", "reason": "invalid_profile_field"}
     try:
         incoming_updated_at = float(envelope.get("profile_updated_at"))
     except (TypeError, ValueError):
         return config, {"schema": BACKUP_PROFILE_SYNC_SCHEMA, "version": BACKUP_PROFILE_SYNC_VERSION, "status": "unsynced", "reason": "invalid_updated_at"}
+    if not math.isfinite(incoming_updated_at) or incoming_updated_at <= 0:
+        return config, {"schema": BACKUP_PROFILE_SYNC_SCHEMA, "version": BACKUP_PROFILE_SYNC_VERSION, "status": "unsynced", "reason": "invalid_updated_at"}
     current = backup_profile_get(config)
     current_updated_at = float(current.get("_profile_updated_at") or 0) if isinstance(current, dict) else 0.0
-    if current_updated_at:
-        current_hash = backup_profile_sync_hash(backup_profile_for_push(config))
+    if current_updated_at and incoming_updated_at <= current_updated_at:
+        try:
+            current_effective = _backup_profile_readback(profile, _backup_profile_effective_values(_effective_cfg(config), source=current.get("source", "profile_db")))
+        except RuntimeError:
+            return config, {"schema": BACKUP_PROFILE_SYNC_SCHEMA, "version": BACKUP_PROFILE_SYNC_VERSION, "status": "unsynced", "reason": "unsupported_profile_field"}
+        current_hash = backup_profile_sync_hash(current_effective)
         if incoming_updated_at < current_updated_at:
             return config, {"schema": BACKUP_PROFILE_SYNC_SCHEMA, "version": BACKUP_PROFILE_SYNC_VERSION, "profile_updated_at": current_updated_at, "status": "unsynced", "reason": "stale_profile", "effective_sha256": current_hash}
-        if incoming_updated_at == current_updated_at and desired_hash != current_hash:
+        if incoming_updated_at == current_updated_at and expected_effective_hash != current_hash:
             return config, {"schema": BACKUP_PROFILE_SYNC_SCHEMA, "version": BACKUP_PROFILE_SYNC_VERSION, "profile_updated_at": current_updated_at, "status": "unsynced", "reason": "profile_conflict", "effective_sha256": current_hash}
-        if incoming_updated_at == current_updated_at and desired_hash == current_hash:
-            effective = backup_profile_for_push(config)
-            return config, {"schema": BACKUP_PROFILE_SYNC_SCHEMA, "version": BACKUP_PROFILE_SYNC_VERSION, "profile_updated_at": current_updated_at, "profile_sha256": current_hash, "effective_profile": _backup_profile_masked_payload(effective), "effective_sha256": current_hash, "status": "ok"}
+        if incoming_updated_at == current_updated_at and expected_effective_hash == current_hash:
+            return config, {"schema": BACKUP_PROFILE_SYNC_SCHEMA, "version": BACKUP_PROFILE_SYNC_VERSION, "profile_updated_at": current_updated_at, "profile_sha256": desired_hash, "effective_profile": _backup_profile_masked_payload(current_effective), "effective_sha256": current_hash, "status": "ok"}
     try:
         candidate = _cfg_with_profile_payload(config, profile)
-        _validate_cfg(candidate)
+        if candidate.backup_enabled:
+            _validate_cfg(candidate)
+        effective = _backup_profile_readback(profile, _backup_profile_effective_values(candidate, source=profile.get("source", "profile_db")))
+        effective_hash = backup_profile_sync_hash(effective)
+        if effective_hash != expected_effective_hash:
+            return config, {"schema": BACKUP_PROFILE_SYNC_SCHEMA, "version": BACKUP_PROFILE_SYNC_VERSION, "status": "unsynced", "reason": "effective_hash_mismatch", "profile_sha256": desired_hash, "effective_profile": _backup_profile_masked_payload(effective), "effective_sha256": effective_hash}
         applied_profile = dict(profile)
         applied_profile["_profile_updated_at"] = incoming_updated_at
         backup_profile_set(config, applied_profile, merge=False, sync_config=True, prepare_check=False, profile_updated_at=incoming_updated_at)
-        effective = backup_profile_for_push(candidate)
+        effective = _backup_profile_readback(profile, _backup_profile_effective_values(_effective_cfg(candidate), source=profile.get("source", "profile_db")))
         effective_hash = backup_profile_sync_hash(effective)
-        status = "ok" if effective_hash == desired_hash else "unsynced"
+        status = "ok" if effective_hash == expected_effective_hash else "unsynced"
         result = {
             "schema": BACKUP_PROFILE_SYNC_SCHEMA,
             "version": BACKUP_PROFILE_SYNC_VERSION,
@@ -6354,7 +6416,8 @@ def backup_profile_apply_sync(config: AgentConfig, envelope: object) -> tuple[Ag
             result["reason"] = "effective_hash_mismatch"
         return candidate, result
     except Exception as exc:
-        return config, {"schema": BACKUP_PROFILE_SYNC_SCHEMA, "version": BACKUP_PROFILE_SYNC_VERSION, "status": "error", "reason": str(exc)}
+        reason = str(exc) if str(exc) in {"unsupported_profile_field", "invalid_profile_field"} else "backup_profile_apply_failed"
+        return config, {"schema": BACKUP_PROFILE_SYNC_SCHEMA, "version": BACKUP_PROFILE_SYNC_VERSION, "status": "error", "reason": reason}
 
 
 def backup_prune(config: AgentConfig, root: str | None = None) -> BackupResult:
