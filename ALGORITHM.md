@@ -1159,6 +1159,37 @@ cycle без ручного `segments:update`, profile/capacity/data changes. Ad
 
 Daily instance backup scheduling is a durable scheduler concern. Before a scheduled `backup_run` the daemon persists one local-date claim and changes it to a `running`, `succeeded`, or `failed` receipt in `TaskStore`. The claim is reloaded after an MCD restart, so a restart cannot duplicate the same daily slot. A stale claim may be recovered only after its bounded grace expires and only when no independent backup lock is active. A missed slot is not launched outside the configured quiet window: it is caught up at the next eligible window, without stopping or replacing an already-running backup.
 
+### Nginx deletion ownership and default stub
+
+Instance deletion inventories exact requested-domain configs in sites-enabled,
+sites-available and conf.d, including arbitrary enabled aliases and dangling
+aliases to the exact target config. Parsed server names establish ownership;
+shared files containing another server name are rejected. Root-path similarity
+or a certificate reference never authorizes deleting another vhost.
+
+Deletion snapshots only its owned configs, stages their removal, validates with
+nginx -t, inspects the active nginx -T inventory and reloads only on success.
+Failure restores only those owned configs, preserving recovery snapshots and
+blocking certificate/database/files cleanup. Unknown active target configs
+block cleanup. Certificates referenced by remaining vhosts or dynamic TLS
+paths are preserved; references are checked again immediately before certbot.
+An unchanged repeated deletion performs no unnecessary reload.
+
+The default stub belongs exclusively to the nginx baseline generator. It has
+server_name _, no instance domains, no certificate directives and no certificate
+selection or generation. HTTPS uses ssl_reject_handshake on. A baseline apply
+validates support through nginx -t and retains its existing rollback behavior.
+Instance deletion never creates, repairs or rewrites this stub or another
+vhost. A broken shared default therefore blocks deletion until its own normal
+baseline operation repairs it; deletion must not hide that fault.
+
+Evidence: test_instance_delete_nginx_transaction covers aliases, quoted and
+inline names, shared-config refusal, rollback, untouched defaults/other vhosts,
+remaining certificate references and pre-mutation failure. Native Ubuntu nginx
+QA additionally checks that the certificate-free stub validates, a broken
+foreign default blocks deletion, and repeated scoped cleanup preserves the
+default and neighboring vhost byte-for-byte.
+
 ### Backup profile synchronization contract
 
 Backup profile synchronization is a separate typed contract and is never

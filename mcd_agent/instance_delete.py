@@ -5,7 +5,9 @@ from pathlib import Path
 import os
 import re
 import shutil
+import shlex
 import subprocess
+import tempfile
 import time
 from typing import Any
 from urllib.parse import urlparse
@@ -18,7 +20,7 @@ from mcd_agent.models import DBConfig
 _DOMAIN_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
 _DB_NAME_RE = re.compile(r"^[A-Za-z0-9_$-]{1,64}$")
 _LOCAL_DB_HOSTS = {"", "localhost", "127.0.0.1", "::1"}
-_NGINX_DIRS = (Path("/etc/nginx/sites-enabled"), Path("/etc/nginx/sites-available"))
+_NGINX_DIRS = (Path("/etc/nginx/sites-enabled"), Path("/etc/nginx/sites-available"), Path("/etc/nginx/conf.d"))
 _VAR_WWW = Path("/var/www")
 _LETSENCRYPT_LIVE = Path("/etc/letsencrypt/live")
 _LETSENCRYPT_RENEWAL = Path("/etc/letsencrypt/renewal")
@@ -193,15 +195,33 @@ def _read_nginx_text(path: Path) -> str:
         return ""
 
 
+def _nginx_directives(text: str, name: str) -> list[list[str]]:
+    lexer = shlex.shlex(text, posix=True, punctuation_chars="{};")
+    lexer.whitespace_split = True
+    statement: list[str] = []
+    contexts: list[str] = []
+    values: list[list[str]] = []
+    try:
+        for token in lexer:
+            if token and all(char in "{};" for char in token):
+                for char in token:
+                    if char == "{":
+                        contexts.append(statement[0] if statement else "")
+                    elif char == "}" and contexts:
+                        contexts.pop()
+                    elif char == ";" and statement and statement[0] == name:
+                        if name != "server_name" or not contexts or contexts[-1] == "server":
+                            values.append(statement[1:])
+                    statement = []
+            else:
+                statement.append(token)
+    except ValueError as exc:
+        raise RuntimeError("malformed nginx config; ownership unverified") from exc
+    return values
+
+
 def _nginx_server_names(text: str) -> set[str]:
-    names: set[str] = set()
-    for match in re.finditer(r"(?im)^\s*server_name\s+([^;]+);", text):
-        for raw in re.split(r"\s+", match.group(1).strip()):
-            name = raw.strip().lower().rstrip(".")
-            if not name or name == "_" or name.startswith("~"):
-                continue
-            names.add(name)
-    return names
+    return {raw.lower().rstrip(".") for values in _nginx_directives(text, "server_name") for raw in values if raw}
 
 
 def _nginx_matches_domain(path: Path, domain_set: set[str]) -> bool:
@@ -210,9 +230,10 @@ def _nginx_matches_domain(path: Path, domain_set: set[str]) -> bool:
     text = _read_nginx_text(path)
     if text:
         names = _nginx_server_names(text)
-        if names.intersection(domain_set):
-            return True
-    return path.name.lower() in {f"{domain}.conf" for domain in domain_set}
+        if names:
+            return bool(names.intersection(domain_set))
+    filenames = {name for domain in domain_set for name in (domain, f"{domain}.conf")}
+    return path.name.lower() in filenames or (path.is_symlink() and path.resolve(strict=False).name.lower() in filenames)
 
 
 def _nginx_candidates(root: Path, domains: list[str]) -> list[Path]:
@@ -234,25 +255,110 @@ def _nginx_candidates(root: Path, domains: list[str]) -> list[Path]:
                 continue
             if _nginx_matches_domain(item, domain_set):
                 wanted.append(item)
-    return [p for p in _dedupe_paths(wanted) if _safe_nginx_child(p)]
+    result = [p for p in _dedupe_paths(wanted) if _safe_nginx_child(p)]
+    for path in result:
+        if _nginx_server_names(_read_nginx_text(path)) - domain_set:
+            raise RuntimeError(f"shared nginx config must be preserved: {path}")
+    # Capture aliases before removing their targets, including arbitrary names.
+    return sorted(result, key=lambda p: not p.is_symlink())
 
 
 def _disable_nginx_vhost(path: Path) -> tuple[bool, str]:
     if not (path.exists() or path.is_symlink()):
         return False, f"nginx vhost already absent: {path}"
     enabled_dir = _nginx_dir("sites-enabled").resolve(strict=False)
-    available_dir = _nginx_dir("sites-available").resolve(strict=False)
     try:
         parent = path.parent.resolve(strict=False)
     except Exception:
         raise RuntimeError(f"unsafe nginx path: {path}")
-    if parent not in {enabled_dir, available_dir}:
+    if not _safe_nginx_child(path):
         raise RuntimeError(f"unsafe nginx path: {path}")
     if parent == enabled_dir:
         path.unlink()
         return True, f"removed enabled nginx config: {path}"
     path.unlink()
-    return True, f"removed available nginx config: {path}"
+    label = "available" if path.parent.name == "sites-available" else path.parent.name
+    return True, f"removed {label} nginx config: {path}"
+
+
+def _certificate_referenced(nginx_dump: str, domain: str) -> bool:
+    roots = (_LETSENCRYPT_LIVE / domain, _LETSENCRYPT_LIVE.parent / "archive" / domain)
+    references = _nginx_directives(nginx_dump, "ssl_certificate") + _nginx_directives(nginx_dump, "ssl_certificate_key")
+    for values in references:
+        if len(values) != 1:
+            return True
+        value = values[0]
+        if "$" in value:
+            return True
+        path = Path(value)
+        if any(path.is_relative_to(root) or path.resolve(strict=False).is_relative_to(root.resolve(strict=False)) for root in roots):
+            return True
+    return False
+
+
+def _remove_nginx_configs_safely(plan: InstanceDeletePlan, result: dict[str, Any]) -> set[str]:
+    """Validate/reload scoped removal before any irreversible cert/data action."""
+    from mcd_agent import nginx_baseline as baseline
+
+    # Rescan immediately before mutation; the plan may predate new aliases.
+    paths = _dedupe_paths([*_nginx_candidates(plan.root, plan.domains), *plan.nginx_paths])
+    domains = set(plan.domains)
+    for path in paths:
+        if not _safe_nginx_child(path) or _nginx_server_names(_read_nginx_text(path)) - domains:
+            raise RuntimeError(f"unsafe or shared nginx config: {path}")
+    if not paths and not shutil.which("nginx"):
+        result["warnings"].append("nginx unavailable; certificates preserved")
+        return domains
+    backup_dir = Path(tempfile.mkdtemp(prefix="mcd-delete-nginx-"))
+    snapshots: dict[Path, Any] = {}
+    changed_paths: list[str] = []
+    reloaded = False
+    try:
+        for path in paths:
+            baseline._snapshot(path, backup_dir, snapshots)
+        for path in paths:
+            changed, message = _disable_nginx_vhost(path)
+            result["warnings"].append(message)
+            if changed:
+                changed_paths.append(str(path))
+        rc, out = _run(["nginx", "-t"], timeout_sec=30)
+        if rc != 0:
+            raise RuntimeError("nginx -t failed after scoped vhost staging: " + out)
+        rc, dump = _run(["nginx", "-T"], timeout_sec=30)
+        if rc != 0:
+            raise RuntimeError("nginx active-config inventory failed")
+        if _nginx_server_names(dump) & domains:
+            raise RuntimeError("target domain remains in active nginx configuration")
+        retained = {domain for domain in domains if _certificate_referenced(dump, domain)}
+        if changed_paths:
+            rc, out = _run(["systemctl", "reload", "nginx"], timeout_sec=30)
+            if rc != 0:
+                raise RuntimeError("nginx reload failed after validated staging: " + out)
+            reloaded = True
+        result["deleted"]["vhost"].extend(changed_paths)
+    except Exception as exc:
+        baseline._restore_snapshots(snapshots)
+        restored = True
+        for snap in snapshots.values():
+            try:
+                if snap.kind == "symlink":
+                    restored &= snap.path.is_symlink() and os.readlink(snap.path) == snap.target
+                elif snap.kind == "file":
+                    restored &= snap.path.is_file() and snap.path.read_bytes() == snap.backup.read_bytes()
+                else:
+                    restored &= not os.path.lexists(snap.path)
+            except OSError:
+                restored = False
+        if not restored:
+            raise RuntimeError(f"nginx rollback incomplete; retained snapshots in {backup_dir}") from exc
+        if reloaded:
+            rc, _ = _run(["nginx", "-t"], timeout_sec=30)
+            if rc == 0:
+                _run(["systemctl", "reload", "nginx"], timeout_sec=30)
+        # Keep the root-only durable snapshots for recovery on failed rollback.
+        raise
+    shutil.rmtree(backup_dir)
+    return retained
 
 
 def _inventory_db_for_root(cfg: AgentConfig | None, root: Path) -> DBConfig | None:
@@ -550,10 +656,7 @@ def delete_instance_artifacts(
     if os.geteuid() != 0:
         raise RuntimeError("must run as root")
 
-    if plan.delete_vhost and plan.nginx_paths:
-        rc, out = _run(["nginx", "-t"], timeout_sec=30)
-        if rc != 0:
-            raise RuntimeError("nginx -t failed before vhost removal: " + out)
+    retained_certificates = _remove_nginx_configs_safely(plan, result) if plan.delete_vhost else set()
 
     if plan.delete_vhost:
         from mcd_agent.local_mail import disable_local_mail
@@ -592,24 +695,20 @@ def delete_instance_artifacts(
         print("Deleting nginx vhost")
         if not plan.nginx_paths:
             result["warnings"].append("no matching nginx vhost files found")
-        for path in plan.nginx_paths:
-            try:
-                changed, msg = _disable_nginx_vhost(path)
-                result["warnings"].append(msg)
-                if changed:
-                    result["deleted"]["vhost"].append(str(path))
-            except Exception as exc:
-                raise RuntimeError(f"failed to remove nginx path {path}: {exc}") from exc
         for domain in plan.domains:
+            if domain not in retained_certificates:
+                rc, dump = _run(["nginx", "-T"], timeout_sec=30)
+                if rc != 0:
+                    raise RuntimeError("nginx inventory failed before certificate cleanup")
+                if _certificate_referenced(dump, domain):
+                    retained_certificates.add(domain)
+            if domain in retained_certificates:
+                result["warnings"].append(f"certificate preserved; still referenced by nginx: {domain}")
+                continue
             changed, message = _remove_dedicated_certificate(domain)
             result["warnings"].append(message)
             if changed:
                 result["deleted"]["certificates"].append(domain)
-        if result["deleted"]["vhost"]:
-            rc, out = _run(["nginx", "-t"], timeout_sec=30)
-            if rc != 0:
-                raise RuntimeError("nginx -t failed after vhost removal: " + out)
-            _run(["systemctl", "reload", "nginx"], timeout_sec=30)
 
     if plan.delete_files:
         print(f"Deleting files {plan.root}")
