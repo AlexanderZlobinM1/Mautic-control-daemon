@@ -1594,6 +1594,9 @@ read-only-примитивы: `read_host_facts`, `check_prerequisites`, `check_w
 Просроченный job получает durable typed terminal receipt
 `portal_mcd_generic_command_expired` без вызова capability handler; после доставки
 receipt курсор продвигается. Это проверяется cached host_facts regression.
+Terminal sequence вычисляется из сохранённого last_sequence; для состояния
+старых версий started_sent означает уже занятый stage sequence 1. Отказ после
+started получает следующий sequence, без повторного вызова capability handler.
 
 Для generic job MCD сначала durable фиксирует `started` receipt, затем вызывает
 handler и durable фиксирует terminal result. Receipt sequence — монотонный,

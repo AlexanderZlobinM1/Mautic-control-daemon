@@ -1495,16 +1495,24 @@ class SelfHostedPortalWorker:
         """Close a leased, valid generic job when admission cannot proceed."""
         job_id = str(job["job_id"])
         digest = hashlib.sha256(canonical_json(dict(job))).hexdigest()
+        runs = self.executor.state.get(_GENERIC_RUNS_KEY)
+        runs = dict(runs) if isinstance(runs, Mapping) else {}
+        saved = runs.get(job_id)
+        saved = dict(saved) if isinstance(saved, Mapping) else {}
+        if saved.get("job_digest") not in (None, digest):
+            return {"status": "rejected", "reason": "portal_mcd_generic_job_reuse_conflict"}
+        last_sequence = max(int(saved.get("last_sequence") or 0), int(bool(saved.get("started_sent"))))
         terminal = self._generic_receipt(
             job,
             terminal=True,
-            sequence=1,
+            sequence=last_sequence + 1,
             status="failed",
             error={"code": reason, "message": reason},
         )
-        runs = self.executor.state.get(_GENERIC_RUNS_KEY)
-        runs = dict(runs) if isinstance(runs, Mapping) else {}
-        runs[job_id] = {"job_digest": digest, "started_sent": False, "terminal": terminal}
+        previous_terminal = saved.get("terminal")
+        if isinstance(previous_terminal, Mapping) and int(previous_terminal.get("sequence") or 0) > last_sequence:
+            terminal = dict(previous_terminal)
+        runs[job_id] = {**saved, "job_digest": digest, "started_sent": bool(saved.get("started_sent")), "terminal": terminal}
         if len(runs) > 64:
             for key in list(runs)[:-64]:
                 runs.pop(key, None)
@@ -1550,7 +1558,7 @@ class SelfHostedPortalWorker:
         started_sent = bool(saved.get("started_sent")) if isinstance(saved, Mapping) else False
         if not started_sent:
             started = self._generic_receipt(job, terminal=False, sequence=1, status="started")
-            runs[job_id] = {"job_digest": digest, "started_sent": True}
+            runs[job_id] = {"job_digest": digest, "started_sent": True, "last_sequence": started["sequence"]}
             self.executor.state.put(_GENERIC_RUNS_KEY, runs)
             if not self._send_or_queue(started):
                 return {"status": "receipt_pending", "job_id": job_id}
