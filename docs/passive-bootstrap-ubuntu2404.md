@@ -1,8 +1,15 @@
 # Passive commercial bootstrap: Ubuntu 24.04 amd64
 
 Candidate entrypoint: `tools/mcd_passive_install.py`. This is a fresh-install
-entrypoint, not an upgrade. Existing `/opt/mcd` or either MCD unit is refused.
+entrypoint, not an upgrade. Existing installations are refused unless an exact
+completed passive receipt, unchanged config/unit, matching installed version,
+durable agent/installation binding, key and request/instance identity prove replay.
+Completed replay performs no new enrollment; partial installs remain refused.
 Provide the existing account commercial key on protected stdin before enrollment.
+Pass the portable instance DNS through `--instance-identity`; it is distinct from
+the machine hostname used for host fingerprinting. Stable `--request-id` supplies
+the two Portal idempotency keys. `--bridge-sha256` is verified before importing
+the bridge, rather than relying on an unchecked caller assertion.
 Never put the key in command arguments, script text or receipts.
 
 The installer verifies the HTTPS runtime archive SHA-256, validates the runtime
@@ -10,7 +17,10 @@ manifest/payload and expected version with the separately SHA-verified MCD bridg
 installs the wheel in a dedicated venv, redeems the same key, uses host registration
 and atomically imports issued binding through `commercial_registration`.
 It writes passive profile and SQLite state; it does not start or enable a worker.
-Failures preserve partial install for diagnosis, so retry requires explicit recovery.
+After daemon-reload it reads actual systemd ActiveState and requires inactive.
+The unit uses KillMode=process so later supervised worker restarts do not kill
+detached jobs. Enrollment does not authorize or execute any scenario.
+Failures preserve partial install for diagnosis, so partial retry requires explicit recovery.
 No activation code, agent keypair or signature infrastructure is used.
 
 Prerequisites: root, Python 3.12, python3-venv/pip, trusted HTTPS CA, systemd.
@@ -37,7 +47,9 @@ not proof of application compatibility.
 
 `tools/passive_install_qa.py` uses a local trusted HTTPS Portal contract double
 inside Ubuntu 24.04 amd64. It checks same-key enrollment/host registration,
-passive receipt, no worker start and refusal of a repeated fresh install.
-The container does not run systemd PID1: daemon-reload is stubbed and any service
-start is rejected. This does not prove live Portal or real systemd behavior.
+passive receipt, no installer worker start, exact completed replay and wrong-key
+rejection. By default daemon-reload is stubbed. With `REAL_SYSTEMD_QA=1` in a
+disposable VM, it uses real systemd and separately checks service start/restart/
+stop with an empty command queue and child-process survival. These fixture tests
+do not prove live Portal behavior; real endpoint acceptance needs separate evidence.
 Do not label a candidate approved for production until those checks are supplied.
