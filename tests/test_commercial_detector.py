@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,6 +15,69 @@ from mcd_agent.commercial_detector import (
 from mcd_agent.commercial_portal import CommercialState
 from mcd_agent.commercial_self_hosted import SelfHostedScenarioExecutor
 from mcd_agent.commercial_onboarding import exposed_capabilities
+
+
+@pytest.mark.parametrize("layout", ["bin/console", "site/bin/console", "site/project/bin/console", "site/public_html/bin/console", "site/project/app/console"])
+def test_mautic_probe_recognizes_bounded_layouts(tmp_path, monkeypatch, layout):
+    from mcd_agent import commercial_detector as detector
+    monkeypatch.setattr(detector, "_MAUTIC_ROOTS", (str(tmp_path),))
+    console = tmp_path / layout
+    console.parent.mkdir(parents=True)
+    console.touch()
+    assert detector._probe_mautic_installation() == {"installed": True, "active": False, "markers": [f"path:{console}"]}
+
+
+@pytest.mark.parametrize("link_at", ["site", "site/project", "site/project/bin", "site/project/bin/console", "root"])
+def test_mautic_probe_does_not_follow_foreign_symlinks(tmp_path, monkeypatch, link_at):
+    from mcd_agent import commercial_detector as detector
+    root = tmp_path / "approved"
+    root.mkdir()
+    foreign = tmp_path / "foreign"
+    foreign.mkdir()
+    console = foreign / "bin/console"
+    console.parent.mkdir()
+    console.touch()
+    if link_at == "root":
+        root.rmdir()
+        root.symlink_to(foreign, target_is_directory=True)
+    else:
+        link = root / link_at
+        link.parent.mkdir(parents=True, exist_ok=True)
+        target = console if link.name == "console" else console.parent if link.name == "bin" else foreign
+        link.symlink_to(target, target_is_directory=link.name != "console")
+    monkeypatch.setattr(detector, "_MAUTIC_ROOTS", (str(root),))
+    assert detector._probe_mautic_installation()["installed"] is False
+
+
+def test_mautic_probe_ignores_deeper_unknown_layout(tmp_path, monkeypatch):
+    from mcd_agent import commercial_detector as detector
+    console = tmp_path / "site/unknown/project/bin/console"
+    console.parent.mkdir(parents=True)
+    console.touch()
+    monkeypatch.setattr(detector, "_MAUTIC_ROOTS", (str(tmp_path),))
+    assert detector._probe_mautic_installation()["markers"] == []
+
+
+@pytest.mark.parametrize("active", [{"php8.5-fpm"}, {"php8.4-fpm", "php8.5-fpm"}, set()])
+def test_php_probe_discovers_actual_units_and_checks_activity(monkeypatch, active):
+    from mcd_agent import commercial_detector as detector
+    calls = []
+    monkeypatch.setattr(detector.shutil, "which", lambda _: "/usr/bin/systemctl")
+    def run(argv, **kwargs):
+        calls.append(argv)
+        if argv[1] == "list-unit-files":
+            return SimpleNamespace(returncode=0, stdout="php8.5-fpm.service enabled\nphp8.4-fpm.service disabled\nphp8.6-fpm@evil.service enabled\n../../evil enabled\nphp8.5-fpm.service enabled\n")
+        return SimpleNamespace(returncode=0 if argv[-1] in active else 3)
+    monkeypatch.setattr(detector.subprocess, "run", run)
+    assert detector._active_services(("php-fpm",)) == sorted(active)
+    assert {argv[-1] for argv in calls if argv[1] == "is-active"} == {"php-fpm", "php8.4-fpm", "php8.5-fpm"}
+
+
+def test_php_probe_without_systemctl_is_empty(monkeypatch):
+    from mcd_agent import commercial_detector as detector
+    monkeypatch.setattr(detector.shutil, "which", lambda _: None)
+    monkeypatch.setattr(detector.subprocess, "run", lambda *args, **kwargs: pytest.fail("unexpected command"))
+    assert detector._active_services(("php-fpm",)) == []
 
 
 def test_normalized_detector_facts_are_data_driven(tmp_path, monkeypatch):

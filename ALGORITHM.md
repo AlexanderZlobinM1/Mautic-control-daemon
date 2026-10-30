@@ -1611,6 +1611,14 @@ Generic result допускает глубину 8 для classification evidenc
 Ошибка формирования terminal превращается в durable sequence 2 failure
 commercial_generic_terminal_construction_failed без включения сырого результата.
 
+Host classification ищет console только в approved roots /var/www, /srv/www,
+/opt/mautic: непосредственно, в одном дочернем каталоге и его project/public_html.
+Симлинки root/каталогов/console не обходятся; максимум 128 дочерних каталогов.
+PHP-FPM версии обнаруживаются read-only list-unit-files с фильтром имени
+php[major.minor]-fpm.service (также php-fpm.service); каждый допустимый unit
+проверяется is-active. Evidence содержит все реально активные версии, а не
+версию PHP CLI; схема evidence сохраняется, digest новых фактов пересчитывается.
+
 Для generic job MCD сначала durable фиксирует `started` receipt, затем вызывает
 handler и durable фиксирует terminal result. Receipt sequence — монотонный,
 Portal idempotency — `{job_id}:{sequence}`. При недоступном Portal receipt

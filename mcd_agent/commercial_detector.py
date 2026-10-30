@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -33,6 +34,7 @@ _APPLICABILITY_FACT_KEYS = (
     "classification_evidence",
 )
 _REQUIRED_APPLICABILITY_FACT_KEYS = _APPLICABILITY_FACT_KEYS[:6]
+_MAUTIC_ROOTS = ("/var/www", "/srv/www", "/opt/mautic")
 
 _CLASSIFICATION_GROUPS = {
     "mautic_installation": {
@@ -58,15 +60,36 @@ _CLASSIFICATION_GROUPS = {
     "php_runtime": {
         "binaries": ("php", "php-fpm"),
         "paths": ("/etc/php", "/usr/lib/php"),
-        "services": ("php-fpm", "php8.4-fpm", "php8.3-fpm", "php8.2-fpm", "php8.1-fpm"),
+        "services": ("php-fpm",),
     },
 }
+
+
+def _php_fpm_units(systemctl: str) -> tuple[str, ...]:
+    """Discover installed units, including inactive versions, without shell expansion."""
+    try:
+        result = subprocess.run(
+            [systemctl, "list-unit-files", "--type=service", "--no-legend", "--no-pager", "php*-fpm.service"],
+            check=False, capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ()
+    if result.returncode != 0:
+        return ()
+    names = set()
+    for line in (result.stdout or "").splitlines()[:512]:
+        fields = line.split()
+        if fields and re.fullmatch(r"php(?:[0-9]{1,2}\.[0-9]{1,2})?-fpm\.service", fields[0]):
+            names.add(fields[0][:-8])
+    return tuple(sorted(names)[:64])
 
 
 def _active_services(names: tuple[str, ...]) -> list[str]:
     systemctl = shutil.which("systemctl")
     if not systemctl:
         return []
+    if "php-fpm" in names:
+        names = tuple(sorted(set(names) | set(_php_fpm_units(systemctl))))
     active: list[str] = []
     for name in names:
         try:
@@ -97,18 +120,26 @@ def _probe_group(*, binaries: tuple[str, ...], paths: tuple[str, ...], services:
 
 def _probe_mautic_installation() -> dict[str, Any]:
     markers: list[str] = []
-    roots = (Path("/var/www"), Path("/srv/www"), Path("/opt/mautic"))
+    roots = tuple(Path(value) for value in _MAUTIC_ROOTS)
     for root in roots:
+        if root.is_symlink():
+            continue
         candidates = [root / "bin" / "console", root / "app" / "console"]
         if root.is_dir():
             try:
-                children = sorted((item for item in root.iterdir() if item.is_dir()), key=lambda item: str(item))[:128]
+                children = sorted((item for item in root.iterdir() if not item.is_symlink() and item.is_dir()), key=lambda item: str(item))[:128]
             except OSError:
                 children = []
             for child in children:
                 candidates.extend((child / "bin" / "console", child / "app" / "console"))
+                for layout in ("project", "public_html"):
+                    candidates.extend((child / layout / "bin" / "console", child / layout / "app" / "console"))
         for candidate in candidates:
             try:
+                relative = candidate.relative_to(root)
+                components = [root, *(root.joinpath(*relative.parts[:index]) for index in range(1, len(relative.parts) + 1))]
+                if any(part.is_symlink() for part in components):
+                    continue
                 if candidate.is_file():
                     markers.append(f"path:{candidate}")
             except OSError:
