@@ -1411,6 +1411,19 @@ commercial worker can start.
 
 #### Manual fallback for an existing commercial key
 
+Fresh Portal bootstrap uses `tools/mcd_passive_install.py`: HTTPS + one existing
+commercial API key on stdin, exact archive/manifest/bridge SHA-256, then the
+existing redeem-commercial-key and same-key host-registration endpoints. DNS
+instance identity is explicit and independent from machine fingerprint. Import
+uses the installed wheel's offline atomic registration importer. The resulting
+config is passive with MCC disabled; the service remains disabled/inactive and
+uses KillMode=process. No stack/Mautic scenario is run during bootstrap.
+An exact completed-install replay verifies receipt pins, config/unit, installed
+version and durable key/agent/installation identity before returning without
+another enrollment. Foreign/partial installations fail closed and stay intact.
+Evidence: tests/test_passive_install.py, tools/passive_install_qa.py; double-only
+QA must not be presented as real Portal/systemd acceptance.
+
 If the normal Own-host bootstrap is unavailable, the operator may use the
 already-issued reusable commercial API key through the MCD-owned manual
 fallback. One key may register unlimited independent external OWH MCD
