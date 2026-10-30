@@ -38,6 +38,9 @@ def completed_replay(root, unit, args, key, identity):
     expected = {"schema": "mcd-passive-install-receipt-v1", "version": args.runtime_version, "archive_sha256": args.archive_sha256, "manifest_sha256": args.manifest_sha256, "bridge_sha256": args.bridge_sha256, "request_id": args.request_id, "local_identity": identity, "activation_state": "passive", "service_started": False}
     if any(receipt.get(name) != value for name, value in expected.items()) or unit.read_text() != PASSIVE_UNIT or (root / "etc/mcd.toml").read_text() != PASSIVE_CONFIG:
         raise RuntimeError("bootstrap_replay_binding_mismatch")
+    fingerprint = "sha256:" + hashlib.sha256(socket.gethostname().encode()).hexdigest()
+    if receipt.get("host_fingerprint") != fingerprint:
+        raise RuntimeError("bootstrap_replay_host_mismatch")
     material = {"key": key, "agent_id": receipt["agent_id"], "installation_id": receipt["installation_id"], "identity": identity, "base": args.portal_api_base.rstrip("/"), "version": args.runtime_version}
     check = '''import json,sys,hmac
 from mcd_agent.commercial_portal import CommercialState
@@ -169,7 +172,7 @@ def main():
         run("systemctl", "daemon-reload")
         if run("systemctl", "show", "mcd.service", "--property=ActiveState", "--value").strip() != "inactive":
             raise RuntimeError("bootstrap_service_not_passive")
-        receipt = {"schema": "mcd-passive-install-receipt-v1", "version": actual, "archive_sha256": args.archive_sha256, "manifest_sha256": args.manifest_sha256, "bridge_sha256": args.bridge_sha256, "request_id": args.request_id, "local_identity": identity, "account_id": activation["account_id"], "commercial_key_id": activation["commercial_key_id"], "agent_id": agent, "installation_id": installation["installation_id"], "activation_state": "passive", "service_started": False}
+        receipt = {"schema": "mcd-passive-install-receipt-v1", "version": actual, "archive_sha256": args.archive_sha256, "manifest_sha256": args.manifest_sha256, "bridge_sha256": args.bridge_sha256, "request_id": args.request_id, "local_identity": identity, "host_fingerprint": fingerprint, "account_id": activation["account_id"], "commercial_key_id": activation["commercial_key_id"], "agent_id": agent, "installation_id": installation["installation_id"], "activation_state": "passive", "service_started": False}
         (root / "var/passive-install-receipt.json").write_text(json.dumps(receipt, sort_keys=True) + "\n")
         print(json.dumps(receipt))
 
