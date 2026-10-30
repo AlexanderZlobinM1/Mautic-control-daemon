@@ -150,23 +150,6 @@ def _sites_enabled_has_non_conf_entries() -> bool:
     return False
 
 
-def _default_deny_ssl_pair() -> tuple[Path, Path] | None:
-    letsencrypt = Path("/etc/letsencrypt/live")
-    if letsencrypt.exists():
-        try:
-            for fullchain in sorted(letsencrypt.glob("*/fullchain.pem")):
-                privkey = fullchain.parent / "privkey.pem"
-                if fullchain.exists() and privkey.exists():
-                    return fullchain, privkey
-        except Exception:
-            pass
-    snakeoil_cert = Path("/etc/ssl/certs/ssl-cert-snakeoil.pem")
-    snakeoil_key = Path("/etc/ssl/private/ssl-cert-snakeoil.key")
-    if snakeoil_cert.exists() and snakeoil_key.exists():
-        return snakeoil_cert, snakeoil_key
-    return None
-
-
 def _listen_default_server_ports(text: str) -> set[int]:
     ports: set[int] = set()
     for raw in text.splitlines():
@@ -199,10 +182,8 @@ def _active_default_server_ports() -> set[int]:
 
 
 def _desired_default_deny_config(
-    pair: tuple[Path, Path] | None = None,
     default_server_ports: set[int] | None = None,
 ) -> str:
-    ssl_pair = pair if pair is not None else _default_deny_ssl_pair()
     occupied_ports = _active_default_server_ports() if default_server_ports is None else default_server_ports
     lines = [
         DEFAULT_DENY_MARKER,
@@ -218,21 +199,18 @@ def _desired_default_deny_config(
                 "",
             ]
         )
-    if ssl_pair is not None:
-        cert, key = ssl_pair
-        if 443 not in occupied_ports:
-            lines.extend(
-                [
-                    "server {",
-                    "    listen 443 ssl default_server;",
-                    "    server_name _;",
-                    f"    ssl_certificate {cert};",
-                    f"    ssl_certificate_key {key};",
-                    "    return 444;",
-                    "}",
-                    "",
-                ]
-            )
+    if 443 not in occupied_ports:
+        lines.extend(
+            [
+                "server {",
+                "    listen 443 ssl default_server;",
+                "    server_name _;",
+                "    ssl_reject_handshake on;",
+                "    return 444;",
+                "}",
+                "",
+            ]
+        )
     return "\n".join(lines)
 
 

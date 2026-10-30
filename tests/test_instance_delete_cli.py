@@ -125,9 +125,10 @@ class InstanceDeleteCliTests(unittest.TestCase):
                 patch.object(instance_delete, "build_delete_plan", return_value=plan),
                 patch.object(instance_delete.os, "geteuid", return_value=0),
                 patch.object(instance_delete, "_run", return_value=(1, "broken config")),
+                patch.object(instance_delete, "_NGINX_DIRS", (Path(tmp),)),
                 patch("mcd_agent.local_mail.disable_local_mail") as disable_mail,
             ):
-                with self.assertRaisesRegex(RuntimeError, "nginx -t failed before"):
+                with self.assertRaisesRegex(RuntimeError, "nginx -t failed after scoped"):
                     instance_delete.delete_instance_artifacts(
                         SimpleNamespace(state_db_path=str(Path(tmp) / "state.db")),
                         root=str(root),
