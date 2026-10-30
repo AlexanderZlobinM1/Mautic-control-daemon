@@ -37,11 +37,11 @@ SQLite state does not change existing MariaDB databases or credentials.
 
 The sole approved scenario target is Ubuntu 24.04, Nginx from nginx.org,
 PHP 8.5 from the approved Ondrej channel, MariaDB 11.4 from the official MariaDB
-channel, latest Mautic 7.2.x, and Redis-backed PHP/Mautic sessions. Channels must
-already be configured; neither bootstrap nor a fallback silently adds a repository.
-The external Portal-owned scenario verifies candidates and reports a typed blocker
-when the approved package family is unavailable. Native Noble 8.3/10.11 is not
-an alternative installation profile.
+channel, latest Mautic 7.2.x, and Redis-backed PHP/Mautic sessions. The external
+Portal-owned scenario explicitly establishes these approved repository profiles
+and verifies their package candidates; bootstrap does not configure repositories.
+An unavailable approved package family is a typed blocker, not permission to add
+an arbitrary source. Native Noble 8.3/10.11 is not an alternative profile.
 
 The accepted CLI and FPM Redis configuration uses php8.5-redis,
 session.save_handler=redis and session.save_path="tcp://127.0.0.1:6379?database=10&prefix=mautic_session:&timeout=2.5&read_timeout=2.5".
