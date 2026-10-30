@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 from typing import Any
 
@@ -220,6 +221,88 @@ def _default_deny_satisfied() -> bool:
         return False
     desired = _desired_default_deny_config()
     return current == desired
+
+
+def default_stub_operation(*, apply: bool = False) -> dict[str, Any]:
+    """Inspect or repair only the baseline owner's managed default stub."""
+    result: dict[str, Any] = {
+        "schema": "mcd-nginx-default-stub-v1", "version": 1,
+        "path": str(DEFAULT_DENY_FILE), "changed": False,
+        "validated": False, "reloaded": False,
+    }
+    if DEFAULT_DENY_FILE.is_symlink():
+        return {**result, "status": "blocked", "reason": "default_stub_symlink"}
+    try:
+        original = DEFAULT_DENY_FILE.read_bytes() if DEFAULT_DENY_FILE.exists() else None
+    except OSError:
+        return {**result, "status": "error", "reason": "default_stub_read_failed"}
+    if original is not None and DEFAULT_DENY_MARKER.encode() not in original:
+        return {**result, "status": "blocked", "reason": "default_stub_unmanaged"}
+    desired = _desired_default_deny_config().encode()
+    result["matches"] = original == desired
+    if not apply:
+        return {**result, "status": "ok" if original == desired else "drift"}
+    if os.geteuid() != 0:
+        return {**result, "status": "blocked", "reason": "root_required"}
+    if not shutil.which("nginx") and not Path("/usr/sbin/nginx").is_file():
+        return {**result, "status": "blocked", "reason": "nginx_binary_missing"}
+    if not DEFAULT_DENY_FILE.parent.is_dir():
+        return {**result, "status": "blocked", "reason": "nginx_config_directory_missing"}
+    snapshots: dict[Path, _Snapshot] = {}
+    wrote = False
+    failure = "default_stub_apply_failed"
+    temporary: Path | None = None
+    try:
+        if original != desired:
+            BACKUP_ROOT.mkdir(parents=True, exist_ok=True)
+            backup_dir = Path(tempfile.mkdtemp(prefix="default-stub-", dir=BACKUP_ROOT))
+            result["backup_dir"] = str(backup_dir)
+            _snapshot(DEFAULT_DENY_FILE, backup_dir, snapshots)
+            old_stat = DEFAULT_DENY_FILE.stat() if original is not None else None
+            with tempfile.NamedTemporaryFile(dir=DEFAULT_DENY_FILE.parent, prefix=".mcd-default-stub-", suffix=".tmp", delete=False) as stream:
+                temporary = Path(stream.name)
+                stream.write(desired)
+            os.chmod(temporary, old_stat.st_mode & 0o777 if old_stat else 0o644)
+            if old_stat:
+                os.chown(temporary, old_stat.st_uid, old_stat.st_gid)
+            current = DEFAULT_DENY_FILE.read_bytes() if DEFAULT_DENY_FILE.exists() else None
+            if current != original or DEFAULT_DENY_FILE.is_symlink():
+                failure = "default_stub_changed_during_apply"
+                raise RuntimeError(failure)
+            os.replace(temporary, DEFAULT_DENY_FILE)
+            wrote = True
+        valid, validation_status = _nginx_test()
+        if not valid or validation_status != "nginx_test:ok":
+            failure = "nginx_validation_failed"
+            raise RuntimeError(failure)
+        result["validated"] = True
+        if wrote:
+            reloaded, reload_status = _reload_nginx()
+            result["reload_status"] = reload_status if reloaded else "failed"
+            if not reloaded:
+                failure = "nginx_reload_failed"
+                raise RuntimeError(failure)
+            result["reloaded"] = reload_status == "nginx_reload:ok"
+        return {**result, "status": "ok", "changed": wrote, "matches": True}
+    except Exception:
+        if wrote:
+            try:
+                unchanged = not DEFAULT_DENY_FILE.is_symlink() and DEFAULT_DENY_FILE.read_bytes() == desired
+            except OSError:
+                unchanged = False
+            if not unchanged:
+                return {**result, "status": "error", "reason": "default_stub_changed_during_apply", "rollback": False}
+            _restore_snapshots(snapshots)
+            restored = (DEFAULT_DENY_FILE.read_bytes() if DEFAULT_DENY_FILE.exists() else None) == original
+            result["rollback"] = restored
+            if failure == "nginx_reload_failed" and restored:
+                valid, _ = _nginx_test()
+                if valid:
+                    result["rollback_reload"] = _reload_nginx()[0]
+        return {**result, "status": "error", "reason": failure}
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def nginx_baseline_satisfied() -> bool:
