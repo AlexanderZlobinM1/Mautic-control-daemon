@@ -29,6 +29,13 @@ PASSIVE_CONFIG = '[config]\nschema_version = 1\n[profile]\nname = "passive"\n[mc
 PASSIVE_UNIT = '[Unit]\nDescription=MCD passive commercial worker\nAfter=network-online.target\n[Service]\nType=simple\nWorkingDirectory=/opt/mcd\nExecStart=/opt/mcd/venv/bin/python -m mcd_agent run --config /opt/mcd/etc/mcd.toml\nRestart=on-failure\nKillMode=process\n[Install]\nWantedBy=multi-user.target\n'
 
 
+def require_passive_service():
+    if run("systemctl", "show", "mcd.service", "--property=ActiveState", "--value").strip() != "inactive":
+        raise RuntimeError("bootstrap_service_not_passive")
+    if run("systemctl", "show", "mcd.service", "--property=UnitFileState", "--value").strip() != "disabled":
+        raise RuntimeError("bootstrap_service_not_disabled")
+
+
 def completed_replay(root, unit, args, key, identity):
     """An exact completed passive install is replayable without enrollment or writes."""
     receipt_path = root / "var/passive-install-receipt.json"
@@ -50,8 +57,7 @@ ok=hmac.compare_digest(str(s.get("portal_agent_credential") or ""),m["key"]) and
 raise SystemExit(0 if ok else 1)
 '''
     run(str(root / "venv/bin/python"), "-I", "-c", check, str(root / "var/mcd-state.db"), data=json.dumps(material))
-    if run("systemctl", "show", "mcd.service", "--property=ActiveState", "--value").strip() != "inactive":
-        raise RuntimeError("bootstrap_service_not_passive")
+    require_passive_service()
     return {**receipt, "idempotent_replay": True}
 
 
@@ -170,8 +176,7 @@ def main():
         unit.write_text(PASSIVE_UNIT)
         unit.chmod(0o644)
         run("systemctl", "daemon-reload")
-        if run("systemctl", "show", "mcd.service", "--property=ActiveState", "--value").strip() != "inactive":
-            raise RuntimeError("bootstrap_service_not_passive")
+        require_passive_service()
         receipt = {"schema": "mcd-passive-install-receipt-v1", "version": actual, "archive_sha256": args.archive_sha256, "manifest_sha256": args.manifest_sha256, "bridge_sha256": args.bridge_sha256, "request_id": args.request_id, "local_identity": identity, "host_fingerprint": fingerprint, "account_id": activation["account_id"], "commercial_key_id": activation["commercial_key_id"], "agent_id": agent, "installation_id": installation["installation_id"], "activation_state": "passive", "service_started": False}
         (root / "var/passive-install-receipt.json").write_text(json.dumps(receipt, sort_keys=True) + "\n")
         print(json.dumps(receipt))

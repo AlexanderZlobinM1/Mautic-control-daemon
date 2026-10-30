@@ -58,7 +58,7 @@ os.environ["SSL_CERT_FILE"] = "/tmp/qa.crt"
 # Container has no systemd PID1: record daemon-reload and prohibit any start.
 real_systemd = os.environ.get("REAL_SYSTEMD_QA") == "1"
 if not real_systemd:
-    Path("/usr/local/bin/systemctl").write_text('#!/bin/sh\nif [ "$1" = show ]; then echo inactive; exit 0; fi\n[ "$1" = daemon-reload ] || exit 99\nprintf "%s\\n" "$1" >> /tmp/systemctl-calls\n')
+    Path("/usr/local/bin/systemctl").write_text('#!/bin/sh\nif [ "$1" = show ]; then if [ "$3" = --property=UnitFileState ]; then echo disabled; else echo inactive; fi; exit 0; fi\n[ "$1" = daemon-reload ] || exit 99\nprintf "%s\\n" "$1" >> /tmp/systemctl-calls\n')
     Path("/usr/local/bin/systemctl").chmod(0o755)
 cmd = ["python3", "/source/tools/mcd_passive_install.py", "--portal-api-base", "https://localhost:8443/api/v1/commercial", "--archive-uri", "https://localhost:8443/runtime", "--archive-sha256", hashlib.sha256(Path("/runtime.tar.gz").read_bytes()).hexdigest(), "--manifest-sha256", "8ab969073cb75f3e765b4e485477b975dc6cd7756341da0fa3f2c3d0b7a458ae", "--runtime-version", "1.6.25", "--request-id", "qa-passive", "--instance-identity", "passive-qa.example.invalid", "--bridge", "/source/tools/mcd_runtime_bootstrap.py", "--bridge-sha256", hashlib.sha256(Path("/source/tools/mcd_runtime_bootstrap.py").read_bytes()).hexdigest()]
 result = subprocess.run(cmd, input=KEY + "\n", text=True, capture_output=True)
