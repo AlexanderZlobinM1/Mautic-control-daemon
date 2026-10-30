@@ -7,7 +7,8 @@ durable agent/installation binding, key and request/instance identity prove repl
 Completed replay performs no new enrollment; partial installs remain refused.
 Provide the existing account commercial key on protected stdin before enrollment.
 Pass the portable instance DNS through `--instance-identity`; it is distinct from
-the machine hostname used for host fingerprinting. Stable `--request-id` supplies
+the machine hostname. New enrollment sends `identity_kind="dns"` and the plain
+DNS identity, with no computed host fingerprint. Stable `--request-id` supplies
 the two Portal idempotency keys. `--bridge-sha256` is verified before importing
 the bridge, rather than relying on an unchecked caller assertion.
 Never put the key in command arguments, script text or receipts.
@@ -34,14 +35,19 @@ Passive enrollment itself requires no PHP, web server, cache or database server.
 It must not provision Mautic packages as an enrollment side effect.
 SQLite state does not change existing MariaDB databases or credentials.
 
-For a separately authorized Ubuntu Noble base-package stage, the distribution
-repositories expose PHP 8.3 (`php-fpm` candidate `2:8.3+93ubuntu2`) and MariaDB
-10.11 (`mariadb-server` candidate `1:10.11.14-0ubuntu0.24.04.1` in QA).
-Use nginx, redis-server, mariadb-server, php8.3-fpm/php8.3-cli and only the PHP
-extensions required by the selected Mautic artifact. PHP 8.4/8.5 is not supplied
-by this profile. Mautic version compatibility still requires the selected
-artifact's own supported-version evidence; distribution availability alone is
-not proof of application compatibility.
+The sole approved scenario target is Ubuntu 24.04, Nginx from nginx.org,
+PHP 8.5 from the approved Ondrej channel, MariaDB 11.4 from the official MariaDB
+channel, latest Mautic 7.2.x, and Redis-backed PHP/Mautic sessions. Channels must
+already be configured; neither bootstrap nor a fallback silently adds a repository.
+The external Portal-owned scenario verifies candidates and reports a typed blocker
+when the approved package family is unavailable. Native Noble 8.3/10.11 is not
+an alternative installation profile.
+
+The accepted CLI and FPM Redis configuration uses php8.5-redis,
+session.save_handler=redis and session.save_path="tcp://127.0.0.1:6379?database=10&prefix=mautic_session:&timeout=2.5&read_timeout=2.5".
+Locking is enabled with lock_expire=300, lock_retries=-1, lock_wait_time=10000;
+session.gc_maxlifetime=86400. This policy belongs to the external scenario and
+requires real read/write and concurrent-lock QA against a single Redis master.
 
 ## QA limits
 

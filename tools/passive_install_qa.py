@@ -8,9 +8,14 @@ import socket
 import ssl
 import subprocess
 import threading
+import tarfile
 
 KEY = "qa-commercial-key-not-a-live-secret-12345"
 calls = []
+with tarfile.open("/runtime.tar.gz", "r:gz") as runtime_tar:
+    manifest_bytes = runtime_tar.extractfile("mcd-runtime-manifest.json").read()
+runtime_manifest = json.loads(manifest_bytes)
+runtime_version = runtime_manifest["version"]
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -27,13 +32,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         assert self.headers["X-Portal-Contract"] == "com.sales-snap.portal-commercial/1.0"
         assert self.headers["Idempotency-Key"] == body["idempotency_key"]
-        assert self.headers["User-Agent"].startswith("mcd-agent/1.6.25 portal-commercial/1.0")
+        assert self.headers["User-Agent"].startswith(f"mcd-agent/{runtime_version} portal-commercial/1.0")
         calls.append(body)
         if self.path.endswith("redeem-commercial-key"):
-            assert self.headers["User-Agent"] == "mcd-agent/1.6.25 portal-commercial/1.0 passive-bootstrap/1.0"
+            assert self.headers["User-Agent"] == f"mcd-agent/{runtime_version} portal-commercial/1.0 passive-bootstrap/1.0"
             assert body["commercial_key"] == KEY
             assert "public_key" not in body["agent"]
-            result = {"schema": "portal-mcd-activation-response-v1", "contract_version": "1.0", "account_id": "account_qa", "agent_id": "agent_qa", "agent_credential": KEY, "commercial_key_id": "key_qa", "portal": {"api_base": "https://localhost:8443/api/v1/commercial"}}
+            assert "host_fingerprint" not in body["agent"]
+            assert body["agent"]["identity_kind"] == "dns"
+            assert body["agent"]["local_identity"] == "passive-qa.example.invalid"
+            result = {"schema": "portal-mcd-activation-response-v1", "contract_version": "1.0", "identity_kind": "dns", "local_identity": "passive-qa.example.invalid", "account_id": "account_qa", "agent_id": "agent_qa", "agent_credential": KEY, "commercial_key_id": "key_qa", "portal": {"api_base": "https://localhost:8443/api/v1/commercial"}}
         elif self.path.endswith("/installations"):
             assert self.headers["Authorization"] == "Bearer " + KEY
             assert body["schema"] == "portal-mcd-host-register-request-v1"
@@ -61,7 +69,7 @@ real_systemd = os.environ.get("REAL_SYSTEMD_QA") == "1"
 if not real_systemd:
     Path("/usr/local/bin/systemctl").write_text('#!/bin/sh\nif [ "$1" = show ]; then if [ "$3" = --property=UnitFileState ]; then echo disabled; else echo inactive; fi; exit 0; fi\n[ "$1" = daemon-reload ] || exit 99\nprintf "%s\\n" "$1" >> /tmp/systemctl-calls\n')
     Path("/usr/local/bin/systemctl").chmod(0o755)
-cmd = ["python3", "/source/tools/mcd_passive_install.py", "--portal-api-base", "https://localhost:8443/api/v1/commercial", "--archive-uri", "https://localhost:8443/runtime", "--archive-sha256", hashlib.sha256(Path("/runtime.tar.gz").read_bytes()).hexdigest(), "--manifest-sha256", "8ab969073cb75f3e765b4e485477b975dc6cd7756341da0fa3f2c3d0b7a458ae", "--runtime-version", "1.6.25", "--request-id", "qa-passive", "--instance-identity", "passive-qa.example.invalid", "--bridge", "/source/tools/mcd_runtime_bootstrap.py", "--bridge-sha256", hashlib.sha256(Path("/source/tools/mcd_runtime_bootstrap.py").read_bytes()).hexdigest()]
+cmd = ["python3", "/source/tools/mcd_passive_install.py", "--portal-api-base", "https://localhost:8443/api/v1/commercial", "--archive-uri", "https://localhost:8443/runtime", "--archive-sha256", hashlib.sha256(Path("/runtime.tar.gz").read_bytes()).hexdigest(), "--manifest-sha256", hashlib.sha256(manifest_bytes).hexdigest(), "--runtime-version", runtime_version, "--request-id", "qa-passive", "--instance-identity", "passive-qa.example.invalid", "--bridge", "/source/tools/mcd_runtime_bootstrap.py", "--bridge-sha256", hashlib.sha256(Path("/source/tools/mcd_runtime_bootstrap.py").read_bytes()).hexdigest()]
 result = subprocess.run(cmd, input=KEY + "\n", text=True, capture_output=True)
 assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
 receipt = json.loads(result.stdout)

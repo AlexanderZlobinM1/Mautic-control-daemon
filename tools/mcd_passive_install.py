@@ -11,14 +11,13 @@ import json
 import os
 from pathlib import Path
 import re
-import socket
 import subprocess
 import sys
 import tempfile
 from urllib import request, parse
 from urllib.error import HTTPError, URLError
 
-USER_AGENT = "mcd-agent/1.6.25 portal-commercial/1.0 passive-bootstrap/1.0"
+USER_AGENT = "mcd-agent/1.6.26 portal-commercial/1.0 passive-bootstrap/1.0"
 
 class NoRedirect(request.HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
@@ -45,15 +44,14 @@ def completed_replay(root, unit, args, key, identity):
     expected = {"schema": "mcd-passive-install-receipt-v1", "version": args.runtime_version, "archive_sha256": args.archive_sha256, "manifest_sha256": args.manifest_sha256, "bridge_sha256": args.bridge_sha256, "request_id": args.request_id, "local_identity": identity, "activation_state": "passive", "service_started": False}
     if any(receipt.get(name) != value for name, value in expected.items()) or unit.read_text() != PASSIVE_UNIT or (root / "etc/mcd.toml").read_text() != PASSIVE_CONFIG:
         raise RuntimeError("bootstrap_replay_binding_mismatch")
-    fingerprint = "sha256:" + hashlib.sha256(socket.gethostname().encode()).hexdigest()
-    if receipt.get("host_fingerprint") != fingerprint:
-        raise RuntimeError("bootstrap_replay_host_mismatch")
+    if receipt.get("identity_kind") != "dns" or "host_fingerprint" in receipt:
+        raise RuntimeError("bootstrap_replay_identity_mismatch")
     material = {"key": key, "agent_id": receipt["agent_id"], "installation_id": receipt["installation_id"], "identity": identity, "base": args.portal_api_base.rstrip("/"), "version": args.runtime_version}
     check = '''import json,sys,hmac
 from mcd_agent.commercial_portal import CommercialState
 from mcd_agent import __version__
 m=json.load(sys.stdin);s=CommercialState(sys.argv[1])
-ok=hmac.compare_digest(str(s.get("portal_agent_credential") or ""),m["key"]) and s.get("agent_id")==m["agent_id"] and s.get("installation_ids")=={m["identity"]:m["installation_id"]} and s.get("portal_api_base")==m["base"] and __version__==m["version"]
+ok=hmac.compare_digest(str(s.get("portal_agent_credential") or ""),m["key"]) and s.get("identity_kind")=="dns" and s.get("local_identity")==m["identity"] and not s.get("host_fingerprint") and s.get("agent_id")==m["agent_id"] and s.get("installation_ids")=={m["identity"]:m["installation_id"]} and s.get("portal_api_base")==m["base"] and __version__==m["version"]
 raise SystemExit(0 if ok else 1)
 '''
     run(str(root / "venv/bin/python"), "-I", "-c", check, str(root / "var/mcd-state.db"), data=json.dumps(material))
@@ -157,19 +155,20 @@ def main():
             (root / name).mkdir(mode=0o700)
         config = root / "etc/mcd.toml"
         config.write_text(PASSIVE_CONFIG)
-        fingerprint = "sha256:" + hashlib.sha256(socket.gethostname().encode()).hexdigest()
-        activation = post(base, "/activations/redeem-commercial-key", {"schema": "portal-mcd-commercial-key-activation-request-v1", "contract_version": "1.0", "commercial_key": key, "agent": {"host_fingerprint": fingerprint, "agent_version": actual, "platform": "linux"}, "supported_contract_versions": ["1.0"], "idempotency_key": args.request_id + ":activation"})
+        activation = post(base, "/activations/redeem-commercial-key", {"schema": "portal-mcd-commercial-key-activation-request-v1", "contract_version": "1.0", "commercial_key": key, "agent": {"identity_kind": "dns", "local_identity": identity, "agent_version": actual, "platform": "linux"}, "supported_contract_versions": ["1.0"], "idempotency_key": args.request_id + ":dns-enroll-v1"})
         if activation.get("schema") != "portal-mcd-activation-response-v1" or activation.get("contract_version") != "1.0" or activation.get("agent_credential") != key or not activation.get("account_id") or not activation.get("commercial_key_id") or activation.get("portal", {}).get("api_base", "").rstrip("/") != base:
             raise RuntimeError("bootstrap_activation_response_invalid")
         agent = activation["agent_id"]
+        if activation.get("identity_kind") != "dns" or activation.get("local_identity") != identity or "host_fingerprint" in activation:
+            raise RuntimeError("bootstrap_activation_identity_invalid")
         if not isinstance(agent, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,192}", agent):
             raise RuntimeError("bootstrap_agent_identity_invalid")
-        installation = post(base, "/agents/" + parse.quote(agent, safe="") + "/installations", {"schema": "portal-mcd-host-register-request-v1", "contract_version": "1.0", "registration_kind": "host", "idempotency_key": args.request_id + ":installation", "host": {"local_identity": identity, "display_name": identity}}, key)
+        installation = post(base, "/agents/" + parse.quote(agent, safe="") + "/installations", {"schema": "portal-mcd-host-register-request-v1", "contract_version": "1.0", "registration_kind": "host", "idempotency_key": args.request_id + ":dns-host-v1", "host": {"local_identity": identity, "display_name": identity}}, key)
         registered = installation["installation"]
         if registered.get("status") != "passive" or registered.get("agent_id") != agent or registered.get("local_identity") != identity or not registered.get("id") or installation.get("connection", {}).get("status") != "active":
             raise RuntimeError("bootstrap_host_response_invalid")
         installation["installation_id"] = registered["id"]
-        material = {"schema": "mcd-portal-activation-material-v1", "contract_version": "1.0", "portal_api_base": base, "agent_id": agent, "portal_agent_credential": key, "commercial_key_id": activation["commercial_key_id"], "host_fingerprint": fingerprint, "installation_ids": {identity: installation["installation_id"]}}
+        material = {"schema": "mcd-portal-enrollment-material-v1", "contract_version": "1.0", "identity_kind": "dns", "local_identity": identity, "account_id": activation["account_id"], "portal_api_base": base, "agent_id": agent, "portal_agent_credential": key, "commercial_key_id": activation["commercial_key_id"], "installation_ids": {identity: installation["installation_id"]}}
         imported = json.loads(run(python, "-I", "-m", "mcd_agent.commercial_registration", "--state-db", str(root / "var/mcd-state.db"), "--json", data=json.dumps(material)))
         if imported.get("schema") != "mcd-portal-registration-receipt-v1" or imported.get("status") != "configured" or imported.get("agent_id") != agent:
             raise RuntimeError("bootstrap_binding_import_invalid")
@@ -177,7 +176,7 @@ def main():
         unit.chmod(0o644)
         run("systemctl", "daemon-reload")
         require_passive_service()
-        receipt = {"schema": "mcd-passive-install-receipt-v1", "version": actual, "archive_sha256": args.archive_sha256, "manifest_sha256": args.manifest_sha256, "bridge_sha256": args.bridge_sha256, "request_id": args.request_id, "local_identity": identity, "host_fingerprint": fingerprint, "account_id": activation["account_id"], "commercial_key_id": activation["commercial_key_id"], "agent_id": agent, "installation_id": installation["installation_id"], "activation_state": "passive", "service_started": False}
+        receipt = {"schema": "mcd-passive-install-receipt-v1", "version": actual, "archive_sha256": args.archive_sha256, "manifest_sha256": args.manifest_sha256, "bridge_sha256": args.bridge_sha256, "request_id": args.request_id, "identity_kind": "dns", "local_identity": identity, "account_id": activation["account_id"], "commercial_key_id": activation["commercial_key_id"], "agent_id": agent, "installation_id": installation["installation_id"], "activation_state": "passive", "service_started": False}
         (root / "var/passive-install-receipt.json").write_text(json.dumps(receipt, sort_keys=True) + "\n")
         print(json.dumps(receipt))
 

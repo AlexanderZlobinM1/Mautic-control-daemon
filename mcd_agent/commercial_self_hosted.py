@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Mapping
 
 from mcd_agent.commercial_detector import read_normalized_applicability_facts, read_normalized_local_facts
+from mcd_agent.portal_identity import identity_coordinate
 from mcd_agent.scenario_launcher import (
     LEGACY_SCENARIO_CONTEXT_SCHEMA,
     SCENARIO_CONTEXT_SCHEMA,
@@ -273,7 +274,7 @@ def _delivery_job(command: Mapping[str, Any]) -> dict[str, Any]:
     return dict(nested) if isinstance(nested, Mapping) else dict(command)
 
 
-def _verified_shape_for_terminal(command: Mapping[str, Any], *, expected_agent_id: str, expected_installation_id: str, expected_commercial_key_id: str, expected_host_fingerprint: str) -> dict[str, Any] | None:
+def _verified_shape_for_terminal(command: Mapping[str, Any], *, expected_agent_id: str, expected_installation_id: str, expected_commercial_key_id: str, expected_host_fingerprint: str, expected_local_identity: str | None = None) -> dict[str, Any] | None:
     """Recover only binding fields needed to close an accepted delivery.
 
     This is not an admission path and never authorizes execution. It exists so
@@ -283,9 +284,16 @@ def _verified_shape_for_terminal(command: Mapping[str, Any], *, expected_agent_i
     """
     job = _delivery_job(command)
     required = ("job_id", "request_id", "account_id", "commercial_key_id", "agent_id", "installation_id", "host_fingerprint", "scenario", "applicability")
-    if any(not str(job.get(key) or "").strip() for key in required[:7]):
+    if any(not str(job.get(key) or "").strip() for key in required[:6]):
         return None
-    if any(str(job.get(key) or "") != expected for key, expected in (("agent_id", expected_agent_id), ("installation_id", expected_installation_id), ("commercial_key_id", expected_commercial_key_id), ("host_fingerprint", expected_host_fingerprint))):
+    try:
+        coordinate = identity_coordinate(job)
+    except ValueError:
+        return None
+    expected_coordinate = {"identity_kind": "dns", "local_identity": expected_local_identity} if expected_local_identity else {"host_fingerprint": expected_host_fingerprint}
+    if coordinate != expected_coordinate:
+        return None
+    if any(str(job.get(key) or "") != expected for key, expected in (("agent_id", expected_agent_id), ("installation_id", expected_installation_id), ("commercial_key_id", expected_commercial_key_id))):
         return None
     scenario = job.get("scenario")
     applicability = job.get("applicability")
@@ -298,8 +306,8 @@ def _verified_shape_for_terminal(command: Mapping[str, Any], *, expected_agent_i
     return {"job": job, "contract_version": contract_version, "scenario": dict(scenario), "facts": dict(applicability.get("facts") or {}) if isinstance(applicability, Mapping) and isinstance(applicability.get("facts"), Mapping) else {}, "facts_digest": facts_digest}
 
 
-def _failed_terminal_for_delivery(command: Mapping[str, Any], *, error: BaseException, sequence: int, expected_agent_id: str, expected_installation_id: str, expected_commercial_key_id: str, expected_host_fingerprint: str) -> dict[str, Any] | None:
-    verified = _verified_shape_for_terminal(command, expected_agent_id=expected_agent_id, expected_installation_id=expected_installation_id, expected_commercial_key_id=expected_commercial_key_id, expected_host_fingerprint=expected_host_fingerprint)
+def _failed_terminal_for_delivery(command: Mapping[str, Any], *, error: BaseException, sequence: int, expected_agent_id: str, expected_installation_id: str, expected_commercial_key_id: str, expected_host_fingerprint: str, expected_local_identity: str | None = None) -> dict[str, Any] | None:
+    verified = _verified_shape_for_terminal(command, expected_agent_id=expected_agent_id, expected_installation_id=expected_installation_id, expected_commercial_key_id=expected_commercial_key_id, expected_host_fingerprint=expected_host_fingerprint, expected_local_identity=expected_local_identity)
     if verified is None:
         return None
     try:
@@ -322,14 +330,16 @@ def _binding_from_verified(verified: Mapping[str, Any]) -> dict[str, Any]:
         "commercial_key_id": str(job["commercial_key_id"]),
         "agent_id": str(job["agent_id"]),
         "installation_id": str(job["installation_id"]),
-        "host_fingerprint": str(job["host_fingerprint"]),
+        **identity_coordinate(job),
         "scenario": dict(verified["scenario"]),
         "facts_digest": str(job["applicability"]["facts_digest"]),
     }
 
 
 def _validate_binding(receipt: Mapping[str, Any], binding: Mapping[str, Any]) -> None:
-    for key in ("job_id", "request_id", "account_id", "commercial_key_id", "agent_id", "installation_id", "host_fingerprint", "facts_digest"):
+    if identity_coordinate(receipt) != identity_coordinate(binding):
+        raise ValueError("self_hosted_mcd_receipt_binding_mismatch")
+    for key in ("job_id", "request_id", "account_id", "commercial_key_id", "agent_id", "installation_id", "facts_digest", *identity_coordinate(binding)):
         if receipt.get(key) != binding.get(key):
             raise ValueError("self_hosted_mcd_receipt_binding_mismatch")
     if receipt.get("scenario") != binding.get("scenario"):
@@ -741,7 +751,7 @@ class ScenarioExecutor:
         return observed
 
     def run(self, job: Mapping[str, Any], *, portal_keys: Mapping[str, str], publisher_keys: Mapping[str, Any], context: Mapping[str, Any], expected_agent_id: str, expected_installation_id: str, expected_commercial_key_id: str, expected_host_fingerprint: str, bootstrap_artifact: bytes | None, scenario_artifact: bytes, receipt_sink: Callable[[dict[str, Any]], Any] | None = None, execution_key: str | None = None) -> dict[str, Any]:
-        verified = verify_self_hosted_mcd_job(job, {}, expected_agent_id=expected_agent_id, expected_installation_id=expected_installation_id, expected_commercial_key_id=expected_commercial_key_id, expected_host_fingerprint=expected_host_fingerprint)
+        verified = verify_self_hosted_mcd_job(job, {}, expected_agent_id=expected_agent_id, expected_installation_id=expected_installation_id, expected_commercial_key_id=expected_commercial_key_id, expected_host_fingerprint=expected_host_fingerprint, expected_local_identity=context.get("local_identity") if context.get("identity_kind") == "dns" else None)
         binding = _binding_from_verified(verified)
         job_id = binding["job_id"]
         job_digest = hashlib.sha256(canonical_json(dict(job))).hexdigest()
@@ -937,7 +947,7 @@ class SelfHostedPortalWorker:
         self.executor = executor
         self.installation_ids = [installation_id] if isinstance(installation_id, str) else [str(value) for value in installation_id]
         self.installation_ids = [value for value in self.installation_ids if value]
-        if not self.installation_ids or not commercial_key_id or not agent_id or not host_fingerprint:
+        if not self.installation_ids or not commercial_key_id or not agent_id or (not host_fingerprint and context.get("identity_kind") != "dns"):
             raise ValueError("self_hosted_mcd_identity_missing")
         self.portal_keys = dict(portal_keys)
         self.publisher_keys = dict(publisher_keys)
@@ -945,6 +955,9 @@ class SelfHostedPortalWorker:
         self.commercial_key_id = commercial_key_id
         self.agent_id = agent_id
         self.host_fingerprint = host_fingerprint
+        if context.get("identity_kind") == "dns" and host_fingerprint:
+            raise ValueError("self_hosted_mcd_dns_fingerprint_forbidden")
+        self.identity_coordinate = identity_coordinate(context) if context.get("identity_kind") == "dns" else {"host_fingerprint": host_fingerprint}
         self.poll_wait_seconds = max(0, min(30, int(poll_wait_seconds)))
         self.backoff_base_seconds = max(0.1, float(backoff_base_seconds))
         self.backoff_max_seconds = max(self.backoff_base_seconds, float(backoff_max_seconds))
@@ -954,6 +967,9 @@ class SelfHostedPortalWorker:
         self.capability_inventory_provider = capability_inventory_provider
         self.generic_command_handler = generic_command_handler
         self._active_installation_id = self.installation_ids[0]
+
+    def _channel_binding(self, installation_id: str) -> dict[str, str]:
+        return {"agent_id": self.agent_id, "installation_id": installation_id, "commercial_key_id": self.commercial_key_id, **self.identity_coordinate}
 
     def _pending(self) -> list[dict[str, Any]]:
         raw = self.executor.state.get(_PENDING_KEY)
@@ -1135,7 +1151,7 @@ class SelfHostedPortalWorker:
         revision = int(inventory_revision(installation_id)) if callable(inventory_revision) else int(self.executor.state.get("commercial_inventory_revision") or 0)
         sync = {"desired_state_sync_protocol": 3, "pending_intent": self.executor.state.get("commercial_pending_sync_intent"), "conflict": self.executor.state.get("commercial_runtime_conflict")}
         settings = build_standalone_settings_snapshot(values, revision=revision, sync=sync)
-        binding = {"agent_id": self.agent_id, "installation_id": installation_id, "host_fingerprint": self.host_fingerprint, "commercial_key_id": self.commercial_key_id}
+        binding = self._channel_binding(installation_id)
         return {"schema": "portal-mcd-inventory-snapshot-v1", "contract_version": "1.0", "request_id": f"inventory-{int(self._clock() * 1000)}", "binding": binding, "snapshot_revision": str(self.executor.state.get("commercial_inventory_revision") or revision), "observed_at": _utc(), "complete": True, "host": {"mcd_version": str(self.context.get("mcd_version") or "runtime"), "profile": str(self.context.get("profile") or "commercial"), "service_status": "active", "scheduler_paused": bool(self.context.get("scheduler_paused", False)), "settings": settings}, "instances": []}
 
     def _inventory(self, installation_id: str) -> dict[str, Any]:
@@ -1316,19 +1332,14 @@ class SelfHostedPortalWorker:
         return {"status": receipt["status"], "command_id": receipt["command_id"]}
 
     def _command_receipt(self, command: Mapping[str, Any], *, status: str, payload: Mapping[str, Any]) -> dict[str, Any]:
-        binding = command.get("binding") if isinstance(command.get("binding"), Mapping) else {"agent_id": self.agent_id, "installation_id": self._active_installation_id, "host_fingerprint": self.host_fingerprint, "commercial_key_id": self.commercial_key_id}
+        binding = command.get("binding") if isinstance(command.get("binding"), Mapping) else self._channel_binding(self._active_installation_id)
         return {"schema": "portal-mcd-command-receipt-v1", "contract_version": "1.0", "command_id": str(command.get("command_id") or command.get("conflict_id") or ""), "delivery_cursor": int(command.get("delivery_cursor") or 0), "request_id": str(command.get("request_id") or command.get("command_id") or ""), "idempotency_key": str(command.get("idempotency_key") or ""), "binding": dict(binding), "status": status if status in {"succeeded", "failed"} else "failed", "payload": dict(payload), "observed_at": _utc()}
 
     def _run_artifact_trust_update(self, command: Mapping[str, Any], *, cursor_next: str) -> dict[str, Any]:
         try:
             update = validate_portal_artifact_trust_update(command)
             binding = update["binding"]
-            expected = {
-                "agent_id": self.agent_id,
-                "installation_id": self._active_installation_id,
-                "host_fingerprint": self.host_fingerprint,
-                "commercial_key_id": self.commercial_key_id,
-            }
+            expected = self._channel_binding(self._active_installation_id)
             if any(str(binding.get(key) or "") != str(expected[key]) for key in expected):
                 raise ValueError("portal_artifact_trust_update_binding_mismatch")
             issued = datetime.fromisoformat(str(update["issued_at"]).replace("Z", "+00:00")).timestamp()
@@ -1503,7 +1514,7 @@ class SelfHostedPortalWorker:
             return True
         if self.executor.state.get("commercial_portal_connection_state") == "active":
             return True
-        state = {"schema": "portal-mcd-connection-state-v1", "contract_version": "1.0", "event_id": f"active-{int(self._clock() * 1000)}", "request_id": f"active-{self._active_installation_id}", "idempotency_key": f"active:{self._active_installation_id}", "binding": {"agent_id": self.agent_id, "installation_id": self._active_installation_id, "host_fingerprint": self.host_fingerprint, "commercial_key_id": self.commercial_key_id}, "status": "active", "reason": "outbound_cycle", "observed_at": _utc()}
+        state = {"schema": "portal-mcd-connection-state-v1", "contract_version": "1.0", "event_id": f"active-{int(self._clock() * 1000)}", "request_id": f"active-{self._active_installation_id}", "idempotency_key": f"active:{self._active_installation_id}", "binding": self._channel_binding(self._active_installation_id), "status": "active", "reason": "outbound_cycle", "observed_at": _utc()}
         if not self._send_or_queue(state):
             return False
         self.executor.state.put("commercial_portal_connection_state", "active")
@@ -1536,6 +1547,7 @@ class SelfHostedPortalWorker:
             expected_installation_id=self._active_installation_id,
             expected_commercial_key_id=self.commercial_key_id,
             expected_host_fingerprint=self.host_fingerprint,
+            expected_local_identity=self.identity_coordinate.get("local_identity"),
         )
         if failed is None:
             return {"status": "rejected", "reason": _error_code(error), "job_id": str(_delivery_job(command).get("job_id") or "")}
@@ -1639,7 +1651,7 @@ class SelfHostedPortalWorker:
         if command.get("schema") == "portal-mcd-job-delivery-v1" and isinstance(command.get("job"), Mapping):
             command = dict(command["job"])
         try:
-            verified = verify_self_hosted_mcd_job(command, self.portal_keys, expected_agent_id=self.agent_id, expected_installation_id=active_installation_id, expected_commercial_key_id=self.commercial_key_id, expected_host_fingerprint=self.host_fingerprint)
+            verified = verify_self_hosted_mcd_job(command, self.portal_keys, expected_agent_id=self.agent_id, expected_installation_id=active_installation_id, expected_commercial_key_id=self.commercial_key_id, expected_host_fingerprint=self.host_fingerprint, expected_local_identity=self.identity_coordinate.get("local_identity"))
         except ValueError as exc:
             return self._delivery_failure(command, cursor_next=cursor_next, error=exc)
         local_state_error = self._local_delivery_state_error()
