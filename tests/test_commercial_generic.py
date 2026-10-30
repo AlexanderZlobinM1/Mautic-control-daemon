@@ -125,7 +125,7 @@ def test_worker_publishes_inventory_and_durable_generic_receipts(tmp_path: Path)
     assert state.get("commercial_self_hosted_pending_delivery_v1") is None
 
 
-def test_worker_terminalizes_valid_generic_job_when_capability_inventory_is_missing(tmp_path: Path):
+def test_worker_terminalizes_valid_generic_job_when_capability_inventory_is_missing(tmp_path: Path, expired_cached=False):
     state = CommercialState(str(tmp_path / "commercial.sqlite"))
     executor = _Executor(state)
 
@@ -145,6 +145,18 @@ def test_worker_terminalizes_valid_generic_job_when_capability_inventory_is_miss
             return {}
 
     portal = Portal()
+    if expired_cached:
+        delivery = portal.pull_job()
+        delivery["job"]["expires_at"] = "1970-01-01T00:01:40Z"
+        state.put("commercial_self_hosted_pending_delivery_v1", {
+            "installation_id": "installation-1", "cursor": "17",
+            "cursor_next": "18", "job": delivery["job"],
+        })
+
+        def unexpected_poll(**kwargs):
+            raise AssertionError("cached delivery must not poll")
+
+        portal.pull_job = unexpected_poll
     calls = []
     worker = SelfHostedPortalWorker(
         portal,
@@ -164,7 +176,14 @@ def test_worker_terminalizes_valid_generic_job_when_capability_inventory_is_miss
     assert result == {"status": "failed", "job_id": "generic-job-1"}
     assert [item["schema"] for item in portal.receipts] == ["portal-mcd-generic-terminal-receipt-v1"]
     assert portal.receipts[0]["status"] == "failed"
-    assert portal.receipts[0]["error"]["code"] == "commercial_capability_inventory_unavailable"
+    expected = "portal_mcd_generic_command_expired" if expired_cached else "commercial_capability_inventory_unavailable"
+    assert portal.receipts[0]["error"]["code"] == expected
+    if expired_cached:
+        assert state.get("commercial_portal_generic_runs_v1")["generic-job-1"]["terminal"] == portal.receipts[0]
     assert calls == []
     assert state.get("commercial_portal_cursor") == "18"
     assert state.get("commercial_self_hosted_pending_delivery_v1") is None
+
+
+def test_expired_cached_host_facts_never_invokes_handler(tmp_path: Path):
+    test_worker_terminalizes_valid_generic_job_when_capability_inventory_is_missing(tmp_path, expired_cached=True)

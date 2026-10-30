@@ -1525,12 +1525,6 @@ class SelfHostedPortalWorker:
             return {"status": "rejected", "reason": str(exc)[:120]}
         if job["installation"]["installation_id"] != str(self._active_installation_id):
             return self._terminalize_generic_failure(job, cursor_next=cursor_next, reason="portal_mcd_generic_installation_mismatch")
-        if not isinstance(inventory, Mapping):
-            return self._terminalize_generic_failure(job, cursor_next=cursor_next, reason="commercial_capability_inventory_unavailable")
-        try:
-            job = validate_generic_command_job(command, inventory=inventory)
-        except Exception as exc:
-            return self._terminalize_generic_failure(job, cursor_next=cursor_next, reason=str(exc)[:120])
         try:
             expires = datetime.fromisoformat(str(job["expires_at"]).replace("Z", "+00:00")).timestamp()
             issued = datetime.fromisoformat(str(job["issued_at"]).replace("Z", "+00:00")).timestamp()
@@ -1538,11 +1532,13 @@ class SelfHostedPortalWorker:
                 raise ValueError("portal_mcd_generic_command_expired")
         except (TypeError, ValueError, OverflowError) as exc:
             reason = str(exc) if str(exc).startswith("portal_mcd_generic_") else "portal_mcd_generic_command_time_invalid"
-            terminal = self._generic_receipt(job, terminal=True, sequence=1, status="failed", error={"code": reason, "message": reason})
-            if not self._send_or_queue(terminal):
-                return {"status": "receipt_pending", "job_id": job["job_id"]}
-            self._finish_command(cursor_next=cursor_next)
-            return {"status": "failed", "job_id": job["job_id"]}
+            return self._terminalize_generic_failure(job, cursor_next=cursor_next, reason=reason)
+        if not isinstance(inventory, Mapping):
+            return self._terminalize_generic_failure(job, cursor_next=cursor_next, reason="commercial_capability_inventory_unavailable")
+        try:
+            job = validate_generic_command_job(command, inventory=inventory)
+        except Exception as exc:
+            return self._terminalize_generic_failure(job, cursor_next=cursor_next, reason=str(exc)[:120])
 
         job_id = str(job["job_id"])
         digest = hashlib.sha256(canonical_json(job)).hexdigest()

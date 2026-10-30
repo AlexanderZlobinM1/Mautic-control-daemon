@@ -1590,6 +1590,11 @@ read-only-примитивы: `read_host_facts`, `check_prerequisites`, `check_w
 нужен отдельный artifact-bound typed contract; Portal не может прислать такой
 шаг под видом произвольной generic-команды.
 
+Перед admission generic job MCD проверяет TTL также для сохранённого poll delivery.
+Просроченный job получает durable typed terminal receipt
+`portal_mcd_generic_command_expired` без вызова capability handler; после доставки
+receipt курсор продвигается. Это проверяется cached host_facts regression.
+
 Для generic job MCD сначала durable фиксирует `started` receipt, затем вызывает
 handler и durable фиксирует terminal result. Receipt sequence — монотонный,
 Portal idempotency — `{job_id}:{sequence}`. При недоступном Portal receipt
