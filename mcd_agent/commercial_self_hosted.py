@@ -47,6 +47,7 @@ from mcd_agent.commercial_portal import (
     PORTAL_ARTIFACT_TRUST_UPDATE_SCHEMA,
     CommercialState,
     CommercialPortalError,
+    INVENTORY_REVISION_ERRORS,
     STANDALONE_SETTINGS_SNAPSHOT_SCHEMA,
     build_standalone_settings_snapshot,
     canonical_json,
@@ -1362,6 +1363,13 @@ class SelfHostedPortalWorker:
         self.executor.state.put("commercial_standalone_etag", etag)
         return inventory
 
+    def _recover_inventory_revision(self, installation_id: str, inventory: Mapping[str, Any], error: Exception) -> bool:
+        cause = error.__cause__
+        if not isinstance(cause, CommercialPortalError) or cause.http_status != 409 or cause.code not in INVENTORY_REVISION_ERRORS or cause.latest_snapshot_revision is None:
+            return False
+        rebase = getattr(self.executor.state, "rebase_inventory_revision", None)
+        return bool(callable(rebase) and rebase(installation_id=installation_id, inventory=inventory, latest_snapshot_revision=cause.latest_snapshot_revision))
+
     def _ensure_adopted(self, installation_id: str) -> bool:
         if not callable(getattr(self.client, "adopt", None)):
             return True
@@ -1372,7 +1380,8 @@ class SelfHostedPortalWorker:
         inventory = self._inventory(installation_id)
         try:
             self._outbound("adopt", lambda: self.client.adopt(installation_id=installation_id, inventory=inventory))
-        except _PortalTransportError:
+        except _PortalTransportError as exc:
+            self._recover_inventory_revision(installation_id, inventory, exc)
             return False
         acknowledge = getattr(self.executor.state, "acknowledge_inventory", None)
         if callable(acknowledge):
@@ -1423,7 +1432,8 @@ class SelfHostedPortalWorker:
             return True
         try:
             self._outbound("inventory", lambda: self._send_inventory(installation_id, inventory))
-        except _PortalTransportError:
+        except _PortalTransportError as exc:
+            self._recover_inventory_revision(installation_id, inventory, exc)
             return False
         acknowledge = getattr(self.executor.state, "acknowledge_inventory", None)
         if callable(acknowledge):

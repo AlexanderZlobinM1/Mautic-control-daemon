@@ -1650,6 +1650,32 @@ baseline migration; corrupted or regressive state fails closed. Portal acceptanc
 pins the same hash/revision, and a failed publication retries that revision
 without creating a new one.
 
+After local state loss, an authenticated installation-scoped HTTP 409 may
+report `inventory_snapshot_revision_conflict` or
+`inventory_snapshot_revision_stale` using `portal-error-v1` / contract `1.0`,
+with top-level integer `latest_snapshot_revision` in 0..9007199254740990.
+Only this typed hint authorizes recovery. Under a SQLite transaction MCD
+compares the rejected revision AND durable hash with the current ledger, then
+sets the same observed snapshot's revision to `max(local, server) + 1` and
+clears its publication/acknowledgement pins. Facts, settings, other installations,
+pending work and Portal history remain intact. A concurrent local change wins;
+an old conflict cannot rebase it. The next normal retry uses the new derived
+inventory request/idempotency identity; adoption already uses fresh outer IDs.
+Missing, opaque, boolean, fractional, negative or out-of-range heads, other
+errors and incompatible envelopes do not authorize recovery. Normal transport
+backoff remains active; no rejected request is acknowledged. Counter overflow
+fails closed. `test_commercial_inventory_recovery` verifies both adopt and
+inventory paths, durable restart, stale in-flight responses, metadata bounds,
+unchanged settings/facts, receipt pins and isolation from other installations.
+
+Commercial inventory prefers the full Mautic version actually recorded in
+`vendor/composer/installed.json` (Composer v1 or v2 package list), including
+pre-release suffixes. It never executes PHP or changes application files to
+observe it. Conflicting, unavailable or non-version installed metadata does
+not invent a full version; existing registration/observed-major fallback remains.
+Installed evidence takes precedence over registration hints and desired lock
+versions. The recovery tests cover both metadata formats and conflicting evidence.
+
 ### OWH-AUTO и generic command broker Portal↔MCD
 
 Автоматическая первая установка OWH является отдельным self-hosted потоком.

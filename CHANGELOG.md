@@ -1,3 +1,13 @@
+## 1.6.31 - 2026-10-30
+
+- Recover inventory revision continuity after local state loss using the
+  authenticated Portal installation's typed conflict/stale head. Atomically
+  rebase only the unchanged rejected snapshot, preserve observed settings and
+  instances, refresh wire identity and retry through existing backoff. Reject
+  malformed hints and counter overflow; preserve Portal history and other work.
+- Report the actual full installed Mautic version from read-only Composer
+  installed metadata, with existing fallback when full evidence is unavailable.
+
 ## 1.6.0 - 2026-10-28 (dev-only candidate)
 
 - Add the generic prepared-target Mautic apply path: MCC-built Composer/ZIP

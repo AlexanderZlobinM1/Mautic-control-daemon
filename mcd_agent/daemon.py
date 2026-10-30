@@ -92,7 +92,7 @@ from mcd_agent.mautic713_import_tag_patch import reconcile_import_tag_patch
 from mcd_agent.grapesjs_ckeditor_patch import ensure_grapesjs_ckeditor_gpl_patch
 from mcd_agent.mautic_locks import cleanup_stale_mautic_file_locks
 from mcd_agent.maintenance_mode import scheduler_dispatch_fence
-from mcd_agent.mautic_version_cache import confirmed_mautic_major, retire_zabbix_mautic_version_userparameter
+from mcd_agent.mautic_version_cache import confirmed_mautic_major, retire_zabbix_mautic_version_userparameter, read_installed_mautic_version_read_only
 from mcd_agent.mautic_core_restore import restore_retired_mcd_core_patches
 from mcd_agent.logical_issues import (
     logical_issue_blocked_segment_ids,
@@ -520,7 +520,8 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
                         continue
                     row_identity = uid
                     row_display_name = str(getattr(inst, "name", "") or uid)
-                    row_mautic_version = str(getattr(inst, "mautic_major", None) or "unknown")
+                    observed_version = read_installed_mautic_version_read_only(str(getattr(inst, "root", "") or ""))
+                    row_mautic_version = observed_version or str(getattr(inst, "mautic_major", None) or "unknown")
                     # A Portal registration is for the selected installation,
                     # not for the host's transient hostname. The single
                     # installation case is unambiguous; retain native IDs in
@@ -528,7 +529,7 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
                     if registration and len(instances) == 1:
                         row_identity = registration.get("local_identity") or row_identity
                         row_display_name = registration.get("display_name") or row_display_name
-                        row_mautic_version = registration.get("mautic_version") or row_mautic_version
+                        row_mautic_version = observed_version or registration.get("mautic_version") or row_mautic_version
                     row = {
                         "instance_id": row_identity,
                         "display_name": row_display_name,

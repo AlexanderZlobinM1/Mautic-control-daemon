@@ -183,6 +183,34 @@ def read_mautic_version_read_only(root: str | Path) -> str | None:
     return read_mautic_version_evidence_read_only(root).get("version")
 
 
+def read_installed_mautic_version_read_only(root: str | Path) -> str | None:
+    """Observe Composer's installed packages, without executing or writing app code."""
+    for candidate in _candidate_roots(str(root)):
+        try:
+            with (candidate / "vendor/composer/installed.json").open("rb") as handle:
+                raw = handle.read(8 * 1024 * 1024 + 1)
+            if len(raw) > 8 * 1024 * 1024:
+                return None
+            payload = json.loads(raw)
+        except (OSError, ValueError, UnicodeDecodeError):
+            continue
+        packages = payload.get("packages") if isinstance(payload, dict) else payload
+        if not isinstance(packages, list):
+            continue
+        versions = set()
+        for package in packages:
+            if not isinstance(package, dict) or package.get("name") not in {"mautic/core-lib", "mautic/core-bundle", "mautic/core"}:
+                continue
+            value = package.get("pretty_version") or package.get("version")
+            if isinstance(value, str) and re.fullmatch(r"v?\d+\.\d+\.\d+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?(?:\+[0-9A-Za-z][0-9A-Za-z.-]*)?", value):
+                versions.add(value.removeprefix("v"))
+        if len(versions) > 1:
+            return None
+        if versions:
+            return versions.pop()
+    return None
+
+
 def _read_version_from_composer_lock(root: Path) -> str | None:
     lock = root / "composer.lock"
     if not lock.exists():

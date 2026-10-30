@@ -61,6 +61,12 @@ MCC_CATALOG_SHA256_TRUST_MODE = "mcc_catalog_sha256"
 MCC_AUTHENTICATED_ARTIFACT_TRANSPORT = "mcc_authenticated_api"
 MAX_ARTIFACT_BYTES = 512 * 1024 * 1024
 PORTAL_USER_AGENT = f"mcd-agent/{__version__} portal-commercial/{CONTRACT_VERSION}"
+MAX_SAFE_INVENTORY_REVISION = 9007199254740991
+INVENTORY_REVISION_ERRORS = frozenset({"inventory_snapshot_revision_conflict", "inventory_snapshot_revision_stale"})
+
+
+def _safe_inventory_revision_head(value: Any) -> bool:
+    return type(value) is int and 0 <= value < MAX_SAFE_INVENTORY_REVISION
 
 
 class CommercialPortalError(RuntimeError):
@@ -71,11 +77,12 @@ class CommercialPortalError(RuntimeError):
     are never retained or rendered.
     """
 
-    def __init__(self, *, stage: str, code: str, http_status: int | None = None, retryable: bool = False):
+    def __init__(self, *, stage: str, code: str, http_status: int | None = None, retryable: bool = False, latest_snapshot_revision: int | None = None):
         self.stage = str(stage)
         self.code = str(code)
         self.http_status = int(http_status) if http_status is not None else None
         self.retryable = bool(retryable)
+        self.latest_snapshot_revision = latest_snapshot_revision if self.http_status == 409 and self.code in INVENTORY_REVISION_ERRORS and _safe_inventory_revision_head(latest_snapshot_revision) else None
         detail = f" stage={self.stage}"
         if self.http_status is not None:
             detail += f" http_status={self.http_status}"
@@ -90,6 +97,8 @@ class CommercialPortalError(RuntimeError):
         }
         if self.http_status is not None:
             payload["http_status"] = self.http_status
+        if self.latest_snapshot_revision is not None:
+            payload["latest_snapshot_revision"] = self.latest_snapshot_revision
         return payload
 
 
@@ -110,15 +119,22 @@ def _portal_http_error(*, stage: str, status: int, code: str | None = None) -> C
 def _portal_http_error_from_exception(*, stage: str, exc: HTTPError) -> CommercialPortalError:
     """Keep a bounded, typed Portal error code without retaining response data."""
     code = ""
+    head = None
     try:
         raw = exc.read(64 * 1024)
         payload = json.loads(raw.decode("utf-8")) if raw else {}
         candidate = payload.get("code") if isinstance(payload, Mapping) else None
         if isinstance(candidate, str) and re.fullmatch(r"[a-z0-9_]{1,120}", candidate):
             code = candidate
+        if isinstance(payload, Mapping) and payload.get("schema") == "portal-error-v1" and payload.get("contract_version") == "1.0" and exc.code == 409 and code in INVENTORY_REVISION_ERRORS:
+            candidate_head = payload.get("latest_snapshot_revision")
+            if _safe_inventory_revision_head(candidate_head):
+                head = candidate_head
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         pass
-    return _portal_http_error(stage=stage, status=exc.code, code=code or None)
+    error = _portal_http_error(stage=stage, status=exc.code, code=code or None)
+    error.latest_snapshot_revision = head
+    return error
 
 
 def _portal_transport_error(*, stage: str) -> CommercialPortalError:
@@ -926,7 +942,7 @@ class CommercialState:
                 revision = int(raw_revision or 0)
             except (TypeError, ValueError):
                 raise ValueError("commercial_inventory_state_invalid")
-            if revision < 0:
+            if revision < 0 or revision > MAX_SAFE_INVENTORY_REVISION:
                 raise ValueError("commercial_inventory_state_invalid")
             previous_hash = str(previous.get("durable_hash") or "")
             if previous_hash and not _valid_inventory_hash(previous_hash):
@@ -947,6 +963,8 @@ class CommercialState:
                 # unambiguously newer without relying on volatile fields.
                 changed = True
             if changed:
+                if revision == MAX_SAFE_INVENTORY_REVISION:
+                    raise ValueError("commercial_inventory_revision_exhausted")
                 revision += 1
                 candidate["snapshot_revision"] = str(revision)
                 candidate_hash = inventory_durable_hash(candidate)
@@ -972,6 +990,42 @@ class CommercialState:
                 ("commercial_inventory_revision", json.dumps(revision)),
             )
         return candidate, record
+
+    def rebase_inventory_revision(self, *, installation_id: str, inventory: Mapping[str, Any], latest_snapshot_revision: int) -> bool:
+        """CAS a rejected snapshot above the authenticated Portal head, preserving facts."""
+        if not _safe_inventory_revision_head(latest_snapshot_revision):
+            return False
+        try:
+            rejected_revision = int(inventory.get("snapshot_revision"))
+        except (TypeError, ValueError):
+            return False
+        rejected_hash = inventory_durable_hash(inventory)
+        with sqlite3.connect(self.path, timeout=30) as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT value FROM commercial_meta WHERE key=?", ("commercial_inventory_state_v1",)).fetchone()
+            state = self._inventory_state_record(json.loads(row[0]) if row else None)
+            record = state["installations"].get(str(installation_id))
+            if not isinstance(record, Mapping) or record.get("snapshot_revision") != rejected_revision or record.get("durable_hash") != rejected_hash:
+                return False
+            snapshot = record.get("durable_snapshot")
+            if not isinstance(snapshot, Mapping) or inventory_durable_hash(snapshot) != rejected_hash:
+                return False
+            revision = max(rejected_revision, latest_snapshot_revision) + 1
+            if revision > MAX_SAFE_INVENTORY_REVISION or rejected_revision < 1:
+                return False
+            snapshot = dict(snapshot)
+            snapshot["snapshot_revision"] = str(revision)
+            record = {**record, "snapshot_revision": revision, "durable_hash": inventory_durable_hash(snapshot), "durable_snapshot": snapshot, "last_published": None, "last_acknowledged": None}
+            state["installations"][str(installation_id)] = record
+            db.execute(
+                "INSERT INTO commercial_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                ("commercial_inventory_state_v1", json.dumps(state, ensure_ascii=True, sort_keys=True)),
+            )
+            db.execute(
+                "INSERT INTO commercial_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                ("commercial_inventory_revision", json.dumps(revision)),
+            )
+        return True
 
     def acknowledge_inventory(self, *, installation_id: str, inventory: Mapping[str, Any]) -> bool:
         """Pin the last successfully published inventory without regressing state."""
