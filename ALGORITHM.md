@@ -1163,11 +1163,27 @@ Daily instance backup scheduling is a durable scheduler concern. Before a schedu
 
 Backup profile synchronization is a separate typed contract and is never
 projected into generic runtime overrides. MCD advertises and consumes
-`mcd-backup-profile-v1` version 1 envelopes containing the complete normalized
-profile, `generation`, and canonical JSON SHA-256. MCD validates schema, version,
-and desired hash before applying the profile; the apply/readback result contains
-masked `effective_profile`, `effective_sha256`, generation, and `status`.
-`ok` is valid only when desired and effective hashes match. Schema, validation,
+`mcd-backup-profile-v1` version 1 envelopes containing a profile,
+`profile_updated_at` epoch, and exact transport `profile_sha256`. The effective
+V1 projection matches MCC `canonical_mcd_profile`: remove `settings`, map its
+backup enabled/schedule values, and preserve all other requested fields,
+including `remote_root_dir`, authentication and declared `source`. MCD verifies
+each requested field against actual candidate values without injecting unrelated
+defaults or local-storage provenance. Schedule values affect the candidate
+immediately; an older DB profile must not overwrite the new candidate during
+verification. Unknown fields or mismatched actual values fail before profile
+mutation. After persistence, MCD rereads the stored effective values and returns
+masked `effective_profile`, `effective_sha256`, the epoch and `status`.
+The transport hash covers the original envelope profile; the effective hash
+covers the canonical projection before credential masking. `ok` requires the
+effective hash to match that projection, including for disabled profiles and
+idempotent same-epoch replay. Subsequent host pushes retain that same stored
+canonical shape, without injecting defaults/provenance as a false same-epoch
+conflict. Invalid/nonfinite epochs are rejected. Evidence:
+`test_backup_profile_v1_readback` includes the exact published MCC hash fixture,
+real temporary DB/config/crypto round trips, schedule adoption, old-state races,
+and negative checks that never apply unknown or unverifiable values.
+Schema, validation,
 apply, or readback mismatch returns `unsynced` or `error` and does not claim a
 successful sync. The legacy `backup_profile` telemetry field remains for older
 MCC/MCD versions; it is not evidence of exact synchronization. Scheduler
