@@ -95,6 +95,11 @@ def test_dns_scenario_and_durable_terminal_use_plain_identity(tmp_path):
     assert terminal["identity_kind"] == "dns" and terminal["local_identity"] == DNS
     assert "host_fingerprint" not in terminal
     assert len(calls) == 1
+    from mcd_agent.scenario_launcher import build_scenario_context
+    context = build_scenario_context(job)
+    assert context["binding"] == {"agent_id": "agent-1", "installation_id": "installation-1", "commercial_key_id": "key-1", "identity_kind": "dns", "local_identity": DNS}
+    assert "identity_kind" not in context["job"]
+    assert context["job"]["account_id"] == "account-1"
 
 
 @pytest.mark.parametrize("expired", [False, True])
@@ -140,7 +145,8 @@ def test_dns_primitive_context_never_uses_host_digest():
     from mcd_agent.scenario_launcher import encode_request_frame
     artifact = b"#!/bin/sh\nexit 0\n"
     context = _primitive_job_context(artifact)
-    context["job"].update(identity_kind="dns", local_identity=DNS, agent_id="agent-1", installation_id="installation-1")
+    context["binding"] = {"identity_kind": "dns", "local_identity": DNS, "agent_id": "agent-1", "installation_id": "installation-1", "commercial_key_id": "key-1"}
+    context["job"]["account_id"] = "account-1"
     binding = context["primitive_context"]["binding"]
     binding.pop("host_fingerprint")
     binding.update(identity_kind="dns", local_identity=DNS)
@@ -148,3 +154,21 @@ def test_dns_primitive_context_never_uses_host_digest():
     binding["host_fingerprint"] = "sha256:" + "a" * 64
     with pytest.raises(ValueError, match="fingerprint_forbidden"):
         encode_request_frame(artifact, context)
+
+
+def test_dns_passive_daemon_builds_independent_portal_worker(tmp_path, monkeypatch):
+    import threading
+    import sys
+    from mcd_agent.config import load_config
+    from mcd_agent.daemon import _default_commercial_worker_factory
+    monkeypatch.setattr("mcd_agent.commercial_portal._host_fingerprint", lambda: pytest.fail("host hash called"))
+    monkeypatch.setattr("mcd_agent.daemon.default_scenario_runner_argv", lambda: [sys.executable])
+    path = str(tmp_path / "state.db")
+    state = CommercialState(path)
+    import_activation_material(state, material())
+    config = tmp_path / "mcd.toml"
+    config.write_text(f'[profile]\nname="passive"\n[mcc]\nurl=""\npush_enabled=false\n[runtime]\nstate_backend="sqlite"\nstate_db_path="{path}"\n')
+    worker = _default_commercial_worker_factory(load_config(str(config), allow_recover_from_mcc=False))(threading.Event())
+    assert worker is not None, state.get("commercial_worker_status")
+    assert worker.identity_coordinate == {"identity_kind": "dns", "local_identity": DNS}
+    assert "host_fingerprint" not in worker._minimal_inventory("installation-1")["binding"]

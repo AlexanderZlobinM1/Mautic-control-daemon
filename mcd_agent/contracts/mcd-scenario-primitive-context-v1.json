@@ -12,9 +12,12 @@
       "scenario_revision",
       "artifact_revision",
       "artifact_digest",
-      "host_fingerprint",
       "facts_digest"
     ],
+    "identity_coordinate": {
+      "dns": {"identity_kind": "dns", "required": ["local_identity"], "forbidden": ["host_fingerprint"], "comparison": "plain DNS equals executable context binding.local_identity"},
+      "legacy": {"required": ["host_fingerprint"], "unchanged": true}
+    },
     "digest_format": "sha256:<64 lowercase hexadecimal characters>",
     "semantics": "Every receipt, retry and terminal result is bound to this tuple. Replaying the same idempotency_key may return the durable terminal receipt but must not execute the artifact twice."
   },

@@ -217,6 +217,8 @@ def import_activation_material(
 
 
 def _import_dns_enrollment(state: CommercialState, source: Mapping[str, Any]) -> dict[str, Any]:
+    if any(key in source for key in ("host_fingerprint", "public_key", "agent_private_key", "agent_key_id", "portal_job_signing_keys", "portal_artifact_signing_keys", "activation_code", "signature")):
+        raise _error("portal_registration_dns_security_extension_forbidden")
     coordinate = identity_coordinate(source)
     if coordinate.get("identity_kind") != "dns":
         raise _error("portal_registration_dns_required")

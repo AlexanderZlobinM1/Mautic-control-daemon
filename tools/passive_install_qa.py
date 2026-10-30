@@ -98,6 +98,18 @@ if real_systemd:
         subprocess.run(["systemctl", operation, "mcd"], check=True)
         time.sleep(2)
         subprocess.run(["systemctl", "is-active", "--quiet", "mcd"], check=True)
+        # ActiveState alone can precede Python imports; require the real
+        # independent Portal worker to finish constructing from durable state.
+        import sqlite3
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline:
+            with sqlite3.connect("/opt/mcd/var/mcd-state.db") as db:
+                row = db.execute("select value from commercial_meta where key=?", ("commercial_worker_status",)).fetchone()
+            if row and json.loads(row[0]).get("status") == "enabled":
+                break
+            time.sleep(1)
+        else:
+            raise AssertionError("actual_portal_worker_not_ready")
         children.append(int(Path("/run/mcd-child.pid").read_text()))
         for pid in children:
             os.kill(pid, 0)
@@ -110,4 +122,4 @@ if real_systemd:
     dropin.unlink()
     dropin.parent.rmdir()
     subprocess.run(["systemctl", "daemon-reload"], check=True)
-print(json.dumps({"status": "PASS", "platform": "Ubuntu24.04/amd64", "https_single_key": True, "registration": "host", "fresh_install": True, "completed_replay_without_enrollment": True, "wrong_key_rejected": True, "installer_worker_start_calls": 0, "systemd": "actual start/restart/stop PASS" if real_systemd else "daemon-reload stub; real systemd not validated", "portal": "HTTPS contract double; live Portal not exercised"}))
+print(json.dumps({"status": "PASS", "platform": "Ubuntu24.04/amd64", "runtime_version": runtime_version, "identity_kind": "dns", "https_single_key": True, "registration": "host", "fresh_install": True, "completed_replay_without_enrollment": True, "wrong_key_rejected": True, "installer_worker_start_calls": 0, "systemd": "actual start/restart/stop + worker ready + child survival PASS" if real_systemd else "daemon-reload stub; real systemd not validated", "portal": "HTTPS contract double; live Portal not exercised"}))

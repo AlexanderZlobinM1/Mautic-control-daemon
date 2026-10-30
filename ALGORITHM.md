@@ -1432,6 +1432,8 @@ are rejected. Import, eligibility, poll, inventory, connection/terminal receipts
 self-hosted jobs and executable context carry the same DNS coordinate. Existing
 legacy/manual fingerprint data and routes retain their original behavior. The
 new idempotency namespace is `:dns-enroll-v1` / `:dns-host-v1`, preserving history.
+The executable context carries full DNS channel identity in top-level `binding`
+and account_id in `job`; legacy job's four identifiers remain unchanged.
 Evidence: tests/test_portal_dns_identity.py (host-hash function fails if called,
 DNS import/replay, legacy preservation, poll/receipts, admitted/expired jobs,
 primitive context); runtime 1.6.26 is required for the new material contract.
