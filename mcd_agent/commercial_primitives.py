@@ -1,8 +1,8 @@
 """Small, typed generic primitives exposed by the Portal worker.
 
 This module deliberately contains no shell or caller supplied command line.
-Only read-only observations that already exist in MCD are exposed here.  A
-mutating archive install is not advertised until it has its own typed,
+Only native observations and an empty-input inventory rescan are exposed here.
+A mutating archive install is not advertised until it has its own typed,
 artifact-bound contract.
 """
 
@@ -11,7 +11,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 from datetime import datetime, timezone
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from mcd_agent.commercial_detector import (
     PORTAL_LOCAL_FACTS_CAPABILITIES,
@@ -30,6 +30,7 @@ _COMMANDS = (
     ("web_php", "check_web_php", False, "portal://mcd/input/web-php-v1"),
     ("mysql", "check_mysql", False, "portal://mcd/input/mysql-v1"),
     ("redis", "check_redis", False, "portal://mcd/input/redis-v1"),
+    ("inventory", "rescan_inventory", True, "portal://mcd/input/inventory-rescan-v1"),
 )
 
 
@@ -82,10 +83,10 @@ def _service_state(names: tuple[str, ...]) -> dict[str, Any]:
     return {"installed": False, "active": False, "service": ""}
 
 
-def execute_generic_primitive(job: Mapping[str, Any]) -> Mapping[str, Any]:
-    """Execute one declared, secret-free observation.
+def execute_generic_primitive(job: Mapping[str, Any], *, inventory_rescan: Callable[[], int] | None = None) -> Mapping[str, Any]:
+    """Execute one declared primitive without caller-controlled paths or argv.
 
-    The input is intentionally empty for the first inventory.  Rejecting any
+    The input is intentionally empty for every primitive. Rejecting any
     non-empty input prevents Portal from smuggling a path, command or secret
     into this generic boundary.
     """
@@ -93,6 +94,18 @@ def execute_generic_primitive(job: Mapping[str, Any]) -> Mapping[str, Any]:
     value = job.get("input")
     if not isinstance(value, Mapping) or value:
         return {"status": "failed", "reason": "commercial_generic_input_must_be_empty"}
+    if command == "rescan_inventory":
+        if inventory_rescan is None:
+            return {"status": "failed", "reason": "commercial_inventory_rescan_unavailable"}
+        try:
+            count = inventory_rescan()
+        except Exception:
+            # Discovery may inspect protected local configuration. Never put
+            # an exception containing that material into a command receipt.
+            return {"status": "failed", "reason": "commercial_inventory_rescan_failed"}
+        if type(count) is not int or count < 0:
+            return {"status": "failed", "reason": "commercial_inventory_rescan_result_invalid"}
+        return {"status": "succeeded", "discovered_count": count}
     if command == "read_host_facts":
         return {"status": "succeeded", "facts": read_normalized_local_facts(capabilities=list(PORTAL_LOCAL_FACTS_CAPABILITIES))}
     readiness = collect_mautic_install_readiness()
