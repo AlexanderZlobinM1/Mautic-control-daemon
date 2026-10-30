@@ -1144,6 +1144,8 @@ cycle без ручного `segments:update`, profile/capacity/data changes. Ad
 | self-update preserves ordinary application work and all durable queues | `mcd_agent/self_update.py`, `daemon.py`, systemd unit | `tests/test_self_update_version_reporting.py`, `tools/runtime_bridge_qa.py` (`mcd-runtime-bridge-qa-v1`) |
 | legacy source-tree to runtime-only transition is authority-safe and accepts complete split TOML config | `tools/mcd_runtime_bootstrap.py`, `tools/mcd_profile_authority_probe.py` | `tests/test_profile_authority_probe.py`, `tests/test_runtime_bootstrap_capture.py`, live `mcd-runtime-bootstrap-receipt-v1` |
 | activation-derived Portal material is imported atomically without new auth/job issuance; commercial API-key transport, host binding and installation IDs are validated and persisted while legacy agent/Portal signing-key state is scrubbed | `mcd_agent/commercial_registration.py`, `mcd_agent/commercial_portal.py` | `tests/test_commercial_registration.py`, `tests/test_commercial_outbound_boundary.py`, redacted `mcd-portal-registration-receipt-v1` |
+| host-first Portal registration binds an activated MCD host before any Mautic instance exists; request contains only local DNS identity/display name, and the response must create a passive host installation with an active empty-inventory connection | `mcd_agent/commercial_portal.py`, `mcd_agent/commercial_host_registration.py`, `mcd_agent/cli.py` | `tests/test_commercial_portal.py`, redacted `portal-mcd-host-register-response-v1` |
+| self-hosted v2.1 jobs select exactly one ordered external stage through `stage_selection` plus matching `execution.stage`; MCD verifies dependencies and emits the existing typed stage/terminal receipts without adding a launcher or recipe layer | `mcd_agent/commercial_portal.py`, `mcd_agent/commercial_self_hosted.py`, `mcd_agent/scenario_launcher.py` | `tests/test_commercial_self_hosted_v2.py`, redacted stage/terminal receipts |
 | manual existing commercial-key fallback keeps pending/active/disconnected state idempotently | `mcd_agent/commercial_manual_activation.py`, `mcd_agent/commercial_portal.py`, `mcd_agent/daemon.py` | `tests/test_commercial_manual_activation.py`, redacted `mcd-commercial-manual-activation-receipt-v1` |
 | active Portal state is reconciled after daemon startup; incomplete construction and exited workers retry without duplicates | `mcd_agent/daemon.py:_reconcile_commercial_worker` | `tests/test_daemon_commercial_guard.py` activation-material retry; `tests/test_commercial_self_hosted_v2.py` activate -> poll -> terminal v2 |
 | result-signing identity bootstraps from MCD-owned config and gates signed control execution on MCC ACK | `mcd_agent/config.py`, `mcd_agent/result_signing.py`, `mcd_agent/state_push.py`, `mcd_agent/mcd_control.py` | `tests/test_result_signing.py`, `tests/test_mcd_control.py`, live `mcd-state-v1` identity/key/ACK and terminal-receipt evidence |
@@ -1200,7 +1202,10 @@ validate a Portal/job signing key or `portal_signature`. The additive contract
 version `2.1` is the registered-installation path: its
 `execution.primitive` is `scenario.apply`, and `bootstrap_artifact` must be
 absent. MCD accepts downloaded artifacts only when size and SHA-256 match the
-immutable artifact pin/catalog entry. MCD never imports MCC credentials or
+immutable artifact pin/catalog entry. Portal sends the self-hosted job and
+artifact pin without `portal_signature`, `signature`, public-key or trust-store
+fields; MCD admission is based on the HTTPS API credential, exact binding,
+expiry/idempotency, and the pinned size/SHA-256 values. MCD never imports MCC credentials or
 scenario rules, and Portal remains only the connector/UI for this lane.
 
 The commercial API credential and host binding described below apply only to
@@ -1213,9 +1218,14 @@ The API-key-authenticated `portal-mcd-inventory-snapshot-v1` also carries the ad
 version `1.0`). Its `facts` mapping is the complete normalized value used by
 the local execution guard: `os_id`, `os_version`, `architecture`,
 `package_manager`, sorted unique `capabilities`, `target_kind`, and
-`detector_schema`. `facts_digest` hashes the same mapping after removing only
-`detector_schema`. Inventory publication and `scenario.apply` use the same
-reader and capability context, so the coordinate is stable across unchanged
+`detector_schema`. It also carries MCD-owned `classification_reason` and
+`classification_evidence` from the read-only
+`mcd-host-classification-evidence-v1` probes. MCD defaults to
+`existing_server`; it emits `new_server` only when no Mautic installation and
+no installed or active web server, database, cache, or PHP runtime marker is
+present. `mcd.service` is explicitly excluded. `facts_digest` hashes the same
+mapping after removing only `detector_schema`. Inventory publication and
+`scenario.apply` use the same reader and capability context, so the coordinate is stable across unchanged
 polls, restart, replay, and Portal outage; its durable inventory hash and
 revision include the field. Missing detector facts fail closed. Scenario
 `required_capabilities` remain Portal-side applicability predicates and are
@@ -1236,7 +1246,7 @@ stage registry is constructed on this path. A legacy self-hosted artifact may
 select `portal-self-hosted-executable-context-v1`; the frame validator accepts
 both that schema and the current MCD context schema without changing the
 primitive contract. Progress is checkpointed by
-immutable `job_id`; replay of the same signed job returns the durable terminal
+immutable `job_id`; replay of the same API-authenticated job returns the durable terminal
 receipt without re-executing the runner only when the received command identity
 is the same. A distinct Portal recovery command has its own command/cursor
 execution identity and is executed exactly once, even though it retains the
@@ -1281,7 +1291,7 @@ during this delivery sequence.
 The executable scenario bridge follows the generic
 `mcd-scenario-executable-context-v1` contract. The old
 `portal-self-hosted-executable-context-v1` value is accepted only as a
-compatibility data label and never creates a second execution path. The signed
+compatibility data label and never creates a second execution path. The versioned
 artifact must be `application/x-sh` or `application/x-elf`; the legacy
 declarative JSON artifact remains audit-only and is never dispatched. MCD sends
 the artifact and canonical context in the 88-byte `SSMCDX01` frame: exact
@@ -1305,6 +1315,12 @@ staging/activation, execution admission, timeout, rollback state and durable
 receipts. The legacy artifact-trust capability remains only for compatibility
 and is not required by the trusted MCC SHA-only path.
 
+If the bounded runner exits non-zero but emits a valid final result frame, MCD
+decodes that frame before reducing the failure. The terminal receipt preserves
+the artifact's typed `error_code`, `completed`, `total`, `rollback`, and bounded
+runner result, so partial mutation and rollback evidence remain visible. Only a
+missing or invalid final frame is reduced to the generic runner failure.
+
 Stage receipts use `mcd-self-hosted-stage-receipt-v2` with only
 `scenario_dispatch` and `execution`, statuses `queued|running|waiting|succeeded|failed`,
 mandatory installation binding and unique idempotency keys. Terminal receipts
@@ -1313,13 +1329,21 @@ use `mcd-self-hosted-terminal-receipt-v2`, `succeeded|failed`, explicit
 bounded and secret-free. Every unsent stage or terminal receipt is durable and
 retried in order after Portal outage or MCD restart.
 
-If Portal responds to a durable receipt with the typed non-retryable
-`receipt_sequence_regression`, MCD treats that response as reconciliation of
-the same job's already-advanced contiguous receipt history, removes only that
-receipt from the local queue, and continues draining in order. It never
-re-executes the runner and never creates a replacement job. Release
-publication is performed by the dedicated `Publish MCD` process; MCC only
-registers/serves the catalog metadata used by MCD.
+Any non-2xx response to a durable receipt, including the typed non-retryable
+`receipt_sequence_regression`, is not an acknowledgement of that exact
+idempotency key. MCD keeps the receipt and pending delivery cursor durable,
+does not advance the cursor, and retries the same receipt in order after the
+Portal-side state is reconciled. It never re-executes the runner or creates a
+replacement job. Release publication is performed by the dedicated `Publish
+MCD` process; MCC only registers/serves the catalog metadata used by MCD.
+
+If a historical runtime already lost a pending receipt after a non-2xx
+response, recovery may requeue only the exact terminal found in
+`commercial_self_hosted_runs`. The worker requires the exact job id, command id,
+delivery cursor, sequence, idempotency key, current installation binding and
+canonical payload SHA-256; any mismatch is rejected. Recovery queues the saved
+payload for normal worker delivery and never reconstructs it, starts the job, or
+changes the host.
 
 The commercial transport worker is a separate non-blocking Portal lane:
 `pull_job` → exact v2 job admission → pinned artifact download(s) → local facts
@@ -1386,6 +1410,33 @@ or private key. A missing or mismatched binding fails closed before the
 commercial worker can start.
 
 #### Manual fallback for an existing commercial key
+
+Fresh Portal bootstrap uses `tools/mcd_passive_install.py`: HTTPS + one existing
+commercial API key on stdin, exact archive/manifest/bridge SHA-256, then the
+existing redeem-commercial-key and same-key host-registration endpoints. DNS
+instance identity is explicit and independent from machine fingerprint. Import
+uses the installed wheel's offline atomic registration importer. The resulting
+config is passive with MCC disabled; the service remains disabled/inactive and
+uses KillMode=process. No stack/Mautic scenario is run during bootstrap.
+An exact completed-install replay verifies receipt pins, config/unit, installed
+version and durable key/agent/installation identity before returning without
+another enrollment. Foreign/partial installations fail closed and stay intact.
+Evidence: tests/test_passive_install.py, tools/passive_install_qa.py; double-only
+QA must not be presented as real Portal/systemd acceptance.
+
+New one-key OWH enrollment uses `identity_kind="dns"` and plain `local_identity`
+with server-issued agent/installation IDs. Material schema is
+`mcd-portal-enrollment-material-v1`, contract 1.0. No hostname/DNS digest is
+computed, stored or required for this branch; mixed DNS/fingerprint coordinates
+are rejected. Import, eligibility, poll, inventory, connection/terminal receipts,
+self-hosted jobs and executable context carry the same DNS coordinate. Existing
+legacy/manual fingerprint data and routes retain their original behavior. The
+new idempotency namespace is `:dns-enroll-v1` / `:dns-host-v1`, preserving history.
+The executable context carries full DNS channel identity in top-level `binding`
+and account_id in `job`; legacy job's four identifiers remain unchanged.
+Evidence: tests/test_portal_dns_identity.py (host-hash function fails if called,
+DNS import/replay, legacy preservation, poll/receipts, admitted/expired jobs,
+primitive context); runtime 1.6.26 is required for the new material contract.
 
 If the normal Own-host bootstrap is unavailable, the operator may use the
 already-issued reusable commercial API key through the MCD-owned manual
@@ -1509,7 +1560,7 @@ completed scenario. A Portal/network failure leaves commands queued at Portal
 and records an exponential, durable retry deadline. The next outbound cycle
 drains receipts first, then resumes the saved batch or polls with the last
 cursor; no scheduler or standalone work is blocked. Backoff is applied only
-to transport failures, not to local signature/applicability rejection.
+to transport failures, not to local validation/applicability rejection.
 
 Inventory publication has its own durable revision ledger per installation.
 MCD canonicalizes the complete inventory and removes only transport-volatility
@@ -1565,6 +1616,35 @@ read-only-примитивы: `read_host_facts`, `check_prerequisites`, `check_w
 Установка Mautic из архива пока не публикуется как generic capability: для неё
 нужен отдельный artifact-bound typed contract; Portal не может прислать такой
 шаг под видом произвольной generic-команды.
+
+Перед admission generic job MCD проверяет TTL также для сохранённого poll delivery.
+Просроченный job получает durable typed terminal receipt
+`portal_mcd_generic_command_expired` без вызова capability handler; после доставки
+receipt курсор продвигается. Это проверяется cached host_facts regression.
+Terminal sequence вычисляется из сохранённого last_sequence; для состояния
+старых версий started_sent означает уже занятый stage sequence 1. Отказ после
+started получает следующий sequence, без повторного вызова capability handler.
+
+Заблокированный generic terminal outbox сверяется через authenticated GET
+`agents/{agentId}/installations/{installationId}/commands/{commandId}/state`.
+Только точное совпадение binding, job, command и delivery cursor, статусы
+cancelled/failed, аудит job_ttl_expired и сохранённые receipt hash metadata
+разрешают supersede. Исходный receipt и полный ответ Portal сохраняются в
+`commercial_generic_superseded_receipts_v1`, затем закрывается этот cursor.
+Ошибка HTTP, несовпадение или отсутствие доказательства сохраняют outbox.
+Ни HTTP 409, ни локальный TTL сами по себе отмену не доказывают.
+Generic result допускает глубину 8 для classification evidence host_facts;
+входные команды сохраняют лимит глубины 5 и запрет произвольных команд/секретов.
+Ошибка формирования terminal превращается в durable sequence 2 failure
+commercial_generic_terminal_construction_failed без включения сырого результата.
+
+Host classification ищет console только в approved roots /var/www, /srv/www,
+/opt/mautic: непосредственно, в одном дочернем каталоге и его project/public_html.
+Симлинки root/каталогов/console не обходятся; максимум 128 дочерних каталогов.
+PHP-FPM версии обнаруживаются read-only list-unit-files с фильтром имени
+php[major.minor]-fpm.service (также php-fpm.service); каждый допустимый unit
+проверяется is-active. Evidence содержит все реально активные версии, а не
+версию PHP CLI; схема evidence сохраняется, digest новых фактов пересчитывается.
 
 Для generic job MCD сначала durable фиксирует `started` receipt, затем вызывает
 handler и durable фиксирует terminal result. Receipt sequence — монотонный,

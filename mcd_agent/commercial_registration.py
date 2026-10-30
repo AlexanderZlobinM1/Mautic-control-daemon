@@ -19,20 +19,19 @@ from typing import Any, Mapping
 from urllib.parse import urlparse
 
 from mcd_agent import __version__
+from mcd_agent.portal_identity import dns_identity, identity_coordinate
 from mcd_agent.commercial_portal import (
     CommercialState,
     _b64,
     _host_fingerprint,
     _public_commercial_key_metadata,
     canonical_json,
-    portal_artifact_trust_keys,
-    validate_portal_artifact_trust,
 )
 
 
 SCHEMA = "mcd-portal-activation-material-v1"
 CONTRACT_VERSION = "1.0"
-_ACCEPTED_SCHEMAS = frozenset({SCHEMA, "portal-mcd-registration-delivery-v1", "sales-snap-registration-v1"})
+_ACCEPTED_SCHEMAS = frozenset({SCHEMA, "portal-mcd-registration-delivery-v1", "sales-snap-registration-v1", "mcd-portal-enrollment-material-v1"})
 
 
 class RegistrationMaterialError(ValueError):
@@ -122,20 +121,6 @@ def _installation_ids(source: Mapping[str, Any]) -> dict[str, str]:
     return result
 
 
-def _artifact_trust(source: Mapping[str, Any]) -> dict[str, Any] | None:
-    """Normalize optional Portal artifact trust from activation material."""
-    raw = _first(source, "portal_artifact_trust_v1", "artifact_trust")
-    portal = source.get("portal")
-    if raw is None and isinstance(portal, Mapping):
-        raw = _first(portal, "portal_artifact_trust_v1", "artifact_trust")
-    if raw is None:
-        return None
-    try:
-        return validate_portal_artifact_trust(raw, code="portal_registration_artifact_trust_invalid")
-    except ValueError as exc:
-        raise _error(str(exc)) from exc
-
-
 def _atomic_put(state: CommercialState, values: Mapping[str, Any]) -> None:
     with sqlite3.connect(state.path, timeout=30) as db:
         db.execute("BEGIN IMMEDIATE")
@@ -153,6 +138,8 @@ def import_activation_material(
 ) -> dict[str, Any]:
     """Atomically install existing activation material without network I/O."""
     source = _unwrap(material)
+    if source.get("schema") == "mcd-portal-enrollment-material-v1":
+        return _import_dns_enrollment(state, source)
     api_base = _portal_api_base(source)
     commercial_key_id_from_material, commercial_key_secret, commercial_key_metadata = _commercial_key(source)
     credential = _text(_first(source, "portal_agent_credential", "agent_credential", "credential")) or commercial_key_secret
@@ -165,8 +152,6 @@ def import_activation_material(
     if supplied_fingerprint and supplied_fingerprint != expected_fingerprint:
         raise _error("portal_registration_host_mismatch")
     incoming_installations = _installation_ids(source)
-    artifact_trust = _artifact_trust(source)
-
     existing_agent = _text(state.get("agent_id"))
     if existing_agent and existing_agent != agent_id:
         raise _error("portal_registration_agent_mismatch")
@@ -187,8 +172,6 @@ def import_activation_material(
         "commercial_key_id": commercial_key_id,
         "installation_ids": merged_installations,
     }
-    if artifact_trust is not None:
-        digest_payload["portal_artifact_trust_v1"] = artifact_trust
     material_digest = hashlib.sha256(canonical_json(digest_payload)).hexdigest()
     previous_digest = _text(state.get("portal_registration_material_digest"))
     updates: dict[str, Any] = {
@@ -202,17 +185,6 @@ def import_activation_material(
         "portal_registration_material_schema": SCHEMA,
         "portal_registration_material_digest": material_digest,
     }
-    if artifact_trust is not None:
-        updates.update(
-            {
-                "portal_artifact_trust_v1": artifact_trust,
-                "portal_artifact_signing_keys": portal_artifact_trust_keys(artifact_trust),
-                "portal_artifact_trust_revision": artifact_trust["trust_revision"],
-                "portal_artifact_trust_digest": artifact_trust["trust_digest"],
-                "portal_artifact_trust_domain": artifact_trust["trust_domain"],
-                "portal_artifact_trust_source": "portal",
-            }
-        )
     supplied_key_metadata = source.get("commercial_key_metadata")
     if isinstance(supplied_key_metadata, Mapping):
         commercial_key_metadata = {
@@ -242,6 +214,36 @@ def import_activation_material(
         "host_fingerprint": expected_fingerprint,
         "material_digest": material_digest,
     }
+
+
+def _import_dns_enrollment(state: CommercialState, source: Mapping[str, Any]) -> dict[str, Any]:
+    if any(key in source for key in ("host_fingerprint", "public_key", "agent_private_key", "agent_key_id", "portal_job_signing_keys", "portal_artifact_signing_keys", "activation_code", "signature")):
+        raise _error("portal_registration_dns_security_extension_forbidden")
+    coordinate = identity_coordinate(source)
+    if coordinate.get("identity_kind") != "dns":
+        raise _error("portal_registration_dns_required")
+    base = _portal_api_base(source)
+    names = ("account_id", "agent_id", "commercial_key_id", "portal_agent_credential")
+    values = {key: _text(source.get(key)) for key in names}
+    if not all(values.values()):
+        raise _error("portal_registration_binding_incomplete")
+    installations = _installation_ids(source)
+    if set(installations) != {coordinate["local_identity"]}:
+        raise _error("portal_registration_installation_mismatch")
+    old_agent = state.get("agent_id")
+    if old_agent and state.get("identity_kind") != "dns":
+        raise _error("portal_registration_legacy_binding_preserved")
+    if state.get("host_fingerprint"):
+        raise _error("portal_registration_dns_fingerprint_forbidden")
+    updates = {**values, **coordinate, "portal_api_base": base, "installation_ids": installations}
+    if old_agent and any(state.get(key) != value for key, value in updates.items()):
+        raise _error("portal_registration_binding_mismatch")
+    updates["agent_version"] = __version__
+    updates["portal_registration_material_schema"] = "mcd-portal-enrollment-material-v1"
+    if state.get("commercial_portal_connection_state") in (None, ""):
+        updates["commercial_portal_connection_state"] = "passive"
+    _atomic_put(state, updates)
+    return {"schema": "mcd-portal-registration-receipt-v1", "contract_version": "1.0", "status": "configured", "idempotent": bool(old_agent), **coordinate, "account_id": values["account_id"], "agent_id": values["agent_id"], "commercial_key_id": values["commercial_key_id"], "installation_ids": installations}
 
 
 def _read_material(args: argparse.Namespace) -> dict[str, Any]:

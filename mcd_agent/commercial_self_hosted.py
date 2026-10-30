@@ -2,7 +2,7 @@
 
 This module deliberately knows only the v2 wire contract and a bounded external
 runner process.  It contains no installer, OS, Mautic, scenario, or primitive
-recipes.  Those belong to the signed external artifact and its Portal-owned
+recipes.  Those belong to the versioned external artifact and its Portal-owned
 runner.
 """
 
@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Mapping
 
 from mcd_agent.commercial_detector import read_normalized_applicability_facts, read_normalized_local_facts
+from mcd_agent.portal_identity import identity_coordinate
 from mcd_agent.scenario_launcher import (
     LEGACY_SCENARIO_CONTEXT_SCHEMA,
     SCENARIO_CONTEXT_SCHEMA,
@@ -96,10 +97,11 @@ def _nonnegative_int(value: object) -> bool:
 class RunnerExecutionError(ValueError):
     """A bounded, secret-free diagnostic for the external runner boundary."""
 
-    def __init__(self, code: str, *, evidence: Mapping[str, Any] | None = None):
+    def __init__(self, code: str, *, evidence: Mapping[str, Any] | None = None, result: Mapping[str, Any] | None = None):
         super().__init__(code)
         self.code = str(code)
         self.evidence = dict(evidence or {})
+        self.result = dict(result or {}) if isinstance(result, Mapping) else None
 
 
 class RunnerTimeoutError(TimeoutError):
@@ -126,6 +128,27 @@ def default_scenario_runner_argv() -> list[str]:
 
 class _PortalTransportError(RuntimeError):
     """A delivery transport failure, kept separate from local job rejection."""
+
+
+def _artifact_download_failure(error: BaseException) -> RunnerExecutionError:
+    """Keep artifact failures typed without exposing URLs or transport data."""
+    cause = error.__cause__ if isinstance(error, _PortalTransportError) and error.__cause__ is not None else error
+    evidence: dict[str, Any] = {"stage": "artifact_download"}
+    if isinstance(cause, CommercialPortalError):
+        code = str(cause.code)[:120]
+        if cause.http_status is not None:
+            failure_class = "http"
+            evidence["http_status"] = cause.http_status
+        elif "size_mismatch" in code or "integrity" in code or "digest" in code:
+            failure_class = "digest_or_size"
+        else:
+            failure_class = "transport"
+        evidence.update({"failure_class": failure_class, "cause_code": code})
+    elif isinstance(cause, ValueError):
+        evidence.update({"failure_class": "pre_request_validation", "cause_code": _error_code(cause)})
+    else:
+        evidence.update({"failure_class": "transport", "cause_code": type(cause).__name__[:80] or "unknown"})
+    return RunnerExecutionError("self_hosted_mcd_artifact_unavailable", evidence=evidence)
 
 
 def _utc() -> str:
@@ -273,19 +296,26 @@ def _delivery_job(command: Mapping[str, Any]) -> dict[str, Any]:
     return dict(nested) if isinstance(nested, Mapping) else dict(command)
 
 
-def _verified_shape_for_terminal(command: Mapping[str, Any], *, expected_agent_id: str, expected_installation_id: str, expected_commercial_key_id: str, expected_host_fingerprint: str) -> dict[str, Any] | None:
+def _verified_shape_for_terminal(command: Mapping[str, Any], *, expected_agent_id: str, expected_installation_id: str, expected_commercial_key_id: str, expected_host_fingerprint: str, expected_local_identity: str | None = None) -> dict[str, Any] | None:
     """Recover only binding fields needed to close an accepted delivery.
 
     This is not an admission path and never authorizes execution. It exists so
     an expired, malformed, or locally disabled leased command can still receive
-    a signed, bounded terminal receipt when Portal supplied enough binding
+    a bounded typed terminal receipt when Portal supplied enough binding
     material to identify it.
     """
     job = _delivery_job(command)
     required = ("job_id", "request_id", "account_id", "commercial_key_id", "agent_id", "installation_id", "host_fingerprint", "scenario", "applicability")
-    if any(not str(job.get(key) or "").strip() for key in required[:7]):
+    if any(not str(job.get(key) or "").strip() for key in required[:6]):
         return None
-    if any(str(job.get(key) or "") != expected for key, expected in (("agent_id", expected_agent_id), ("installation_id", expected_installation_id), ("commercial_key_id", expected_commercial_key_id), ("host_fingerprint", expected_host_fingerprint))):
+    try:
+        coordinate = identity_coordinate(job)
+    except ValueError:
+        return None
+    expected_coordinate = {"identity_kind": "dns", "local_identity": expected_local_identity} if expected_local_identity else {"host_fingerprint": expected_host_fingerprint}
+    if coordinate != expected_coordinate:
+        return None
+    if any(str(job.get(key) or "") != expected for key, expected in (("agent_id", expected_agent_id), ("installation_id", expected_installation_id), ("commercial_key_id", expected_commercial_key_id))):
         return None
     scenario = job.get("scenario")
     applicability = job.get("applicability")
@@ -298,8 +328,8 @@ def _verified_shape_for_terminal(command: Mapping[str, Any], *, expected_agent_i
     return {"job": job, "contract_version": contract_version, "scenario": dict(scenario), "facts": dict(applicability.get("facts") or {}) if isinstance(applicability, Mapping) and isinstance(applicability.get("facts"), Mapping) else {}, "facts_digest": facts_digest}
 
 
-def _failed_terminal_for_delivery(command: Mapping[str, Any], *, error: BaseException, sequence: int, expected_agent_id: str, expected_installation_id: str, expected_commercial_key_id: str, expected_host_fingerprint: str) -> dict[str, Any] | None:
-    verified = _verified_shape_for_terminal(command, expected_agent_id=expected_agent_id, expected_installation_id=expected_installation_id, expected_commercial_key_id=expected_commercial_key_id, expected_host_fingerprint=expected_host_fingerprint)
+def _failed_terminal_for_delivery(command: Mapping[str, Any], *, error: BaseException, sequence: int, expected_agent_id: str, expected_installation_id: str, expected_commercial_key_id: str, expected_host_fingerprint: str, expected_local_identity: str | None = None) -> dict[str, Any] | None:
+    verified = _verified_shape_for_terminal(command, expected_agent_id=expected_agent_id, expected_installation_id=expected_installation_id, expected_commercial_key_id=expected_commercial_key_id, expected_host_fingerprint=expected_host_fingerprint, expected_local_identity=expected_local_identity)
     if verified is None:
         return None
     try:
@@ -322,14 +352,16 @@ def _binding_from_verified(verified: Mapping[str, Any]) -> dict[str, Any]:
         "commercial_key_id": str(job["commercial_key_id"]),
         "agent_id": str(job["agent_id"]),
         "installation_id": str(job["installation_id"]),
-        "host_fingerprint": str(job["host_fingerprint"]),
+        **identity_coordinate(job),
         "scenario": dict(verified["scenario"]),
         "facts_digest": str(job["applicability"]["facts_digest"]),
     }
 
 
 def _validate_binding(receipt: Mapping[str, Any], binding: Mapping[str, Any]) -> None:
-    for key in ("job_id", "request_id", "account_id", "commercial_key_id", "agent_id", "installation_id", "host_fingerprint", "facts_digest"):
+    if identity_coordinate(receipt) != identity_coordinate(binding):
+        raise ValueError("self_hosted_mcd_receipt_binding_mismatch")
+    for key in ("job_id", "request_id", "account_id", "commercial_key_id", "agent_id", "installation_id", "facts_digest", *identity_coordinate(binding)):
         if receipt.get(key) != binding.get(key):
             raise ValueError("self_hosted_mcd_receipt_binding_mismatch")
     if receipt.get("scenario") != binding.get("scenario"):
@@ -373,6 +405,19 @@ def _failed_terminal_receipt(verified: Mapping[str, Any], *, error: BaseExceptio
     contract_version = str(verified.get("contract_version") or SELF_HOSTED_MCD_CONTRACT_VERSION)
     if contract_version not in SELF_HOSTED_MCD_CONTRACT_VERSIONS:
         contract_version = SELF_HOSTED_MCD_CONTRACT_VERSION
+    runner_result = getattr(error, "result", None)
+    if isinstance(runner_result, Mapping):
+        completed = runner_result.get("completed", completed)
+        total = runner_result.get("total", total)
+        rollback = runner_result.get("rollback", rollback)
+    result_payload: dict[str, Any] = {
+        "executor": "mcd-self-hosted-external",
+        "completed": max(0, int(completed)) if isinstance(completed, int) and not isinstance(completed, bool) else 0,
+        "total": max(1, int(total)) if isinstance(total, int) and not isinstance(total, bool) else 1,
+        "rollback": rollback if rollback in SELF_HOSTED_MCD_ROLLBACK_STATUSES else "not_attempted",
+    }
+    if isinstance(runner_result, Mapping):
+        result_payload["runner"] = _bounded_result(dict(runner_result))
     result = {
         **binding,
         "schema": SELF_HOSTED_MCD_TERMINAL_RECEIPT_SCHEMA,
@@ -383,7 +428,7 @@ def _failed_terminal_receipt(verified: Mapping[str, Any], *, error: BaseExceptio
         "observed_at": _utc(),
         "started_at": started_at,
         "completed_at": _utc(),
-        "result": {"executor": "mcd-self-hosted-external", "completed": max(0, int(completed)), "total": max(0, int(total))},
+        "result": result_payload,
         "error": {"code": "self_hosted_mcd_execution_failed", "type": _runner_error_code(error)},
         "rollback": rollback if rollback in SELF_HOSTED_MCD_ROLLBACK_STATUSES else "not_attempted",
     }
@@ -402,7 +447,7 @@ class ExternalProcessPolicy:
 
     The launcher receives a framed artifact/context request on stdin.  It is
     the only MCD-owned execution path in this boundary; scenario policy remains
-    in the signed delivered artifact.
+    in the versioned delivered artifact.
     """
 
     def __init__(self, argv: list[str] | tuple[str, ...] | None, *, timeout_sec: int = 1800):
@@ -468,12 +513,12 @@ class ExternalProcessPolicy:
                 f"self_hosted_mcd_runner_signal_{-completed.returncode}",
                 evidence={**evidence, "admission_stage": "signal"},
             )
-        if completed.returncode != 0:
-            code = self._child_error_code(stdout)
-            raise RunnerExecutionError(code or "self_hosted_mcd_runner_failed", evidence=evidence)
         try:
             frames = self._decode_output_frames(stdout)
         except ValueError as exc:
+            if completed.returncode != 0:
+                code = self._child_error_code(stdout)
+                raise RunnerExecutionError(code or "self_hosted_mcd_runner_failed", evidence=evidence) from exc
             raise RunnerExecutionError(
                 _runner_error_code(exc),
                 evidence={
@@ -485,6 +530,13 @@ class ExternalProcessPolicy:
         if not frames:
             raise RunnerExecutionError("self_hosted_mcd_runner_output_missing", evidence=evidence)
         parsed = frames[-1]
+        if completed.returncode != 0:
+            result = _bounded_result(parsed)
+            raise RunnerExecutionError(
+                str(parsed.get("error_code") or "self_hosted_mcd_runner_failed"),
+                evidence={**evidence, "admission_stage": "result_decode", "runner_result": result},
+                result=result,
+            )
         if str(parsed.get("status") or "") not in {"succeeded", "completed", "ok"}:
             raise RunnerExecutionError(
                 "self_hosted_mcd_runner_failed",
@@ -720,6 +772,14 @@ class ScenarioExecutor:
             row = db.execute(f"SELECT payload FROM {_RUNS_TABLE} WHERE job_id=?", (job_id,)).fetchone()
         return json.loads(row[0]) if row else None
 
+    def durable_terminal(self, *, job_id: str, execution_key: str) -> dict[str, Any] | None:
+        """Return one exact terminal from the worker's durable execution history."""
+        prior = self._load(job_id)
+        executions = prior.get("executions") if isinstance(prior, Mapping) else None
+        saved = executions.get(execution_key) if isinstance(executions, Mapping) else None
+        terminal = saved.get("terminal") if isinstance(saved, Mapping) else None
+        return dict(terminal) if isinstance(terminal, Mapping) else None
+
     def _save(self, job_id: str, payload: Mapping[str, Any]) -> None:
         with sqlite3.connect(self.state.path) as db:
             db.execute(f"INSERT INTO {_RUNS_TABLE}(job_id,payload) VALUES(?,?) ON CONFLICT(job_id) DO UPDATE SET payload=excluded.payload", (job_id, json.dumps(payload, sort_keys=True)))
@@ -736,12 +796,17 @@ class ScenarioExecutor:
         observed["capabilities"] = sorted(set(str(item) for item in observed.get("capabilities", [])))
         normalized_expected = dict(expected)
         normalized_expected["capabilities"] = sorted(set(str(item) for item in expected.get("capabilities", [])))
+        # Legacy 2.0/early 2.1 jobs may omit the additive host-classification
+        # coordinate; when present, it is part of the exact revalidation.
+        for key in ("classification_reason", "classification_evidence"):
+            if key not in normalized_expected:
+                observed.pop(key, None)
         if observed != normalized_expected:
             raise ValueError("self_hosted_mcd_applicability_facts_mismatch")
         return observed
 
     def run(self, job: Mapping[str, Any], *, portal_keys: Mapping[str, str], publisher_keys: Mapping[str, Any], context: Mapping[str, Any], expected_agent_id: str, expected_installation_id: str, expected_commercial_key_id: str, expected_host_fingerprint: str, bootstrap_artifact: bytes | None, scenario_artifact: bytes, receipt_sink: Callable[[dict[str, Any]], Any] | None = None, execution_key: str | None = None) -> dict[str, Any]:
-        verified = verify_self_hosted_mcd_job(job, {}, expected_agent_id=expected_agent_id, expected_installation_id=expected_installation_id, expected_commercial_key_id=expected_commercial_key_id, expected_host_fingerprint=expected_host_fingerprint)
+        verified = verify_self_hosted_mcd_job(job, {}, expected_agent_id=expected_agent_id, expected_installation_id=expected_installation_id, expected_commercial_key_id=expected_commercial_key_id, expected_host_fingerprint=expected_host_fingerprint, expected_local_identity=context.get("local_identity") if context.get("identity_kind") == "dns" else None)
         binding = _binding_from_verified(verified)
         job_id = binding["job_id"]
         job_digest = hashlib.sha256(canonical_json(dict(job))).hexdigest()
@@ -864,7 +929,7 @@ class ScenarioExecutor:
             delivery_receipt_emitted = emit(
                 "scenario_dispatch",
                 "succeeded",
-                {"status": "accepted", "artifact_delivery": delivery["receipt"]},
+                {"status": "accepted", "stage_selection": verified.get("stage_selection"), "artifact_delivery": delivery["receipt"]},
             )
             active_artifact = Path(delivery["artifact_path"]).read_bytes()
             if delivery_receipt_emitted:
@@ -872,8 +937,10 @@ class ScenarioExecutor:
             if self.runner is None:
                 raise ValueError("self_hosted_mcd_runner_unconfigured")
             result = self.runner(artifact=active_artifact, job=verified["job"], facts=facts)
-            emit("execution", "succeeded", result)
-            terminal = {**binding, "schema": SELF_HOSTED_MCD_TERMINAL_RECEIPT_SCHEMA, "contract_version": str(verified.get("contract_version") or SELF_HOSTED_MCD_CONTRACT_VERSION), "sequence": sequence + 1, "idempotency_key": f"{binding['job_id']}:terminal:{sequence + 1}", "status": "succeeded", "observed_at": _utc(), "started_at": started_at, "completed_at": _utc(), "result": _bounded_result(result), "rollback": "not_attempted"}
+            execution_result = dict(result) if isinstance(result, Mapping) else {"value": result}
+            execution_result["stage_selection"] = verified.get("stage_selection")
+            emit("execution", "succeeded", execution_result)
+            terminal = {**binding, "schema": SELF_HOSTED_MCD_TERMINAL_RECEIPT_SCHEMA, "contract_version": str(verified.get("contract_version") or SELF_HOSTED_MCD_CONTRACT_VERSION), "sequence": sequence + 1, "idempotency_key": f"{binding['job_id']}:terminal:{sequence + 1}", "status": "succeeded", "observed_at": _utc(), "started_at": started_at, "completed_at": _utc(), "result": _bounded_result(execution_result), "rollback": "not_attempted"}
             validate_self_hosted_terminal_receipt(terminal, binding=binding)
         except Exception as exc:
             evidence = getattr(exc, "evidence", None)
@@ -937,7 +1004,7 @@ class SelfHostedPortalWorker:
         self.executor = executor
         self.installation_ids = [installation_id] if isinstance(installation_id, str) else [str(value) for value in installation_id]
         self.installation_ids = [value for value in self.installation_ids if value]
-        if not self.installation_ids or not commercial_key_id or not agent_id or not host_fingerprint:
+        if not self.installation_ids or not commercial_key_id or not agent_id or (not host_fingerprint and context.get("identity_kind") != "dns"):
             raise ValueError("self_hosted_mcd_identity_missing")
         self.portal_keys = dict(portal_keys)
         self.publisher_keys = dict(publisher_keys)
@@ -945,6 +1012,9 @@ class SelfHostedPortalWorker:
         self.commercial_key_id = commercial_key_id
         self.agent_id = agent_id
         self.host_fingerprint = host_fingerprint
+        if context.get("identity_kind") == "dns" and host_fingerprint:
+            raise ValueError("self_hosted_mcd_dns_fingerprint_forbidden")
+        self.identity_coordinate = identity_coordinate(context) if context.get("identity_kind") == "dns" else {"host_fingerprint": host_fingerprint}
         self.poll_wait_seconds = max(0, min(30, int(poll_wait_seconds)))
         self.backoff_base_seconds = max(0.1, float(backoff_base_seconds))
         self.backoff_max_seconds = max(self.backoff_base_seconds, float(backoff_max_seconds))
@@ -954,6 +1024,14 @@ class SelfHostedPortalWorker:
         self.capability_inventory_provider = capability_inventory_provider
         self.generic_command_handler = generic_command_handler
         self._active_installation_id = self.installation_ids[0]
+        # A daemon restart is also the supported recovery point for a stale
+        # Portal projection. Publish one complete inventory on the first
+        # outbound cycle even when the durable content hash is unchanged;
+        # subsequent cycles remain hash/idempotency gated.
+        self._publish_inventory_on_startup = True
+
+    def _channel_binding(self, installation_id: str) -> dict[str, str]:
+        return {"agent_id": self.agent_id, "installation_id": installation_id, "commercial_key_id": self.commercial_key_id, **self.identity_coordinate}
 
     def _pending(self) -> list[dict[str, Any]]:
         raw = self.executor.state.get(_PENDING_KEY)
@@ -965,6 +1043,61 @@ class SelfHostedPortalWorker:
         if not any(str(item.get("idempotency_key") or "") == identity for item in pending):
             pending.append(dict(receipt))
         self.executor.state.put(_PENDING_KEY, pending)
+
+    def requeue_durable_terminal_receipt(
+        self,
+        *,
+        job_id: str,
+        command_id: str,
+        delivery_cursor: int,
+        sequence: int,
+        idempotency_key: str,
+        payload_sha256: str,
+    ) -> dict[str, Any]:
+        """Requeue one exact terminal already persisted by this worker."""
+        if not isinstance(job_id, str) or not job_id.strip():
+            raise ValueError("self_hosted_mcd_recovery_job_invalid")
+        if not isinstance(command_id, str) or not command_id.strip():
+            raise ValueError("self_hosted_mcd_recovery_command_invalid")
+        if not isinstance(delivery_cursor, int) or isinstance(delivery_cursor, bool) or delivery_cursor < 1:
+            raise ValueError("self_hosted_mcd_recovery_cursor_invalid")
+        if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < 1:
+            raise ValueError("self_hosted_mcd_recovery_sequence_invalid")
+        if not isinstance(idempotency_key, str) or not idempotency_key.strip():
+            raise ValueError("self_hosted_mcd_recovery_idempotency_invalid")
+        if not isinstance(payload_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", payload_sha256):
+            raise ValueError("self_hosted_mcd_recovery_payload_digest_invalid")
+        execution_key = f"{command_id}:{delivery_cursor}"
+        loader = getattr(self.executor, "durable_terminal", None)
+        terminal = loader(job_id=job_id, execution_key=execution_key) if callable(loader) else None
+        if not isinstance(terminal, Mapping):
+            raise ValueError("self_hosted_mcd_recovery_terminal_missing")
+        terminal = dict(terminal)
+        binding = {**{key: terminal.get(key) for key in ("job_id", "request_id", "account_id", "commercial_key_id", "agent_id", "installation_id", "facts_digest", "scenario")}, **identity_coordinate(terminal)}
+        try:
+            validate_self_hosted_terminal_receipt(terminal, binding=binding)
+        except (TypeError, ValueError, KeyError) as exc:
+            raise ValueError("self_hosted_mcd_recovery_terminal_invalid") from exc
+        if (
+            terminal.get("job_id") != job_id
+            or terminal.get("sequence") != sequence
+            or terminal.get("idempotency_key") != idempotency_key
+            or terminal.get("agent_id") != self.agent_id
+            or terminal.get("installation_id") != self._active_installation_id
+            or terminal.get("commercial_key_id") != self.commercial_key_id
+            or identity_coordinate(terminal) != self.identity_coordinate
+        ):
+            raise ValueError("self_hosted_mcd_recovery_binding_mismatch")
+        digest = hashlib.sha256(canonical_json(terminal)).hexdigest()
+        if digest != payload_sha256:
+            raise ValueError("self_hosted_mcd_recovery_payload_mismatch")
+        pending = self._pending()
+        if pending:
+            if any(str(item.get("idempotency_key") or "") != idempotency_key for item in pending):
+                raise ValueError("self_hosted_mcd_recovery_queue_busy")
+            return {"status": "already_queued", "job_id": job_id, "sequence": sequence, "idempotency_key": idempotency_key, "payload_sha256": digest}
+        self._queue(terminal)
+        return {"status": "queued", "job_id": job_id, "sequence": sequence, "idempotency_key": idempotency_key, "payload_sha256": digest}
 
     def _send_or_queue(self, receipt: dict[str, Any]) -> bool:
         if self._pending():
@@ -1016,29 +1149,82 @@ class SelfHostedPortalWorker:
         pending[0] = rebased
         self.executor.state.put(_PENDING_KEY, pending)
 
+    def _reconcile_cancelled_generic(self, receipt: Mapping[str, Any]) -> bool:
+        """Retire an exact cancelled delivery only with authenticated Portal proof."""
+        if receipt.get("schema") != GENERIC_TERMINAL_RECEIPT_SCHEMA:
+            return False
+        if receipt.get("status") != "failed" or (receipt.get("error") or {}).get("code") != "portal_mcd_generic_command_expired":
+            return False
+        lookup = getattr(self.client, "command_state", None)
+        delivery = self._pending_delivery()
+        if not callable(lookup) or not delivery:
+            return False
+        commands = self._commands_from_delivery(delivery.get("job") or {})
+        if not commands:
+            return False
+        job = commands[0]
+        for key in ("job_id", "command_id"):
+            if not receipt.get(key) or receipt.get(key) != job.get(key):
+                return False
+        installation = str(delivery.get("installation_id") or "")
+        if installation != self._active_installation_id or receipt.get("installation", {}).get("installation_id") != installation:
+            return False
+        try:
+            proof = lookup(installation_id=installation, command_id=str(job["command_id"]))
+            binding = proof.get("binding") or {}
+            audit = proof.get("expiry_audit") or {}
+            if proof.get("schema") != "portal-mcd-command-state-v1" or proof.get("contract_version") != "1.0":
+                return False
+            if binding.get("agent_id") != self.agent_id or binding.get("installation_id") != installation or not binding.get("account_id"):
+                return False
+            account = self.executor.state.get("account_id")
+            if account and account != binding.get("account_id"):
+                return False
+            if any(proof.get(key) != job.get(key) for key in ("job_id", "command_id")):
+                return False
+            if int(proof.get("delivery_cursor") or 0) != int(job.get("delivery_cursor") or 0) or str(proof["delivery_cursor"]) != str(delivery.get("cursor_next")):
+                return False
+            if proof.get("command_status") != "cancelled" or proof.get("job_status") != "failed":
+                return False
+            if audit.get("reason") != "job_ttl_expired" or not audit.get("created_at"):
+                return False
+            receipts = proof.get("receipts")
+            if not isinstance(receipts, list) or not receipts:
+                return False
+            if not all(isinstance(item, Mapping) and int(item.get("sequence") or 0) > 0 and re.fullmatch(r"sha256:[0-9a-f]{64}", str(item.get("payload_sha256") or "")) for item in receipts):
+                return False
+            if not any(item.get("sequence") == 1 and item.get("status") == "started" and item.get("terminal") is False for item in receipts):
+                return False
+            if int(proof.get("last_sequence") or 0) != max(int(item["sequence"]) for item in receipts):
+                return False
+        except Exception:
+            return False
+        records = self.executor.state.get("commercial_generic_superseded_receipts_v1") or []
+        record = {"receipt": dict(receipt), "portal_state": proof, "reason": "portal_audited_cancellation"}
+        self.executor.state.put("commercial_generic_superseded_receipts_v1", [*records, record])
+        return True
+
     def _drain(self) -> bool:
         pending = self._pending()
         drained_terminal = False
         while pending:
             try:
                 self._send_receipt(pending[0])
-            except CommercialPortalError as exc:
-                # Portal may already have accepted a later contiguous receipt
-                # before MCD persisted the local queue (for example across a
-                # restart).  A sequence regression is therefore a durable
-                # reconciliation acknowledgement for this exact job receipt,
-                # not a transport failure and not a reason to replay work.
-                if exc.code != "receipt_sequence_regression":
-                    self._transport_failed("receipt_delivery")
+            except CommercialPortalError:
+                if self._reconcile_cancelled_generic(pending[0]):
+                    pending.pop(0)
                     self.executor.state.put(_PENDING_KEY, pending)
-                    return False
-                self._transport_succeeded()
-                acknowledge_pending = getattr(getattr(self.executor, "artifact_store", None), "acknowledge_pending", None)
-                if callable(acknowledge_pending):
-                    acknowledge_pending()
-                drained_terminal = pending[0].get("schema") == SELF_HOSTED_MCD_TERMINAL_RECEIPT_SCHEMA
-                pending.pop(0)
+                    saved = self._pending_delivery()
+                    self._finish_command(cursor_next=str(saved["cursor_next"]))
+                    self._transport_succeeded()
+                    continue
+                # Any non-2xx response, including a typed sequence regression,
+                # is not an acknowledgement of this exact idempotency key.
+                # Keep the durable receipt and delivery cursor unchanged until
+                # Portal explicitly accepts this receipt.
                 self.executor.state.put(_PENDING_KEY, pending)
+                self._transport_failed("receipt_delivery")
+                return False
             except Exception:
                 self._transport_failed("receipt_delivery")
                 self.executor.state.put(_PENDING_KEY, pending)
@@ -1091,6 +1277,9 @@ class SelfHostedPortalWorker:
     def _outbound(self, operation: str, call: Callable[[], Any]) -> Any:
         try:
             value = call()
+        except CommercialPortalError as exc:
+            retry_after = self._transport_failed(f"{operation}:{exc.code}")
+            raise _PortalTransportError(f"{operation}:{exc.code}:retry_after={retry_after:.3f}") from exc
         except Exception as exc:
             retry_after = self._transport_failed(operation)
             raise _PortalTransportError(f"{operation}:retry_after={retry_after:.3f}") from exc
@@ -1135,7 +1324,7 @@ class SelfHostedPortalWorker:
         revision = int(inventory_revision(installation_id)) if callable(inventory_revision) else int(self.executor.state.get("commercial_inventory_revision") or 0)
         sync = {"desired_state_sync_protocol": 3, "pending_intent": self.executor.state.get("commercial_pending_sync_intent"), "conflict": self.executor.state.get("commercial_runtime_conflict")}
         settings = build_standalone_settings_snapshot(values, revision=revision, sync=sync)
-        binding = {"agent_id": self.agent_id, "installation_id": installation_id, "host_fingerprint": self.host_fingerprint, "commercial_key_id": self.commercial_key_id}
+        binding = self._channel_binding(installation_id)
         return {"schema": "portal-mcd-inventory-snapshot-v1", "contract_version": "1.0", "request_id": f"inventory-{int(self._clock() * 1000)}", "binding": binding, "snapshot_revision": str(self.executor.state.get("commercial_inventory_revision") or revision), "observed_at": _utc(), "complete": True, "host": {"mcd_version": str(self.context.get("mcd_version") or "runtime"), "profile": str(self.context.get("profile") or "commercial"), "service_status": "active", "scheduler_paused": bool(self.context.get("scheduler_paused", False)), "settings": settings}, "instances": []}
 
     def _inventory(self, installation_id: str) -> dict[str, Any]:
@@ -1230,7 +1419,7 @@ class SelfHostedPortalWorker:
             pinned_revision = int(pinned.get("snapshot_revision") or -1) if isinstance(pinned, Mapping) else -1
         except (TypeError, ValueError):
             raise ValueError("commercial_inventory_state_invalid")
-        if isinstance(pinned, Mapping) and str(pinned.get("durable_hash") or "") == durable_hash and pinned_revision == revision:
+        if not self._publish_inventory_on_startup and isinstance(pinned, Mapping) and str(pinned.get("durable_hash") or "") == durable_hash and pinned_revision == revision:
             return True
         try:
             self._outbound("inventory", lambda: self._send_inventory(installation_id, inventory))
@@ -1239,6 +1428,7 @@ class SelfHostedPortalWorker:
         acknowledge = getattr(self.executor.state, "acknowledge_inventory", None)
         if callable(acknowledge):
             acknowledge(installation_id=installation_id, inventory=inventory)
+        self._publish_inventory_on_startup = False
         return True
 
     def _send_inventory(self, installation_id: str, inventory: Mapping[str, Any]) -> Any:
@@ -1316,19 +1506,14 @@ class SelfHostedPortalWorker:
         return {"status": receipt["status"], "command_id": receipt["command_id"]}
 
     def _command_receipt(self, command: Mapping[str, Any], *, status: str, payload: Mapping[str, Any]) -> dict[str, Any]:
-        binding = command.get("binding") if isinstance(command.get("binding"), Mapping) else {"agent_id": self.agent_id, "installation_id": self._active_installation_id, "host_fingerprint": self.host_fingerprint, "commercial_key_id": self.commercial_key_id}
+        binding = command.get("binding") if isinstance(command.get("binding"), Mapping) else self._channel_binding(self._active_installation_id)
         return {"schema": "portal-mcd-command-receipt-v1", "contract_version": "1.0", "command_id": str(command.get("command_id") or command.get("conflict_id") or ""), "delivery_cursor": int(command.get("delivery_cursor") or 0), "request_id": str(command.get("request_id") or command.get("command_id") or ""), "idempotency_key": str(command.get("idempotency_key") or ""), "binding": dict(binding), "status": status if status in {"succeeded", "failed"} else "failed", "payload": dict(payload), "observed_at": _utc()}
 
     def _run_artifact_trust_update(self, command: Mapping[str, Any], *, cursor_next: str) -> dict[str, Any]:
         try:
             update = validate_portal_artifact_trust_update(command)
             binding = update["binding"]
-            expected = {
-                "agent_id": self.agent_id,
-                "installation_id": self._active_installation_id,
-                "host_fingerprint": self.host_fingerprint,
-                "commercial_key_id": self.commercial_key_id,
-            }
+            expected = self._channel_binding(self._active_installation_id)
             if any(str(binding.get(key) or "") != str(expected[key]) for key in expected):
                 raise ValueError("portal_artifact_trust_update_binding_mismatch")
             issued = datetime.fromisoformat(str(update["issued_at"]).replace("Z", "+00:00")).timestamp()
@@ -1383,16 +1568,24 @@ class SelfHostedPortalWorker:
         """Close a leased, valid generic job when admission cannot proceed."""
         job_id = str(job["job_id"])
         digest = hashlib.sha256(canonical_json(dict(job))).hexdigest()
+        runs = self.executor.state.get(_GENERIC_RUNS_KEY)
+        runs = dict(runs) if isinstance(runs, Mapping) else {}
+        saved = runs.get(job_id)
+        saved = dict(saved) if isinstance(saved, Mapping) else {}
+        if saved.get("job_digest") not in (None, digest):
+            return {"status": "rejected", "reason": "portal_mcd_generic_job_reuse_conflict"}
+        last_sequence = max(int(saved.get("last_sequence") or 0), int(bool(saved.get("started_sent"))))
         terminal = self._generic_receipt(
             job,
             terminal=True,
-            sequence=1,
+            sequence=last_sequence + 1,
             status="failed",
             error={"code": reason, "message": reason},
         )
-        runs = self.executor.state.get(_GENERIC_RUNS_KEY)
-        runs = dict(runs) if isinstance(runs, Mapping) else {}
-        runs[job_id] = {"job_digest": digest, "started_sent": False, "terminal": terminal}
+        previous_terminal = saved.get("terminal")
+        if isinstance(previous_terminal, Mapping) and int(previous_terminal.get("sequence") or 0) > last_sequence:
+            terminal = dict(previous_terminal)
+        runs[job_id] = {**saved, "job_digest": digest, "started_sent": bool(saved.get("started_sent")), "terminal": terminal}
         if len(runs) > 64:
             for key in list(runs)[:-64]:
                 runs.pop(key, None)
@@ -1413,12 +1606,6 @@ class SelfHostedPortalWorker:
             return {"status": "rejected", "reason": str(exc)[:120]}
         if job["installation"]["installation_id"] != str(self._active_installation_id):
             return self._terminalize_generic_failure(job, cursor_next=cursor_next, reason="portal_mcd_generic_installation_mismatch")
-        if not isinstance(inventory, Mapping):
-            return self._terminalize_generic_failure(job, cursor_next=cursor_next, reason="commercial_capability_inventory_unavailable")
-        try:
-            job = validate_generic_command_job(command, inventory=inventory)
-        except Exception as exc:
-            return self._terminalize_generic_failure(job, cursor_next=cursor_next, reason=str(exc)[:120])
         try:
             expires = datetime.fromisoformat(str(job["expires_at"]).replace("Z", "+00:00")).timestamp()
             issued = datetime.fromisoformat(str(job["issued_at"]).replace("Z", "+00:00")).timestamp()
@@ -1426,11 +1613,13 @@ class SelfHostedPortalWorker:
                 raise ValueError("portal_mcd_generic_command_expired")
         except (TypeError, ValueError, OverflowError) as exc:
             reason = str(exc) if str(exc).startswith("portal_mcd_generic_") else "portal_mcd_generic_command_time_invalid"
-            terminal = self._generic_receipt(job, terminal=True, sequence=1, status="failed", error={"code": reason, "message": reason})
-            if not self._send_or_queue(terminal):
-                return {"status": "receipt_pending", "job_id": job["job_id"]}
-            self._finish_command(cursor_next=cursor_next)
-            return {"status": "failed", "job_id": job["job_id"]}
+            return self._terminalize_generic_failure(job, cursor_next=cursor_next, reason=reason)
+        if not isinstance(inventory, Mapping):
+            return self._terminalize_generic_failure(job, cursor_next=cursor_next, reason="commercial_capability_inventory_unavailable")
+        try:
+            job = validate_generic_command_job(command, inventory=inventory)
+        except Exception as exc:
+            return self._terminalize_generic_failure(job, cursor_next=cursor_next, reason=str(exc)[:120])
 
         job_id = str(job["job_id"])
         digest = hashlib.sha256(canonical_json(job)).hexdigest()
@@ -1442,7 +1631,7 @@ class SelfHostedPortalWorker:
         started_sent = bool(saved.get("started_sent")) if isinstance(saved, Mapping) else False
         if not started_sent:
             started = self._generic_receipt(job, terminal=False, sequence=1, status="started")
-            runs[job_id] = {"job_digest": digest, "started_sent": True}
+            runs[job_id] = {"job_digest": digest, "started_sent": True, "last_sequence": started["sequence"]}
             self.executor.state.put(_GENERIC_RUNS_KEY, runs)
             if not self._send_or_queue(started):
                 return {"status": "receipt_pending", "job_id": job_id}
@@ -1460,7 +1649,10 @@ class SelfHostedPortalWorker:
                 result = None
                 status = "failed"
                 error = {"code": type(exc).__name__[:120], "message": str(exc)[:1024] or "generic primitive failed"}
-            terminal_saved = self._generic_receipt(job, terminal=True, sequence=2, status=status, result=result, error=error)
+            try:
+                terminal_saved = self._generic_receipt(job, terminal=True, sequence=2, status=status, result=result, error=error)
+            except Exception as exc:
+                terminal_saved = self._generic_receipt(job, terminal=True, sequence=2, status="failed", error={"code": "commercial_generic_terminal_construction_failed", "message": type(exc).__name__[:120]})
             runs[job_id] = {"job_digest": digest, "started_sent": True, "terminal": terminal_saved}
             if len(runs) > 64:
                 for key in list(runs)[:-64]:
@@ -1503,7 +1695,7 @@ class SelfHostedPortalWorker:
             return True
         if self.executor.state.get("commercial_portal_connection_state") == "active":
             return True
-        state = {"schema": "portal-mcd-connection-state-v1", "contract_version": "1.0", "event_id": f"active-{int(self._clock() * 1000)}", "request_id": f"active-{self._active_installation_id}", "idempotency_key": f"active:{self._active_installation_id}", "binding": {"agent_id": self.agent_id, "installation_id": self._active_installation_id, "host_fingerprint": self.host_fingerprint, "commercial_key_id": self.commercial_key_id}, "status": "active", "reason": "outbound_cycle", "observed_at": _utc()}
+        state = {"schema": "portal-mcd-connection-state-v1", "contract_version": "1.0", "event_id": f"active-{int(self._clock() * 1000)}", "request_id": f"active-{self._active_installation_id}", "idempotency_key": f"active:{self._active_installation_id}", "binding": self._channel_binding(self._active_installation_id), "status": "active", "reason": "outbound_cycle", "observed_at": _utc()}
         if not self._send_or_queue(state):
             return False
         self.executor.state.put("commercial_portal_connection_state", "active")
@@ -1536,6 +1728,7 @@ class SelfHostedPortalWorker:
             expected_installation_id=self._active_installation_id,
             expected_commercial_key_id=self.commercial_key_id,
             expected_host_fingerprint=self.host_fingerprint,
+            expected_local_identity=self.identity_coordinate.get("local_identity"),
         )
         if failed is None:
             return {"status": "rejected", "reason": _error_code(error), "job_id": str(_delivery_job(command).get("job_id") or "")}
@@ -1630,7 +1823,12 @@ class SelfHostedPortalWorker:
         if command.get("schema") == COMMAND_JOB_SCHEMA:
             return self._run_generic_command(command, cursor_next=cursor_next)
         if command.get("schema") == PORTAL_ARTIFACT_TRUST_UPDATE_SCHEMA:
-            return self._run_artifact_trust_update(command, cursor_next=cursor_next)
+            # Signing/key trust updates are retired.  Artifact integrity is
+            # enforced by the pinned size/SHA-256 check after HTTPS download.
+            receipt = self._command_receipt(command, status="failed", payload={"reason": "commercial_artifact_trust_layer_unsupported"})
+            if self._send_or_queue(receipt):
+                self._finish_command(cursor_next=cursor_next)
+            return {"status": "failed", "reason": "commercial_artifact_trust_layer_unsupported"}
         if command.get("schema") not in {None, SELF_HOSTED_MCD_JOB_SCHEMA, "portal-mcd-job-delivery-v1"}:
             receipt = self._command_receipt(command, status="failed", payload={"reason": "commercial_command_unsupported"})
             if self._send_or_queue(receipt):
@@ -1639,7 +1837,7 @@ class SelfHostedPortalWorker:
         if command.get("schema") == "portal-mcd-job-delivery-v1" and isinstance(command.get("job"), Mapping):
             command = dict(command["job"])
         try:
-            verified = verify_self_hosted_mcd_job(command, self.portal_keys, expected_agent_id=self.agent_id, expected_installation_id=active_installation_id, expected_commercial_key_id=self.commercial_key_id, expected_host_fingerprint=self.host_fingerprint)
+            verified = verify_self_hosted_mcd_job(command, self.portal_keys, expected_agent_id=self.agent_id, expected_installation_id=active_installation_id, expected_commercial_key_id=self.commercial_key_id, expected_host_fingerprint=self.host_fingerprint, expected_local_identity=self.identity_coordinate.get("local_identity"))
         except ValueError as exc:
             return self._delivery_failure(command, cursor_next=cursor_next, error=exc)
         local_state_error = self._local_delivery_state_error()
@@ -1654,7 +1852,7 @@ class SelfHostedPortalWorker:
                     bootstrap = self._outbound("bootstrap_download", lambda: self._download_scenario_artifact(bootstrap_pin))
                 scenario = self._outbound("scenario_download", lambda: self._download_scenario_artifact(scenario_pin))
             except _PortalTransportError as exc:
-                return self._delivery_failure(command, cursor_next=cursor_next, error=ValueError("self_hosted_mcd_artifact_unavailable"))
+                return self._delivery_failure(command, cursor_next=cursor_next, error=_artifact_download_failure(exc))
             command_id = str(command.get("command_id") or "").strip()
             delivery_cursor = command.get("delivery_cursor")
             execution_key = ""
@@ -1663,7 +1861,7 @@ class SelfHostedPortalWorker:
             terminal = self.executor.run(command, portal_keys=self.portal_keys, publisher_keys=self.publisher_keys, context=self.context, expected_agent_id=self.agent_id, expected_installation_id=str(command["installation_id"]), expected_commercial_key_id=self.commercial_key_id, expected_host_fingerprint=self.host_fingerprint, bootstrap_artifact=bootstrap, scenario_artifact=scenario, receipt_sink=self._send_or_queue, execution_key=execution_key or None)
             if self._pending():
                 # Keep the delivery and cursor pending until the next outbound
-                # cycle drains every signed receipt in order.  The executor's
+                # cycle drains every typed receipt in order.  The executor's
                 # durable terminal makes the following replay idempotent.
                 return {"status": terminal.get("status"), "job_id": str(command["job_id"]), "receipt_pending": True}
             self._finish_command(cursor_next=cursor_next)

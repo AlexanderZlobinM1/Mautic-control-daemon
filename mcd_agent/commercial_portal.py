@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import http.client
 import json
 import os
 from pathlib import Path
@@ -22,6 +23,7 @@ from urllib.error import HTTPError, URLError
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from mcd_agent import __version__
+from mcd_agent.portal_identity import channel_binding, identity_coordinate, dns_identity
 
 CONTRACT = "com.sales-snap.portal-commercial/1.0"
 CONTRACT_VERSION = "1.0"
@@ -35,6 +37,12 @@ SELF_HOSTED_MCD_STAGE_IDS = frozenset({"scenario_dispatch", "execution"})
 SELF_HOSTED_MCD_STAGE_STATUSES = frozenset({"queued", "running", "waiting", "succeeded", "failed"})
 SELF_HOSTED_MCD_TERMINAL_STATUSES = frozenset({"succeeded", "failed"})
 SELF_HOSTED_MCD_ROLLBACK_STATUSES = frozenset({"not_attempted", "succeeded", "failed"})
+SELF_HOSTED_MCD_SCENARIO_STAGES = (
+    ("base_packages", "ensure_supported_base_packages"),
+    ("database_cache", "provision_database_and_cache"),
+    ("web_stack", "configure_web_and_vhost"),
+    ("mautic", "composer_install_current_mautic"),
+)
 PORTAL_MCD_ADOPT_CONTRACT_VERSION = "1.0"
 PORTAL_MCD_POLL_REQUEST_SCHEMA = "portal-mcd-poll-request-v1"
 PORTAL_MCD_POLL_RESPONSE_SCHEMA = "portal-mcd-poll-response-v1"
@@ -117,6 +125,49 @@ def _portal_transport_error(*, stage: str) -> CommercialPortalError:
     return CommercialPortalError(stage=stage, code="commercial_portal_transport_error", retryable=True)
 
 
+def _create_ipv4_connection(address: tuple[str, int], timeout: float | object = socket._GLOBAL_DEFAULT_TIMEOUT, source_address: tuple[str, int] | None = None) -> socket.socket:
+    """Create a TCP connection using only A records while retaining the host name."""
+    host, port = address
+    last_error: OSError | None = None
+    infos = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)
+    for family, socktype, proto, _canonname, sockaddr in infos:
+        sock: socket.socket | None = None
+        try:
+            sock = socket.socket(family, socktype, proto)
+            if timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
+                sock.settimeout(timeout)
+            if source_address is not None:
+                sock.bind(source_address)
+            sock.connect(sockaddr)
+            return sock
+        except OSError as exc:
+            last_error = exc
+            if sock is not None:
+                sock.close()
+    if last_error is not None:
+        raise last_error
+    raise OSError(f"no IPv4 address for {host}")
+
+
+class _IPv4HTTPSConnection(http.client.HTTPSConnection):
+    """HTTPS connection with IPv4 TCP and hostname-based TLS/SNI."""
+
+    def __init__(self, *args: Any, **kwargs: Any):
+        super().__init__(*args, **kwargs)
+        self._create_connection = _create_ipv4_connection
+
+
+class _IPv4HTTPSHandler(request.HTTPSHandler):
+    def https_open(self, req: request.Request):
+        return self.do_open(_IPv4HTTPSConnection, req, context=self._context)
+
+
+def _portal_urlopen(req: request.Request, *, timeout: int, context: ssl.SSLContext):
+    """Open Portal HTTPS over IPv4 without changing the URL host/SNI."""
+    opener = request.build_opener(_IPv4HTTPSHandler(context=context))
+    return opener.open(req, timeout=timeout)
+
+
 def _b64(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
 
@@ -185,6 +236,12 @@ def _host_fingerprint() -> str:
     return "sha256:" + hashlib.sha256(socket.gethostname().encode()).hexdigest()
 
 
+def portal_state_identity(state: Any) -> dict[str, str]:
+    if state.get("identity_kind") == "dns":
+        return identity_coordinate({"identity_kind": "dns", "local_identity": state.get("local_identity")})
+    return {"host_fingerprint": str(state.get("host_fingerprint") or _host_fingerprint())}
+
+
 def _require_https(url: str) -> None:
     if not str(url).lower().startswith("https://"):
         raise ValueError("commercial_portal_https_required")
@@ -194,7 +251,7 @@ def build_portal_mcd_poll_request(*, request_id: str, idempotency_key: str, bind
     """Build the exact Stage2 outbound poll envelope."""
     if not request_id or not idempotency_key:
         raise ValueError("portal_mcd_poll_request_invalid")
-    required = ("agent_id", "installation_id", "host_fingerprint", "commercial_key_id")
+    required = tuple(channel_binding(binding))
     if any(not str(binding.get(key) or "") for key in required):
         raise ValueError("portal_mcd_poll_request_binding_invalid")
     wait = int(wait_ms)
@@ -221,7 +278,7 @@ def verify_portal_mcd_poll_response(response: Mapping[str, Any], *, public_keys:
     if response.get("request_id") != expected_request_id or response.get("idempotency_key") != expected_idempotency_key:
         raise ValueError("portal_mcd_poll_response_idempotency_mismatch")
     binding = response.get("binding")
-    if not isinstance(binding, Mapping) or any(str(binding.get(key) or "") != str(expected_binding.get(key) or "") for key in ("agent_id", "installation_id", "host_fingerprint", "commercial_key_id")):
+    if not isinstance(binding, Mapping) or channel_binding(binding) != channel_binding(expected_binding):
         raise ValueError("portal_mcd_poll_response_binding_mismatch")
     next_cursor = response.get("next_command_cursor", response.get("next_cursor"))
     commands = response.get("commands")
@@ -239,7 +296,7 @@ def verify_portal_mcd_attach_response(response: Mapping[str, Any], *, public_key
     if response.get("request_id") != expected_request_id or response.get("idempotency_key") != expected_idempotency_key:
         raise ValueError("portal_mcd_attach_response_idempotency_mismatch")
     binding = response.get("binding")
-    if not isinstance(binding, Mapping) or any(str(binding.get(key) or "") != str(expected_binding.get(key) or "") for key in ("agent_id", "installation_id", "host_fingerprint", "commercial_key_id")):
+    if not isinstance(binding, Mapping) or channel_binding(binding) != channel_binding(expected_binding):
         raise ValueError("portal_mcd_attach_response_binding_mismatch")
     connection = response.get("connection")
     inventory = response.get("inventory")
@@ -389,14 +446,13 @@ def validate_portal_artifact_trust_update(value: object, *, code: str = "portal_
     if isinstance(cursor, bool) or not isinstance(cursor, int) or cursor < 1:
         raise ValueError(code)
     binding = value.get("binding")
-    if not isinstance(binding, Mapping) or set(binding) != {"agent_id", "installation_id", "host_fingerprint", "commercial_key_id"}:
+    if not isinstance(binding, Mapping):
         raise ValueError(code)
-    normalized_binding = {
-        "agent_id": _require_contract_string(binding.get("agent_id"), code),
-        "installation_id": _require_contract_string(binding.get("installation_id"), code),
-        "host_fingerprint": _require_sha256_digest(binding.get("host_fingerprint"), code),
-        "commercial_key_id": _require_contract_string(binding.get("commercial_key_id"), code),
-    }
+    normalized_binding = channel_binding(binding)
+    if set(binding) != set(normalized_binding):
+        raise ValueError(code)
+    if "host_fingerprint" in normalized_binding:
+        _require_sha256_digest(normalized_binding["host_fingerprint"], code)
     revision = value.get("trust_revision")
     if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
         raise ValueError(code)
@@ -478,8 +534,21 @@ def _validate_self_hosted_facts(value: object) -> dict[str, Any]:
         "capabilities": sorted(set(str(item).strip() for item in capabilities)),
         "target_kind": str(value["target_kind"]),
     }
-    if set(value) != set(normalized):
+    optional = {"detector_schema", "classification_reason", "classification_evidence"}
+    if set(value) - set(normalized) - optional:
         raise ValueError("self_hosted_mcd_facts_invalid")
+    if "detector_schema" in value:
+        if not isinstance(value["detector_schema"], str) or not str(value["detector_schema"]).strip():
+            raise ValueError("self_hosted_mcd_facts_invalid")
+    if ("classification_reason" in value) != ("classification_evidence" in value):
+        raise ValueError("self_hosted_mcd_facts_invalid")
+    if "classification_reason" in value:
+        reason = value["classification_reason"]
+        evidence = value["classification_evidence"]
+        if not isinstance(reason, str) or not reason.strip() or len(reason) > 256 or not isinstance(evidence, Mapping):
+            raise ValueError("self_hosted_mcd_facts_invalid")
+        normalized["classification_reason"] = reason.strip()
+        normalized["classification_evidence"] = dict(evidence)
     return normalized
 
 
@@ -573,6 +642,7 @@ def verify_self_hosted_mcd_job(
     expected_installation_id: str | None = None,
     expected_commercial_key_id: str | None = None,
     expected_host_fingerprint: str | None = None,
+    expected_local_identity: str | None = None,
     now: float | None = None,
 ) -> dict[str, Any]:
     """Validate the exact Portal self-hosted MCD v2 envelope."""
@@ -582,11 +652,18 @@ def verify_self_hosted_mcd_job(
     contract_version = job.get("contract_version")
     if job.get("schema") != SELF_HOSTED_MCD_JOB_SCHEMA or contract_version not in SELF_HOSTED_MCD_CONTRACT_VERSIONS:
         raise ValueError("self_hosted_mcd_job_invalid")
-    required = ("job_id", "request_id", "idempotency_key", "account_id", "commercial_key_id", "agent_id", "installation_id", "host_fingerprint", "scenario", "applicability", "scenario_artifact", "execution", "issued_at", "expires_at", "nonce")
+    required = ("job_id", "request_id", "idempotency_key", "account_id", "commercial_key_id", "agent_id", "installation_id", "scenario", "applicability", "scenario_artifact", "execution", "issued_at", "expires_at", "nonce")
     if any(not job.get(key) for key in required):
         raise ValueError("self_hosted_mcd_job_fields_missing")
     identity = {key: _require_contract_string(job.get(key), "self_hosted_mcd_job_invalid") for key in ("job_id", "request_id", "idempotency_key", "account_id", "commercial_key_id", "agent_id", "installation_id", "nonce")}
-    host_fingerprint = _require_sha256_digest(job.get("host_fingerprint"), "self_hosted_mcd_host_fingerprint_invalid")
+    coordinate = identity_coordinate(job)
+    host_fingerprint = coordinate.get("host_fingerprint", "")
+    if host_fingerprint:
+        _require_sha256_digest(host_fingerprint, "self_hosted_mcd_host_fingerprint_invalid")
+    if expected_local_identity and coordinate != {"identity_kind": "dns", "local_identity": expected_local_identity}:
+        raise ValueError("self_hosted_mcd_binding_mismatch")
+    if coordinate.get("identity_kind") == "dns" and contract_version != SELF_HOSTED_MCD_CONTRACT_VERSION:
+        raise ValueError("self_hosted_mcd_dns_contract_invalid")
     for key, expected in (("agent_id", expected_agent_id), ("installation_id", expected_installation_id), ("commercial_key_id", expected_commercial_key_id), ("host_fingerprint", expected_host_fingerprint)):
         if expected and identity.get(key, host_fingerprint if key == "host_fingerprint" else None) != expected:
             raise ValueError("self_hosted_mcd_binding_mismatch")
@@ -610,6 +687,27 @@ def verify_self_hosted_mcd_job(
     execution = job.get("execution")
     if not isinstance(execution, Mapping) or execution.get("primitive") != "scenario.apply" or execution.get("version") != "1.0":
         raise ValueError("self_hosted_mcd_execution_invalid")
+    stage_selection = job.get("stage_selection")
+    if contract_version == SELF_HOSTED_MCD_CONTRACT_VERSION:
+        if not isinstance(stage_selection, Mapping):
+            raise ValueError("self_hosted_mcd_stage_selection_missing")
+        expected_stages = {stage: (sequence, operation) for sequence, (stage, operation) in enumerate(SELF_HOSTED_MCD_SCENARIO_STAGES, 1)}
+        if set(stage_selection) != {"stage_id", "sequence", "operation", "depends_on"}:
+            raise ValueError("self_hosted_mcd_stage_selection_invalid")
+        stage_id = stage_selection.get("stage_id")
+        sequence = stage_selection.get("sequence")
+        operation = stage_selection.get("operation")
+        depends_on = stage_selection.get("depends_on")
+        if stage_id not in expected_stages or isinstance(sequence, bool) or not isinstance(sequence, int) or expected_stages[stage_id][0] != sequence or operation != expected_stages[stage_id][1] or not isinstance(depends_on, list):
+            raise ValueError("self_hosted_mcd_stage_selection_invalid")
+        expected_dependencies = [item[0] for item in SELF_HOSTED_MCD_SCENARIO_STAGES[: sequence - 1]]
+        if depends_on != expected_dependencies:
+            raise ValueError("self_hosted_mcd_stage_selection_order_invalid")
+        execution_stage = execution.get("stage")
+        if not isinstance(execution_stage, Mapping) or set(execution_stage) != {"stage_id", "sequence", "operation"} or dict(execution_stage) != {key: stage_selection[key] for key in ("stage_id", "sequence", "operation")}:
+            raise ValueError("self_hosted_mcd_execution_stage_mismatch")
+    elif stage_selection is not None:
+        raise ValueError("self_hosted_mcd_stage_selection_forbidden")
     issued_text = _require_contract_string(job.get("issued_at"), "self_hosted_mcd_job_time_invalid")
     expires_text = _require_contract_string(job.get("expires_at"), "self_hosted_mcd_job_time_invalid")
     try:
@@ -620,7 +718,7 @@ def verify_self_hosted_mcd_job(
     current = time.time() if now is None else float(now)
     if expires <= issued or current < issued - 60 or current >= expires:
         raise ValueError("self_hosted_mcd_job_expired_or_not_yet_valid")
-    return {"job": dict(job), "contract_version": str(contract_version), "scenario": scenario, "facts": facts, "bootstrap_artifact": bootstrap, "scenario_artifact": scenario_artifact, "job_id": identity["job_id"], "idempotency_key": identity["idempotency_key"], "host_fingerprint": host_fingerprint}
+    return {"job": dict(job), "contract_version": str(contract_version), "scenario": scenario, "facts": facts, "bootstrap_artifact": bootstrap, "scenario_artifact": scenario_artifact, "stage_selection": dict(stage_selection) if isinstance(stage_selection, Mapping) else None, "job_id": identity["job_id"], "idempotency_key": identity["idempotency_key"], **coordinate}
 
 
 def verify_self_hosted_external_artifact(
@@ -653,7 +751,7 @@ def download_external_artifact(uri: str, *, expected_size: int, timeout_sec: int
         raise ValueError("self_hosted_mcd_artifact_size_invalid")
     req = request.Request(uri, headers={"Accept": "application/octet-stream", "User-Agent": PORTAL_USER_AGENT}, method="GET")
     try:
-        with request.urlopen(req, timeout=max(1, min(60, int(timeout_sec))), context=ssl.create_default_context()) as response:
+        with _portal_urlopen(req, timeout=max(1, min(60, int(timeout_sec))), context=ssl.create_default_context()) as response:
             body = response.read(expected + 1)
     except HTTPError as exc:
         raise _portal_http_error(stage="artifact.download", status=exc.code) from exc
@@ -675,10 +773,18 @@ class CommercialState:
             db.execute("CREATE TABLE IF NOT EXISTS commercial_nonces (nonce TEXT PRIMARY KEY, seen_at REAL NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS commercial_receipts (job_id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS commercial_usage_sequences (metric TEXT PRIMARY KEY, value INTEGER NOT NULL)")
-            # Agent and Portal signing material is retired. Existing state is
-            # scrubbed on first open; the commercial lane uses only the
-            # existing API credential over HTTPS and SHA-256 artifact checks.
-            db.execute("DELETE FROM commercial_meta WHERE key IN ('agent_private_key','agent_key_id','portal_job_signing_keys')")
+            # Agent, Portal job-signing, and artifact-signing material is
+            # retired. Existing state is scrubbed on open; the commercial
+            # lane uses only the API credential over HTTPS and SHA-256 checks.
+            db.execute(
+                "DELETE FROM commercial_meta WHERE key IN ("
+                "'agent_private_key','agent_key_id','portal_job_signing_keys',"
+                "'portal_artifact_trust_v1','portal_artifact_signing_keys',"
+                "'portal_artifact_trust_revision','portal_artifact_trust_digest',"
+                "'portal_artifact_trust_domain','portal_artifact_trust_source',"
+                "'portal_artifact_trust_updates_v1','portal_mcc_publisher_keys'"
+                ")"
+            )
         try:
             os.chmod(self.path, 0o600)
         except OSError:
@@ -692,6 +798,19 @@ class CommercialState:
     def put(self, key: str, value: Any) -> None:
         with sqlite3.connect(self.path) as db:
             db.execute("INSERT INTO commercial_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, json.dumps(value, ensure_ascii=True, sort_keys=True)))
+
+    def put_many(self, values: Mapping[str, Any], *, delete_keys: tuple[str, ...] = ()) -> None:
+        """Commit a related state transition as one durable transaction."""
+        with sqlite3.connect(self.path, timeout=30) as db:
+            db.execute("BEGIN IMMEDIATE")
+            for key in delete_keys:
+                db.execute("DELETE FROM commercial_meta WHERE key=?", (str(key),))
+            for key, value in values.items():
+                db.execute(
+                    "INSERT INTO commercial_meta(key,value) VALUES(?,?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (str(key), json.dumps(value, ensure_ascii=True, sort_keys=True)),
+                )
 
     def delete(self, key: str) -> None:
         with sqlite3.connect(self.path) as db:
@@ -891,6 +1010,13 @@ class CommercialState:
         This is deliberately unrelated to the corporate MCC configuration or
         profile. The Portal lane has its own credential and host binding.
         """
+        if self.get("identity_kind") == "dns":
+            try:
+                coordinate = portal_state_identity(self)
+            except ValueError:
+                return False
+            installations = self.get("installation_ids")
+            return bool(self.get("portal_agent_credential") and self.get("agent_id") and self.get("commercial_key_id") and isinstance(installations, dict) and installations.get(coordinate["local_identity"])) and not self.get("host_fingerprint")
         return bool(self.get("portal_agent_credential")) and self.get("host_fingerprint") == _host_fingerprint()
 
     @property
@@ -936,7 +1062,7 @@ class PortalClient:
         headers["User-Agent"] = PORTAL_USER_AGENT
         req = request.Request(base + "/" + path.lstrip("/"), data=body, headers=headers, method=method)
         try:
-            with request.urlopen(req, timeout=self.timeout_sec, context=ssl.create_default_context()) as response:
+            with _portal_urlopen(req, timeout=self.timeout_sec, context=ssl.create_default_context()) as response:
                 raw = response.read(2 * 1024 * 1024 + 1)
         except HTTPError as exc:
             raise _portal_http_error_from_exception(stage="portal.request", exc=exc) from exc
@@ -969,7 +1095,7 @@ class PortalClient:
         binding = {
             "agent_id": agent_id,
             "installation_id": str(installation_id),
-            "host_fingerprint": str(self.state.get("host_fingerprint") or _host_fingerprint()),
+            **portal_state_identity(self.state),
             "commercial_key_id": str(self.state.get("commercial_key_id") or ""),
         }
         transport = self.state.get("commercial_portal_transport_v1")
@@ -984,12 +1110,18 @@ class PortalClient:
             backoff_ms=backoff_ms,
         )
         result = self._request("POST", f"agents/{agent_id}/installations/{installation_id}/poll", payload, idempotency_key=str(request_state["idempotency_key"]))
-        verified = verify_portal_mcd_poll_response(
-            result,
-            expected_request_id=str(request_state["request_id"]),
-            expected_idempotency_key=str(request_state["idempotency_key"]),
-            expected_binding=binding,
-        )
+        try:
+            verified = verify_portal_mcd_poll_response(
+                result,
+                expected_request_id=str(request_state["request_id"]),
+                expected_idempotency_key=str(request_state["idempotency_key"]),
+                expected_binding=binding,
+            )
+        except ValueError as exc:
+            code = str(exc)
+            if not re.fullmatch(r"[a-z0-9_]{1,120}", code):
+                code = "portal_mcd_poll_response_invalid"
+            raise CommercialPortalError(stage="poll.response_validation", code=code, retryable=False) from exc
         self.state.put("commercial_portal_poll_request", None)
         retry_after_ms = int(verified["retry_after_ms"])
         self.state.put("commercial_portal_server_retry_after", time.time() + (retry_after_ms / 1000.0))
@@ -1016,7 +1148,7 @@ class PortalClient:
             raise ValueError("commercial_artifact_size_invalid")
         req = request.Request(base + "/" + path.lstrip("/"), headers={"Authorization": "Bearer " + str(self.state.get("portal_agent_credential")), "X-Portal-Contract": CONTRACT, "X-Portal-Artifact-Grant": grant, "User-Agent": PORTAL_USER_AGENT}, method="GET")
         try:
-            with request.urlopen(req, timeout=self.timeout_sec, context=ssl.create_default_context()) as response:
+            with _portal_urlopen(req, timeout=self.timeout_sec, context=ssl.create_default_context()) as response:
                 body = response.read(expected + 1)
         except HTTPError as exc:
             raise _portal_http_error(stage="artifact.download", status=exc.code) from exc
@@ -1025,6 +1157,11 @@ class PortalClient:
         if len(body) != expected:
             raise CommercialPortalError(stage="artifact.download", code="commercial_artifact_size_mismatch")
         return body
+
+    def command_state(self, *, installation_id: str, command_id: str) -> dict[str, Any]:
+        agent_id = str(self.state.get("agent_id") or "")
+        parts = [quote(value, safe="") for value in (agent_id, installation_id, command_id)]
+        return self._request("GET", f"agents/{parts[0]}/installations/{parts[1]}/commands/{parts[2]}/state", extra_headers={"Cache-Control": "no-cache"})
 
     def send_receipt(self, payload: dict[str, Any], *, installation_id: str | None = None) -> dict[str, Any]:
         agent_id = str(self.state.get("agent_id") or "")
@@ -1075,7 +1212,7 @@ class PortalClient:
         headers = {"Authorization": "Bearer " + str(self.state.get("portal_agent_credential")), "X-Portal-Contract": CONTRACT, "X-Content-Digest": normalized, "User-Agent": PORTAL_USER_AGENT}
         req = request.Request(base + "/" + path, headers=headers, method="GET")
         try:
-            with request.urlopen(req, timeout=self.timeout_sec, context=ssl.create_default_context()) as response:
+            with _portal_urlopen(req, timeout=self.timeout_sec, context=ssl.create_default_context()) as response:
                 body = response.read(expected + 1)
         except HTTPError as exc:
             raise _portal_http_error(stage="generic_artifact.download", status=exc.code) from exc
@@ -1091,7 +1228,7 @@ class PortalClient:
         return {
             "agent_id": str(self.state.get("agent_id") or ""),
             "installation_id": str(installation_id),
-            "host_fingerprint": str(self.state.get("host_fingerprint") or _host_fingerprint()),
+            **portal_state_identity(self.state),
             "commercial_key_id": str(self.state.get("commercial_key_id") or ""),
         }
 
@@ -1128,7 +1265,7 @@ class PortalClient:
         headers = {"Content-Type": "application/json", "X-Portal-Contract": CONTRACT, "X-Request-Id": _b64(os.urandom(16)), "Idempotency-Key": payload["idempotency_key"], "User-Agent": PORTAL_USER_AGENT}
         req = request.Request(base_url.rstrip("/") + "/api/v1/commercial/activations/redeem", data=body, headers=headers, method="POST")
         try:
-            with request.urlopen(req, timeout=self.timeout_sec, context=ssl.create_default_context()) as response:
+            with _portal_urlopen(req, timeout=self.timeout_sec, context=ssl.create_default_context()) as response:
                 raw = response.read(2 * 1024 * 1024 + 1)
         except HTTPError as exc:
             raise _portal_http_error(stage="activation", status=exc.code) from exc
@@ -1152,33 +1289,23 @@ class PortalClient:
             raise CommercialPortalError(stage="activation", code="commercial_activation_response_schema_invalid")
         if not result.get("agent_id") or not result.get("agent_credential") or not isinstance(result.get("portal"), dict):
             raise CommercialPortalError(stage="activation", code="commercial_activation_response_fields_invalid")
-        self.state.put("portal_api_base", base_url.rstrip("/") + "/api/v1/commercial")
-        self.state.put("portal_agent_credential", result["agent_credential"])
-        self.state.put("agent_id", result["agent_id"])
-        self.state.put("host_fingerprint", host_fingerprint)
-        self.state.delete("portal_job_signing_keys")
-        artifact_trust = result["portal"].get("artifact_trust")
-        artifact_signing_keys = result["portal"].get("artifact_signing_keys")
-        if artifact_trust is not None:
-            normalized_trust = validate_portal_artifact_trust(artifact_trust, code="commercial_activation_artifact_trust_invalid")
-            if artifact_signing_keys is not None:
-                supplied = _normalize_artifact_trust_keys(artifact_signing_keys, "commercial_activation_artifact_trust_invalid")
-                if supplied != normalized_trust["keys"]:
-                    raise CommercialPortalError(stage="activation", code="commercial_activation_artifact_trust_mismatch")
-            self.state.put("portal_artifact_trust_v1", normalized_trust)
-            self.state.put("portal_artifact_signing_keys", {item["key_id"]: item for item in normalized_trust["keys"]})
-            self.state.put("portal_artifact_trust_revision", normalized_trust["trust_revision"])
-            self.state.put("portal_artifact_trust_digest", normalized_trust["trust_digest"])
-            self.state.put("portal_artifact_trust_domain", normalized_trust["trust_domain"])
-            self.state.put("portal_artifact_trust_source", "portal")
-        elif artifact_signing_keys is not None:
-            raise CommercialPortalError(stage="activation", code="commercial_activation_artifact_trust_invalid")
+        # Portal activation is authenticated by the HTTPS API credential and
+        # host binding.  Legacy artifact-trust fields, including signing-key
+        # material, are intentionally ignored.  Artifact integrity is checked
+        # later by exact size/SHA-256 after authenticated HTTPS download.
         commercial_key = result.get("commercial_key") or result.get("commercial_key_metadata")
+        updates: dict[str, Any] = {
+            "portal_api_base": base_url.rstrip("/") + "/api/v1/commercial",
+            "portal_agent_credential": result["agent_credential"],
+            "agent_id": result["agent_id"],
+            "host_fingerprint": host_fingerprint,
+        }
         if isinstance(commercial_key, dict) and commercial_key.get("commercial_key_id"):
-            self.state.put("commercial_key_id", str(commercial_key["commercial_key_id"]))
-            self.state.put("commercial_key_metadata", _public_commercial_key_metadata(commercial_key))
+            updates["commercial_key_id"] = str(commercial_key["commercial_key_id"])
+            updates["commercial_key_metadata"] = _public_commercial_key_metadata(commercial_key)
         elif result.get("commercial_key_id"):
-            self.state.put("commercial_key_id", str(result["commercial_key_id"]))
+            updates["commercial_key_id"] = str(result["commercial_key_id"])
+        self.state.put_many(updates, delete_keys=("portal_job_signing_keys",))
         return {"status": "activated", "agent_id": result["agent_id"], "contract_version": CONTRACT_VERSION}
 
     def register_installation(self, *, local_identity: str, display_name: str, mautic_version: str, application_root_fingerprint: str, activation_state: str = "passive") -> dict[str, Any]:
@@ -1217,6 +1344,70 @@ class PortalClient:
         }
         self.state.put("commercial_installation_metadata", metadata)
         self.state.delete("portal_job_signing_keys")
+        return result
+
+    def register_host(self, *, local_identity: str, display_name: str) -> dict[str, Any]:
+        """Register the host/MCD binding before any Mautic instance exists."""
+        identity = _require_contract_string(local_identity, "commercial_host_identity_invalid")
+        name = _require_contract_string(display_name, "commercial_host_display_name_invalid")
+        agent_id = _require_contract_string(self.state.get("agent_id"), "commercial_host_agent_missing")
+        requests = self.state.get("host_registration_requests")
+        requests = dict(requests) if isinstance(requests, Mapping) else {}
+        previous = requests.get(identity)
+        fingerprint = hashlib.sha256(canonical_json({"local_identity": identity, "display_name": name})).hexdigest()
+        if isinstance(previous, Mapping) and str(previous.get("fingerprint") or "") != fingerprint:
+            raise ValueError("commercial_host_registration_idempotency_conflict")
+        idempotency_key = str(previous.get("idempotency_key")) if isinstance(previous, Mapping) else _b64(os.urandom(16))
+        payload = {
+            "schema": "portal-mcd-host-register-request-v1",
+            "contract_version": CONTRACT_VERSION,
+            "registration_kind": "host",
+            "idempotency_key": idempotency_key,
+            "host": {"local_identity": identity, "display_name": name},
+        }
+        requests[identity] = {"fingerprint": fingerprint, "idempotency_key": idempotency_key}
+        self.state.put("host_registration_requests", requests)
+        result = self._request("POST", f"agents/{agent_id}/installations", payload, idempotency_key=idempotency_key)
+        installation = result.get("installation")
+        connection = result.get("connection")
+        if (
+            result.get("schema") != "portal-mcd-host-register-response-v1"
+            or result.get("contract_version") != CONTRACT_VERSION
+            or result.get("registration_kind") != "host"
+            or not isinstance(installation, Mapping)
+            or not isinstance(connection, Mapping)
+            or not installation.get("id")
+            or str(installation.get("agent_id") or "") != agent_id
+            or str(installation.get("local_identity") or "") != identity
+            or str(installation.get("display_name") or "") != name
+            or installation.get("status") != "passive"
+            or connection.get("status") != "active"
+            or connection.get("channel_contract") != CONTRACT_VERSION
+            or connection.get("last_inventory_revision") is not None
+        ):
+            raise RuntimeError("commercial_host_registration_response_invalid")
+        installation_id = str(installation["id"])
+        installation_ids = self.state.get("installation_ids")
+        installation_ids = dict(installation_ids) if isinstance(installation_ids, Mapping) else {}
+        existing = installation_ids.get(identity)
+        if existing and str(existing) != installation_id:
+            raise ValueError("commercial_host_registration_identity_conflict")
+        installation_ids[identity] = installation_id
+        metadata = self.state.get("commercial_installation_metadata")
+        metadata = dict(metadata) if isinstance(metadata, Mapping) else {}
+        metadata[identity] = {
+            "registration_kind": "host",
+            "local_identity": identity,
+            "display_name": name,
+        }
+        self.state.put_many(
+            {
+                "installation_ids": installation_ids,
+                "commercial_installation_metadata": metadata,
+                "host_registration_requests": requests,
+            },
+            delete_keys=("portal_job_signing_keys",),
+        )
         return result
 
     def send_usage(self, *, installation_id: str, metric: str, observed_at: str, raw_value: int,

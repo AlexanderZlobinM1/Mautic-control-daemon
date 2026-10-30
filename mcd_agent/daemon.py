@@ -236,7 +236,7 @@ from mcd_agent.state_backend import (
     normalized_state_backend,
 )
 from mcd_agent.commercial_self_hosted import ExternalProcessPolicy, SelfHostedPortalWorker, SelfHostedScenarioExecutor, default_scenario_runner_argv
-from mcd_agent.commercial_portal import CommercialState, PortalClient, build_standalone_settings_snapshot, canonical_json, portal_artifact_trust_keys
+from mcd_agent.commercial_portal import CommercialState, PortalClient, build_standalone_settings_snapshot, canonical_json, portal_state_identity
 
 _CMD_SEP = "\x1f"
 _M4_CAMPAIGN_DELETED_CLAUSE_RE = re.compile(r"\s+AND\s*\(?\s*c\.deleted\s+IS\s+NULL\s*\)?", re.IGNORECASE)
@@ -344,7 +344,7 @@ def _commercial_state_eligibility(config: AgentConfig) -> tuple[bool, str]:
             or not credential
             or not agent_id
             or not commercial_key_id
-            or not host_fingerprint
+            or not (host_fingerprint or (state.get("identity_kind") == "dns" and state.get("local_identity")))
             or not isinstance(installations, dict)
             or not installations
         ):
@@ -378,24 +378,14 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
         credential = str(state.get("portal_agent_credential") or "")
         agent_id = str(state.get("agent_id") or "")
         installations = state.get("installation_ids")
-        # Portal artifact trust is operation-scoped material. It is needed only
-        # when a delivered scenario's external artifacts are verified; it is
-        # not a worker-start gate. Canonical Portal trust wins. The old MCC
-        # publisher map remains a deprecated compatibility alias only while no
-        # canonical Portal trust has been activated.
-        artifact_trust_raw = state.get("portal_artifact_trust_v1")
-        publisher_keys_raw = state.get("portal_artifact_signing_keys")
-        if isinstance(artifact_trust_raw, dict):
-            publisher_keys = portal_artifact_trust_keys(artifact_trust_raw)
-        elif isinstance(publisher_keys_raw, dict):
-            publisher_keys = publisher_keys_raw
-        else:
-            legacy_keys = state.get("portal_mcc_publisher_keys")
-            publisher_keys = legacy_keys if isinstance(legacy_keys, dict) else {}
+        # Artifact authenticity is not a signing/key layer in MCD.  The
+        # commercial runtime verifies the exact pinned size/SHA-256 after
+        # authenticated HTTPS download, so no publisher-key state is loaded.
+        publisher_keys: dict[str, Any] = {}
         key_metadata = state.get("commercial_key_metadata")
         commercial_key_id = str(state.get("commercial_key_id") or (key_metadata.get("commercial_key_id") if isinstance(key_metadata, dict) else "") or "")
         host_fingerprint = str(state.get("host_fingerprint") or "")
-        if not base.startswith("https://") or not credential or not agent_id or not commercial_key_id or not host_fingerprint or not isinstance(installations, dict) or not installations:
+        if not base.startswith("https://") or not credential or not agent_id or not commercial_key_id or not (host_fingerprint or (state.get("identity_kind") == "dns" and state.get("local_identity"))) or not isinstance(installations, dict) or not installations:
             disabled("portal_runtime_material_incomplete")
             return None
         try:
@@ -476,6 +466,7 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
             # must not make a valid recovery command fail closed locally.
             local_facts_capabilities = list(PORTAL_LOCAL_FACTS_CAPABILITIES)
             portal_context = {
+                **portal_state_identity(state),
                 "platform": "linux-arm64" if platform.machine().lower() in {"aarch64", "arm64"} else "linux-amd64",
                 "runtime": "host",
                 "cron_ownership": "none",
@@ -560,7 +551,7 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
                     "binding": {
                         "agent_id": agent_id,
                         "installation_id": _installation_id,
-                        "host_fingerprint": host_fingerprint,
+                        **portal_state_identity(state),
                         "commercial_key_id": commercial_key_id,
                     },
                     "snapshot_revision": str(host_revision),
@@ -574,7 +565,6 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
                         "settings": settings(runtime),
                     },
                     "applicability_facts": build_applicability_facts_snapshot(
-                        target_kind="existing_server",
                         capabilities=list(portal_context["local_facts_capabilities"]),
                     ),
                     "instances": rows,
@@ -595,7 +585,7 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
                 SelfHostedScenarioExecutor(state, runner=runner.run),
                 installation_id=sorted(str(value) for value in installations.values()),
                 portal_keys={},
-                publisher_keys={str(key): value for key, value in publisher_keys.items() if isinstance(value, (str, dict))},
+                publisher_keys=publisher_keys,
                 context=portal_context,
                 commercial_key_id=commercial_key_id,
                 agent_id=agent_id,

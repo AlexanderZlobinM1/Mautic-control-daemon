@@ -174,5 +174,6 @@ def test_inventory_revision_is_stable_then_bumps_once_for_facts_change_and_legac
         inventory_provider=inventory,
     )
     assert restarted.run_once()["status"] == "idle"
-    assert len(portal.inventories) == 2
+    assert len(portal.inventories) == 3
+    assert portal.inventories[-1]["snapshot_revision"] == "2"
     assert state.get("commercial_inventory_state_v1")["installations"]["installation-1"]["snapshot_revision"] == 2

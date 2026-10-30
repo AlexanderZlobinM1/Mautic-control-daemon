@@ -94,7 +94,7 @@ def execute_generic_primitive(job: Mapping[str, Any]) -> Mapping[str, Any]:
     if not isinstance(value, Mapping) or value:
         return {"status": "failed", "reason": "commercial_generic_input_must_be_empty"}
     if command == "read_host_facts":
-        return {"status": "succeeded", "facts": read_normalized_local_facts(target_kind="existing_server", capabilities=list(PORTAL_LOCAL_FACTS_CAPABILITIES))}
+        return {"status": "succeeded", "facts": read_normalized_local_facts(capabilities=list(PORTAL_LOCAL_FACTS_CAPABILITIES))}
     readiness = collect_mautic_install_readiness()
     if command == "check_prerequisites":
         return {"status": "succeeded", "readiness": readiness}

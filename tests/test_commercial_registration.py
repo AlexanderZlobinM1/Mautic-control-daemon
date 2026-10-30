@@ -85,7 +85,7 @@ class PortalRegistrationTests(unittest.TestCase):
             self.assertEqual(state.get("portal_agent_credential"), "installation-bound-secret")
             self.assertEqual(state.get("commercial_key_metadata"), {"commercial_key_id": "commercial_key_existing", "display_name": "test-key"})
 
-    def test_import_persists_canonical_portal_artifact_trust_atomically(self) -> None:
+    def test_import_ignores_legacy_portal_artifact_trust(self) -> None:
         fixture = json.loads((Path(__file__).parent / "fixtures" / "portal-artifact-trust-v1.json").read_text())
         material = self._material()
         material["portal_artifact_trust_v1"] = fixture["artifact_trust"]
@@ -93,20 +93,17 @@ class PortalRegistrationTests(unittest.TestCase):
             state = CommercialState(str(Path(td) / "state.sqlite"))
             with patch("mcd_agent.commercial_registration._host_fingerprint", return_value="sha256:" + "a" * 64):
                 import_activation_material(state, material)
-            self.assertEqual(state.get("portal_artifact_trust_v1"), fixture["artifact_trust"])
-            self.assertEqual(state.get("portal_artifact_trust_revision"), 1)
-            self.assertEqual(state.get("portal_artifact_trust_digest"), fixture["artifact_trust"]["trust_digest"])
-            self.assertEqual(state.get("portal_artifact_signing_keys")["portal-artifact-fixture-1"]["status"], "active")
+            self.assertIsNone(state.get("portal_artifact_trust_v1"))
+            self.assertIsNone(state.get("portal_artifact_signing_keys"))
 
-    def test_import_rejects_invalid_artifact_trust_before_writing(self) -> None:
+    def test_import_ignores_invalid_legacy_artifact_trust(self) -> None:
         material = self._material()
         material["portal_artifact_trust_v1"] = {"schema": "portal-artifact-trust-v1"}
         with tempfile.TemporaryDirectory() as td:
             state = CommercialState(str(Path(td) / "state.sqlite"))
             with patch("mcd_agent.commercial_registration._host_fingerprint", return_value="sha256:" + "a" * 64):
-                with self.assertRaisesRegex(ValueError, "portal_registration_artifact_trust_invalid"):
-                    import_activation_material(state, material)
-            self.assertIsNone(state.get("portal_agent_credential"))
+                import_activation_material(state, material)
+            self.assertEqual(state.get("portal_agent_credential"), "activation-derived-credential")
 
     def test_import_scrubs_legacy_agent_key_state_and_ignores_legacy_material(self) -> None:
         material = self._material()

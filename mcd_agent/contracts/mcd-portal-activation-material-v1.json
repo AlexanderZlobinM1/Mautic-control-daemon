@@ -20,7 +20,6 @@
     "host_fingerprint": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
     "commercial_key_id": {"type": "string", "minLength": 1},
     "installation_ids": {"type": "object", "minProperties": 1, "additionalProperties": {"type": "string", "minLength": 1}},
-    "portal_artifact_trust_v1": {"type": "object", "minProperties": 1},
     "portal_registration_id": {"type": "string"},
     "commercial_key_metadata": {"type": "object"}
   },
