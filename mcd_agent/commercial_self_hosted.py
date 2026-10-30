@@ -96,10 +96,11 @@ def _nonnegative_int(value: object) -> bool:
 class RunnerExecutionError(ValueError):
     """A bounded, secret-free diagnostic for the external runner boundary."""
 
-    def __init__(self, code: str, *, evidence: Mapping[str, Any] | None = None):
+    def __init__(self, code: str, *, evidence: Mapping[str, Any] | None = None, result: Mapping[str, Any] | None = None):
         super().__init__(code)
         self.code = str(code)
         self.evidence = dict(evidence or {})
+        self.result = dict(result or {}) if isinstance(result, Mapping) else None
 
 
 class RunnerTimeoutError(TimeoutError):
@@ -394,6 +395,19 @@ def _failed_terminal_receipt(verified: Mapping[str, Any], *, error: BaseExceptio
     contract_version = str(verified.get("contract_version") or SELF_HOSTED_MCD_CONTRACT_VERSION)
     if contract_version not in SELF_HOSTED_MCD_CONTRACT_VERSIONS:
         contract_version = SELF_HOSTED_MCD_CONTRACT_VERSION
+    runner_result = getattr(error, "result", None)
+    if isinstance(runner_result, Mapping):
+        completed = runner_result.get("completed", completed)
+        total = runner_result.get("total", total)
+        rollback = runner_result.get("rollback", rollback)
+    result_payload: dict[str, Any] = {
+        "executor": "mcd-self-hosted-external",
+        "completed": max(0, int(completed)) if isinstance(completed, int) and not isinstance(completed, bool) else 0,
+        "total": max(1, int(total)) if isinstance(total, int) and not isinstance(total, bool) else 1,
+        "rollback": rollback if rollback in SELF_HOSTED_MCD_ROLLBACK_STATUSES else "not_attempted",
+    }
+    if isinstance(runner_result, Mapping):
+        result_payload["runner"] = _bounded_result(dict(runner_result))
     result = {
         **binding,
         "schema": SELF_HOSTED_MCD_TERMINAL_RECEIPT_SCHEMA,
@@ -404,7 +418,7 @@ def _failed_terminal_receipt(verified: Mapping[str, Any], *, error: BaseExceptio
         "observed_at": _utc(),
         "started_at": started_at,
         "completed_at": _utc(),
-        "result": {"executor": "mcd-self-hosted-external", "completed": max(0, int(completed)), "total": max(0, int(total))},
+        "result": result_payload,
         "error": {"code": "self_hosted_mcd_execution_failed", "type": _runner_error_code(error)},
         "rollback": rollback if rollback in SELF_HOSTED_MCD_ROLLBACK_STATUSES else "not_attempted",
     }
@@ -489,12 +503,12 @@ class ExternalProcessPolicy:
                 f"self_hosted_mcd_runner_signal_{-completed.returncode}",
                 evidence={**evidence, "admission_stage": "signal"},
             )
-        if completed.returncode != 0:
-            code = self._child_error_code(stdout)
-            raise RunnerExecutionError(code or "self_hosted_mcd_runner_failed", evidence=evidence)
         try:
             frames = self._decode_output_frames(stdout)
         except ValueError as exc:
+            if completed.returncode != 0:
+                code = self._child_error_code(stdout)
+                raise RunnerExecutionError(code or "self_hosted_mcd_runner_failed", evidence=evidence) from exc
             raise RunnerExecutionError(
                 _runner_error_code(exc),
                 evidence={
@@ -506,6 +520,13 @@ class ExternalProcessPolicy:
         if not frames:
             raise RunnerExecutionError("self_hosted_mcd_runner_output_missing", evidence=evidence)
         parsed = frames[-1]
+        if completed.returncode != 0:
+            result = _bounded_result(parsed)
+            raise RunnerExecutionError(
+                str(parsed.get("error_code") or "self_hosted_mcd_runner_failed"),
+                evidence={**evidence, "admission_stage": "result_decode", "runner_result": result},
+                result=result,
+            )
         if str(parsed.get("status") or "") not in {"succeeded", "completed", "ok"}:
             raise RunnerExecutionError(
                 "self_hosted_mcd_runner_failed",

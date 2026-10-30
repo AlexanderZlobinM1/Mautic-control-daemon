@@ -1315,6 +1315,12 @@ staging/activation, execution admission, timeout, rollback state and durable
 receipts. The legacy artifact-trust capability remains only for compatibility
 and is not required by the trusted MCC SHA-only path.
 
+If the bounded runner exits non-zero but emits a valid final result frame, MCD
+decodes that frame before reducing the failure. The terminal receipt preserves
+the artifact's typed `error_code`, `completed`, `total`, `rollback`, and bounded
+runner result, so partial mutation and rollback evidence remain visible. Only a
+missing or invalid final frame is reduced to the generic runner failure.
+
 Stage receipts use `mcd-self-hosted-stage-receipt-v2` with only
 `scenario_dispatch` and `execution`, statuses `queued|running|waiting|succeeded|failed`,
 mandatory installation binding and unique idempotency keys. Terminal receipts

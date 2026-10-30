@@ -878,6 +878,17 @@ def test_v2_runner_failure_persists_bounded_evidence_and_replays_without_rerun()
                 "stderr_truncated": False,
                 "stderr_preview": "error",
             },
+            result={
+                "schema": "mcd-self-hosted-executable-output-v1",
+                "contract_version": "1.0",
+                "frame_type": "result",
+                "status": "failed",
+                "exit_code": 23,
+                "completed": 2,
+                "total": 6,
+                "rollback": "not_attempted",
+                "error_code": "mariadb_version_mismatch",
+            },
         )
 
     with TemporaryDirectory() as directory:
@@ -902,6 +913,9 @@ def test_v2_runner_failure_persists_bounded_evidence_and_replays_without_rerun()
         assert terminal["status"] == "failed"
         assert terminal["runner_evidence"]["exit_code"] == 23
         assert terminal["error"]["runner_evidence"]["stderr_preview"] == "error"
+        assert terminal["result"]["completed"] == 2
+        assert terminal["result"]["total"] == 6
+        assert terminal["result"]["runner"]["error_code"] == "mariadb_version_mismatch"
         saved = executor._load("job-1")
         assert saved["runner_evidence"]["stderr_bytes"] == 5
         replay = executor.run(
