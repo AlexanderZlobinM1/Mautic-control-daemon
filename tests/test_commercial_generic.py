@@ -123,3 +123,48 @@ def test_worker_publishes_inventory_and_durable_generic_receipts(tmp_path: Path)
     assert len(calls) == 1
     assert state.get("commercial_portal_cursor") == "1"
     assert state.get("commercial_self_hosted_pending_delivery_v1") is None
+
+
+def test_worker_terminalizes_valid_generic_job_when_capability_inventory_is_missing(tmp_path: Path):
+    state = CommercialState(str(tmp_path / "commercial.sqlite"))
+    executor = _Executor(state)
+
+    class Portal:
+        def __init__(self):
+            self.receipts = []
+
+        def pull_job(self, **kwargs):
+            job = _job()
+            job["command"] = {**job["command"], "command_id": "read_host_facts", "version": "1.0", "mutates_state": False}
+            job["capability"] = {"capability_id": "host_facts", "version": "1.0"}
+            job["input"] = {}
+            return {"cursor": "18", "job": job}
+
+        def send_receipt(self, payload, **kwargs):
+            self.receipts.append(payload)
+            return {}
+
+    portal = Portal()
+    calls = []
+    worker = SelfHostedPortalWorker(
+        portal,
+        executor,
+        installation_id="installation-1",
+        portal_keys={},
+        publisher_keys={},
+        context={},
+        commercial_key_id="commercial-1",
+        agent_id="agent-1",
+        host_fingerprint="sha256:" + "a" * 64,
+        clock=_Clock(),
+        generic_command_handler=lambda job: calls.append(job) or {"status": "succeeded"},
+    )
+
+    result = worker.run_once()
+    assert result == {"status": "failed", "job_id": "generic-job-1"}
+    assert [item["schema"] for item in portal.receipts] == ["portal-mcd-generic-terminal-receipt-v1"]
+    assert portal.receipts[0]["status"] == "failed"
+    assert portal.receipts[0]["error"]["code"] == "commercial_capability_inventory_unavailable"
+    assert calls == []
+    assert state.get("commercial_portal_cursor") == "18"
+    assert state.get("commercial_self_hosted_pending_delivery_v1") is None
