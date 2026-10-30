@@ -6391,7 +6391,8 @@ def backup_profile_apply_sync(config: AgentConfig, envelope: object) -> tuple[Ag
             return config, {"schema": BACKUP_PROFILE_SYNC_SCHEMA, "version": BACKUP_PROFILE_SYNC_VERSION, "profile_updated_at": current_updated_at, "profile_sha256": desired_hash, "effective_profile": _backup_profile_masked_payload(current_effective), "effective_sha256": current_hash, "status": "ok"}
     try:
         candidate = _cfg_with_profile_payload(config, profile)
-        _validate_cfg(candidate)
+        if candidate.backup_enabled:
+            _validate_cfg(candidate)
         effective = _backup_profile_readback(profile, _backup_profile_effective_values(candidate, source=profile.get("source", "profile_db")))
         effective_hash = backup_profile_sync_hash(effective)
         if effective_hash != expected_effective_hash:

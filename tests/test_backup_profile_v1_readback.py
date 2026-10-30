@@ -75,9 +75,8 @@ def test_newer_request_does_not_reapply_older_db_values_to_candidate(tmp_path):
 def test_disabled_full_profile_keeps_settings_and_can_replay(tmp_path):
     cfg = config(tmp_path)
     profile = {'enabled': False, 'remote_root_dir': 'backup', 'source': 'config', 'storage': {'kind': 'local'}}
-    with patch.object(backup, '_validate_cfg'):
-        cfg, receipt = backup.backup_profile_apply_sync(cfg, envelope(profile))
-        replay = backup.backup_profile_apply_sync(cfg, envelope(profile))[1]
+    cfg, receipt = backup.backup_profile_apply_sync(cfg, envelope(profile))
+    replay = backup.backup_profile_apply_sync(cfg, envelope(profile))[1]
     assert receipt['status'] == replay['status'] == 'ok'
     assert receipt['effective_profile'] == profile
     assert backup.backup_profile_for_push(cfg) == profile

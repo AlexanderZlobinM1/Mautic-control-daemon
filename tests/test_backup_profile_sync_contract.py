@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from mcd_agent.backup import (
@@ -11,7 +12,7 @@ from mcd_agent.backup import (
 
 class BackupProfileSyncContractTests(unittest.TestCase):
     def test_hash_mismatch_is_unsynced_without_apply(self):
-        cfg = object()
+        cfg = SimpleNamespace(backup_enabled=True)
         envelope = {
             "schema": BACKUP_PROFILE_SYNC_SCHEMA,
             "version": BACKUP_PROFILE_SYNC_VERSION,
@@ -26,7 +27,7 @@ class BackupProfileSyncContractTests(unittest.TestCase):
         apply.assert_not_called()
 
     def test_valid_envelope_returns_masked_effective_readback(self):
-        cfg = object()
+        cfg = SimpleNamespace(backup_enabled=True)
         profile = {"enabled": True, "storage": {"password": "secret"}}
         envelope = {
             "schema": BACKUP_PROFILE_SYNC_SCHEMA,
@@ -54,7 +55,7 @@ class BackupProfileSyncContractTests(unittest.TestCase):
         self.assertEqual(result["reason"], "unsupported_schema")
 
     def test_host_newer_wins(self):
-        cfg = object()
+        cfg = SimpleNamespace(backup_enabled=True)
         profile = {"enabled": True}
         envelope = {"schema": BACKUP_PROFILE_SYNC_SCHEMA, "version": 1, "profile_updated_at": 20,
                     "profile": profile, "profile_sha256": backup_profile_sync_hash(profile)}
@@ -67,7 +68,7 @@ class BackupProfileSyncContractTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
 
     def test_mcc_newer_wins(self):
-        cfg = object()
+        cfg = SimpleNamespace(backup_enabled=True)
         profile = {"enabled": True}
         envelope = {"schema": BACKUP_PROFILE_SYNC_SCHEMA, "version": 1, "profile_updated_at": 20,
                     "profile": profile, "profile_sha256": backup_profile_sync_hash(profile)}
