@@ -1709,11 +1709,31 @@ script, argv, executable, sudo, пароль, ключ, token и подпись 
 исполнения. Generic primitive вызывается тем же внедрённым MCD handler, который
 использует локальные typed primitives; arbitrary shell route отсутствует.
 
-В релизе MCD 1.6.15 фактический inventory содержит только безопасные
-read-only-примитивы: `read_host_facts`, `check_prerequisites`, `check_web_php`,
+Inventory содержит безопасные read-only-примитивы:
+`read_host_facts`, `check_prerequisites`, `check_web_php`,
 `check_mysql` и `check_redis` (каждый `version=1.0`,
 `execution=generic_primitive`, `mutates_state=false`, с собственным
 `input_schema_ref`). Вход этих примитивов обязан быть пустым объектом.
+С MCD 1.6.32 дополнительно объявлен `capability_id=inventory`,
+`command_id=rescan_inventory`, `version=1.0`, `execution=generic_primitive`,
+`mutates_state=true`, `input_schema_ref=portal://mcd/input/inventory-rescan-v1`.
+Вход — только `{}`: пути, argv и политика discovery не принимаются от Portal.
+Handler загружает текущую локальную конфигурацию без восстановления из MCC,
+вызывает штатный `InstanceInventory.rescan(..., preserve_manual=True)` и
+закрывает локальное соединение. Результат содержит только status и
+`discovered_count` (число обнаруженных записей, не общее число с manual).
+Ошибка discovery возвращает фиксированный код без текста исключения.
+После принятого terminal следующий обычный outbound цикл публикует настоящий
+inventory с новым revision/ACK; команда не создаёт регистрацию, не меняет
+профиль, периодический scan, vhost или данные Mautic. Portal обязан дождаться
+этого inventory, а не подменять его успешным receipt. Команда проходит те же
+advertisement, binding, TTL, lease, durable started/terminal и replay gates.
+Тесты `test_commercial_primitives`, `test_daemon_commercial_guard` и
+`test_commercial_generic` проверяют пустой input, сохранение manual-записи,
+текущую локальную discovery-конфигурацию и доставку terminal после рестарта
+без повторного rescan. Live evidence требует authentic command receipt,
+новый inventory revision/ACK, фактический root/версию и ровно один экземпляр
+под прежней DNS-карточкой.
 Установка Mautic из архива пока не публикуется как generic capability: для неё
 нужен отдельный artifact-bound typed contract; Portal не может прислать такой
 шаг под видом произвольной generic-команды.

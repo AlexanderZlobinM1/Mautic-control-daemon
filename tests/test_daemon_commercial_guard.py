@@ -116,6 +116,48 @@ def test_default_factory_disables_without_portal_material(tmp_path, monkeypatch)
     assert state.get("commercial_worker_status")["status"] == "disabled"
 
 
+def test_native_rescan_uses_current_local_config_and_preserves_manual_instances(tmp_path, monkeypatch):
+    from mcd_agent.inventory import InstanceInventory
+    from mcd_agent.models import MauticInstall
+
+    _state, config = _eligible_state(tmp_path, monkeypatch)
+    config.config_file_path = str(tmp_path / "local.toml")
+    current = SimpleNamespace(
+        state_db_path=config.state_db_path, discovery_roots=[str(tmp_path / "current-root")],
+        exclude_path_contains=[], supported_mautic_majors=[7], custom_instances=[],
+    )
+    loads = []
+
+    def load(path, *, allow_recover_from_mcc):
+        loads.append((path, allow_recover_from_mcc))
+        return current
+
+    monkeypatch.setattr("mcd_agent.daemon.load_config", load)
+    monkeypatch.setattr("mcd_agent.daemon.default_scenario_runner_argv", lambda: [sys.executable])
+    native = InstanceInventory(config.state_db_path)
+    manual = MauticInstall("manual", "manual", str(tmp_path / "manual"), "/manual/bin/console", source="manual")
+    discovered = MauticInstall("new", "new", str(tmp_path / "current-root"), "/new/bin/console", mautic_major=7)
+    native._upsert_install(manual)
+    native.conn.commit()
+    discoveries = []
+
+    def discover(roots, *args):
+        discoveries.append(roots)
+        return [discovered]
+
+    monkeypatch.setattr("mcd_agent.inventory.discover_mautic", discover)
+    worker = _default_commercial_worker_factory(config)(None)
+    assert worker is not None
+    result = worker.generic_command_handler({"command": {"command_id": "rescan_inventory"}, "input": {}})
+    assert result == {"status": "succeeded", "discovered_count": 1}
+    assert loads == [(config.config_file_path, False)]
+    assert discoveries == [current.discovery_roots]
+    assert {(row.instance_uid, row.source) for row in native.list_instances()} == {
+        ("manual", "manual"), ("new", "autodiscovery"),
+    }
+    native.conn.close()
+
+
 def test_commercial_worker_retries_after_activation_material_is_temporarily_incomplete(monkeypatch):
     class Worker:
         def run_forever(self, stop_event, **_kwargs):

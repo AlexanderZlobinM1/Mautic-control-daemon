@@ -581,6 +581,14 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
                     raise ValueError("commercial_generic_identity_unavailable")
                 return build_capability_inventory(installation_id=_installation_id, dns_name=dns_name)
 
+            def rescan_inventory() -> int:
+                local_cfg = load_config(config.config_file_path, allow_recover_from_mcc=False)
+                local_inventory = InstanceInventory(local_cfg.state_db_path)
+                try:
+                    return local_inventory.rescan(local_cfg, preserve_manual=True)
+                finally:
+                    local_inventory.conn.close()
+
             worker = SelfHostedPortalWorker(
                 PortalClient(state),
                 SelfHostedScenarioExecutor(state, runner=runner.run),
@@ -594,7 +602,7 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
                 inventory_provider=inventory_snapshot,
                 runtime_command_handler=handle_runtime_command,
                 capability_inventory_provider=capability_inventory,
-                generic_command_handler=execute_generic_primitive,
+                generic_command_handler=lambda job: execute_generic_primitive(job, inventory_rescan=rescan_inventory),
             )
         except Exception:
             disabled("commercial_worker_material_invalid")

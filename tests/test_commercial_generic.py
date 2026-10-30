@@ -75,6 +75,67 @@ def test_generic_job_requires_latest_advertised_inventory():
         raise AssertionError("unadvertised command must be rejected")
 
 
+def test_inventory_rescan_terminal_survives_restart_without_rescanning(tmp_path):
+    from mcd_agent.commercial_primitives import build_capability_inventory, execute_generic_primitive
+
+    state_path = str(tmp_path / "commercial.sqlite")
+    inventory = build_capability_inventory(installation_id="installation-1", dns_name="mautic.example.com")
+    job = _job()
+    job["capability"]["capability_id"] = "inventory"
+    job["command"].update(command_id="rescan_inventory", mutates_state=True)
+    job["input"] = {}
+    assert validate_generic_command_job(job, inventory=inventory)["command"]["mutates_state"]
+    calls = []
+    now = [100.0]
+
+    class Portal:
+        fail_terminal = True
+        polled = False
+
+        def __init__(self):
+            self.receipts = []
+
+        def send_capability_inventory(self, **kwargs):
+            return {}
+
+        def pull_job(self, **kwargs):
+            if self.polled:
+                return None
+            self.polled = True
+            return {"cursor": "1", "job": job}
+
+        def send_receipt(self, payload, **kwargs):
+            self.receipts.append(copy.deepcopy(payload))
+            if self.fail_terminal and payload["sequence"] == 2:
+                raise OSError("temporary transport failure")
+            return {}
+
+    portal = Portal()
+
+    def worker():
+        return SelfHostedPortalWorker(
+            portal, _Executor(CommercialState(state_path)), installation_id="installation-1",
+            portal_keys={}, publisher_keys={}, context={}, commercial_key_id="commercial-1",
+            agent_id="agent-1", host_fingerprint="sha256:" + "a" * 64, clock=lambda: now[0],
+            capability_inventory_provider=lambda _installation: inventory,
+            generic_command_handler=lambda job: execute_generic_primitive(
+                job, inventory_rescan=lambda: calls.append(True) or 1,
+            ),
+        )
+
+    assert worker().run_once() == {"status": "receipt_pending", "job_id": "generic-job-1"}
+    pending = CommercialState(state_path).get("commercial_self_hosted_pending_receipts")
+    assert pending[0]["result"] == {"status": "succeeded", "discovered_count": 1}
+    assert CommercialState(state_path).get("commercial_portal_cursor") is None
+    portal.fail_terminal = False
+    now[0] = 200.0
+    assert worker().run_once() == {"status": "succeeded", "job_id": "generic-job-1"}
+    assert calls == [True]
+    assert portal.receipts[-1] == pending[0]
+    assert CommercialState(state_path).get("commercial_portal_cursor") == "1"
+    assert CommercialState(state_path).get("commercial_self_hosted_pending_receipts") == []
+
+
 @pytest.mark.parametrize("host_result", [None, "facts", "invalid"])
 def test_worker_publishes_inventory_and_durable_generic_receipts(tmp_path: Path, monkeypatch, host_result):
     state = CommercialState(str(tmp_path / "commercial.sqlite"))

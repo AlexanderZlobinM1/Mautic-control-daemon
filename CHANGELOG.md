@@ -1,3 +1,11 @@
+## 1.6.32 - 2026-10-31
+
+- Expose the native inventory rescan through the existing Portal generic
+  command broker. Use only local discovery configuration, preserve manual
+  instances, and publish genuine discovered instances through normal inventory
+  revision/ACK processing. Reject caller inputs and redact discovery failures;
+  retain existing command leases, durable receipts and replay protection.
+
 ## 1.6.31 - 2026-10-30
 
 - Recover inventory revision continuity after local state loss using the
