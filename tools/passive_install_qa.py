@@ -27,9 +27,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         assert self.headers["X-Portal-Contract"] == "com.sales-snap.portal-commercial/1.0"
         assert self.headers["Idempotency-Key"] == body["idempotency_key"]
-        assert self.headers["User-Agent"] == "mcd-agent/1.6.25 portal-commercial/1.0 passive-bootstrap/1.0"
+        assert self.headers["User-Agent"].startswith("mcd-agent/1.6.25 portal-commercial/1.0")
         calls.append(body)
         if self.path.endswith("redeem-commercial-key"):
+            assert self.headers["User-Agent"] == "mcd-agent/1.6.25 portal-commercial/1.0 passive-bootstrap/1.0"
             assert body["commercial_key"] == KEY
             assert "public_key" not in body["agent"]
             result = {"schema": "portal-mcd-activation-response-v1", "contract_version": "1.0", "account_id": "account_qa", "agent_id": "agent_qa", "agent_credential": KEY, "commercial_key_id": "key_qa", "portal": {"api_base": "https://localhost:8443/api/v1/commercial"}}
