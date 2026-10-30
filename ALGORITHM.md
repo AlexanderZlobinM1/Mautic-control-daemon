@@ -1606,6 +1606,10 @@ cancelled/failed, аудит job_ttl_expired и сохранённые receipt h
 `commercial_generic_superseded_receipts_v1`, затем закрывается этот cursor.
 Ошибка HTTP, несовпадение или отсутствие доказательства сохраняют outbox.
 Ни HTTP 409, ни локальный TTL сами по себе отмену не доказывают.
+Generic result допускает глубину 8 для classification evidence host_facts;
+входные команды сохраняют лимит глубины 5 и запрет произвольных команд/секретов.
+Ошибка формирования terminal превращается в durable sequence 2 failure
+commercial_generic_terminal_construction_failed без включения сырого результата.
 
 Для generic job MCD сначала durable фиксирует `started` receipt, затем вызывает
 handler и durable фиксирует terminal result. Receipt sequence — монотонный,

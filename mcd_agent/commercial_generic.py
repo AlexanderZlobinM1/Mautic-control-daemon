@@ -76,20 +76,20 @@ def _secret_free(value: object) -> None:
             _secret_free(child)
 
 
-def _scalar(value: object, code: str, depth: int = 0) -> object:
-    if depth > 5:
+def _scalar(value: object, code: str, depth: int = 0, *, max_depth: int = 5) -> object:
+    if depth > max_depth:
         raise _error(code)
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, list):
-        return [_scalar(item, code, depth + 1) for item in value]
+        return [_scalar(item, code, depth + 1, max_depth=max_depth) for item in value]
     if isinstance(value, Mapping):
         result: dict[str, object] = {}
         for key, child in value.items():
             text = str(key)
             if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,96}", text) or re.fullmatch(r"shell|script|command_line|argv|executable|sudo|password|private_key|secret|token|credential", text, re.IGNORECASE):
                 raise _error(code)
-            result[text] = _scalar(child, code, depth + 1)
+            result[text] = _scalar(child, code, depth + 1, max_depth=max_depth)
         return result
     raise _error(code)
 
@@ -172,7 +172,7 @@ def _receipt_base(item: Mapping[str, Any], code: str) -> dict[str, Any]:
 def _result(value: object, code: str) -> dict[str, Any] | None:
     if value is None:
         return None
-    parsed = _scalar(value, code)
+    parsed = _scalar(value, code, max_depth=8)
     if not isinstance(parsed, Mapping):
         raise _error(code)
     return dict(parsed)

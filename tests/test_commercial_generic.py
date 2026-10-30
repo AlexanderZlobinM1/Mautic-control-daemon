@@ -75,10 +75,32 @@ def test_generic_job_requires_latest_advertised_inventory():
         raise AssertionError("unadvertised command must be rejected")
 
 
-def test_worker_publishes_inventory_and_durable_generic_receipts(tmp_path: Path):
+@pytest.mark.parametrize("host_result", [None, "facts", "invalid"])
+def test_worker_publishes_inventory_and_durable_generic_receipts(tmp_path: Path, monkeypatch, host_result):
     state = CommercialState(str(tmp_path / "commercial.sqlite"))
     executor = _Executor(state)
     inventory = _inventory()
+    job = _job()
+    handler = None
+    if host_result:
+        from mcd_agent import commercial_primitives, commercial_detector
+        job["capability"]["capability_id"] = "host_facts"
+        job["command"].update(command_id="read_host_facts", mutates_state=False)
+        job["input"] = {}
+        capability = inventory["capabilities"][0]
+        capability["capability_id"] = "host_facts"
+        capability["commands"][0].update(command_id="read_host_facts", mutates_state=False)
+        inventory["inventory_sha256"] = capability_inventory_digest({key: value for key, value in inventory.items() if key != "inventory_sha256"})
+        os_release = tmp_path / "os-release"
+        os_release.write_text('ID=ubuntu\nVERSION_ID="24.04"\n')
+        monkeypatch.setattr(commercial_detector.shutil, "which", lambda name: "/usr/bin/apt-get" if name == "apt-get" else None)
+        probes = {name: {"installed": True, "active": False, "markers": ["path:/etc/php"]} for name in ("mautic_installation", "web_server", "database", "cache", "php_runtime")}
+        facts = commercial_detector.read_normalized_local_facts(os_release_path=str(os_release), machine="x86_64", classification_probes=probes)
+        from mcd_agent.commercial_generic import _scalar, GenericCommandContractError
+        with pytest.raises(GenericCommandContractError, match="portal_mcd_generic_terminal_receipt_invalid"):
+            _scalar({"status": "succeeded", "facts": facts}, "portal_mcd_generic_terminal_receipt_invalid")
+        monkeypatch.setattr(commercial_primitives, "read_normalized_local_facts", lambda **kwargs: facts if host_result == "facts" else {"shell": "forbidden"})
+        handler = commercial_primitives.execute_generic_primitive
 
     class Portal:
         def __init__(self):
@@ -94,7 +116,7 @@ def test_worker_publishes_inventory_and_durable_generic_receipts(tmp_path: Path)
             if self.polled:
                 return None
             self.polled = True
-            return {"cursor": "1", "job": _job()}
+            return {"cursor": "1", "job": job}
 
         def send_receipt(self, payload, **kwargs):
             self.receipts.append(payload)
@@ -114,11 +136,16 @@ def test_worker_publishes_inventory_and_durable_generic_receipts(tmp_path: Path)
         host_fingerprint="sha256:" + "a" * 64,
         clock=_Clock(),
         capability_inventory_provider=lambda _installation: inventory,
-        generic_command_handler=lambda job: calls.append(job) or {"status": "succeeded", "changed": True},
+        generic_command_handler=lambda job: calls.append(job) or (handler(job) if handler else {"status": "succeeded", "changed": True}),
     )
 
     result = worker.run_once()
-    assert result == {"status": "succeeded", "job_id": "generic-job-1"}
+    assert result == {"status": "failed" if host_result == "invalid" else "succeeded", "job_id": "generic-job-1"}
+    if host_result == "facts":
+        assert portal.receipts[-1]["result"]["facts"]["classification_evidence"]["probes"]["php_runtime"]["markers"] == ["path:/etc/php"]
+    if host_result == "invalid":
+        assert portal.receipts[-1]["error"]["code"] == "commercial_generic_terminal_construction_failed"
+    assert state.get("commercial_portal_generic_runs_v1")["generic-job-1"]["terminal"] == portal.receipts[-1]
     assert portal.inventory[0]["inventory"]["inventory_sha256"] == inventory["inventory_sha256"]
     assert [item["schema"] for item in portal.receipts] == ["portal-mcd-generic-stage-receipt-v1", "portal-mcd-generic-terminal-receipt-v1"]
     assert [item["sequence"] for item in portal.receipts] == [1, 2]

@@ -1638,7 +1638,10 @@ class SelfHostedPortalWorker:
                 result = None
                 status = "failed"
                 error = {"code": type(exc).__name__[:120], "message": str(exc)[:1024] or "generic primitive failed"}
-            terminal_saved = self._generic_receipt(job, terminal=True, sequence=2, status=status, result=result, error=error)
+            try:
+                terminal_saved = self._generic_receipt(job, terminal=True, sequence=2, status=status, result=result, error=error)
+            except Exception as exc:
+                terminal_saved = self._generic_receipt(job, terminal=True, sequence=2, status="failed", error={"code": "commercial_generic_terminal_construction_failed", "message": type(exc).__name__[:120]})
             runs[job_id] = {"job_digest": digest, "started_sent": True, "terminal": terminal_saved}
             if len(runs) > 64:
                 for key in list(runs)[:-64]:
