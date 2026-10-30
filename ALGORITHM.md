@@ -1598,6 +1598,15 @@ Terminal sequence вычисляется из сохранённого last_sequ
 старых версий started_sent означает уже занятый stage sequence 1. Отказ после
 started получает следующий sequence, без повторного вызова capability handler.
 
+Заблокированный generic terminal outbox сверяется через authenticated GET
+`agents/{agentId}/installations/{installationId}/commands/{commandId}/state`.
+Только точное совпадение binding, job, command и delivery cursor, статусы
+cancelled/failed, аудит job_ttl_expired и сохранённые receipt hash metadata
+разрешают supersede. Исходный receipt и полный ответ Portal сохраняются в
+`commercial_generic_superseded_receipts_v1`, затем закрывается этот cursor.
+Ошибка HTTP, несовпадение или отсутствие доказательства сохраняют outbox.
+Ни HTTP 409, ни локальный TTL сами по себе отмену не доказывают.
+
 Для generic job MCD сначала durable фиксирует `started` receipt, затем вызывает
 handler и durable фиксирует terminal result. Receipt sequence — монотонный,
 Portal idempotency — `{job_id}:{sequence}`. При недоступном Portal receipt

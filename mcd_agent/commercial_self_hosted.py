@@ -1133,6 +1133,61 @@ class SelfHostedPortalWorker:
         pending[0] = rebased
         self.executor.state.put(_PENDING_KEY, pending)
 
+    def _reconcile_cancelled_generic(self, receipt: Mapping[str, Any]) -> bool:
+        """Retire an exact cancelled delivery only with authenticated Portal proof."""
+        if receipt.get("schema") != GENERIC_TERMINAL_RECEIPT_SCHEMA:
+            return False
+        if receipt.get("status") != "failed" or (receipt.get("error") or {}).get("code") != "portal_mcd_generic_command_expired":
+            return False
+        lookup = getattr(self.client, "command_state", None)
+        delivery = self._pending_delivery()
+        if not callable(lookup) or not delivery:
+            return False
+        commands = self._commands_from_delivery(delivery.get("job") or {})
+        if not commands:
+            return False
+        job = commands[0]
+        for key in ("job_id", "command_id"):
+            if not receipt.get(key) or receipt.get(key) != job.get(key):
+                return False
+        installation = str(delivery.get("installation_id") or "")
+        if installation != self._active_installation_id or receipt.get("installation", {}).get("installation_id") != installation:
+            return False
+        try:
+            proof = lookup(installation_id=installation, command_id=str(job["command_id"]))
+            binding = proof.get("binding") or {}
+            audit = proof.get("expiry_audit") or {}
+            if proof.get("schema") != "portal-mcd-command-state-v1" or proof.get("contract_version") != "1.0":
+                return False
+            if binding.get("agent_id") != self.agent_id or binding.get("installation_id") != installation or not binding.get("account_id"):
+                return False
+            account = self.executor.state.get("account_id")
+            if account and account != binding.get("account_id"):
+                return False
+            if any(proof.get(key) != job.get(key) for key in ("job_id", "command_id")):
+                return False
+            if int(proof.get("delivery_cursor") or 0) != int(job.get("delivery_cursor") or 0) or str(proof["delivery_cursor"]) != str(delivery.get("cursor_next")):
+                return False
+            if proof.get("command_status") != "cancelled" or proof.get("job_status") != "failed":
+                return False
+            if audit.get("reason") != "job_ttl_expired" or not audit.get("created_at"):
+                return False
+            receipts = proof.get("receipts")
+            if not isinstance(receipts, list) or not receipts:
+                return False
+            if not all(isinstance(item, Mapping) and int(item.get("sequence") or 0) > 0 and re.fullmatch(r"sha256:[0-9a-f]{64}", str(item.get("payload_sha256") or "")) for item in receipts):
+                return False
+            if not any(item.get("sequence") == 1 and item.get("status") == "started" and item.get("terminal") is False for item in receipts):
+                return False
+            if int(proof.get("last_sequence") or 0) != max(int(item["sequence"]) for item in receipts):
+                return False
+        except Exception:
+            return False
+        records = self.executor.state.get("commercial_generic_superseded_receipts_v1") or []
+        record = {"receipt": dict(receipt), "portal_state": proof, "reason": "portal_audited_cancellation"}
+        self.executor.state.put("commercial_generic_superseded_receipts_v1", [*records, record])
+        return True
+
     def _drain(self) -> bool:
         pending = self._pending()
         drained_terminal = False
@@ -1140,6 +1195,13 @@ class SelfHostedPortalWorker:
             try:
                 self._send_receipt(pending[0])
             except CommercialPortalError:
+                if self._reconcile_cancelled_generic(pending[0]):
+                    pending.pop(0)
+                    self.executor.state.put(_PENDING_KEY, pending)
+                    saved = self._pending_delivery()
+                    self._finish_command(cursor_next=str(saved["cursor_next"]))
+                    self._transport_succeeded()
+                    continue
                 # Any non-2xx response, including a typed sequence regression,
                 # is not an acknowledgement of this exact idempotency key.
                 # Keep the durable receipt and delivery cursor unchanged until

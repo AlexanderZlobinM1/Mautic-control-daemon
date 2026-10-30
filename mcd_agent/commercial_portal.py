@@ -1137,6 +1137,11 @@ class PortalClient:
             raise CommercialPortalError(stage="artifact.download", code="commercial_artifact_size_mismatch")
         return body
 
+    def command_state(self, *, installation_id: str, command_id: str) -> dict[str, Any]:
+        agent_id = str(self.state.get("agent_id") or "")
+        parts = [quote(value, safe="") for value in (agent_id, installation_id, command_id)]
+        return self._request("GET", f"agents/{parts[0]}/installations/{parts[1]}/commands/{parts[2]}/state", extra_headers={"Cache-Control": "no-cache"})
+
     def send_receipt(self, payload: dict[str, Any], *, installation_id: str | None = None) -> dict[str, Any]:
         agent_id = str(self.state.get("agent_id") or "")
         payload = dict(payload)
