@@ -28,7 +28,8 @@ class RuntimeAckDaemonIntegrationTests(TestCase):
                 encoding="utf-8",
             )
             config = load_config(str(config_path), allow_recover_from_mcc=False)
-            desired_runtime = {f"runtime_key_{index:03d}": index for index in range(181)}
+            desired_runtime = {f"runtime_key_{index:03d}": index for index in range(180)}
+            desired_runtime["form_embed_instance_settings"] = {"app.example": {"enabled": True, "cors_origins": ["https://customer.example"]}}
             desired_runtime["segment_recurring_priority_v1"] = {
                 "app.example": {"segments": [7], "max_interval_sec": 60},
             }
@@ -48,10 +49,11 @@ class RuntimeAckDaemonIntegrationTests(TestCase):
                     "runtime_overrides": desired_runtime,
                 },
                 "instance_desired_states": {
-                    instance_uid: {"revision": 7, "runtime_overrides": {"jobs_max_workers": 2}},
+                    instance_uid: {"revision": 7, "runtime_overrides": {"jobs_max_workers": 2, "form_embed_instance_settings": desired_runtime["form_embed_instance_settings"]["app.example"]}},
                 },
             }
             posts: list[dict[str, object]] = []
+            form_reconciles: list[dict[str, object]] = []
 
             class EmptyInventory:
                 def __init__(self, *args: object, **kwargs: object) -> None:
@@ -88,7 +90,6 @@ class RuntimeAckDaemonIntegrationTests(TestCase):
                     ("_bootstrap_remote_runtime_before_local_baseline", "none"),
                     ("_initialize_local_runtime_baseline", ({}, "baseline")),
                     ("retire_zabbix_mautic_version_userparameter", {"status": "ok"}),
-                    ("_sync_and_publish_form_embed_status", False),
                     ("fetch_runtime_overrides", response),
                     ("_monitor_running", None),
                     ("_refresh_instance_db_maps", None),
@@ -97,12 +98,15 @@ class RuntimeAckDaemonIntegrationTests(TestCase):
                 ):
                     stack.enter_context(patch.object(daemon, target, return_value=value))
                 stack.enter_context(patch.object(daemon, "InstanceInventory", EmptyInventory))
+                stack.enter_context(patch.object(daemon, "_sync_and_publish_form_embed_status", side_effect=lambda cfg, installs, **kwargs: form_reconciles.append(cfg.form_embed_instance_settings) or False))
                 stack.enter_context(patch.object(daemon, "MCCStatePusher", DisabledPusher))
                 stack.enter_context(patch.object(runtime_overrides, "runtime_supported_keys", return_value=set(desired_runtime)))
                 stack.enter_context(patch.object(runtime_overrides, "runtime_remote_allowed_keys", return_value=set(desired_runtime)))
-                stack.enter_context(patch.object(runtime_overrides, "runtime_effective_map", return_value=effective_runtime))
+                stack.enter_context(patch.object(runtime_overrides, "runtime_effective_map", side_effect=lambda cfg: {**effective_runtime, "form_embed_instance_settings": cfg.form_embed_instance_settings}))
                 stack.enter_context(patch.object(runtime_overrides, "_post_json", side_effect=capture_post))
                 daemon.run_loop(config, single_cycle=True)
+
+            self.assertIn({instance_uid: desired_runtime["form_embed_instance_settings"]["app.example"]}, form_reconciles)
 
             host_posts = [payload["desired_state_ack"]["observed"] for payload in posts if payload["desired_state_ack"]["scope"] == "host"]
             instance_posts = [payload["desired_state_ack"]["observed"] for payload in posts if payload["desired_state_ack"]["scope"] == "instance"]

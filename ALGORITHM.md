@@ -1495,6 +1495,21 @@ MCC применяется на хосте. Отсутствие поля в ч�
 обновляет baseline без повторной отправки того же состояния как новой локальной
 правки.
 
+Embedded Forms reconciles the effective `form_embed_instance_settings` after
+runtime adoption, independently of desired-state ACK delivery. A changed policy
+or inventory applies immediately; `runtime-overrides trigger` also reconciles
+an unchanged policy. Startup uses the same path. Failed/blocked application or
+observed-status delivery retries at the existing runtime poll cadence, while a
+new policy or explicit trigger bypasses that retry delay. Standalone MCD applies
+locally with MCC disabled. Successful unchanged policy/inventory is cached;
+an empty inventory or blocked vhost is never treated as completed application.
+The reconciler uses the existing nginx backup/test/reload/rollback mechanism;
+MCC stores desired policy and observed receipts, without editing nginx.
+Evidence: `test_runtime_ack_daemon_integration` covers actual daemon adoption
+with a canonical instance row, `test_runtime_stable_keys` covers triggers,
+retry, inventory changes and failed delivery, and `test_form_embed` checks
+rendering and rollback on a failed nginx validation.
+
 MCD may negotiate the opt-in `desired_state_sync_protocol=3` endpoint without
 changing the legacy v2 transport. The producer keeps the complete acknowledged
 MCC snapshot and its revision as the common base in `runtime_sync`; a local
