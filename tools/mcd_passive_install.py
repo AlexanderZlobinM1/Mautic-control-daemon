@@ -24,7 +24,7 @@ class NoRedirect(request.HTTPRedirectHandler):
         raise RuntimeError("bootstrap_redirect_refused")
 
 
-PASSIVE_CONFIG = '[config]\nschema_version = 1\n[profile]\nname = "passive"\n[mcc]\nurl = ""\ntoken = ""\npush_enabled = false\n[state]\nbackend = "sqlite"\nstate_db_path = "/opt/mcd/var/mcd-state.db"\n'
+PASSIVE_CONFIG = '[config]\nschema_version = 1\n[profile]\nname = "passive"\n[mcc]\nurl = ""\ntoken = ""\npush_enabled = false\n[runtime]\nstate_backend = "sqlite"\nstate_db_path = "/opt/mcd/var/mcd-state.db"\n'
 PASSIVE_UNIT = '[Unit]\nDescription=MCD passive commercial worker\nAfter=network-online.target\n[Service]\nType=simple\nWorkingDirectory=/opt/mcd\nExecStart=/opt/mcd/venv/bin/python -m mcd_agent run --config /opt/mcd/etc/mcd.toml\nRestart=on-failure\nKillMode=process\n[Install]\nWantedBy=multi-user.target\n'
 
 

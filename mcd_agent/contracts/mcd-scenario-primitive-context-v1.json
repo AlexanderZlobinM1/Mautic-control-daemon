@@ -12,9 +12,12 @@
       "scenario_revision",
       "artifact_revision",
       "artifact_digest",
-      "host_fingerprint",
       "facts_digest"
     ],
+    "identity_coordinate": {
+      "dns": {"identity_kind": "dns", "required": ["local_identity"], "forbidden": ["host_fingerprint"], "comparison": "plain DNS equals executable context binding.local_identity"},
+      "legacy": {"required": ["host_fingerprint"], "unchanged": true}
+    },
     "digest_format": "sha256:<64 lowercase hexadecimal characters>",
     "semantics": "Every receipt, retry and terminal result is bound to this tuple. Replaying the same idempotency_key may return the durable terminal receipt but must not execute the artifact twice."
   },
@@ -64,7 +67,7 @@
     "unknown_state": "unknown, interrupted or partially observed mutation requires rollback state attempted/failed or blocked; it is never reported succeeded"
   },
   "mcd_ownership": {
-    "mcd": ["signed job admission", "host/artifact binding", "timeout", "transport", "durable stage and terminal receipts", "idempotency", "rollback state"],
+    "mcd": ["API-authenticated job admission", "host/artifact binding", "timeout", "HTTPS transport", "SHA-256 artifact integrity", "durable stage and terminal receipts", "idempotency", "rollback state"],
     "portal_or_mcc": ["scenario policy", "artifact bytes and active catalog metadata", "selected primitive fields", "applicability facts and pins"],
     "excluded": ["installer recipe", "Mautic version selection", "raw credentials", "upgrade-version branching"]
   }

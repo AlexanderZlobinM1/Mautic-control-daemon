@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import json
 import sqlite3
@@ -27,6 +28,7 @@ from mcd_agent.commercial_self_hosted import (
     RunnerExecutionError,
     SelfHostedPortalWorker,
     SelfHostedScenarioExecutor,
+    _artifact_download_failure,
     validate_self_hosted_stage_receipt,
     validate_self_hosted_terminal_receipt,
 )
@@ -125,6 +127,9 @@ def _job(portal: Ed25519PrivateKey, publisher: Ed25519PrivateKey, *, contract_ve
     }
     if contract_version == SELF_HOSTED_MCD_LEGACY_CONTRACT_VERSION:
         job["bootstrap_artifact"] = _artifact("bootstrap", "bootstrap-r1", bootstrap, publisher)
+    else:
+        job["stage_selection"] = {"stage_id": "base_packages", "sequence": 1, "operation": "ensure_supported_base_packages", "depends_on": []}
+        job["execution"]["stage"] = {"stage_id": "base_packages", "sequence": 1, "operation": "ensure_supported_base_packages"}
     unsigned = dict(job)
     unsigned.pop("portal_signature")
     job["portal_signature"] = {"algorithm": "ed25519", "key_id": "portal-1", "value": _b64(portal.sign(canonical_json(unsigned)))}
@@ -155,6 +160,56 @@ def test_v2_job_rejects_scenario_artifact_revision_mismatch() -> None:
         assert str(exc) == "self_hosted_mcd_scenario_revision_mismatch"
     else:
         raise AssertionError("scenario and artifact revisions must be immutable together")
+
+
+def test_v21_job_requires_ordered_stage_selection() -> None:
+    portal = Ed25519PrivateKey.generate()
+    publisher = Ed25519PrivateKey.generate()
+    job, _bootstrap, _scenario, keys = _job(portal, publisher, contract_version=SELF_HOSTED_MCD_CONTRACT_VERSION)
+    job.pop("stage_selection")
+    unsigned = dict(job)
+    unsigned.pop("portal_signature")
+    job["portal_signature"] = {"algorithm": "ed25519", "key_id": "portal-1", "value": _b64(portal.sign(canonical_json(unsigned)))}
+    try:
+        verify_self_hosted_mcd_job(
+            job,
+            {"portal-1": keys["portal-1"]},
+            expected_agent_id="agent-1",
+            expected_installation_id="installation-1",
+            expected_commercial_key_id="commercial-key-1",
+            expected_host_fingerprint="sha256:" + "b" * 64,
+        )
+    except ValueError as exc:
+        assert str(exc) == "self_hosted_mcd_stage_selection_missing"
+    else:
+        raise AssertionError("v2.1 full-plan jobs must not bypass explicit stage selection")
+
+
+def test_v21_job_rejects_stage_order_and_execution_mismatch() -> None:
+    portal = Ed25519PrivateKey.generate()
+    publisher = Ed25519PrivateKey.generate()
+    job, _bootstrap, _scenario, keys = _job(portal, publisher, contract_version=SELF_HOSTED_MCD_CONTRACT_VERSION)
+    job["stage_selection"] = {"stage_id": "database_cache", "sequence": 2, "operation": "provision_database_and_cache", "depends_on": []}
+    unsigned = dict(job)
+    unsigned.pop("portal_signature")
+    job["portal_signature"] = {"algorithm": "ed25519", "key_id": "portal-1", "value": _b64(portal.sign(canonical_json(unsigned)))}
+    try:
+        verify_self_hosted_mcd_job(job, {"portal-1": keys["portal-1"]}, expected_agent_id="agent-1", expected_installation_id="installation-1", expected_commercial_key_id="commercial-key-1", expected_host_fingerprint="sha256:" + "b" * 64)
+    except ValueError as exc:
+        assert str(exc) == "self_hosted_mcd_stage_selection_order_invalid"
+    else:
+        raise AssertionError("stage dependencies must be ordered")
+    job["stage_selection"]["depends_on"] = ["base_packages"]
+    job["execution"]["stage"]["operation"] = "wrong"
+    unsigned = dict(job)
+    unsigned.pop("portal_signature")
+    job["portal_signature"] = {"algorithm": "ed25519", "key_id": "portal-1", "value": _b64(portal.sign(canonical_json(unsigned)))}
+    try:
+        verify_self_hosted_mcd_job(job, {"portal-1": keys["portal-1"]}, expected_agent_id="agent-1", expected_installation_id="installation-1", expected_commercial_key_id="commercial-key-1", expected_host_fingerprint="sha256:" + "b" * 64)
+    except ValueError as exc:
+        assert str(exc) == "self_hosted_mcd_execution_stage_mismatch"
+    else:
+        raise AssertionError("execution stage metadata must match selection")
 
 
 def test_unsigned_v2_job_is_accepted_without_portal_signing_keys() -> None:
@@ -197,15 +252,14 @@ def test_v21_registered_scenario_job_has_no_bootstrap_artifact() -> None:
     assert verified["bootstrap_artifact"] is None
 
 
-def test_v21_portal_fixture_matches_signed_cross_component_vector() -> None:
+def test_v21_portal_fixture_matches_unsigned_cross_component_vector() -> None:
     fixture_path = Path(__file__).parent / "fixtures" / "portal-self-hosted-mcd-v2.1-job.json"
     job = json.loads(fixture_path.read_text(encoding="utf-8"))
-    public_key = (fixture_path.with_suffix(".public-key")).read_text(encoding="utf-8").strip()
     expected_hash = (fixture_path.with_suffix(".sha256")).read_text(encoding="utf-8").strip()
 
     verified = verify_self_hosted_mcd_job(
         job,
-        {job["portal_signature"]["key_id"]: public_key},
+        {},
         expected_agent_id=job["agent_id"],
         expected_installation_id=job["installation_id"],
         expected_commercial_key_id=job["commercial_key_id"],
@@ -215,6 +269,8 @@ def test_v21_portal_fixture_matches_signed_cross_component_vector() -> None:
 
     assert verified["contract_version"] == SELF_HOSTED_MCD_CONTRACT_VERSION
     assert "bootstrap_artifact" not in job
+    assert "portal_signature" not in job
+    assert "signature" not in job["scenario_artifact"]
     assert hashlib.sha256(canonical_json(job)).hexdigest() == expected_hash
 
 
@@ -473,6 +529,85 @@ def test_activated_worker_polls_and_emits_terminal_receipt_v2(monkeypatch) -> No
     )
 
 
+def test_v21_retry_with_same_artifact_pin_downloads_again_and_keeps_context_binding(monkeypatch) -> None:
+    portal_key = Ed25519PrivateKey.generate()
+    publisher_key = Ed25519PrivateKey.generate()
+    first, _bootstrap, scenario, keys = _job(portal_key, publisher_key, contract_version=SELF_HOSTED_MCD_CONTRACT_VERSION)
+    first["job_id"] = "job-first"
+    first["request_id"] = "request-first"
+    first["idempotency_key"] = "request-first:scenario-r1"
+    first["parameters"] = {"context_binding": "job-first:portal-ubuntu-24-04:scenario-r1"}
+    first["command_id"] = "mcd_command_job-first"
+    first["delivery_cursor"] = 6
+    second = copy.deepcopy(first)
+    second["job_id"] = "job-second"
+    second["request_id"] = "request-second"
+    second["idempotency_key"] = "request-second:scenario-r1"
+    second["command_id"] = "mcd_command_job-second"
+    second["delivery_cursor"] = 7
+    second["parameters"] = {"context_binding": "job-second:portal-ubuntu-24-04:scenario-r1"}
+
+    class Portal:
+        def __init__(self) -> None:
+            self.jobs = [first, second]
+            self.receipts: list[dict[str, object]] = []
+            self.downloads = 0
+
+        def pull_job(self, **_: object):
+            job = self.jobs.pop(0) if self.jobs else None
+            return {"cursor": str(job["delivery_cursor"] if job else 7), "job": job} if job else None
+
+        def send_receipt(self, receipt: dict[str, object], **_: object):
+            self.receipts.append(receipt)
+            return {}
+
+    with TemporaryDirectory() as directory:
+        state = CommercialState(str(Path(directory) / "commercial.sqlite"))
+        executor = SelfHostedScenarioExecutor(
+            state,
+            facts_reader=lambda **_: first["applicability"]["facts"],
+            runner=lambda **_: {"status": "succeeded"},
+        )
+        portal = Portal()
+
+        def download(uri: str, expected_size: int) -> bytes:
+            portal.downloads += 1
+            assert uri == first["scenario_artifact"]["artifact_uri"]
+            assert expected_size == len(scenario)
+            return scenario
+
+        monkeypatch.setattr("mcd_agent.commercial_self_hosted.download_external_artifact", download)
+        worker = SelfHostedPortalWorker(
+            portal,
+            executor,
+            installation_id="installation-1",
+            portal_keys={"portal-1": keys["portal-1"]},
+            publisher_keys={"publisher-1": keys["publisher-1"]},
+            context={},
+            commercial_key_id="commercial-key-1",
+            agent_id="agent-1",
+            host_fingerprint="sha256:" + "b" * 64,
+        )
+
+        assert worker.run_once() == {"status": "succeeded", "job_id": "job-first"}
+        assert worker.run_once() == {"status": "succeeded", "job_id": "job-second"}
+        assert portal.downloads == 2
+        assert [receipt["job_id"] for receipt in portal.receipts if receipt["schema"] == "mcd-self-hosted-terminal-receipt-v2"] == ["job-first", "job-second"]
+
+
+def test_artifact_download_failure_receipt_keeps_bounded_failure_class() -> None:
+    error = _artifact_download_failure(ValueError("self_hosted_mcd_artifact_uri_invalid"))
+    assert isinstance(error, RunnerExecutionError)
+    assert error.code == "self_hosted_mcd_artifact_unavailable"
+    assert error.evidence == {"stage": "artifact_download", "failure_class": "pre_request_validation", "cause_code": "self_hosted_mcd_artifact_uri_invalid"}
+
+    http = _artifact_download_failure(CommercialPortalError(stage="artifact.download", code="commercial_artifact_http_503", http_status=503, retryable=True))
+    assert http.evidence == {"stage": "artifact_download", "failure_class": "http", "cause_code": "commercial_artifact_http_503", "http_status": 503}
+
+    size = _artifact_download_failure(CommercialPortalError(stage="artifact.download", code="self_hosted_mcd_artifact_size_mismatch"))
+    assert size.evidence == {"stage": "artifact_download", "failure_class": "digest_or_size", "cause_code": "self_hosted_mcd_artifact_size_mismatch"}
+
+
 def test_v2_external_artifact_execution_has_exact_binding_and_no_handlers() -> None:
     portal = Ed25519PrivateKey.generate()
     publisher = Ed25519PrivateKey.generate()
@@ -560,6 +695,67 @@ def test_v2_distinct_recovery_command_executes_once_per_command_identity() -> No
         assert retry["sequence"] == 6
         assert replay == retry
         assert calls == 2
+
+
+def test_v2_requeue_requires_exact_durable_terminal_binding() -> None:
+    portal = Ed25519PrivateKey.generate()
+    publisher = Ed25519PrivateKey.generate()
+    job, bootstrap, scenario, keys = _job(portal, publisher)
+    with TemporaryDirectory() as directory:
+        state = CommercialState(str(Path(directory) / "commercial.sqlite"))
+        executor = SelfHostedScenarioExecutor(
+            state,
+            facts_reader=lambda **_: job["applicability"]["facts"],
+            runner=lambda **_: {"status": "succeeded"},
+        )
+        terminal = executor.run(
+            job,
+            portal_keys={"portal-1": keys["portal-1"]},
+            publisher_keys={"publisher-1": keys["publisher-1"]},
+            context={},
+            expected_agent_id="agent-1",
+            expected_installation_id="installation-1",
+            expected_commercial_key_id="commercial-key-1",
+            expected_host_fingerprint="sha256:" + "b" * 64,
+            bootstrap_artifact=bootstrap,
+            scenario_artifact=scenario,
+            execution_key="mcd_command_job-1_retry_3:11",
+        )
+        worker = SelfHostedPortalWorker(
+            object(),
+            executor,
+            installation_id="installation-1",
+            portal_keys={"portal-1": keys["portal-1"]},
+            publisher_keys={"publisher-1": keys["publisher-1"]},
+            context={},
+            commercial_key_id="commercial-key-1",
+            agent_id="agent-1",
+            host_fingerprint="sha256:" + "b" * 64,
+        )
+        digest = hashlib.sha256(canonical_json(terminal)).hexdigest()
+        queued = worker.requeue_durable_terminal_receipt(
+            job_id="job-1",
+            command_id="mcd_command_job-1_retry_3",
+            delivery_cursor=11,
+            sequence=int(terminal["sequence"]),
+            idempotency_key=str(terminal["idempotency_key"]),
+            payload_sha256=digest,
+        )
+        assert queued["status"] == "queued"
+        assert state.get("commercial_self_hosted_pending_receipts") == [terminal]
+        try:
+            worker.requeue_durable_terminal_receipt(
+                job_id="job-1",
+                command_id="mcd_command_job-1_retry_3",
+                delivery_cursor=11,
+                sequence=int(terminal["sequence"]),
+                idempotency_key=str(terminal["idempotency_key"]),
+                payload_sha256="0" * 64,
+            )
+        except ValueError as exc:
+            assert str(exc) == "self_hosted_mcd_recovery_payload_mismatch"
+        else:
+            raise AssertionError("recovery must reject a mismatched durable payload digest")
 
 
 def test_v2_recovery_identity_is_derived_from_verified_command_when_cursor_is_text() -> None:
@@ -682,6 +878,17 @@ def test_v2_runner_failure_persists_bounded_evidence_and_replays_without_rerun()
                 "stderr_truncated": False,
                 "stderr_preview": "error",
             },
+            result={
+                "schema": "mcd-self-hosted-executable-output-v1",
+                "contract_version": "1.0",
+                "frame_type": "result",
+                "status": "failed",
+                "exit_code": 23,
+                "completed": 2,
+                "total": 6,
+                "rollback": "not_attempted",
+                "error_code": "mariadb_version_mismatch",
+            },
         )
 
     with TemporaryDirectory() as directory:
@@ -706,6 +913,9 @@ def test_v2_runner_failure_persists_bounded_evidence_and_replays_without_rerun()
         assert terminal["status"] == "failed"
         assert terminal["runner_evidence"]["exit_code"] == 23
         assert terminal["error"]["runner_evidence"]["stderr_preview"] == "error"
+        assert terminal["result"]["completed"] == 2
+        assert terminal["result"]["total"] == 6
+        assert terminal["result"]["runner"]["error_code"] == "mariadb_version_mismatch"
         saved = executor._load("job-1")
         assert saved["runner_evidence"]["stderr_bytes"] == 5
         replay = executor.run(
@@ -1026,7 +1236,7 @@ def test_v2_receipts_queue_in_order_across_portal_outage_and_restart(monkeypatch
         assert [receipt["sequence"] for receipt in fake.receipts[:2]] == [1, 2]
 
 
-def test_v2_drain_reconciles_receipts_already_advanced_on_portal() -> None:
+def test_v2_drain_retains_receipt_on_portal_sequence_regression() -> None:
     portal = Ed25519PrivateKey.generate()
     publisher = Ed25519PrivateKey.generate()
     job, _bootstrap, _scenario, keys = _job(portal, publisher)
@@ -1070,6 +1280,14 @@ def test_v2_drain_reconciles_receipts_already_advanced_on_portal() -> None:
             host_fingerprint="sha256:" + "b" * 64,
         )
 
-        assert worker._drain() is True
-        assert state.get("commercial_self_hosted_pending_receipts") == []
-        assert state.get("commercial_self_hosted_pending_delivery_v1") is None
+        assert worker._drain() is False
+        pending = state.get("commercial_self_hosted_pending_receipts")
+        assert isinstance(pending, list)
+        assert [item["idempotency_key"] for item in pending] == [
+            "job-1:scenario_dispatch:1",
+            "job-1:execution:2",
+            "job-1:terminal:3",
+        ]
+        assert state.get("commercial_self_hosted_pending_delivery_v1") is not None
+        assert state.get("commercial_portal_cursor") is None
+        assert worker.client.calls == 1

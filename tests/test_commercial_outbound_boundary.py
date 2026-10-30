@@ -11,8 +11,11 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from mcd_agent.commercial_portal import (
     PORTAL_MCD_POLL_REQUEST_SCHEMA,
+    CommercialPortalError,
     CommercialState,
     PortalClient,
+    _IPv4HTTPSConnection,
+    _create_ipv4_connection,
     build_standalone_settings_snapshot,
     build_portal_mcd_poll_request,
     canonical_json,
@@ -313,6 +316,77 @@ def test_portal_client_accepts_unsigned_poll_and_does_not_read_signing_state(tmp
     assert state.get("portal_job_signing_keys") is None
 
 
+def test_poll_response_validation_is_typed_and_bounded(tmp_path):
+    state = CommercialState(str(tmp_path / "commercial.sqlite"))
+    state.put("portal_api_base", "https://portal.example/api/v1/commercial")
+    state.put("portal_agent_credential", "credential")
+    state.put("agent_id", "agent-1")
+    state.put("host_fingerprint", "sha256:" + "a" * 64)
+    state.put("commercial_key_id", "commercial-key-1")
+    client = PortalClient(state)
+
+    def fake_request(_method, _path, payload, idempotency_key):
+        return {
+            "schema": "portal-mcd-poll-response-v1",
+            "contract_version": "1.0",
+            "request_id": payload["request_id"],
+            "idempotency_key": idempotency_key,
+            "binding": {**payload["binding"], "installation_id": "wrong-installation"},
+            "next_cursor": "cursor-10",
+            "commands": [],
+            "retry_after_ms": 0,
+        }
+
+    client._request = fake_request
+    with pytest.raises(CommercialPortalError) as raised:
+        client.pull_job(installation_id="installation-1", cursor="9", wait_seconds=30)
+    assert raised.value.stage == "poll.response_validation"
+    assert raised.value.code == "portal_mcd_poll_response_binding_mismatch"
+    assert raised.value.retryable is False
+    assert state.get("commercial_portal_poll_request")["cursor"] == "9"
+
+
+def test_worker_persists_typed_poll_diagnostic(tmp_path):
+    class Portal:
+        def pull_job(self, **_kwargs):
+            raise CommercialPortalError(
+                stage="poll.response_validation",
+                code="portal_mcd_poll_response_binding_mismatch",
+                retryable=False,
+            )
+
+    worker, state, _executor = _worker(tmp_path, Portal(), _Clock())
+    assert worker.run_once() == {"status": "backoff", "retry_after": 101.0}
+    assert state.get("commercial_portal_transport_v1")["last_error"] == "job_poll:portal_mcd_poll_response_binding_mismatch"
+
+
+def test_portal_https_transport_forces_ipv4_and_keeps_hostname_for_sni(monkeypatch):
+    seen = {}
+
+    class FakeSocket:
+        def settimeout(self, value):
+            seen["timeout"] = value
+
+        def connect(self, sockaddr):
+            seen["sockaddr"] = sockaddr
+
+        def close(self):
+            seen["closed"] = True
+
+    def fake_getaddrinfo(host, port, family, socktype):
+        seen["resolve"] = (host, port, family, socktype)
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.0.2.10", port))]
+
+    monkeypatch.setattr("mcd_agent.commercial_portal.socket.getaddrinfo", fake_getaddrinfo)
+    monkeypatch.setattr("mcd_agent.commercial_portal.socket.socket", lambda family, socktype, proto: FakeSocket())
+    sock = _create_ipv4_connection(("portal.example", 443), timeout=5)
+    assert seen["resolve"] == ("portal.example", 443, socket.AF_INET, socket.SOCK_STREAM)
+    assert seen["sockaddr"] == ("192.0.2.10", 443)
+    connection = _IPv4HTTPSConnection("portal.example", 443)
+    assert connection.host == "portal.example"
+    assert connection._create_connection is _create_ipv4_connection
+
+
 def test_stage2_adoption_and_batch_commands_are_durable_and_ordered(tmp_path):
     clock = _Clock()
     etag = "sha256:" + "a" * 64
@@ -609,7 +683,8 @@ def test_inventory_revision_ignores_transport_fields_and_bumps_once_per_durable_
     restarted.inventory_provider = lambda _installation: dict(current["value"])
     assert restarted.run_once()["status"] == "idle"
     assert restarted_state.get("commercial_inventory_state_v1")["installations"]["installation-1"]["snapshot_revision"] == 2
-    assert len(portal.inventories) == 2
+    assert len(portal.inventories) == 3
+    assert portal.inventories[-1]["snapshot_revision"] == "2"
 
 
 def test_inventory_revision_changes_for_settings_and_instances_and_replays_same_revision_after_outage(tmp_path):

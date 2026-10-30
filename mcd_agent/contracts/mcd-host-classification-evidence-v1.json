@@ -1,0 +1,22 @@
+{
+  "schema": "mcd-host-classification-evidence-v1",
+  "contract_version": "1.0",
+  "purpose": "Read-only evidence for the MCD-emitted host target_kind.",
+  "probes": {
+    "required": ["mautic_installation", "web_server", "database", "cache", "php_runtime"],
+    "probe_fields": ["installed", "active", "markers"],
+    "marker_semantics": "Markers are bounded, secret-free names of observed binaries, paths or active services. mcd.service is excluded and is never a positive marker."
+  },
+  "classification": {
+    "default": "existing_server",
+    "new_server": "Allowed only when all five probes have installed=false and active=false, including no Mautic installation and no web, database, cache or PHP runtime stack.",
+    "existing_server": "Used when any probe reports an installed or active marker.",
+    "reason_field": "classification_reason",
+    "evidence_field": "classification_evidence"
+  },
+  "ownership": {
+    "mcd": ["bounded read-only probes", "target_kind", "classification_reason", "classification_evidence", "facts_digest"],
+    "portal": ["scenario applicability policy"],
+    "prohibited": ["host mutation", "package removal", "service stop", "signature", "public key", "trust store"]
+  }
+}

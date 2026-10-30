@@ -31,16 +31,11 @@
     "artifact_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     "artifact_size_bytes": 24,
     "artifact_media_type": "application/json",
-    "artifact_revision": "3.0.0",
-    "signature": {"algorithm": "ed25519", "key_id": "fixture-scenario-artifact", "value": "fixture-scenario-signature"}
+    "artifact_revision": "3.0.0"
   },
-  "execution": {"primitive": "scenario.apply", "version": "1.0"},
+  "execution": {"primitive": "scenario.apply", "version": "1.0", "stage": {"stage_id": "base_packages", "sequence": 1, "operation": "ensure_supported_base_packages"}},
+  "stage_selection": {"stage_id": "base_packages", "sequence": 1, "operation": "ensure_supported_base_packages", "depends_on": []},
   "issued_at": "2099-10-26T00:00:00.000Z",
   "expires_at": "2099-10-26T01:00:00.000Z",
-  "nonce": "fixture-nonce-v21",
-  "portal_signature": {
-    "algorithm": "ed25519",
-    "key_id": "portal-self-hosted-mcd-v2.1-fixture",
-    "value": "k3h_Iv5Neb1Gf6vmbpnB6hUtxsJskh6bcs1yq8TY12waeiu_Jp01MH7z_i-HuePj-dPs4YOBQAI0xWMfkLtLBQ"
-  }
+  "nonce": "fixture-nonce-v21"
 }

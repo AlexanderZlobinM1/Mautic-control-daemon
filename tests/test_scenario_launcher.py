@@ -330,6 +330,19 @@ def test_policy_accepts_canonical_progress_and_terminal_frames(tmp_path: Path) -
     assert result["runner_evidence"]["stderr_bytes"] == 0
 
 
+def test_policy_preserves_typed_failed_result_on_nonzero_exit(tmp_path: Path) -> None:
+    runner = _runner_script(
+        tmp_path,
+        "import json, struct; sys.stdin.buffer.read(); frame={'schema':'mcd-self-hosted-executable-output-v1','contract_version':'1.0','frame_type':'result','status':'failed','exit_code':1,'completed':2,'total':6,'rollback':'not_attempted','error_code':'mariadb_version_mismatch'}; payload=json.dumps(frame, separators=(',',':'), sort_keys=True).encode(); sys.stdout.buffer.write(struct.pack('!I', len(payload)) + payload); sys.exit(1)",
+    )
+    with pytest.raises(RunnerExecutionError) as raised:
+        _run_policy(runner)
+    assert raised.value.code == "mariadb_version_mismatch"
+    assert raised.value.result["completed"] == 2
+    assert raised.value.result["total"] == 6
+    assert raised.value.evidence["runner_result"]["error_code"] == "mariadb_version_mismatch"
+
+
 def test_policy_timeout_terminates_process_group(tmp_path: Path) -> None:
     runner = _runner_script(tmp_path, "sys.stdin.buffer.read(); time.sleep(3)")
     Path(runner).write_text(f"#!{sys.executable}\nimport sys, time\nsys.stdin.buffer.read(); time.sleep(3)\n", encoding="utf-8")

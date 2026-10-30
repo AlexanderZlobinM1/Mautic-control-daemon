@@ -119,7 +119,7 @@ def test_all_portal_http_requests_use_product_user_agent(monkeypatch, tmp_path):
         requests.append(req)
         return Response()
 
-    monkeypatch.setattr("mcd_agent.commercial_portal.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("mcd_agent.commercial_portal._portal_urlopen", fake_urlopen)
     state = CommercialState(str(tmp_path / "state.sqlite"))
     state.put("portal_api_base", "https://portal.example/api/v1/commercial")
     state.put("portal_agent_credential", "credential")
@@ -193,7 +193,7 @@ def test_activation_failures_are_typed_and_secret_free(monkeypatch, tmp_path, fa
     def fail_urlopen(_req, **_kwargs):
         raise failure
 
-    monkeypatch.setattr("mcd_agent.commercial_portal.request.urlopen", fail_urlopen)
+    monkeypatch.setattr("mcd_agent.commercial_portal._portal_urlopen", fail_urlopen)
     state = CommercialState(str(tmp_path / "state.sqlite"))
     client = PortalClient(state)
 
@@ -221,7 +221,7 @@ def test_portal_error_code_is_preserved_for_durable_receipt_reconciliation(monke
             io.BytesIO(b'{"schema":"portal-error-v1","code":"receipt_sequence_regression"}'),
         )
 
-    monkeypatch.setattr("mcd_agent.commercial_portal.request.urlopen", fail_urlopen)
+    monkeypatch.setattr("mcd_agent.commercial_portal._portal_urlopen", fail_urlopen)
     state = CommercialState(str(tmp_path / "state.sqlite"))
     state.put("portal_api_base", "https://portal.example/api/v1/commercial")
     state.put("portal_agent_credential", "credential")
@@ -292,6 +292,57 @@ def test_installation_registration_defaults_to_passive_and_binds_agent():
         assert captured["idempotency_key"] == first_key
         with pytest.raises(ValueError, match="commercial_installation_idempotency_conflict"):
             client.register_installation(local_identity="local-1", display_name="Changed", mautic_version="7.2.1", application_root_fingerprint="sha256:" + "a" * 64)
+
+
+def test_host_registration_precedes_mautic_and_persists_only_host_binding():
+    with tempfile.TemporaryDirectory() as td:
+        state = CommercialState(str(Path(td) / "state.sqlite"))
+        state.put("portal_api_base", "https://portal.invalid/api/v1/commercial")
+        state.put("portal_agent_credential", "credential")
+        state.put("agent_id", "agent-1")
+        captured = {}
+        client = PortalClient(state)
+
+        def fake_request(method, path, payload, idempotency_key):
+            captured.update({"method": method, "path": path, "payload": payload, "idempotency_key": idempotency_key})
+            return {
+                "schema": "portal-mcd-host-register-response-v1",
+                "contract_version": "1.0",
+                "registration_kind": "host",
+                "installation": {
+                    "id": "host-1",
+                    "agent_id": "agent-1",
+                    "local_identity": "mautic.zlobin.com",
+                    "display_name": "mautic.zlobin.com",
+                    "status": "passive",
+                },
+                "connection": {"status": "active", "channel_contract": "1.0", "last_inventory_revision": None},
+            }
+
+        client._request = fake_request
+        result = client.register_host(local_identity="mautic.zlobin.com", display_name="mautic.zlobin.com")
+        assert result["installation"]["id"] == "host-1"
+        assert captured["method"] == "POST"
+        assert captured["path"] == "agents/agent-1/installations"
+        assert captured["payload"] == {
+            "schema": "portal-mcd-host-register-request-v1",
+            "contract_version": "1.0",
+            "registration_kind": "host",
+            "idempotency_key": captured["idempotency_key"],
+            "host": {"local_identity": "mautic.zlobin.com", "display_name": "mautic.zlobin.com"},
+        }
+        assert state.get("installation_ids") == {"mautic.zlobin.com": "host-1"}
+        assert state.get("commercial_installation_metadata") == {
+            "mautic.zlobin.com": {
+                "registration_kind": "host",
+                "local_identity": "mautic.zlobin.com",
+                "display_name": "mautic.zlobin.com",
+            }
+        }
+        client.register_host(local_identity="mautic.zlobin.com", display_name="mautic.zlobin.com")
+        assert captured["idempotency_key"] == state.get("host_registration_requests")["mautic.zlobin.com"]["idempotency_key"]
+        with pytest.raises(ValueError, match="commercial_host_registration_idempotency_conflict"):
+            client.register_host(local_identity="mautic.zlobin.com", display_name="Changed")
 
 
 def test_usage_contract_signs_exact_payload_and_reuses_sample_id():
