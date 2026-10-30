@@ -160,7 +160,7 @@ from mcd_agent.mode import (
     profile_status,
     reconcile_managed_cron,
 )
-from mcd_agent.nginx_baseline import ensure_nginx_baseline
+from mcd_agent.nginx_baseline import default_stub_operation, ensure_nginx_baseline
 from mcd_agent.plugins import run_plugins_interactive
 from mcd_agent.plugin_operations import (
     effective_values,
@@ -1657,6 +1657,11 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="cmd", required=False)
     default_cfg = _default_config_path()
 
+    nginx_baseline = sub.add_parser("nginx-baseline", help="Manage only the MCD-owned nginx default stub")
+    nginx_baseline.add_argument("component", choices=["default-stub"])
+    nginx_baseline.add_argument("op", choices=["status", "apply"], nargs="?", default="status")
+    nginx_baseline.add_argument("--json", action="store_true")
+
     health = sub.add_parser("health", help="Print agent health")
     health.add_argument("--json", action="store_true")
 
@@ -2414,6 +2419,11 @@ def main() -> int:
         if note:
             print(f"NOTICE: {note}")
         return _run_interactive_hub(cfg, None, False)
+
+    if args.cmd == "nginx-baseline":
+        payload = default_stub_operation(apply=args.op == "apply")
+        print(json.dumps(payload, ensure_ascii=True, indent=2))
+        return 0 if payload.get("status") in {"ok", "drift"} else 1
 
     if args.cmd == "health":
         versions = agent_version_payload()

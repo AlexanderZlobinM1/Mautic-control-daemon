@@ -1183,6 +1183,19 @@ Instance deletion never creates, repairs or rewrites this stub or another
 vhost. A broken shared default therefore blocks deletion until its own normal
 baseline operation repairs it; deletion must not hide that fault.
 
+The supported narrow baseline-owner operation is
+`mcd-cli nginx-baseline default-stub status|apply --json`. Status is read-only;
+apply writes only the existing managed default stub (or creates a missing stub)
+using its generator, validates nginx, then reloads. It never runs the full
+baseline, apt postchecks, instance configuration or deletion. Unmanaged files
+and symlinks are refused. Atomic replacement preserves file permissions/owner,
+retains a backup, and restores only this file on validation/reload failure.
+Concurrent edits are preserved rather than overwritten by rollback. An
+unchanged repeat validates without reloading. The receipt distinguishes real
+validation, reload, rollback and an inactive-service reload skip.
+Evidence: `test_default_stub_operation` covers these boundaries, standalone CLI
+routing, neighbors remaining byte/mtime-identical, and failures/replay.
+
 Evidence: test_instance_delete_nginx_transaction covers aliases, quoted and
 inline names, shared-config refusal, rollback, untouched defaults/other vhosts,
 remaining certificate references and pre-mutation failure. Native Ubuntu nginx
