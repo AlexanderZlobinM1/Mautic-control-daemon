@@ -7619,14 +7619,44 @@ def _sync_and_publish_form_embed_status(
             {"form_embed_instance_status": observed if isinstance(observed, dict) else {}},
             merge=True,
         )
-        if str(pushed.get("status", "")).lower() != "ok":
+        if str(pushed.get("status", "")).lower() not in {"ok", "disabled"}:
             logging.warning("form embed status push failed (%s): %s", reason, pushed.get("reason", "unknown"))
             return False
         logging.info("form embed status reconciled and published (%s)", reason)
-        return True
+        return (
+            result.get("status", "ok") == "ok"
+            and bool(observed)
+            and all(isinstance(row, dict) and row.get("status") == "applied" for row in observed.values())
+        )
     except Exception as e:
         logging.warning("form embed settings sync failed (%s): %s", reason, e)
         return False
+
+
+def _reconcile_form_embed_runtime(
+    config: AgentConfig,
+    installs: list[object] | None,
+    state: dict[str, object],
+    *,
+    now: float,
+    force: bool = False,
+) -> None:
+    """Apply effective policy independently of desired-state acknowledgements."""
+    settings = getattr(config, "form_embed_instance_settings", {})
+    if not isinstance(settings, dict) or not settings:
+        state.clear()
+        return
+    inventory = sorted(
+        (str(getattr(inst, "instance_uid", "") or ""), str(getattr(inst, "root", "") or ""), str(getattr(inst, "name", "") or ""))
+        for inst in installs or []
+    )
+    fingerprint = overrides_fingerprint({"settings": settings, "inventory": inventory})
+    if not force and state.get("fingerprint") == fingerprint:
+        if state.get("complete") or now < float(state.get("retry_at", 0)):
+            return
+    complete = _sync_and_publish_form_embed_status(config, installs, reason="effective_runtime")
+    interval = max(15, min(300, int(getattr(config, "mcc_push_interval_sec", 0) or getattr(config, "poll_interval_sec", 60) or 60)))
+    state.update(fingerprint=fingerprint, complete=complete, retry_at=now + interval)
 
 
 def _to_int_list(value: object) -> list[int]:
@@ -17369,7 +17399,8 @@ def run_loop(
         evidence.update(_import_path_liveness_signal(task.root, task.command_str))
         return evidence
 
-    _sync_and_publish_form_embed_status(config, installs, reason="startup")
+    form_embed_reconcile_state: dict[str, object] = {}
+    _reconcile_form_embed_runtime(config, installs, form_embed_reconcile_state, now=time.time(), force=True)
     retired_zabbix_probe = retire_zabbix_mautic_version_userparameter()
     if bool(retired_zabbix_probe.get("changed", False)):
         logging.info("retired per-instance Zabbix mautic.version probe")
@@ -17488,6 +17519,7 @@ def run_loop(
     next_inventory_auto_rescan_at = time.time() + min(300, max(60, int(getattr(config, "poll_interval_sec", 60) or 60)))
     last_inventory_signature = ""
     runtime_overrides_sync_requested = False
+    form_embed_reconcile_requested = False
     local_runtime_push_pending = _read_local_runtime_push_pending(store) is not None
     # Always perform an initial runtime-overrides sync after daemon start/restart.
     # This is required even when periodic polling is disabled to avoid running
@@ -20205,7 +20237,7 @@ def run_loop(
                         15,
                         min(300, int(config.mcc_push_interval_sec or config.poll_interval_sec or 60)),
                     )
-                    _sync_and_publish_form_embed_status(config, installs, reason="local_runtime_push")
+                    form_embed_reconcile_requested = True
                 elif p_status == "conflict":
                     if v3_conflict_handled:
                         local_runtime_push_pending = False
@@ -20236,6 +20268,7 @@ def run_loop(
             local_runtime_push_pending = False
 
         if consume_poll_trigger(config):
+            form_embed_reconcile_requested = True
             runtime_overrides_sync_requested = True
             next_runtime_overrides_poll_at = 0.0
             logging.info("runtime-overrides poll trigger consumed: immediate MCC sync requested")
@@ -20666,6 +20699,14 @@ def run_loop(
                 next_runtime_overrides_poll_at = now + max(30, poll_interval)
             if status not in {"deferred_local_delta", "deferred_remote_stale"}:
                 runtime_overrides_sync_requested = False
+
+        # Reconcile the effective config after LWW adoption, including a
+        # no-change trigger. ACK/network failures cannot gate local effects.
+        _reconcile_form_embed_runtime(
+            config, installs, form_embed_reconcile_state,
+            now=now, force=form_embed_reconcile_requested,
+        )
+        form_embed_reconcile_requested = False
 
         if now >= next_backup_profile_sync_at:
             try:
