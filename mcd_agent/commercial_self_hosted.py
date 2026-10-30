@@ -1491,19 +1491,46 @@ class SelfHostedPortalWorker:
             return validate_generic_terminal_receipt(payload)
         return validate_generic_stage_receipt(payload)
 
+    def _terminalize_generic_failure(self, job: Mapping[str, Any], *, cursor_next: str, reason: str) -> dict[str, Any]:
+        """Close a leased, valid generic job when admission cannot proceed."""
+        job_id = str(job["job_id"])
+        digest = hashlib.sha256(canonical_json(dict(job))).hexdigest()
+        terminal = self._generic_receipt(
+            job,
+            terminal=True,
+            sequence=1,
+            status="failed",
+            error={"code": reason, "message": reason},
+        )
+        runs = self.executor.state.get(_GENERIC_RUNS_KEY)
+        runs = dict(runs) if isinstance(runs, Mapping) else {}
+        runs[job_id] = {"job_digest": digest, "started_sent": False, "terminal": terminal}
+        if len(runs) > 64:
+            for key in list(runs)[:-64]:
+                runs.pop(key, None)
+        self.executor.state.put(_GENERIC_RUNS_KEY, runs)
+        if not self._send_or_queue(terminal):
+            return {"status": "receipt_pending", "job_id": job_id}
+        self._finish_command(cursor_next=cursor_next)
+        return {"status": "failed", "job_id": job_id}
+
     def _run_generic_command(self, command: Mapping[str, Any], *, cursor_next: str) -> dict[str, Any]:
         """Run one advertised generic primitive with durable receipts."""
         inventories = self.executor.state.get("commercial_portal_generic_capabilities_v1")
         inventory_map = inventories if isinstance(inventories, Mapping) else {}
         inventory = inventory_map.get(str(self._active_installation_id))
-        if not isinstance(inventory, Mapping):
-            return {"status": "blocked", "reason": "commercial_capability_inventory_unavailable"}
         try:
-            job = validate_generic_command_job(command, inventory=inventory)
+            job = validate_generic_command_job(command)
         except Exception as exc:
             return {"status": "rejected", "reason": str(exc)[:120]}
         if job["installation"]["installation_id"] != str(self._active_installation_id):
-            return {"status": "rejected", "reason": "portal_mcd_generic_installation_mismatch"}
+            return self._terminalize_generic_failure(job, cursor_next=cursor_next, reason="portal_mcd_generic_installation_mismatch")
+        if not isinstance(inventory, Mapping):
+            return self._terminalize_generic_failure(job, cursor_next=cursor_next, reason="commercial_capability_inventory_unavailable")
+        try:
+            job = validate_generic_command_job(command, inventory=inventory)
+        except Exception as exc:
+            return self._terminalize_generic_failure(job, cursor_next=cursor_next, reason=str(exc)[:120])
         try:
             expires = datetime.fromisoformat(str(job["expires_at"]).replace("Z", "+00:00")).timestamp()
             issued = datetime.fromisoformat(str(job["issued_at"]).replace("Z", "+00:00")).timestamp()
