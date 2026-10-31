@@ -1,3 +1,13 @@
+## 1.6.36 - 2026-10-31
+
+- Warm the image's production cache as www-data with its selected PHP before
+  publishing the nginx vhost. This runs Doctrine's required proxy warmer after
+  imported cache removal. Warm again after optional mail configuration changes.
+- Require a real local-vhost HTTPS login response with valid TLS/SNI, HTTP 200
+  and a password form before publishing installation success. Failures use the
+  existing installation rollback; console success alone is insufficient.
+- Hold the existing shared source-operation lease during image installation.
+
 ## 1.6.35 - 2026-10-31
 
 - Fail closed before package installation when repository setup or APT refresh

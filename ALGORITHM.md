@@ -1829,3 +1829,32 @@ For example, native IPv6 policy operations are
 `/opt/mcd/venv/bin/mcd-cli env ipv6 disable --config /opt/mcd/etc/mcd.toml`
 and `env ipv6 status` with the same config. Optional `/var/www` preparation
 remains controlled by the fetched profile's `ensure_var_www` flag.
+
+### Image installation runtime acceptance
+
+Image installation removes imported var/cache and var/logs after patching local
+configuration and importing the database. It must then run the selected PHP's
+`cache:warmup --env=prod --no-debug --no-interaction` as www-data before writing
+and publishing the nginx vhost. Symfony's nonoptional Doctrine proxy warmer
+creates the proxies required when production automatic proxy generation is off.
+A nonzero ownership/prod warmup result aborts installation. Optional mail
+configuration may invalidate cache, so it is followed by another prod warmup.
+There are no cache mutations after the final warmup and verification.
+
+Before inventory rescan and status=ok, probe `https://<domain>/s/login` through
+127.0.0.1 with the actual hostname/SNI, standard CA/hostname validation, and no
+proxy/redirect/HTTP fallback. Require HTTP 200 and a password form; capture safe
+`runtime_warmup` and `runtime_verification` fields in the result. Missing/bad
+certificates, HTTP 500, redirects and generic 200 stubs fail the gate and enter
+the existing rollback transaction for this newly created installation. Even
+when certificate issuance is skipped, the HTTPS gate requires valid existing
+TLS; `--no-certbot` does not bypass readiness verification.
+
+The existing source-operation lease prevents concurrent MCD replacement during
+the operation. Inventory rescan is observational; no new discovery or scheduler
+marker layer is introduced. No concurrent cache invalidation was demonstrated
+in the failing vanila7 evidence. Tests cover warmup/publication/verification
+ordering, mail-triggered invalidation, failure rollback and inventory exclusion,
+and TLS/status/login validation. The live scenario is verified with a fresh
+explicitly authorized disposable install through the normal deployment path;
+existing failed instances are preserved as evidence rather than manually warmed.
