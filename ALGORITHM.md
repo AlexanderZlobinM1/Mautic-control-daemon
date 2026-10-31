@@ -2091,6 +2091,12 @@ public custom manifest and verified archive, generic dispatch and native PHP
 writer. Dry-run, apply and noop dictionaries exactly match the old native
 reference; dry-run preserves files/kernel, apply matches six rendered files,
 FPM validation and verified HTTPS remain healthy. Evidence is staged in
-`docs/qa/mcd-legacy-service-profile-cli-native-20261031.json`. Controlled failure
-and final canonical reset remain separate required cases; normal PASS alone
-does not authorize old-writer deletion, candidate activation or release.
+`docs/qa/mcd-legacy-service-profile-cli-native-20261031.json`. The controlled failure case also passed from a full reset: real FPM validation
+returned 78, the CLI propagated the validated failed external terminal and the
+six managed files returned to their original absent state. Kernel state and
+master PID were unchanged; verified HTTPS stayed healthy. The terminal retains
+the existing `rollback=not_attempted` summary, while native file restoration is
+independently observed; this transfer does not invent a new rollback claim.
+Canonical full reset is mandatory after the retained invalid test fixture.
+Operator-override native proof and reset remain required before old-writer
+deletion, candidate activation or release.

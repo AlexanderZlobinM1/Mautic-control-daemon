@@ -1,5 +1,5 @@
 {
-  "status": "normal-pass-negative-pending",
+  "status": "normal-and-negative-pass-reset-pending",
   "scope": "legacy service-profile CLI real HTTPS isolated MCC API/public catalog/native external recipe; not release or activation",
   "normal": {
     "scope": "actual installed legacy CLI through owner isolated real MCC HTTP API; no mocked fetch/process/downloader",
@@ -187,8 +187,61 @@
   },
   "mcc_catalog_source_commit": "2d2a55e27410ca00ffd76739b17ffc4897dbf413",
   "normal_installed_module_source_verification": "5 dispatch/CLI modules independently matched committed R7 source",
-  "negative": "pending canonical full reset and R7 reinstall",
-  "final_reset": "pending after negative case",
+  "negative": {
+    "scope": "actual installed legacy CLI through owner isolated real MCC HTTP API; no mocked fetch/process/downloader",
+    "before_files": {
+      "/etc/php/8.5/fpm/pool.d/zz-mcd-hw.conf": null,
+      "/etc/php/8.5/fpm/conf.d/99-mcd-hw.ini": null,
+      "/etc/php/8.5/cli/conf.d/99-mcd-hw.ini": null,
+      "/etc/sysctl.d/99-mcd-hw.conf": null,
+      "/etc/php/8.5/fpm/conf.d/90-redis-sessions.ini": null,
+      "/etc/php/8.5/cli/conf.d/90-redis-sessions.ini": null
+    },
+    "before_health": {
+      "https": 200,
+      "tls_verify": 0,
+      "services": {
+        "php8.5-fpm": "active",
+        "nginx": "active",
+        "mariadb": "active",
+        "mcd": "inactive"
+      }
+    },
+    "before_kernel": 4096,
+    "activation": false,
+    "canonical_full_reset_required": true,
+    "status": "PASS",
+    "mode": "negative",
+    "cli_exit_code": 1,
+    "files_restored": true,
+    "kernel_unchanged": true,
+    "master_pid_unchanged": true,
+    "fault_fixture_sha256": "d05f1355789f48c8c0a603ad45e4940a979d2a926edabfc5adccd57c41cbbbe0",
+    "after_health": {
+      "https": 200,
+      "tls_verify": 0,
+      "services": {
+        "php8.5-fpm": "active",
+        "nginx": "active",
+        "mariadb": "active",
+        "mcd": "inactive"
+      }
+    },
+    "actual_validated_external_terminal": {
+      "completed": 0,
+      "contract_version": "1.0",
+      "error_code": "external_install_failed",
+      "exit_code": 1,
+      "frame_type": "result",
+      "rollback": "not_attempted",
+      "schema": "mcd-self-hosted-executable-output-v1",
+      "status": "failed",
+      "total": 1
+    },
+    "external_dispatch_failure_verified": true,
+    "native_fpm_validation_exit_code": 78
+  },
+  "final_reset": "canonical full reset requested after negative; next isolated operator-override case will follow",
   "raw_evidence_directory": "/Users/azlobin/.codex/admin/host-diagnostics/mcd-legacy-profile-cli-native-20261031/",
   "activation": false,
   "legacy_writer_deleted": false
