@@ -480,7 +480,7 @@
       "recipe_owner": "external MCC/Portal immutable artifact and exact profile data",
       "generic_adapter": "mcd_agent/service_profile_external.py",
       "native_evidence": "docs/qa/mcd-legacy-service-profile-cli-native-20261031.json",
-      "cleanup_native_recheck": "pending"
+      "cleanup_native_recheck": "PASS: R8 ordinary CLI, active descriptor in isolated QA only, exact operator profile preserved"
     }
   ]
 }

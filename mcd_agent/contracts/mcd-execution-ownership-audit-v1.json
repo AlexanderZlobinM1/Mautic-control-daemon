@@ -239,7 +239,7 @@
   },
   "completed_recipe_components": {
     "php_system_profile": {
-      "status": "source-externalized-native-cleanup-recheck-pending",
+      "status": "source-and-native-cleanup-verified-final-reset-pending",
       "generic_dispatch_paths": [
         "mcd_agent/service_profile_external.py",
         "mcd_agent/custom_scripts.py"
@@ -251,8 +251,7 @@
       ],
       "native_evidence": "docs/qa/mcd-legacy-service-profile-cli-native-20261031.json",
       "remaining_release_gates": [
-        "canonical final reset",
-        "native CLI recheck after writer deletion",
+        "canonical final reset after R8",
         "capability-aware active binding before 1.7 release"
       ],
       "other_service_profile_recipes": "still pending; no blanket externalization claim"

@@ -2085,8 +2085,8 @@ The consumer independently admitted all 22 owner-exported live profile selection
 and matched 110 pure rendering results against the existing writer, without
 copying universal profile data into MCD. This is not native apply proof; see
 `docs/qa/mcd-php-all-live-plans-consumer-20261031.json`. Legacy CLI native
-HTTP integration still requires the isolated MCC API/DB and canonical disposable
-lease; no fabricated production host or billing identity is permitted.
+HTTPS integration has passed using the isolated MCC API/DB and canonical
+disposable lease; no fabricated production host or billing identity is permitted.
 
 
 The legacy service-profile CLI normal path has passed through the real isolated
@@ -2111,5 +2111,9 @@ three tests transferred to external-owner commit f8900b8 (seven PHP tests PASS).
 Shared `_service_exists` and `_write_file` remain because MySQL still calls them;
 MySQL and all direct Mautic/core paths retain their existing behavior. Runtime
 boundary/audit records distinguish this completed component from remaining
-recipes. A native CLI recheck of the cleaned package and final reset are still
-required before marking that cleanup accepted.
+recipes. The cleaned R8 package also passed the ordinary CLI recheck without a candidate
+flag/POST opt-in: active descriptors were enabled only in the isolated QA API.
+Installed module hashes match the cleaned commit, all 13 legacy PHP functions
+are absent, shared MySQL helpers remain, and dry-run/apply/noop preserve the exact
+operator profile and native file/service behavior. Final canonical reset after
+R8 is the remaining sandbox cleanup gate.
