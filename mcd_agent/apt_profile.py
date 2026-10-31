@@ -2706,6 +2706,35 @@ def collect_apt_state(
     }
 
 
+def _planned_apt_actions(profile: dict[str, Any]) -> list[str]:
+    """Describe policy intent without pretending disabled optional work will run."""
+    actions = ["repo_profiles", "unattended_upgrades"]
+    optional = (
+        ("remove_third_party_sources", "remove_third_party_sources", True),
+        ("dedupe_list_sources", "dedupe_list_sources", True),
+        ("refresh_cache", "apt_update", True),
+        ("repair_on_error", "repair_repos_on_error", True),
+        ("ensure_local_fqdn_hosts", "ensure_local_fqdn_hosts", True),
+        ("ensure_composer_global", "ensure_composer_global", False),
+        ("ensure_var_www", "ensure_var_www", False),
+        ("zabbix_mysql_monitor_enabled", "zabbix_mysql_monitor_bootstrap", True),
+    )
+    actions.extend(action for key, action, default in optional if _bool(profile.get(key), default))
+    packages = bool(profile.get("packages_present"))
+    upgrade = str(profile.get("upgrade_mode", "none")).strip().lower() in {"safe", "upgrade", "full", "dist", "dist-upgrade"}
+    if packages or profile.get("packages_absent") or upgrade:
+        actions.append("optional_package_ops")
+    if (packages or upgrade) and _bool(profile.get("ensure_package_services_started"), True):
+        actions.append("ensure_package_services_started")
+    if _bool(profile.get("nginx_official_stable_profile_enabled", profile.get("ensure_nginx_official_stable_repo")), False):
+        actions.append("nginx_official_stable_repo")
+    if cloudflare_real_ip_profile_present(profile):
+        actions.append("cloudflare_real_ip")
+    if _bool(profile.get("zabbix_agent_enabled"), False):
+        actions.extend(["zabbix_agent_config", "zabbix_agent_firewall"])
+    return actions
+
+
 def apply_apt_profile(
     profile: dict[str, Any],
     *,
@@ -2716,30 +2745,15 @@ def apply_apt_profile(
 ) -> dict[str, Any]:
     if profile is None:
         profile = {}
+    if _bool(profile.get("ensure_nodejs20"), False):
+        return {"status": "error", "reason": "apt_profile_legacy_node20_unsupported", "actions": [], "changed_files": []}
     if dry_run:
         current = collect_apt_state(timeout_sec=25, cfg=cfg, profile=profile, auto_bootstrap_zabbix=False)
         return {
             "status": "planned",
-            "actions": [
-                "remove_third_party_sources",
-                "dedupe_list_sources",
-                "repo_profiles",
-                "nginx_official_stable_repo",
-                "unattended_upgrades",
-                "repair_repos_on_error",
-                "apt_update",
-                "ensure_local_fqdn_hosts",
-                "optional_package_ops",
-                "ensure_package_services_started",
-                "ensure_nodejs20",
-                "ensure_composer_global",
-                "ensure_var_www",
-                "cloudflare_real_ip",
-                "zabbix_agent_repo",
-                "zabbix_agent_config",
-                "zabbix_agent_firewall",
-                "zabbix_mysql_monitor_bootstrap",
-            ],
+            "actions": _planned_apt_actions(profile),
+            "packages_present": list(profile.get("packages_present", []) or []),
+            "packages_absent": list(profile.get("packages_absent", []) or []),
             "current": current,
         }
 
@@ -2767,7 +2781,6 @@ def apply_apt_profile(
     ensure_local_fqdn_hosts = _bool(profile.get("ensure_local_fqdn_hosts"), True)
     local_fqdn_suffix = str(profile.get("local_fqdn_suffix", "localdomain") or "localdomain")
     ensure_package_services_started = _bool(profile.get("ensure_package_services_started"), True)
-    ensure_nodejs20 = _bool(profile.get("ensure_nodejs20"), False)
     ensure_composer_global = _bool(profile.get("ensure_composer_global"), False)
     ensure_var_www = _bool(profile.get("ensure_var_www"), False)
     upgrade_mode = str(profile.get("upgrade_mode", "none")).strip().lower() or "none"
@@ -2902,14 +2915,7 @@ def apply_apt_profile(
     else:
         actions.append(f"zabbix_agent:{zbx_agent_status or 'unknown'}")
 
-    if ensure_nodejs20:
-        node_changed, node_actions, node_errors = _ensure_nodejs20(timeout_sec=max(90, int(refresh_timeout_sec)))
-        actions.extend(node_actions)
-        errors.extend(node_errors)
-        if node_changed:
-            changed.append("/usr/bin/node")
-    else:
-        actions.append("nodejs20:disabled")
+    actions.append("node_runtime:unmanaged")
 
     if ensure_composer_global:
         composer_changed, composer_actions, composer_errors = _ensure_composer_global(timeout_sec=max(90, int(refresh_timeout_sec)))

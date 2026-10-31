@@ -1,3 +1,10 @@
+## 1.6.34 - 2026-10-31
+
+- Make APT dry-run optional actions reflect the fetched external policy and
+  expose its declared package lists. Reject the obsolete Node20 switch before
+  probing or changing the host. Keep the existing MCC service-profile source
+  and native apply path; no alternate local policy or hardcoded host baseline.
+
 ## 1.6.33 - 2026-10-31
 
 - Identify corporate HTTP requests with the actual versioned MCD product
