@@ -1858,3 +1858,39 @@ ordering, mail-triggered invalidation, failure rollback and inventory exclusion,
 and TLS/status/login validation. The live scenario is verified with a fresh
 explicitly authorized disposable install through the normal deployment path;
 existing failed instances are preserved as evidence rather than manually warmed.
+
+### External installation scenario boundary
+
+All installation recipes, ordering, conditions and rollback belong to external
+versioned scenario blocks and their external composition. MCD must not encode
+OS, package/repository, service, database, web, PHP, mail or Mautic installation
+steps, seed scripts or install-specific fallback branches. The legacy managed
+image installer remains only during migration until its external replacement
+has passed the normal-path scenario test; its removal is required to complete
+the migration. Its previous release history is not rewritten.
+
+Managed execution reuses `mcd-cli custom --config <path> --no-detach
+--expected-sha256 <sha256> <immutable-key> -- <declared-script-arguments>`.
+The existing custom manifest version 1 supplies key/file/sha256/run_mode and
+interactive metadata. `run_mode=direct` and `--no-detach` preserve the command's
+actual exit status and script progress/result stdout. An expected pin must be
+64 hex characters and must equal both the selected manifest SHA and downloaded
+bytes. Download into isolated staging and atomically publish only a verified,
+content-addressed file; a failed fetch or integrity check cannot replace a
+previous executable revision. CLI machine-output notices go to stderr.
+
+Only nonsecret inputs and existing local configuration/secret references are
+passed as arguments. External blocks own their progress/result JSON and
+readiness/rollback semantics. MCC owns managed block artifacts, their immutable
+manifest entries and dispatch; Operations executes/verifies the host task.
+Portal owns its OWH external composition and existing framed FD3 protocol.
+This does not add a DAG engine or convert custom stdout into the OWH protocol.
+Both routes may consume shared external blocks through their declared inputs;
+composition and protocol adaptation remain outside MCD installation code.
+
+The existing approved external scenario folder architecture must be inspected
+and reused for common/family reusable blocks plus external target descriptors.
+Do not create per-distribution/version copies when only target names or package
+and repository parameters differ. Overrides require demonstrated command or
+behavior differences. No installation artifact tree, embedded script seed or
+OS policy is added here.

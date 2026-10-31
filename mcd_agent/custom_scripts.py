@@ -7,6 +7,8 @@ import json
 import os
 from pathlib import Path
 import shlex
+import re
+import tempfile
 import shutil
 import subprocess
 import time
@@ -275,19 +277,29 @@ def _fetch_script_to_cache(config: AgentConfig, script: dict[str, Any]) -> Path:
     dl_dir = _cache_root(config) / "downloads" / key
     dl_dir.mkdir(parents=True, exist_ok=True)
     suffix = Path(file_rel).suffix or ".sh"
-    dst = dl_dir / f"{key}{suffix}"
-
     req = mcc_request(url, headers=_headers(config))
-    with urllib.request.urlopen(req, timeout=120) as resp, dst.open("wb") as f:
-        shutil.copyfileobj(resp, f)
-    os.chmod(dst, 0o755)
+    staged: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=dl_dir, prefix=".download-", delete=False) as temporary:
+            staged = Path(temporary.name)
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                shutil.copyfileobj(resp, temporary)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        got_sha = hashlib.sha256(staged.read_bytes()).hexdigest().lower()
+        if expected_sha and got_sha != expected_sha:
+            raise RuntimeError(
+                f"custom script checksum mismatch for {key}: expected={expected_sha} got={got_sha}"
+            )
+        # A revision cannot overwrite the pathname of a different running script.
+        dst = dl_dir / f"{key}-{got_sha}{suffix}"
+        os.chmod(staged, 0o755)
+        os.replace(staged, dst)
+        return dst
+    finally:
+        if staged is not None:
+            staged.unlink(missing_ok=True)
 
-    got_sha = hashlib.sha256(dst.read_bytes()).hexdigest().lower()
-    if expected_sha and got_sha != expected_sha:
-        raise RuntimeError(
-            f"custom script checksum mismatch for {key}: expected={expected_sha} got={got_sha}"
-        )
-    return dst
 
 
 def _choose_mode(config: AgentConfig, requested_mode: str, detach: bool) -> str:
@@ -367,7 +379,11 @@ def run_custom_script_by_key(
     args: list[str] | None = None,
     detach: bool | None = None,
     live_output: bool = True,
+    expected_sha256: str | None = None,
 ) -> tuple[int, str]:
+    expected = str(expected_sha256 or "").strip().lower()
+    if expected and re.fullmatch(r"[0-9a-f]{64}", expected) is None:
+        return 2, "custom expected SHA-256 is invalid"
     key = str(script_key or "").strip()
     if not key:
         return 2, "script key is required"
@@ -386,6 +402,8 @@ def run_custom_script_by_key(
     if found is None:
         return 2, f"custom script not found in manifest: {key}"
 
+    if expected and str(found.get("sha256", "")).strip().lower() != expected:
+        return 1, "custom script manifest checksum does not match the requested pin"
     try:
         script_path = _fetch_script_to_cache(config, found)
     except Exception as e:
