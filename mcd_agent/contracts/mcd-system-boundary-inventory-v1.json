@@ -25,7 +25,7 @@
         },
         {
           "path": "mcd_agent/cli.py",
-          "line": 4725
+          "line": 4786
         },
         {
           "path": "mcd_agent/commercial_primitives.py",
@@ -50,7 +50,7 @@
         },
         {
           "path": "mcd_agent/cli.py",
-          "line": 4737
+          "line": 4798
         }
       ],
       "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive"
@@ -71,7 +71,7 @@
     {
       "path": "mcd_agent/service_profiles.py",
       "function": "fetch_service_profile",
-      "line": 50,
+      "line": 48,
       "classification": "KEEP",
       "lexical_name_callers": [
         {
@@ -84,36 +84,23 @@
         },
         {
           "path": "mcd_agent/service_profiles.py",
-          "line": 99
+          "line": 79
         },
         {
           "path": "mcd_agent/service_profiles.py",
-          "line": 103
+          "line": 83
         },
         {
           "path": "mcd_agent/service_profiles.py",
-          "line": 107
+          "line": 87
         },
         {
           "path": "mcd_agent/service_profiles.py",
-          "line": 111
+          "line": 91
         },
         {
           "path": "mcd_agent/service_profiles.py",
-          "line": 742
-        }
-      ],
-      "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive"
-    },
-    {
-      "path": "mcd_agent/service_profiles.py",
-      "function": "apply_docker_profile",
-      "line": 133,
-      "classification": "EXTERNAL",
-      "lexical_name_callers": [
-        {
-          "path": "mcd_agent/service_profiles.py",
-          "line": 736
+          "line": 186
         }
       ],
       "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive"
@@ -121,7 +108,7 @@
     {
       "path": "mcd_agent/service_profiles.py",
       "function": "service_profiles_apply_once",
-      "line": 230,
+      "line": 160,
       "classification": "SPLIT",
       "lexical_name_callers": [
         {
@@ -221,7 +208,7 @@
         },
         {
           "path": "mcd_agent/cli.py",
-          "line": 3390
+          "line": 3434
         }
       ],
       "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive",
@@ -315,11 +302,11 @@
       "lexical_name_callers": [
         {
           "path": "mcd_agent/cli.py",
-          "line": 3500
+          "line": 3561
         },
         {
           "path": "mcd_agent/cli.py",
-          "line": 3489
+          "line": 3550
         }
       ],
       "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive"
@@ -375,7 +362,7 @@
       "lexical_name_callers": [
         {
           "path": "mcd_agent/custom_scripts.py",
-          "line": 459
+          "line": 503
         }
       ],
       "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive"
@@ -388,7 +375,7 @@
       "lexical_name_callers": [
         {
           "path": "mcd_agent/custom_scripts.py",
-          "line": 477
+          "line": 523
         }
       ],
       "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive"
@@ -400,12 +387,16 @@
       "classification": "KEEP",
       "lexical_name_callers": [
         {
-          "path": "mcd_agent/cli.py",
-          "line": 1335
+          "path": "mcd_agent/service_profile_external.py",
+          "line": 92
         },
         {
           "path": "mcd_agent/cli.py",
-          "line": 5088
+          "line": 1358
+        },
+        {
+          "path": "mcd_agent/cli.py",
+          "line": 5149
         }
       ],
       "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive"
@@ -418,7 +409,7 @@
       "lexical_name_callers": [
         {
           "path": "mcd_agent/cli.py",
-          "line": 4457
+          "line": 4518
         }
       ],
       "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive",
@@ -432,10 +423,10 @@
       "lexical_name_callers": [
         {
           "path": "mcd_agent/service_profiles.py",
-          "line": 754
+          "line": 198
         }
       ],
-      "caller_resolution": "explicit PHP and MySQL generic dispatch; no builtin writer/fallback"
+      "caller_resolution": "explicit PHP/MySQL/Docker generic dispatch; no builtin writer/fallback"
     }
   ],
   "native_before_after_evidence": null,
@@ -467,6 +458,18 @@
       "native_evidence": "docs/qa/mcd-mysql-generator-native-20261031.json",
       "status": "source-and-native-cleanup-verified-final-reset-clean",
       "final_reset_receipt_sha256": "2fe97f9ca999c8dc3060b2a6b0c8ac61d7f337999749f63d55d8952ee3e97e5e"
+    },
+    {
+      "component": "docker_runtime_install",
+      "removed_legacy_functions": [
+        "_docker_runtime_state",
+        "apply_docker_profile"
+      ],
+      "retired_transferred_tests": 2,
+      "status": "source-cleaned after direct and ordinary CLI proof; R12 cleaned native and final reset pending",
+      "native_evidence": "docs/qa/mcd-docker-runtime-native-20261101.json",
+      "external_archive_sha256": "803dcb3102a8eeb58f96c2b949215297edd9c74f7e96c9e7e95bbad97dc41176",
+      "daemon_installation": false
     }
   ]
 }

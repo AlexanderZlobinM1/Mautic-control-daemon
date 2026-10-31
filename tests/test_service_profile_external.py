@@ -196,7 +196,7 @@ def test_docker_public_dispatch_preserves_external_result_without_builtin_fallba
     fetched['external_handler'].update(component='docker',resolved_plan_key='universal',
         profile_input={'source':'response.profile','sha256':hashlib.sha256(b'{}').hexdigest()})
     monkeypatch.setattr(profiles,'fetch_service_profile',lambda *a,**kw:fetched)
-    monkeypatch.setattr(profiles,'apply_docker_profile',lambda **kw:pytest.fail('builtin fallback forbidden'))
+    assert not hasattr(profiles,'apply_docker_profile')
     calls=[]
     payload=raw if exit_code==0 else failed_terminal(raw)
     monkeypatch.setattr(ext,'run_custom_script_by_key',lambda *a,**kw:calls.append(kw) or (exit_code,json.dumps(payload)))
@@ -207,6 +207,6 @@ def test_docker_public_dispatch_preserves_external_result_without_builtin_fallba
 
 def test_docker_missing_descriptor_does_not_run_retained_reference_writer(monkeypatch):
     monkeypatch.setattr(profiles,'fetch_service_profile',lambda *a,**kw:{'status':'ok','component':'docker','profile':{}})
-    monkeypatch.setattr(profiles,'apply_docker_profile',lambda **kw:pytest.fail('missing descriptor cannot select builtin'))
+    assert not hasattr(profiles,'apply_docker_profile')
     with pytest.raises(ValueError,match='external_handler_missing'):
         profiles.service_profiles_apply_once(SimpleNamespace(cluster_id=None),component='docker')

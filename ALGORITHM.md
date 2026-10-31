@@ -2259,3 +2259,15 @@ Docker now uses the existing capability-aware service-profile fetch and active
 external descriptor dispatcher; no builtin fallback. The legacy two bodies
 remain reference-only until ordinary installed CLI acceptance and cleanup.
 CLI fetch retains its existing dry-run behavior; daemon exclusion is unchanged.
+
+
+Ordinary installed Docker CLI acceptance now passed through the real isolated
+MCC resolver/catalog: fetch-absent, dry-run, apply, repeat-noop, ready-dry-run
+and fetch-ready results exactly match the old native reference. Active binding
+requires no candidate opt-in; actual archive803d cache and verified health pass.
+Receipt SHA491cdbe9ef66c298574abbe1b3d41cfb3bffe2933671a9418836a57e9d36ce1f.
+The two replaced Docker bodies and unused imports are now removed, superseding
+the earlier reference-retention checkpoint. Two transferred writer tests were
+retired; owner pure tests preserve their invariants. Generic dispatcher tests
+prove success/failure/raw-result/no-fallback behavior; daemon exclusion and CLI
+fetch compatibility remain. Cleaned R12 native proof and final reset pending.

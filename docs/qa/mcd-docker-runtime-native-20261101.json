@@ -1,5 +1,5 @@
 {
-  "status": "OLD-AND-DIRECT-EXTERNAL-NATIVE-PASS; ordinary CLI and cleaned runtime pending",
+  "status": "OLD-DIRECT-AND-ORDINARY-CLI-PASS; cleaned R12 native and final reset pending",
   "scope": "explicit optional Docker runtime installation only; no Mautic Docker engine/capability/preflight changes",
   "source_reference": "19c640e74caa2c92e60e2ee87454d682525b23eb",
   "closure_sha256": "633b281270212f811d2109ea1ff09ec00baca31b089b3c3dff493a5fc3f6cea1",
@@ -39,7 +39,7 @@
     "root_order": "ready noop, dry-run planned, root guard, commands",
     "profile_values_read": false
   },
-  "old_writer_removed": false,
+  "old_writer_removed": true,
   "activation": "HOLD until complete MCD 1.7 Test/Approved",
   "next_gates": [
     "full reset after old native actor",
@@ -66,6 +66,50 @@
     "release_regression": "PASS",
     "full_regression": {
       "passed": 2006,
+      "failed": 61,
+      "skipped": 57,
+      "subtests_passed": 105,
+      "new_failure_ids": [],
+      "missing_baseline_failure_ids": []
+    }
+  },
+  "ordinary_cli_r11": {
+    "status": "PASS",
+    "receipt": "/Users/azlobin/.codex/admin/host-diagnostics/mcd-docker-runtime-native-20261101/r11-cli-positive.json",
+    "sha256": "491cdbe9ef66c298574abbe1b3d41cfb3bffe2933671a9418836a57e9d36ce1f",
+    "all_six_public_results_exact_old": true,
+    "active_without_candidate_opt_in": true,
+    "actual_artifact_cache_verified": true,
+    "health_matches": true,
+    "token_absence_checked_before_private_copy": true,
+    "installed_source_proof_sha256": "7ac41f5f9903d394056c639dfb963e6c5d4eb74e76fe00b3f6da33a66cbdb652",
+    "runtime_candidate": {
+      "scope": "UNLISTED feature-source runtime-only test fixture; NOT canonical release or 1.7.0 acceptance",
+      "wheel": "/tmp/mcd-unlisted-core-20261101-r11/mcd_agent-1.6.38-py3-none-any.whl",
+      "wheel_sha256": "e54db21005c946935cee9063347072b8b73f88c662ec284af392e3d7db78a6df",
+      "wheel_size": 1028965,
+      "archive": "/tmp/mcd-unlisted-core-20261101-r11/mcd-runtime-only-unlisted-r11.tar.gz",
+      "archive_sha256": "9fb8d1df38e41d2f2edfda3313c303548a6fe74776c14e5f7cf4f5c8dcca6e25",
+      "manifest_sha256": "7506dabfd1bc865471525f2b9bb23827754c83dd1a91632c045c56c656a15fd3",
+      "canonical_release": false,
+      "channel_publication": false,
+      "source_commit": "94ef7b09cd68d761a40feaf671665c5eba16d976"
+    }
+  },
+  "source_cleanup": {
+    "component": "docker_runtime_install",
+    "removed_legacy_functions": [
+      "_docker_runtime_state",
+      "apply_docker_profile"
+    ],
+    "retired_transferred_tests": 2,
+    "status": "source-cleaned after direct and ordinary CLI proof; R12 cleaned native and final reset pending",
+    "native_evidence": "docs/qa/mcd-docker-runtime-native-20261101.json",
+    "external_archive_sha256": "803dcb3102a8eeb58f96c2b949215297edd9c74f7e96c9e7e95bbad97dc41176",
+    "daemon_installation": false,
+    "focused_tests_passed": 45,
+    "full_regression": {
+      "passed": 2004,
       "failed": 61,
       "skipped": 57,
       "subtests_passed": 105,
