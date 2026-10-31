@@ -1,0 +1,195 @@
+{
+  "status": "normal-pass-negative-pending",
+  "scope": "legacy service-profile CLI real HTTPS isolated MCC API/public catalog/native external recipe; not release or activation",
+  "normal": {
+    "scope": "actual installed legacy CLI through owner isolated real MCC HTTP API; no mocked fetch/process/downloader",
+    "before_files": {
+      "/etc/php/8.5/fpm/pool.d/zz-mcd-hw.conf": null,
+      "/etc/php/8.5/fpm/conf.d/99-mcd-hw.ini": null,
+      "/etc/php/8.5/cli/conf.d/99-mcd-hw.ini": null,
+      "/etc/sysctl.d/99-mcd-hw.conf": null,
+      "/etc/php/8.5/fpm/conf.d/90-redis-sessions.ini": null,
+      "/etc/php/8.5/cli/conf.d/90-redis-sessions.ini": null
+    },
+    "before_health": {
+      "https": 200,
+      "tls_verify": 0,
+      "services": {
+        "php8.5-fpm": "active",
+        "nginx": "active",
+        "mariadb": "active",
+        "mcd": "inactive"
+      }
+    },
+    "before_kernel": 4096,
+    "activation": false,
+    "canonical_full_reset_required": true,
+    "status": "PASS",
+    "mode": "normal",
+    "dryrun_public_result": {
+      "files": [
+        "/etc/php/8.5/fpm/pool.d/zz-mcd-hw.conf",
+        "/etc/php/8.5/fpm/conf.d/99-mcd-hw.ini",
+        "/etc/php/8.5/cli/conf.d/99-mcd-hw.ini",
+        "/etc/php/8.5/fpm/conf.d/90-redis-sessions.ini",
+        "/etc/php/8.5/cli/conf.d/90-redis-sessions.ini",
+        "/etc/sysctl.d/99-mcd-hw.conf"
+      ],
+      "php_fpm_bin": "/usr/sbin/php-fpm8.5",
+      "php_version": "8.5",
+      "pool": "www",
+      "service_name": "php8.5-fpm",
+      "status": "planned"
+    },
+    "apply_public_result": {
+      "changed_files": [
+        "/etc/php/8.5/fpm/pool.d/zz-mcd-hw.conf",
+        "/etc/php/8.5/fpm/conf.d/99-mcd-hw.ini",
+        "/etc/php/8.5/cli/conf.d/99-mcd-hw.ini",
+        "/etc/php/8.5/fpm/conf.d/90-redis-sessions.ini",
+        "/etc/php/8.5/cli/conf.d/90-redis-sessions.ini",
+        "/etc/sysctl.d/99-mcd-hw.conf"
+      ],
+      "php_fpm_bin": "/usr/sbin/php-fpm8.5",
+      "php_version": "8.5",
+      "pool": "www",
+      "service_name": "php8.5-fpm",
+      "status": "applied"
+    },
+    "noop_public_result": {
+      "changed_files": [],
+      "php_fpm_bin": "/usr/sbin/php-fpm8.5",
+      "php_version": "8.5",
+      "pool": "www",
+      "service_name": "php8.5-fpm",
+      "status": "noop"
+    },
+    "handler": {
+      "schema": "mcc-service-profile-external-handler-v1",
+      "component": "php_fpm",
+      "resolved_plan_key": "cpx22",
+      "state": "candidate",
+      "active": false,
+      "activation_required": true,
+      "transport": "mcd-custom-v1",
+      "artifact": {
+        "key": "php-system-profile-1.0.4-all-plans",
+        "file": "bundles/portal-php-system-profile-executable-1.0.4-all-plans-20261031.tar.gz",
+        "uri": "https://servercontrol.sales-snap.com/mauticctl/custom/bundles/portal-php-system-profile-executable-1.0.4-all-plans-20261031.tar.gz",
+        "sha256": "681e1124aec2ef18a5d7885c51c4e86412f2980ee29ae27b7643135044e073d5",
+        "size_bytes": 10975,
+        "media_type": "application/gzip",
+        "entrypoint": "scenarios/debian-family/skeleton.py",
+        "task_data": "profiles/task.json",
+        "default_selection": null
+      },
+      "command": {
+        "argv": [
+          "custom",
+          "--no-detach",
+          "--expected-sha256",
+          "681e1124aec2ef18a5d7885c51c4e86412f2980ee29ae27b7643135044e073d5",
+          "php-system-profile-1.0.4-all-plans",
+          "--",
+          "--composition",
+          "profiles/task.json",
+          "--selection",
+          "php-system-profile-cpx22"
+        ]
+      },
+      "profile_input": {
+        "source": "response.profile",
+        "sha256": "4a486b735af0e19d0c01a0bf3dd5018a7ceae5252443622b8e817f72defe3b17",
+        "expected_sha256": "4a486b735af0e19d0c01a0bf3dd5018a7ceae5252443622b8e817f72defe3b17",
+        "matches_expected": true
+      },
+      "dry_run_command": {
+        "argv": [
+          "custom",
+          "--no-detach",
+          "--expected-sha256",
+          "681e1124aec2ef18a5d7885c51c4e86412f2980ee29ae27b7643135044e073d5",
+          "php-system-profile-1.0.4-all-plans",
+          "--",
+          "--composition",
+          "profiles/task.json",
+          "--selection",
+          "php-system-profile-cpx22",
+          "--dry-run"
+        ]
+      },
+      "selection": "php-system-profile-cpx22",
+      "minimum_runtime": {
+        "target": "MCD result-aware custom gzip entrypoint/raw JSONline capture plus legacy adapter; activation remains owner-gated",
+        "version_is_sufficient": false,
+        "required_capabilities": [
+          "custom-gzip-entrypoint",
+          "raw-jsonline-terminal-result"
+        ]
+      },
+      "terminal_result_contract": {
+        "schema": "mcd-self-hosted-executable-output-v1",
+        "contract_version": "1.0",
+        "result": "exact public generator apply/noop/dry_run result dictionary",
+        "public_result_component": "php_system_profile"
+      },
+      "source_ref": "MCC owner live normalized export immutable SHA3641962bf55e8ffc51fe880ce06c8212c0e607ad315e1c6f74f638e696a7a1f0",
+      "source_catalog": {
+        "path": "/tmp/mcc-live-resolved-php-fpm-v1-20261031.json",
+        "sha256": "3641962bf55e8ffc51fe880ce06c8212c0e607ad315e1c6f74f638e696a7a1f0",
+        "size_bytes": 28333,
+        "version": 1,
+        "authority": {
+          "authority": "live MCC persisted universal service-profile catalog",
+          "catalog_version": 2,
+          "path": "/opt/mcc/cache/service-profiles.json",
+          "sha256": "37d8fdba9d323c1b2043b54e0274177fb70539b99f35d2f4a9877601808799e2",
+          "size_bytes": 83138
+        },
+        "bundle_path": "profiles/universal/3641962bf55e8ffc51fe880ce06c8212c0e607ad315e1c6f74f638e696a7a1f0.json"
+      }
+    },
+    "after_files": {
+      "/etc/php/8.5/fpm/pool.d/zz-mcd-hw.conf": "5d15042d97566fbb64ede3a7e7d5a55b96dd9f0e5c59647a6cca367c41bdc183",
+      "/etc/php/8.5/fpm/conf.d/99-mcd-hw.ini": "b3cff3cf4dff7c60b666192f75a0135810eabe8ef8c12020086b50fdbd2e5470",
+      "/etc/php/8.5/cli/conf.d/99-mcd-hw.ini": "4c38ca11cb62d6b5de036a4e9f132173a405487767435372e0165af13866422b",
+      "/etc/sysctl.d/99-mcd-hw.conf": "932e9b536c75969849d8e0b064ff2473481dd084e6b8ae17427e79f3c9e03158",
+      "/etc/php/8.5/fpm/conf.d/90-redis-sessions.ini": "a42ca56ad78eeab6c5e107fdb42fbd770af8062b57da29779ed41119adf3648d",
+      "/etc/php/8.5/cli/conf.d/90-redis-sessions.ini": "a42ca56ad78eeab6c5e107fdb42fbd770af8062b57da29779ed41119adf3648d"
+    },
+    "after_kernel": 1024,
+    "after_health": {
+      "https": 200,
+      "tls_verify": 0,
+      "services": {
+        "php8.5-fpm": "active",
+        "nginx": "active",
+        "mariadb": "active",
+        "mcd": "inactive"
+      }
+    },
+    "dryrun_unchanged": true,
+    "native_reference_dryrun_exact": true,
+    "native_reference_apply_exact": true,
+    "native_reference_noop_exact": true
+  },
+  "runtime_candidate": {
+    "scope": "UNLISTED feature-source runtime-only test fixture; NOT canonical release or 1.7.0 acceptance",
+    "wheel": "/tmp/mcd-unlisted-core-20261031-r7/mcd_agent-1.6.38-py3-none-any.whl",
+    "wheel_sha256": "fccf26e08d5e59b1dc99b822fef65b565f5a91452123ee243e27a9333be4610e",
+    "wheel_size": 1033870,
+    "archive": "/tmp/mcd-unlisted-core-20261031-r7/mcd-runtime-only-unlisted-r7.tar.gz",
+    "archive_sha256": "50e7d3b3159d1501dc50e41b50bf3a04e47b8e8077986c20c102321e45498546",
+    "manifest_sha256": "c3f8dc5a5b5ddadc239bc593d0806dd32723778d55b3cb742337d56632a4e27b",
+    "canonical_release": false,
+    "channel_publication": false,
+    "source_commit": "5984fda5785c12388e67a0188a65f220cce04f83"
+  },
+  "mcc_catalog_source_commit": "2d2a55e27410ca00ffd76739b17ffc4897dbf413",
+  "normal_installed_module_source_verification": "5 dispatch/CLI modules independently matched committed R7 source",
+  "negative": "pending canonical full reset and R7 reinstall",
+  "final_reset": "pending after negative case",
+  "raw_evidence_directory": "/Users/azlobin/.codex/admin/host-diagnostics/mcd-legacy-profile-cli-native-20261031/",
+  "activation": false,
+  "legacy_writer_deleted": false
+}
