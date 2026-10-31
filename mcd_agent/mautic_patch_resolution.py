@@ -1,6 +1,8 @@
 """Authenticated transport for MCC-resolved Mautic patch plans."""
 from __future__ import annotations
 
+from mcd_agent.mcc_transport import mcc_request
+
 import hashlib
 import os
 import stat
@@ -140,7 +142,7 @@ def _post_json(config: AgentConfig, suffix: str, payload: dict[str, Any]) -> dic
     if not token:
         raise MauticPatchResolutionError("mcc_token_missing")
     body = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
-    request = urllib.request.Request(
+    request = mcc_request(
         _endpoint(config, suffix),
         data=body,
         headers={

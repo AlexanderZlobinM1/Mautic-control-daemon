@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from mcd_agent.mcc_transport import mcc_request
+
 from dataclasses import asdict
 from datetime import timezone, datetime
 import csv
@@ -2477,7 +2479,7 @@ class MCCStatePusher:
         base = str(self.cfg.mcc_url).rstrip("/")
         url = base + "/api/v1/agent/signals"
         data = json.dumps(body, ensure_ascii=True).encode("utf-8")
-        req = request.Request(
+        req = mcc_request(
             url=url,
             data=data,
             method="POST",
@@ -2690,7 +2692,7 @@ class MCCStatePusher:
         base = str(self.cfg.mcc_url).rstrip("/")
         url = base + "/api/v1/agent/state"
         data = json.dumps(payload, ensure_ascii=True).encode("utf-8")
-        req = request.Request(
+        req = mcc_request(
             url=url,
             data=data,
             method="POST",

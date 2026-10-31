@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from mcd_agent.mcc_transport import mcc_request
+
 import hashlib
 import json
 import os
@@ -221,7 +223,7 @@ def _parse_manifest(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 def fetch_custom_manifest(config: AgentConfig, *, use_cache_on_error: bool = True) -> tuple[list[dict[str, Any]], str]:
     url = _manifest_url(config)
-    req = urllib.request.Request(url, headers=_headers(config))
+    req = mcc_request(url, headers=_headers(config))
     cache_path = _cache_manifest_path(config)
     try:
         with urllib.request.urlopen(req, timeout=12) as resp:
@@ -275,7 +277,7 @@ def _fetch_script_to_cache(config: AgentConfig, script: dict[str, Any]) -> Path:
     suffix = Path(file_rel).suffix or ".sh"
     dst = dl_dir / f"{key}{suffix}"
 
-    req = urllib.request.Request(url, headers=_headers(config))
+    req = mcc_request(url, headers=_headers(config))
     with urllib.request.urlopen(req, timeout=120) as resp, dst.open("wb") as f:
         shutil.copyfileobj(resp, f)
     os.chmod(dst, 0o755)

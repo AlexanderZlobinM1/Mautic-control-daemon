@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from mcd_agent.mcc_transport import mcc_request
+
 from contextlib import contextmanager
 import hashlib
 import json
@@ -629,7 +631,7 @@ def _fetch_json(
     headers = {"Accept": "application/json", "User-Agent": f"mcd-agent/{__version__}"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    req = urllib.request.Request(url, headers=headers)
+    req = mcc_request(url, headers=headers)
     primary_err: Exception | None = None
     try:
         with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
@@ -663,7 +665,7 @@ def _fetch_file(url: str, token: str | None, dst: Path, *, fallback_ip: str | No
     headers: dict[str, str] = {"User-Agent": f"mcd-agent/{__version__}"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    req = urllib.request.Request(url, headers=headers)
+    req = mcc_request(url, headers=headers)
     primary_err: Exception | None = None
     try:
         with urllib.request.urlopen(req, timeout=120) as resp, dst.open("wb") as f:

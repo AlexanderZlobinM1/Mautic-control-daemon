@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from mcd_agent.mcc_transport import mcc_request
+
 import hashlib
 import json
 import logging
@@ -115,7 +117,7 @@ def _clear_active_campaign_process_state(state: dict[str, Any]) -> None:
 
 def _post_json(url: str, payload: dict[str, Any], token: str | None, timeout_sec: int = 10) -> dict[str, Any]:
     data = json.dumps(payload, ensure_ascii=True).encode("utf-8")
-    req = request.Request(url=url, data=data, method="POST", headers={"Content-Type": "application/json"})
+    req = mcc_request(url=url, data=data, method="POST", headers={"Content-Type": "application/json"})
     if token:
         req.add_header("Authorization", f"Bearer {token}")
     with request.urlopen(req, timeout=timeout_sec) as resp:
@@ -269,7 +271,7 @@ def release_session(cfg: AgentConfig, session_id: str, *, result_status: str, re
 
 
 def _download_package(url: str, dst: Path, token: str | None) -> None:
-    req = request.Request(url)
+    req = mcc_request(url)
     if token:
         req.add_header("Authorization", f"Bearer {token}")
     with request.urlopen(req, timeout=30) as resp:

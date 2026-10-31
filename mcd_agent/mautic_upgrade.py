@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from mcd_agent.mcc_transport import mcc_request
+
 from uuid import uuid4
 
 import json
@@ -401,7 +403,7 @@ def _release_targets_from_mcc(config: AgentConfig) -> dict[str, dict[str, str]]:
     if not config.mcc_url:
         return {}
     url = config.mcc_url.rstrip("/") + "/api/v1/agent/mautic/releases"
-    req = urllib.request.Request(url=url, method="GET")
+    req = mcc_request(url=url, method="GET")
     if config.mcc_token:
         req.add_header("Authorization", f"Bearer {config.mcc_token}")
     try:
@@ -449,7 +451,7 @@ def _require_release_approval(config: AgentConfig, target: str, source_version: 
     if not source_version or _branch_key(source_version) != _branch_key(target):
         raise RuntimeError("Cross-line apply requires bound release transition authorization")
     url = config.mcc_url.rstrip("/") + "/api/v1/agent/mautic/releases/authorize?" + urlencode({"version": target, "source_version": source_version})
-    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {config.mcc_token}"})
+    req = mcc_request(url, headers={"Authorization": f"Bearer {config.mcc_token}"})
     try:
         with urllib.request.urlopen(req, timeout=20) as response:
             result = json.loads(response.read())
