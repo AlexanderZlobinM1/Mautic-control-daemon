@@ -1,5 +1,5 @@
 {
-  "status": "all-php-contracts-and-clean-source-native-pass-final-reset-pending",
+  "status": "PASS-php-component-only-not-1.7-release",
   "scope": "legacy service-profile CLI real HTTPS isolated MCC API/public catalog/native external recipe; not release or activation",
   "normal": {
     "scope": "actual installed legacy CLI through owner isolated real MCC HTTP API; no mocked fetch/process/downloader",
@@ -718,5 +718,23 @@
     },
     "owner_receipt": "/Users/azlobin/Documents/Projects/Mautic-Operations/sandboxes/evidence/20261031-php-generator-cpx22-lease.json"
   },
-  "final_reset": "pending final canonical full reset after R8 cleanup-native recheck"
+  "final_reset": {
+    "status": "PASS",
+    "mode": "canonical full recreation from clean R4 baseline after R8",
+    "independent_read_only_facts": {
+      "managed_files_absent": true,
+      "fault_absent": true,
+      "source_absent": true,
+      "services": {
+        "mariadb": "active",
+        "php8.5-fpm": "active",
+        "nginx": "active",
+        "mcd": "inactive"
+      },
+      "https": "200:0",
+      "https_rc": 0,
+      "somaxconn": 4096
+    },
+    "owner_receipt": "/Users/azlobin/Documents/Projects/Mautic-Operations/sandboxes/evidence/20261031-php-generator-cpx22-lease.json"
+  }
 }

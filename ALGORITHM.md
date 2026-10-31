@@ -2116,4 +2116,7 @@ flag/POST opt-in: active descriptors were enabled only in the isolated QA API.
 Installed module hashes match the cleaned commit, all 13 legacy PHP functions
 are absent, shared MySQL helpers remain, and dry-run/apply/noop preserve the exact
 operator profile and native file/service behavior. Final canonical reset after
-R8 is the remaining sandbox cleanup gate.
+R8 has also passed independently: managed/fault files and source checkout are
+absent, kernel backlog is back to baseline, DB/FPM/nginx are active, MCD is
+inactive and HTTPS remains certificate-verified 200. PHP component acceptance
+does not imply completion/publication of the overall 1.7 release.
