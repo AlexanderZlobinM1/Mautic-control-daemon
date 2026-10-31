@@ -27,7 +27,7 @@ def test_descriptor_dispatch_preserves_public_result_and_arguments(fetched, monk
     result={'status':'applied','arbitrary_public_value':[1,'operator']}
     calls=[]
     monkeypatch.setattr(ext,'run_custom_script_by_key',lambda cfg,**kw:calls.append(kw) or (0,json.dumps(result)))
-    assert ext.apply_external_service_profile(None,fetched)==result
+    assert ext.apply_external_service_profile(None,fetched,component='php_fpm')==result
     assert calls[0]['args']==fetched['external_handler']['command']['argv'][6:]
     assert calls[0]['expected_entrypoint']=='recipe/main.py'
     assert calls[0]['capture_result'] is True
@@ -37,11 +37,11 @@ def test_descriptor_dispatch_preserves_public_result_and_arguments(fetched, monk
 def test_dry_run_uses_only_explicit_nonmutating_descriptor(fetched,monkeypatch):
     calls=[]
     monkeypatch.setattr(ext,'run_custom_script_by_key',lambda cfg,**kw:calls.append(kw) or (0,'{"status":"planned"}'))
-    assert ext.apply_external_service_profile(None,fetched,dry_run=True)['status']=='planned'
+    assert ext.apply_external_service_profile(None,fetched,component='php_fpm',dry_run=True)['status']=='planned'
     assert calls[0]['args'][-1]=='--dry-run'
     del fetched['external_handler']['dry_run_command']
     with pytest.raises(ValueError,match='dry_run_unavailable'):
-        ext.apply_external_service_profile(None,fetched,dry_run=True)
+        ext.apply_external_service_profile(None,fetched,component='php_fpm',dry_run=True)
     assert len(calls)==1
 
 
@@ -57,13 +57,13 @@ def test_admission_failure_never_executes(fetched,monkeypatch,mutation):
     elif mutation=='command':h['command']['argv'][0]='sh'
     elif mutation=='activation':h['active']=False
     elif mutation=='transport':h['transport']='shell'
-    with pytest.raises(ValueError):ext.apply_external_service_profile(None,fetched)
+    with pytest.raises(ValueError):ext.apply_external_service_profile(None,fetched,component='php_fpm')
 
 
 def test_inactive_candidate_is_rejected(fetched,monkeypatch):
     h=fetched['external_handler'];h.update(state='candidate',active=False)
     monkeypatch.setattr(ext,'run_custom_script_by_key',lambda *a,**kw:(0,'{"status":"noop"}'))
-    with pytest.raises(ValueError,match='inactive'):ext.apply_external_service_profile(None,fetched)
+    with pytest.raises(ValueError,match='inactive'):ext.apply_external_service_profile(None,fetched,component='php_fpm')
 
 
 def test_selected_external_failure_cannot_fallback(fetched,monkeypatch):
@@ -108,4 +108,31 @@ def test_profile_pin_uses_authority_utf8_without_ascii_escaping(fetched,monkeypa
     exact=json.dumps(fetched['profile'],ensure_ascii=False,sort_keys=True,separators=(',',':'),allow_nan=False).encode('utf-8')
     fetched['external_handler']['profile_input']['sha256']=hashlib.sha256(exact).hexdigest()
     monkeypatch.setattr(ext,'run_custom_script_by_key',lambda *a,**kw:(0,'{"status":"noop"}'))
-    assert ext.apply_external_service_profile(None,fetched)=={'status':'noop'}
+    assert ext.apply_external_service_profile(None,fetched,component='php_fpm')=={'status':'noop'}
+
+
+@pytest.mark.parametrize('actual,declared', [(None,None),('qa-cluster','qa-cluster')])
+def test_mysql_context_matches_actual_current_config(fetched,monkeypatch,actual,declared):
+    fetched['component']='mysql'
+    fetched['external_handler'].update(component='mysql',runtime_context={'cluster_id':declared})
+    monkeypatch.setattr(ext,'run_custom_script_by_key',lambda *a,**kw:(0,'{"status":"planned"}'))
+    assert ext.apply_external_service_profile(SimpleNamespace(cluster_id=actual),fetched,component='mysql',dry_run=True)=={'status':'planned'}
+
+
+@pytest.mark.parametrize('actual,context', [(None,{}),(None,None),(None,{'cluster_id':''}),
+    ('qa-cluster',{'cluster_id':None}),('new-cluster',{'cluster_id':'old-cluster'}),
+    (None,{'cluster_id':False}),('qa-cluster',{'cluster_id':'qa-cluster','unknown':True})])
+def test_mysql_missing_null_mismatch_context_cannot_begin_execution(fetched,monkeypatch,actual,context):
+    fetched['component']='mysql'
+    fetched['external_handler'].update(component='mysql')
+    if context is not None:fetched['external_handler']['runtime_context']=context
+    monkeypatch.setattr(ext,'run_custom_script_by_key',lambda *a,**kw:pytest.fail('context must be checked before download/execution'))
+    with pytest.raises(ValueError,match='runtime_context'):
+        ext.apply_external_service_profile(SimpleNamespace(cluster_id=actual),fetched,component='mysql')
+
+
+def test_response_and_handler_cannot_change_requested_component(fetched,monkeypatch):
+    fetched['component']='mysql';fetched['external_handler']['component']='mysql'
+    monkeypatch.setattr(ext,'run_custom_script_by_key',lambda *a,**kw:pytest.fail('wrong endpoint component'))
+    with pytest.raises(ValueError,match='requested_component_mismatch'):
+        ext.apply_external_service_profile(None,fetched,component='php_fpm')

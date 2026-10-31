@@ -1,0 +1,54 @@
+{
+  "status": "IN-PROGRESS-not-native-parity-accepted",
+  "scope": "existing MySQL host tuning extraction, no schema/Mautic/cluster repair",
+  "authority_export": {
+    "path": "/tmp/mcc-live-resolved-mysql-v1-20261031.json",
+    "sha256": "3b91d3a1bba95527313cae8e3a500a15f7356fab066799a58cd1f38154bd38f3",
+    "size_bytes": 21123,
+    "profile_count": 22,
+    "stock_cpx22_profile_sha256": "e245f07c385dc78f385b78538447b5787574493f42a3f1c5b0ca0e1c788bf661"
+  },
+  "closure": {
+    "function_count": 19,
+    "constant_count": 3,
+    "sha256": "ec3b916d17196f0251999ac751de4103cd949469ac6265ad43bc8bbb07f1c151"
+  },
+  "pure_fixtures": {
+    "render_count": 66,
+    "engines": [
+      "mysql",
+      "mariadb",
+      "percona"
+    ],
+    "cluster_sanitizer_count": 3,
+    "native_engine_claim": false
+  },
+  "first_native_attempt_diagnostic": {
+    "engine": "MariaDB 11.4.13",
+    "stock_first_status_observed": "partial",
+    "diagnostic_repeat_status": "deferred",
+    "error_code": 1290,
+    "failed_statement": "SET GLOBAL max_user_connections=134",
+    "cause": "server startup max_user_connections=0 rejects runtime transition",
+    "prior_four_global_assignments_persist": true,
+    "file_tuning_persists": true,
+    "raw_diagnostic": "/Users/azlobin/.codex/admin/host-diagnostics/mcd-mysql-profile-native-20261031/old-first-attempt-partial-repeat-diagnostic.json",
+    "limitation": "Initial return was not checkpointed before the harness assertion; diagnostic repeat is not clean-baseline acceptance. Fresh reset/reference capture required."
+  },
+  "normal_qa_operator_fixture": {
+    "approved_test_selection_only": true,
+    "change_from_stock": "max_user_connections=0 only",
+    "live_catalog_change": false,
+    "automatic_fallback": false
+  },
+  "runtime_context_contract": {
+    "required": "explicit descriptor.cluster_id exact current cfg.cluster_id; pinned same value in composition",
+    "missing_is_null": false,
+    "explicit_null": "only when both actual values are null",
+    "core_cluster_maintenance_guards": "preserved"
+  },
+  "my_sql_native_claim": false,
+  "galera_native_claim": false,
+  "old_writer_removed": false,
+  "activation": false
+}

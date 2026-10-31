@@ -2120,3 +2120,37 @@ R8 has also passed independently: managed/fault files and source checkout are
 absent, kernel backlog is back to baseline, DB/FPM/nginx are active, MCD is
 inactive and HTTPS remains certificate-verified 200. PHP component acceptance
 does not imply completion/publication of the overall 1.7 release.
+
+
+### MySQL working-generator batch (in progress)
+
+The next extraction is the existing `apply_mysql_profile` closure: 19 function
+bodies and three constants, with real MCC live profile export pins and 66 pure
+render fixtures across MySQL/MariaDB/Percona. This is host DB tuning, not Mautic
+code/schema repair. The old writer remains until native before/after and catalog
+CLI proof. Existing dynamic partial/deferred behavior and no-surprise-restart
+semantics are preserved; real Galera native execution is not claimed.
+
+Generic descriptor admission now also verifies the requested component against
+the response/handler. MySQL execution requires an explicit
+`runtime_context.cluster_id` and compares its exact string/null value with the
+current loaded MCD config before artifact execution. Missing is not null; null
+is valid only when both sides actually contain null, and no blank default or
+plan-derived cluster membership is invented. The producer pins that same context
+inside the composition data, so changing context changes whole-archive identity
+while the profile object/pin remains unchanged. The core maintenance guard and
+its shared Galera detection remain authoritative. This context admission is
+tested in isolation; automatic MySQL dispatch still uses the old writer until
+the external replacement passes its native and delivery gates.
+
+
+The first old-writer stock CPX22 native probe exposed an existing MariaDB 11.4
+constraint: startup `max_user_connections=0` rejects runtime assignment to 134
+with error 1290. Old behavior is partial on a config change, deferred on repeat,
+with earlier SQL assignments retained; this is not repaired or reclassified as
+normal success during extraction. The first diagnostic lacks a checkpointed
+initial return and is explicitly not acceptance evidence. Fresh reset captures
+will compare that failure contract. A separate explicitly approved QA-only
+operator profile changes just max_user_connections to zero for the working
+normal case; this is test data, never a runtime fallback or live catalog change.
+See `docs/qa/mcd-mysql-generator-native-20261031.json`.

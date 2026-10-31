@@ -749,7 +749,7 @@ def service_profiles_apply_once(
     if comp == "php_fpm":
         # Only delivery/admission lives here; the artifact owns the algorithm.
         # No builtin writer or fallback exists after external selection.
-        applied = apply_external_service_profile(cfg, fetched, dry_run=dry_run)
+        applied = apply_external_service_profile(cfg, fetched, component=comp, dry_run=dry_run)
     elif comp == "mysql":
         applied = apply_mysql_profile(cfg, profile, dry_run=dry_run)
     elif comp == "wazuh":

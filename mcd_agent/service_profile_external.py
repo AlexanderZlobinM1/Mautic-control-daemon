@@ -20,7 +20,7 @@ def external_handler_selected(handler: Mapping[str, Any]) -> bool:
 
 
 def apply_external_service_profile(cfg: Any, fetched: Mapping[str, Any], *,
-                                   dry_run: bool = False) -> dict[str, Any]:
+                                   component: str, dry_run: bool = False) -> dict[str, Any]:
     handler = fetched.get('external_handler')
     if not isinstance(handler, Mapping):
         raise ValueError('external_handler_missing')
@@ -32,6 +32,8 @@ def apply_external_service_profile(cfg: Any, fetched: Mapping[str, Any], *,
         value = handler.get(coordinate)
         if not isinstance(value, str) or not value or value != fetched.get(coordinate):
             raise ValueError('external_handler_binding_invalid')
+    if fetched.get('component') != component:
+        raise ValueError('external_handler_requested_component_mismatch')
     runtime = handler.get('minimum_runtime')
     required = runtime.get('required_capabilities') if isinstance(runtime, Mapping) else None
     if (not isinstance(required, list) or not required or
@@ -49,6 +51,22 @@ def apply_external_service_profile(cfg: Any, fetched: Mapping[str, Any], *,
                                separators=(",", ":"), allow_nan=False).encode("utf-8")
     if hashlib.sha256(profile_bytes).hexdigest() != expected_profile:
         raise ValueError('external_handler_profile_pin_mismatch')
+    # Cluster membership is current agent state, not a hardware-plan default.
+    # The producer pins the same explicit context inside the composition data.
+    if component == "mysql" or "runtime_context" in handler:
+        context = handler.get("runtime_context")
+        if not isinstance(context, Mapping) or set(context) != {"cluster_id"}:
+            raise ValueError("external_handler_runtime_context_missing")
+        declared = context["cluster_id"]
+        if declared is not None and not isinstance(declared, str):
+            raise ValueError("external_handler_runtime_context_invalid")
+        if not hasattr(cfg, "cluster_id"):
+            raise ValueError("external_handler_runtime_context_unavailable")
+        actual = cfg.cluster_id
+        if actual is not None and not isinstance(actual, str):
+            raise ValueError("external_handler_runtime_context_invalid")
+        if actual != declared:
+            raise ValueError("external_handler_runtime_context_mismatch")
     artifact = handler.get('artifact')
     if not isinstance(artifact, Mapping) or artifact.get('media_type') != 'application/gzip':
         raise ValueError('external_handler_artifact_invalid')
