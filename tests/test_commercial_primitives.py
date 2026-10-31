@@ -61,3 +61,25 @@ def test_inventory_rescan_does_not_disclose_discovery_errors():
         inventory_rescan=fail,
     ) == {"status": "failed", "reason": "commercial_inventory_rescan_failed"}
 
+
+
+def test_host_hardware_observation_preserves_applicability_facts(monkeypatch):
+    from mcd_agent import commercial_primitives as primitives
+    facts = {"schema": "existing", "facts_digest": "unchanged"}
+    monkeypatch.setattr(primitives, "read_normalized_local_facts", lambda **kw: facts)
+    monkeypatch.setattr(primitives.os, "cpu_count", lambda: 8)
+    monkeypatch.setattr(primitives, "read_memory_kib", lambda: 16000000)
+    result = execute_generic_primitive({"command": {"command_id": "read_host_facts"}, "input": {}})
+    assert result == {"status": "succeeded", "facts": facts,
+                      "hardware_observation": {"cpu_count": 8, "memory_kib": 16000000}}
+    assert result["facts"] is facts
+
+
+def test_host_hardware_unavailable_is_explicit_null(monkeypatch, tmp_path):
+    from mcd_agent import commercial_primitives as primitives
+    from mcd_agent.hardware_profile import read_memory_kib
+    monkeypatch.setattr(primitives, "read_normalized_local_facts", lambda **kw: {})
+    monkeypatch.setattr(primitives.os, "cpu_count", lambda: None)
+    monkeypatch.setattr(primitives, "read_memory_kib", lambda: read_memory_kib(tmp_path / "missing-proc"))
+    result = execute_generic_primitive({"command": {"command_id": "read_host_facts"}, "input": {}})
+    assert result["hardware_observation"] == {"cpu_count": None, "memory_kib": None}

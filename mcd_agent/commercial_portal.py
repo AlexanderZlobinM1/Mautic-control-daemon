@@ -705,24 +705,26 @@ def verify_self_hosted_mcd_job(
         raise ValueError("self_hosted_mcd_execution_invalid")
     stage_selection = job.get("stage_selection")
     if contract_version == SELF_HOSTED_MCD_CONTRACT_VERSION:
-        if not isinstance(stage_selection, Mapping):
-            raise ValueError("self_hosted_mcd_stage_selection_missing")
-        expected_stages = {stage: (sequence, operation) for sequence, (stage, operation) in enumerate(SELF_HOSTED_MCD_SCENARIO_STAGES, 1)}
+        if stage_selection is None:
+            if "stage" in execution:
+                raise ValueError("self_hosted_mcd_execution_stage_mismatch")
+        elif not isinstance(stage_selection, Mapping):
+            raise ValueError("self_hosted_mcd_stage_selection_invalid")
+    if contract_version == SELF_HOSTED_MCD_CONTRACT_VERSION and isinstance(stage_selection, Mapping):
         if set(stage_selection) != {"stage_id", "sequence", "operation", "depends_on"}:
             raise ValueError("self_hosted_mcd_stage_selection_invalid")
         stage_id = stage_selection.get("stage_id")
         sequence = stage_selection.get("sequence")
         operation = stage_selection.get("operation")
         depends_on = stage_selection.get("depends_on")
-        if stage_id not in expected_stages or isinstance(sequence, bool) or not isinstance(sequence, int) or expected_stages[stage_id][0] != sequence or operation != expected_stages[stage_id][1] or not isinstance(depends_on, list):
+        if not isinstance(stage_id, str) or not stage_id.strip() or isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 1 or not isinstance(operation, str) or not operation.strip() or not isinstance(depends_on, list):
             raise ValueError("self_hosted_mcd_stage_selection_invalid")
-        expected_dependencies = [item[0] for item in SELF_HOSTED_MCD_SCENARIO_STAGES[: sequence - 1]]
-        if depends_on != expected_dependencies:
-            raise ValueError("self_hosted_mcd_stage_selection_order_invalid")
+        if any(not isinstance(item, str) or not item.strip() or item == stage_id for item in depends_on) or len(set(depends_on)) != len(depends_on):
+            raise ValueError("self_hosted_mcd_stage_selection_invalid")
         execution_stage = execution.get("stage")
         if not isinstance(execution_stage, Mapping) or set(execution_stage) != {"stage_id", "sequence", "operation"} or dict(execution_stage) != {key: stage_selection[key] for key in ("stage_id", "sequence", "operation")}:
             raise ValueError("self_hosted_mcd_execution_stage_mismatch")
-    elif stage_selection is not None:
+    elif contract_version != SELF_HOSTED_MCD_CONTRACT_VERSION and stage_selection is not None:
         raise ValueError("self_hosted_mcd_stage_selection_forbidden")
     issued_text = _require_contract_string(job.get("issued_at"), "self_hosted_mcd_job_time_invalid")
     expires_text = _require_contract_string(job.get("expires_at"), "self_hosted_mcd_job_time_invalid")

@@ -24,7 +24,6 @@ _NGINX_DIRS = (Path("/etc/nginx/sites-enabled"), Path("/etc/nginx/sites-availabl
 _VAR_WWW = Path("/var/www")
 _LETSENCRYPT_LIVE = Path("/etc/letsencrypt/live")
 _LETSENCRYPT_RENEWAL = Path("/etc/letsencrypt/renewal")
-_LETSENCRYPT_MCD = Path("/etc/letsencrypt/mcd")
 
 
 def _nginx_dir(name: str) -> Path:
@@ -602,13 +601,6 @@ def _remove_dedicated_certificate(domain: str) -> tuple[bool, str]:
     )
     if rc != 0:
         return False, f"certificate cleanup failed for {domain}: {out}"
-    safe_domain = re.sub(r"[^a-z0-9_.-]+", "_", domain.lower()).strip("._-") or "domain"
-    credential = _LETSENCRYPT_MCD / f"dns-cloudflare-{safe_domain}.ini"
-    try:
-        if credential.exists():
-            credential.unlink()
-    except OSError as exc:
-        return True, f"certificate removed for {domain}; credential cleanup failed: {exc}"
     return True, f"certificate removed for {domain}"
 
 

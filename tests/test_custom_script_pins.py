@@ -46,7 +46,7 @@ def test_bad_download_preserves_previously_verified_revision(cfg, monkeypatch):
     old=custom._fetch_script_to_cache(cfg,item)
     monkeypatch.setattr(custom.urllib.request,'urlopen',lambda *a,**kw: BytesIO(b'tampered'))
     with pytest.raises(RuntimeError,match='checksum mismatch'):
-        custom._fetch_script_to_cache(cfg,item)
+        custom._fetch_script_to_cache(cfg,row(b'new revision whose cache is missing'))
     assert old.read_bytes()==data
     assert not list(old.parent.glob('.download-*'))
 

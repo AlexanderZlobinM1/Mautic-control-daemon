@@ -1,0 +1,496 @@
+{
+  "schema": "mcd-system-boundary-inventory-v1",
+  "status": "partial classification; no deletion authorization",
+  "scope": "all entrypoints; preserve direct Mautic and agent logic",
+  "categories": {
+    "KEEP": "agent logic/direct Mautic/read-only measurements/generic transport",
+    "EXTERNAL": "concrete OS/service/package/repository/config-generation action or external matrix authority",
+    "SPLIT": "mixed orchestration; preserve direct Mautic while externalizing OS actions, review required",
+    "UNRESOLVED": "no current bin/console ownership question; mixed workflows still require decomposition"
+  },
+  "rows": [
+    {
+      "path": "mcd_agent/hardware_profile.py",
+      "function": "read_memory_kib",
+      "line": 33,
+      "classification": "KEEP",
+      "lexical_name_callers": [
+        {
+          "path": "mcd_agent/hardware_profile.py",
+          "line": 144
+        },
+        {
+          "path": "mcd_agent/hardware_profile.py",
+          "line": 169
+        },
+        {
+          "path": "mcd_agent/cli.py",
+          "line": 4725
+        },
+        {
+          "path": "mcd_agent/commercial_primitives.py",
+          "line": 116
+        }
+      ],
+      "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive"
+    },
+    {
+      "path": "mcd_agent/hardware_profile.py",
+      "function": "recommended_profile",
+      "line": 43,
+      "classification": "EXTERNAL",
+      "lexical_name_callers": [
+        {
+          "path": "mcd_agent/hardware_profile.py",
+          "line": 64
+        },
+        {
+          "path": "mcd_agent/hardware_profile.py",
+          "line": 206
+        },
+        {
+          "path": "mcd_agent/cli.py",
+          "line": 4737
+        }
+      ],
+      "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive"
+    },
+    {
+      "path": "mcd_agent/hardware_profile.py",
+      "function": "recommended_farm_profile",
+      "line": 63,
+      "classification": "EXTERNAL",
+      "lexical_name_callers": [
+        {
+          "path": "mcd_agent/hardware_profile.py",
+          "line": 174
+        }
+      ],
+      "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive"
+    },
+    {
+      "path": "mcd_agent/service_profiles.py",
+      "function": "fetch_service_profile",
+      "line": 66,
+      "classification": "KEEP",
+      "lexical_name_callers": [
+        {
+          "path": "mcd_agent/cli.py",
+          "line": 3735
+        },
+        {
+          "path": "mcd_agent/cli.py",
+          "line": 3689
+        },
+        {
+          "path": "mcd_agent/service_profiles.py",
+          "line": 95
+        },
+        {
+          "path": "mcd_agent/service_profiles.py",
+          "line": 99
+        },
+        {
+          "path": "mcd_agent/service_profiles.py",
+          "line": 103
+        },
+        {
+          "path": "mcd_agent/service_profiles.py",
+          "line": 107
+        },
+        {
+          "path": "mcd_agent/service_profiles.py",
+          "line": 1041
+        }
+      ],
+      "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive"
+    },
+    {
+      "path": "mcd_agent/service_profiles.py",
+      "function": "apply_docker_profile",
+      "line": 147,
+      "classification": "EXTERNAL",
+      "lexical_name_callers": [
+        {
+          "path": "mcd_agent/service_profiles.py",
+          "line": 1035
+        }
+      ],
+      "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive"
+    },
+    {
+      "path": "mcd_agent/service_profiles.py",
+      "function": "_build_pool_override",
+      "line": 300,
+      "classification": "EXTERNAL",
+      "lexical_name_callers": [
+        {
+          "path": "mcd_agent/service_profiles.py",
+          "line": 813
+        }
+      ],
+      "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive"
+    },
+    {
+      "path": "mcd_agent/service_profiles.py",
+      "function": "_build_opcache_override",
+      "line": 331,
+      "classification": "EXTERNAL",
+      "lexical_name_callers": [
+        {
+          "path": "mcd_agent/service_profiles.py",
+          "line": 814
+        }
+      ],
+      "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive"
+    },
+    {
+      "path": "mcd_agent/service_profiles.py",
+      "function": "_build_mysql_override",
+      "line": 654,
+      "classification": "EXTERNAL",
+      "lexical_name_callers": [
+        {
+          "path": "mcd_agent/service_profiles.py",
+          "line": 932
+        }
+      ],
+      "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive"
+    },
+    {
+      "path": "mcd_agent/service_profiles.py",
+      "function": "apply_php_fpm_profile",
+      "line": 799,
+      "classification": "EXTERNAL",
+      "lexical_name_callers": [
+        {
+          "path": "mcd_agent/service_profiles.py",
+          "line": 1049
+        }
+      ],
+      "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive"
+    },
+    {
+      "path": "mcd_agent/service_profiles.py",
+      "function": "apply_mysql_profile",
+      "line": 914,
+      "classification": "EXTERNAL",
+      "lexical_name_callers": [
+        {
+          "path": "mcd_agent/service_profiles.py",
+          "line": 1051
+        }
+      ],
+      "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive"
+    },
+    {
+      "path": "mcd_agent/service_profiles.py",
+      "function": "service_profiles_apply_once",
+      "line": 1008,
+      "classification": "SPLIT",
+      "lexical_name_callers": [
+        {
+          "path": "mcd_agent/cli.py",
+          "line": 3710
+        },
+        {
+          "path": "mcd_agent/cli.py",
+          "line": 3697
+        },
+        {
+          "path": "mcd_agent/cli.py",
+          "line": 3681
+        },
+        {
+          "path": "mcd_agent/daemon.py",
+          "line": 20900
+        }
+      ],
+      "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive"
+    },
+    {
+      "path": "mcd_agent/mautic_upgrade.py",
+      "function": "_apply_php84_system_upgrade",
+      "line": 1041,
+      "classification": "EXTERNAL",
+      "lexical_name_callers": [
+        {
+          "path": "mcd_agent/mautic_upgrade.py",
+          "line": 1074
+        }
+      ],
+      "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive"
+    },
+    {
+      "path": "mcd_agent/mautic_upgrade.py",
+      "function": "_apply_system_upgrade",
+      "line": 1062,
+      "classification": "EXTERNAL",
+      "lexical_name_callers": [
+        {
+          "path": "mcd_agent/mautic_upgrade.py",
+          "line": 2738
+        },
+        {
+          "path": "mcd_agent/mautic_upgrade.py",
+          "line": 2748
+        }
+      ],
+      "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive"
+    },
+    {
+      "path": "mcd_agent/mautic_upgrade.py",
+      "function": "_doctrine_migrate_command",
+      "line": 1455,
+      "classification": "KEEP",
+      "lexical_name_callers": [
+        {
+          "path": "mcd_agent/mautic_upgrade.py",
+          "line": 1396
+        },
+        {
+          "path": "mcd_agent/mautic_upgrade.py",
+          "line": 1771
+        }
+      ],
+      "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive",
+      "reason": "Mautic bin/console operation belongs to MCD; existing defect repair deferred"
+    },
+    {
+      "path": "mcd_agent/mautic_upgrade.py",
+      "function": "_run_doctrine_migrate_with_reconcile",
+      "line": 1577,
+      "classification": "KEEP",
+      "lexical_name_callers": [
+        {
+          "path": "mcd_agent/mautic_upgrade.py",
+          "line": 1397
+        },
+        {
+          "path": "mcd_agent/mautic_upgrade.py",
+          "line": 1772
+        }
+      ],
+      "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive",
+      "reason": "Mautic bin/console operation belongs to MCD; existing defect repair deferred"
+    },
+    {
+      "path": "mcd_agent/mautic_upgrade.py",
+      "function": "run_upgrade_apply",
+      "line": 2232,
+      "classification": "SPLIT",
+      "lexical_name_callers": [
+        {
+          "path": "mcd_agent/mautic_upgrade.py",
+          "line": 2861
+        },
+        {
+          "path": "mcd_agent/cli.py",
+          "line": 3390
+        }
+      ],
+      "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive",
+      "reason": "retain direct Mautic commands and agent orchestration; externalize concrete OS recipes only; existing defect repair deferred"
+    },
+    {
+      "path": "mcd_agent/mautic_image_install.py",
+      "function": "_apt_install_packages",
+      "line": 529,
+      "classification": "EXTERNAL",
+      "lexical_name_callers": [
+        {
+          "path": "mcd_agent/backup.py",
+          "line": 1733
+        },
+        {
+          "path": "mcd_agent/backup.py",
+          "line": 2961
+        },
+        {
+          "path": "mcd_agent/mautic_image_install.py",
+          "line": 557
+        }
+      ],
+      "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive"
+    },
+    {
+      "path": "mcd_agent/mautic_image_install.py",
+      "function": "_write_nginx_vhost",
+      "line": 736,
+      "classification": "EXTERNAL",
+      "lexical_name_callers": [
+        {
+          "path": "mcd_agent/mautic_image_install.py",
+          "line": 924
+        },
+        {
+          "path": "mcd_agent/instance_migrate.py",
+          "line": 853
+        },
+        {
+          "path": "mcd_agent/instance_migrate.py",
+          "line": 1177
+        }
+      ],
+      "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive"
+    },
+    {
+      "path": "mcd_agent/mautic_image_install.py",
+      "function": "_php_fpm_fastcgi_pass",
+      "line": 688,
+      "classification": "EXTERNAL",
+      "lexical_name_callers": [
+        {
+          "path": "mcd_agent/mautic_image_install.py",
+          "line": 669
+        },
+        {
+          "path": "mcd_agent/mautic_image_install.py",
+          "line": 729
+        },
+        {
+          "path": "mcd_agent/mautic_image_install.py",
+          "line": 746
+        }
+      ],
+      "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive"
+    },
+    {
+      "path": "mcd_agent/mautic_image_install.py",
+      "function": "_warm_image_runtime",
+      "line": 798,
+      "classification": "SPLIT",
+      "lexical_name_callers": [
+        {
+          "path": "mcd_agent/mautic_image_install.py",
+          "line": 921
+        },
+        {
+          "path": "mcd_agent/mautic_image_install.py",
+          "line": 961
+        }
+      ],
+      "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive"
+    },
+    {
+      "path": "mcd_agent/mautic_image_install.py",
+      "function": "install_from_image",
+      "line": 840,
+      "classification": "SPLIT",
+      "lexical_name_callers": [
+        {
+          "path": "mcd_agent/cli.py",
+          "line": 3500
+        },
+        {
+          "path": "mcd_agent/cli.py",
+          "line": 3489
+        }
+      ],
+      "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive"
+    },
+    {
+      "path": "mcd_agent/daemon.py",
+      "function": "_scheduler_notify_refill_priority",
+      "line": 710,
+      "classification": "KEEP",
+      "lexical_name_callers": [
+        {
+          "path": "mcd_agent/daemon.py",
+          "line": 5135
+        }
+      ],
+      "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive"
+    },
+    {
+      "path": "mcd_agent/daemon.py",
+      "function": "_mark_scheduler_shared_admission",
+      "line": 8100,
+      "classification": "KEEP",
+      "lexical_name_callers": [
+        {
+          "path": "mcd_agent/daemon.py",
+          "line": 15730
+        },
+        {
+          "path": "mcd_agent/daemon.py",
+          "line": 13940
+        }
+      ],
+      "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive"
+    },
+    {
+      "path": "mcd_agent/daemon.py",
+      "function": "_plugin_operation_runtime_heartbeat",
+      "line": 6667,
+      "classification": "KEEP",
+      "lexical_name_callers": [
+        {
+          "path": "mcd_agent/daemon.py",
+          "line": 16253
+        }
+      ],
+      "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive"
+    },
+    {
+      "path": "mcd_agent/custom_scripts.py",
+      "function": "_fetch_script_to_cache",
+      "line": 288,
+      "classification": "KEEP",
+      "lexical_name_callers": [
+        {
+          "path": "mcd_agent/custom_scripts.py",
+          "line": 459
+        }
+      ],
+      "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive"
+    },
+    {
+      "path": "mcd_agent/custom_scripts.py",
+      "function": "_run_direct",
+      "line": 409,
+      "classification": "KEEP",
+      "lexical_name_callers": [
+        {
+          "path": "mcd_agent/custom_scripts.py",
+          "line": 477
+        }
+      ],
+      "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive"
+    },
+    {
+      "path": "mcd_agent/custom_scripts.py",
+      "function": "run_custom_script_by_key",
+      "line": 418,
+      "classification": "KEEP",
+      "lexical_name_callers": [
+        {
+          "path": "mcd_agent/cli.py",
+          "line": 1335
+        },
+        {
+          "path": "mcd_agent/cli.py",
+          "line": 5088
+        }
+      ],
+      "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive"
+    },
+    {
+      "path": "mcd_agent/instance_migrate.py",
+      "function": "run_target_pull_migration",
+      "line": 1042,
+      "classification": "SPLIT",
+      "lexical_name_callers": [
+        {
+          "path": "mcd_agent/cli.py",
+          "line": 4457
+        }
+      ],
+      "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive",
+      "reason": "retain direct Mautic commands and agent orchestration; externalize concrete OS recipes only; existing defect repair deferred"
+    }
+  ],
+  "native_before_after_evidence": null,
+  "native_status": "not executed; canonical sandbox lease pending",
+  "preexisting_broken_upgrade_migrate": "repair deferred"
+}

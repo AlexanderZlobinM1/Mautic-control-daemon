@@ -291,7 +291,11 @@ def main(argv: list[str] | None = None) -> int:
             raise RuntimeError("TaskStore queue/claim/running/retry/monitor state changed")
         if worker.poll() is not None:
             raise RuntimeError("ordinary worker did not survive bridge")
-        if not (install / "src" / "mcd-runtime-manifest.json").is_file():
+        if (install / "src").exists():
+            raise RuntimeError("legacy project src remained after verified runtime activation")
+        if any((install / "var" / "updates").glob("runtime.prev-bridge-*")):
+            raise RuntimeError("legacy project rollback tree remained after successful activation")
+        if not (install / "runtime" / "mcd-runtime-manifest.json").is_file():
             raise RuntimeError("runtime source switch did not install the detached manifest")
         if not (install / "var" / "runtime-bootstrap-receipt.json").is_file():
             raise RuntimeError("bridge receipt is missing")

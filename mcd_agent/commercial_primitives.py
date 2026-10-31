@@ -8,6 +8,7 @@ artifact-bound contract.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from datetime import datetime, timezone
@@ -19,6 +20,7 @@ from mcd_agent.commercial_detector import (
 )
 from mcd_agent.commercial_generic import capability_inventory_digest
 from mcd_agent.install_readiness import collect_mautic_install_readiness
+from mcd_agent.hardware_profile import read_memory_kib
 
 
 CAPABILITY_VERSION = "1.0"
@@ -107,7 +109,19 @@ def execute_generic_primitive(job: Mapping[str, Any], *, inventory_rescan: Calla
             return {"status": "failed", "reason": "commercial_inventory_rescan_result_invalid"}
         return {"status": "succeeded", "discovered_count": count}
     if command == "read_host_facts":
-        return {"status": "succeeded", "facts": read_normalized_local_facts(capabilities=list(PORTAL_LOCAL_FACTS_CAPABILITIES))}
+        try:
+            cpu_count = os.cpu_count()
+        except OSError:
+            cpu_count = None
+        memory_kib = read_memory_kib()
+        return {
+            "status": "succeeded",
+            "facts": read_normalized_local_facts(capabilities=list(PORTAL_LOCAL_FACTS_CAPABILITIES)),
+            "hardware_observation": {
+                "cpu_count": cpu_count if type(cpu_count) is int and cpu_count > 0 else None,
+                "memory_kib": memory_kib if type(memory_kib) is int and memory_kib > 0 else None,
+            },
+        }
     readiness = collect_mautic_install_readiness()
     if command == "check_prerequisites":
         return {"status": "succeeded", "readiness": readiness}

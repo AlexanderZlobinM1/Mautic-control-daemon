@@ -9,6 +9,7 @@ from pathlib import Path
 import shlex
 import re
 import tempfile
+import tarfile
 import shutil
 import subprocess
 import time
@@ -19,6 +20,7 @@ import urllib.request
 
 from mcd_agent import __version__
 from mcd_agent.config import AgentConfig
+from mcd_agent.archive_utils import safe_extract_tar
 
 
 _RUN_MODES = {"auto", "tmux", "screen", "direct"}
@@ -191,6 +193,7 @@ def _flatten_items(items: list[Any], parent: list[str], out: list[dict[str, Any]
                 "name": str(raw.get("name", "")).strip() or key,
                 "description": str(raw.get("description", "")).strip(),
                 "file": file_rel,
+                "entrypoint": raw.get("entrypoint"),
                 "sha256": str(raw.get("sha256", "")).strip().lower(),
                 "run_mode": str(raw.get("run_mode", "auto")).strip().lower() or "auto",
                 "interactive": _to_bool(raw.get("interactive", False)),
@@ -262,6 +265,26 @@ def fetch_custom_manifest(config: AgentConfig, *, use_cache_on_error: bool = Tru
         raise RuntimeError(f"custom manifest fetch failed: {e}") from e
 
 
+def _activate_bundle(archive_path: Path, cache_dir: Path, digest: str, entrypoint: str) -> Path:
+    # Isolate concurrent invocations while retaining the whole bundle's identity.
+    revision_dir = cache_dir / digest
+    revision_dir.mkdir(mode=0o700, exist_ok=True)
+    staged = Path(tempfile.mkdtemp(prefix=".extract-", dir=revision_dir))
+    try:
+        with tarfile.open(archive_path, "r:gz") as archive:
+            safe_extract_tar(archive, staged)
+        selected = staged / entrypoint
+        if not selected.is_file() or selected.is_symlink():
+            raise RuntimeError("custom bundle entrypoint is missing or not a regular file")
+        selected.chmod(selected.stat().st_mode | 0o500)
+        activated = revision_dir / ("run-" + staged.name.removeprefix(".extract-"))
+        os.replace(staged, activated)
+        return activated / entrypoint
+    finally:
+        if staged.exists():
+            shutil.rmtree(staged)
+
+
 def _fetch_script_to_cache(config: AgentConfig, script: dict[str, Any]) -> Path:
     file_rel = str(script.get("file", "")).strip()
     if not file_rel:
@@ -273,10 +296,27 @@ def _fetch_script_to_cache(config: AgentConfig, script: dict[str, Any]) -> Path:
     url = urllib.parse.urljoin(base, file_rel)
     key = str(script.get("key", "")).strip() or "script"
     expected_sha = str(script.get("sha256", "")).strip().lower()
+    if re.fullmatch(r"[0-9a-f]{64}", expected_sha) is None:
+        raise RuntimeError("custom artifact requires an expected SHA-256")
+
+    entrypoint = script.get("entrypoint")
+    if entrypoint is not None:
+        if (not isinstance(entrypoint, str) or not entrypoint.strip()
+                or "\x00" in entrypoint or Path(entrypoint).is_absolute()
+                or ".." in Path(entrypoint).parts):
+            raise RuntimeError("custom bundle entrypoint path is invalid")
+        if not file_rel.endswith(".tar.gz") or re.fullmatch(r"[0-9a-f]{64}", expected_sha) is None:
+            raise RuntimeError("custom bundle requires tar.gz and a manifest SHA-256")
 
     dl_dir = _cache_root(config) / "downloads" / key
     dl_dir.mkdir(parents=True, exist_ok=True)
-    suffix = Path(file_rel).suffix or ".sh"
+    suffix = ".tar.gz" if entrypoint is not None else (Path(file_rel).suffix or ".sh")
+    cached = dl_dir / f"{key}-{expected_sha}{suffix}"
+    if cached.is_file() and not cached.is_symlink() and hashlib.sha256(cached.read_bytes()).hexdigest() == expected_sha:
+        if entrypoint is not None:
+            return _activate_bundle(cached, dl_dir, expected_sha, entrypoint)
+        cached.chmod(cached.stat().st_mode | 0o500)
+        return cached
     req = mcc_request(url, headers=_headers(config))
     staged: Path | None = None
     try:
@@ -295,6 +335,8 @@ def _fetch_script_to_cache(config: AgentConfig, script: dict[str, Any]) -> Path:
         dst = dl_dir / f"{key}-{got_sha}{suffix}"
         os.chmod(staged, 0o755)
         os.replace(staged, dst)
+        if entrypoint is not None:
+            return _activate_bundle(dst, dl_dir, got_sha, entrypoint)
         return dst
     finally:
         if staged is not None:
@@ -321,7 +363,7 @@ def _choose_mode(config: AgentConfig, requested_mode: str, detach: bool) -> str:
     return mode
 
 
-def _run_detached_tmux(config: AgentConfig, script_path: Path, script_key: str, args: list[str]) -> tuple[int, str]:
+def _run_detached_tmux(config: AgentConfig, script_path: Path, script_key: str, args: list[str], *, cwd: Path | None = None) -> tuple[int, str]:
     ts = int(time.time())
     prefix = str(config.custom_tmux_session_prefix or "mcd-custom").strip() or "mcd-custom"
     session = f"{prefix}-{script_key}-{ts}"
@@ -332,7 +374,7 @@ def _run_detached_tmux(config: AgentConfig, script_path: Path, script_key: str, 
     cmd = " ".join([shlex.quote(str(script_path)), *(shlex.quote(x) for x in args)])
     shell_cmd = f"{cmd} 2>&1 | tee -a {shlex.quote(str(log_path))}"
     proc = subprocess.run(
-        ["tmux", "new-session", "-d", "-s", session, "bash", "-lc", shell_cmd],
+        ["tmux", "new-session", "-d", "-s", session, *(["-c", str(cwd)] if cwd is not None else []), "bash", "-lc", shell_cmd],
         capture_output=True,
         text=True,
     )
@@ -342,7 +384,7 @@ def _run_detached_tmux(config: AgentConfig, script_path: Path, script_key: str, 
     return 0, f"started in tmux session={session} log={log_path}"
 
 
-def _run_detached_screen(config: AgentConfig, script_path: Path, script_key: str, args: list[str]) -> tuple[int, str]:
+def _run_detached_screen(config: AgentConfig, script_path: Path, script_key: str, args: list[str], *, cwd: Path | None = None) -> tuple[int, str]:
     ts = int(time.time())
     prefix = str(config.custom_tmux_session_prefix or "mcd-custom").strip() or "mcd-custom"
     session = f"{prefix}-{script_key}-{ts}"
@@ -354,6 +396,7 @@ def _run_detached_screen(config: AgentConfig, script_path: Path, script_key: str
     shell_cmd = f"{cmd} 2>&1 | tee -a {shlex.quote(str(log_path))}"
     proc = subprocess.run(
         ["screen", "-dmS", session, "bash", "-lc", shell_cmd],
+        cwd=cwd,
         capture_output=True,
         text=True,
     )
@@ -363,11 +406,11 @@ def _run_detached_screen(config: AgentConfig, script_path: Path, script_key: str
     return 0, f"started in screen session={session} log={log_path}"
 
 
-def _run_direct(script_path: Path, args: list[str], *, live_output: bool) -> tuple[int, str]:
+def _run_direct(script_path: Path, args: list[str], *, live_output: bool, cwd: Path | None = None) -> tuple[int, str]:
     if live_output:
-        proc = subprocess.run([str(script_path), *args])
+        proc = subprocess.run([str(script_path), *args], cwd=cwd)
         return int(proc.returncode), ""
-    proc = subprocess.run([str(script_path), *args], capture_output=True, text=True)
+    proc = subprocess.run([str(script_path), *args], capture_output=True, text=True, cwd=cwd)
     out = (proc.stdout or "") + ((("\n" + proc.stderr) if proc.stderr else ""))
     return int(proc.returncode), out.strip()
 
@@ -380,6 +423,7 @@ def run_custom_script_by_key(
     detach: bool | None = None,
     live_output: bool = True,
     expected_sha256: str | None = None,
+    fetch_only: bool = False,
 ) -> tuple[int, str]:
     expected = str(expected_sha256 or "").strip().lower()
     if expected and re.fullmatch(r"[0-9a-f]{64}", expected) is None:
@@ -387,18 +431,25 @@ def run_custom_script_by_key(
     key = str(script_key or "").strip()
     if not key:
         return 2, "script key is required"
-    manifest, _src = fetch_custom_manifest(config, use_cache_on_error=True)
+    manifest = None
+    if expected:
+        # The selected task pin, not remote freshness or file provenance, is
+        # authoritative here. A manually populated matching cache is equal.
+        cache_manifest = _cache_manifest_path(config)
+        if cache_manifest.is_file():
+            try:
+                cached_rows = _parse_manifest(json.loads(cache_manifest.read_text()))
+                if any(row.get("key") == key and row.get("sha256") == expected for row in cached_rows):
+                    manifest = cached_rows
+            except (OSError, ValueError, RuntimeError):
+                pass
+    if manifest is None:
+        manifest, _src = fetch_custom_manifest(config, use_cache_on_error=True)
     found = None
     for item in manifest:
         if str(item.get("key", "")).strip() == key:
             found = item
             break
-    # Optional fallback: allow selection by display name from manifest.
-    if found is None:
-        for item in manifest:
-            if str(item.get("name", "")).strip().lower() == key.lower():
-                found = item
-                break
     if found is None:
         return 2, f"custom script not found in manifest: {key}"
 
@@ -409,15 +460,21 @@ def run_custom_script_by_key(
     except Exception as e:
         return 1, f"custom script download failed: {e}"
 
+    if fetch_only:
+        return 0, json.dumps({"status": "cached", "key": key,
+                              "sha256": found["sha256"], "path": str(script_path)}, sort_keys=True)
     arg_list = list(args or [])
     script_interactive = _to_bool(found.get("interactive", False))
     detach_effective = (not script_interactive) if detach is None else bool(detach)
     mode = _choose_mode(config, str(found.get("run_mode", "auto")), detach=detach_effective)
+    execution_options: dict[str, Any] = {}
+    if found.get("entrypoint") is not None:
+        execution_options["cwd"] = script_path.parents[len(Path(found["entrypoint"]).parts) - 1]
     if detach_effective and mode == "tmux":
-        return _run_detached_tmux(config, script_path, key, arg_list)
+        return _run_detached_tmux(config, script_path, key, arg_list, **execution_options)
     if detach_effective and mode == "screen":
-        return _run_detached_screen(config, script_path, key, arg_list)
-    return _run_direct(script_path, arg_list, live_output=live_output)
+        return _run_detached_screen(config, script_path, key, arg_list, **execution_options)
+    return _run_direct(script_path, arg_list, live_output=live_output, **execution_options)
 
 
 def format_custom_scripts_list(rows: list[dict[str, Any]], *, with_idx: bool = True) -> str:

@@ -83,7 +83,7 @@ def test_bridge_removes_only_stale_mcd_distribution_metadata(tmp_path: Path) -> 
 def test_bridge_successful_replay_is_read_only_and_hash_bound(tmp_path: Path) -> None:
     bridge = _load_bridge()
     install = tmp_path / "install"
-    source = install / "src"
+    source = install / "runtime"
     source.mkdir(parents=True)
     (source / "mcd-runtime-manifest.json").write_text('{"version":"1.5.182"}\n', encoding="utf-8")
     receipt_path = install / "var" / "runtime-bootstrap-receipt.json"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import time
 import hashlib
@@ -116,6 +117,8 @@ class InstanceInventory:
             self._migrate_instances_legacy_pk_name()
         self.conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_instances_uid ON instances(instance_uid)")
         self._ensure_instance_uids()
+        if "registering_operation_id" not in {str(row["name"]) for row in self.conn.execute("PRAGMA table_info(instances)")} :
+            self.conn.execute("ALTER TABLE instances ADD COLUMN registering_operation_id TEXT")
         self._migrate_db_passwords_encrypted()
         self.conn.commit()
 
@@ -347,20 +350,75 @@ class InstanceInventory:
             config.supported_mautic_majors,
             config.custom_instances,
         )
-        if preserve_manual:
-            self.conn.execute(
-                "DELETE FROM instances WHERE source IN ('autodiscovery','runtime-descriptor')"
-            )
-        else:
-            self.conn.execute(
-                "DELETE FROM instances WHERE source IN ('autodiscovery','manual','runtime-descriptor')"
-            )
+        tokens = {str(row["root"]): row["registering_operation_id"] for row in self.conn.execute("SELECT root, registering_operation_id FROM instances")}
+        previous = {inst.root: inst for inst in self.list_instances()}
+        seen_roots = set()
         for inst in installs:
-            self._upsert_install(inst, source=inst.source or "autodiscovery")
-        self.conn.commit()
+            if inst.root in seen_roots:
+                raise ValueError("Ambiguous discovered Mautic root")
+            seen_roots.add(inst.root)
+            old = previous.get(inst.root)
+            if old and old.runtime == inst.runtime:
+                inst.instance_uid = old.instance_uid
+                if inst.runtime == "host":
+                    inst.runtime_php_bin = inst.runtime_php_bin or old.runtime_php_bin
+                    inst.runtime_user = inst.runtime_user or old.runtime_user
+        # Explicit runtime registration must survive a pre-vhost rescan.
+        installs.extend(old for root, old in previous.items()
+                        if root not in seen_roots and old.source == "manual"
+                        and old.runtime == "host" and old.runtime_php_bin and old.runtime_user)
+        with self.conn:
+            if preserve_manual:
+                self.conn.execute(
+                    "DELETE FROM instances WHERE source IN ('autodiscovery','runtime-descriptor')"
+                )
+            else:
+                self.conn.execute(
+                    "DELETE FROM instances WHERE source IN ('autodiscovery','manual','runtime-descriptor')"
+                )
+            for inst in installs:
+                self._upsert_install(inst, source=inst.source or "autodiscovery")
+                if tokens.get(inst.root):
+                    self.conn.execute("UPDATE instances SET registering_operation_id=? WHERE root=?", (tokens[inst.root], inst.root))
         return len(installs)
 
-    def add_or_update_manual(
+    def add_or_update_manual(self, *, registration_receipt: bool = False, registering_operation_id: str | None = None, **kwargs):
+        with self.conn:
+            self.conn.execute("BEGIN IMMEDIATE")
+            previous = self.conn.execute("SELECT * FROM instances WHERE root=?", (kwargs["root"],)).fetchone()
+            if registration_receipt:
+                if not isinstance(registering_operation_id, str) or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,254}", registering_operation_id):
+                    raise ValueError("Registration receipt requires the existing operation ID")
+                if not all(kwargs.get(key) for key in ("instance_uid", "runtime_php_bin", "runtime_user")):
+                    raise ValueError("Registration receipt requires UID and complete runtime")
+                if previous:
+                    for key in ("instance_uid", "console_path", "runtime_php_bin", "runtime_user"):
+                        if previous[key] and previous[key] != kwargs[key]:
+                            raise ValueError("Existing registration runtime conflicts with declared facts")
+                if previous:
+                    php, user = kwargs["runtime_php_bin"], kwargs["runtime_user"]
+                    if not Path(php).is_absolute() or not re.fullmatch(r"[a-zA-Z0-9_.-]+", user):
+                        raise ValueError("Invalid registered runtime PHP or user")
+                    self.conn.execute("UPDATE instances SET runtime_php_bin=?, runtime_user=? WHERE root=?", (php, user, kwargs["root"]))
+                    return {"status": "ok", "instance_uid": kwargs["instance_uid"], "root": kwargs["root"],
+                            "created": False, "registering_operation_id": None}
+            self._add_or_update_manual(**kwargs)
+            if not registration_receipt:
+                return None
+            token = registering_operation_id if previous is None else None
+            if token:
+                self.conn.execute("UPDATE instances SET registering_operation_id=? WHERE instance_uid=? AND root=?", (token, kwargs["instance_uid"], kwargs["root"]))
+            return {"status": "ok", "instance_uid": kwargs["instance_uid"], "root": kwargs["root"],
+                    "created": previous is None, "registering_operation_id": token}
+
+    def remove_owned_registration(self, *, instance_uid: str, root: str, registering_operation_id: str) -> bool:
+        if not instance_uid or not root or not registering_operation_id:
+            raise ValueError("Owned removal requires UID, root and registration token")
+        with self.conn:
+            cursor = self.conn.execute("DELETE FROM instances WHERE instance_uid=? AND root=? AND registering_operation_id=?", (instance_uid, root, registering_operation_id))
+            return cursor.rowcount == 1
+
+    def _add_or_update_manual(
         self,
         *,
         name: str,
@@ -374,7 +432,25 @@ class InstanceInventory:
         db_user: str | None,
         db_password: str | None,
         db_table_prefix: str | None,
+        instance_uid: str | None = None,
+        runtime_php_bin: str | None = None,
+        runtime_user: str | None = None,
     ) -> None:
+        if bool(runtime_php_bin) != bool(runtime_user):
+            raise ValueError("Runtime PHP and user must be supplied together")
+        if runtime_php_bin and (not Path(runtime_php_bin).is_absolute() or not re.fullmatch(r"[a-zA-Z0-9_.-]+", runtime_user or "")):
+            raise ValueError("Invalid registered runtime PHP or user")
+        if instance_uid and not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,254}", instance_uid):
+            raise ValueError("Invalid stable Mautic instance UID")
+        if (instance_uid or runtime_php_bin) and (not Path(root).is_absolute() or not Path(console_path).is_absolute()):
+            raise ValueError("Registered runtime paths must be absolute")
+        existing = next((item for item in self.list_instances() if item.root == root), None)
+        uid = instance_uid or (existing.instance_uid if existing else build_domain_uid(domain=None, root=root, name=name))
+        if existing and instance_uid and existing.instance_uid != uid:
+            raise ValueError("Root already belongs to another stable instance UID")
+        collision = self.conn.execute("SELECT root FROM instances WHERE instance_uid=?", (uid,)).fetchone()
+        if collision and str(collision["root"]) != root:
+            raise ValueError("Stable instance UID already belongs to another root")
         db = None
         if db_host and db_name and db_user and db_password:
             db = DBConfig(
@@ -386,7 +462,7 @@ class InstanceInventory:
                 table_prefix=db_table_prefix or "",
             )
         inst = MauticInstall(
-            instance_uid=build_domain_uid(domain=None, root=root, name=name),
+            instance_uid=uid,
             name=name,
             root=root,
             primary_domain=None,
@@ -397,9 +473,10 @@ class InstanceInventory:
             db=db,
             source="manual",
             markers=[],
+            runtime_php_bin=runtime_php_bin or (existing.runtime_php_bin if existing else None),
+            runtime_user=runtime_user or (existing.runtime_user if existing else None),
         )
         self._upsert_install(inst, source="manual")
-        self.conn.commit()
 
     def remove(self, name: str) -> bool:
         cur = self.conn.execute("DELETE FROM instances WHERE root=?", (name,))

@@ -116,28 +116,6 @@ class MauticImageInstallNginxTests(unittest.TestCase):
 
         self.assertLess(template.index("{{FORM_EMBED_HTTP_LOCATION}}"), template.index("{{MAUTIC_DENY_LOCATIONS}}"))
 
-    def test_cloudflare_dns01_certbot_does_not_put_token_on_command_line(self) -> None:
-        plan = image_install.build_plan(image_ref="default7", domain="example.sales-snap.com", php_version="8.4")
-        cfg = SimpleNamespace(mcc_url="https://mcc.example", mcc_token="agent-token")
-        calls: list[list[str]] = []
-
-        def fake_run(args: list[str], **_: object) -> tuple[int, str]:
-            calls.append(args)
-            return 0, "ok"
-
-        with (
-            patch.object(image_install, "_ensure_certbot_cloudflare_plugin"),
-            patch.object(image_install, "_certbot_cloudflare_credentials_path", return_value=Path("/etc/letsencrypt/mcd/cf.ini")),
-            patch.object(image_install, "_write_nginx_vhost") as write_vhost,
-            patch.object(image_install, "_run", side_effect=fake_run),
-        ):
-            image_install._run_certbot_cloudflare_dns01(cfg, plan, "mcc://dns/cloudflare/dns1")
-
-        self.assertEqual(calls[0][0:2], ["certbot", "certonly"])
-        self.assertIn("--dns-cloudflare", calls[0])
-        self.assertIn("/etc/letsencrypt/mcd/cf.ini", calls[0])
-        self.assertNotIn("agent-token", " ".join(calls[0]))
-        write_vhost.assert_called_once_with(plan, ssl_enabled=True)
 
     def test_certbot_retries_when_global_lock_is_busy(self) -> None:
         with (

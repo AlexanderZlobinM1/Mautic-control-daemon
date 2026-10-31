@@ -131,14 +131,13 @@ class InstanceDeleteNginxTests(unittest.TestCase):
         with (
             patch.object(instance_delete, "_LETSENCRYPT_LIVE", live),
             patch.object(instance_delete, "_LETSENCRYPT_RENEWAL", renewal),
-            patch.object(instance_delete, "_LETSENCRYPT_MCD", creds),
             patch.object(instance_delete, "_run", side_effect=fake_run),
         ):
             changed, _message = instance_delete._remove_dedicated_certificate("site.sales-snap.com")
 
         self.assertTrue(changed)
         self.assertEqual(calls[1][0:3], ["certbot", "delete", "--cert-name"])
-        self.assertFalse(credential.exists())
+        self.assertTrue(credential.exists())
 
     def test_remove_certificate_preserves_shared_certificate(self) -> None:
         root = Path(self.tmp.name)

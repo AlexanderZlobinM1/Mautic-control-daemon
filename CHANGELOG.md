@@ -1,3 +1,14 @@
+## 1.7.0 — Unreleased architecture candidate
+
+- Required boundary: independently versioned MCC-distributed external wrapping
+  owns all install/upgrade/migrate/config/profile/matrix semantics. MCD retains
+  generic artifact cache/verification/execution/progress/receipts only.
+- Candidate work removes DNS mutation/credential paths and adds generic bundle
+  delivery plus exact selected-task cache reuse, including manual/offline cache.
+- NOT READY: remaining embedded implementations/callers, external replacement
+  integration, complete-task closure and same-artifact native acceptance remain
+  required. No 1.7.0 release is claimed or authorized by this entry.
+
 ## 1.6.38 - 2026-10-31
 
 - Preserve MCD workload profile overrides, cron and profile events when only

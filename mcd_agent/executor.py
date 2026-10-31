@@ -26,6 +26,8 @@ SUPPORTED_COMMANDS = {
     "import": "mautic:import",
     "cache:clear": "cache:clear",
     "cache:warmup": "cache:warmup",
+    "version": "--version",
+    "doctrine:migrations:migrate": "doctrine:migrations:migrate",
 }
 
 COMMAND_TASK_TYPES = {
@@ -148,6 +150,7 @@ def build_mautic_exec_args(
     command: str,
     instance_id: int | None,
     run_as_user: str | None = None,
+    console_args: list[str] | None = None,
 ) -> list[str]:
     if command not in SUPPORTED_COMMANDS:
         raise ValueError(f"Unsupported command: {command}")
@@ -155,12 +158,16 @@ def build_mautic_exec_args(
     template = SUPPORTED_COMMANDS[command]
     if command in {"campaign:trigger", "segments:update", "campaign:rebuild", "campaigns:rebuild", "campaigns:update", "campaigns:trigger", "import"} and instance_id is not None:
         template += f" -i {instance_id}"
-    return render_mautic_command(
+    cmd = render_mautic_command(
         php_bin=php_bin,
         root=root,
         template=template,
         run_as_user=run_as_user,
     )
+    for arg in console_args or []:
+        if not isinstance(arg, str) or "\x00" in arg:
+            raise ValueError("Invalid Mautic console argument")
+    return cmd + list(console_args or [])
 
 
 def execute_mautic_command(
@@ -171,6 +178,7 @@ def execute_mautic_command(
     instance_id: int | None,
     timeout_sec: int,
     run_as_user: str | None = None,
+    console_args: list[str] | None = None,
 ) -> tuple[int, str]:
     try:
         cmd = build_mautic_exec_args(
@@ -179,6 +187,7 @@ def execute_mautic_command(
             command=command,
             instance_id=instance_id,
             run_as_user=run_as_user,
+            **({"console_args": console_args} if console_args else {}),
         )
     except ValueError as e:
         return 2, str(e)

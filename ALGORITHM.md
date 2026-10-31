@@ -1145,7 +1145,7 @@ cycle без ручного `segments:update`, profile/capacity/data changes. Ad
 | legacy source-tree to runtime-only transition is authority-safe and accepts complete split TOML config | `tools/mcd_runtime_bootstrap.py`, `tools/mcd_profile_authority_probe.py` | `tests/test_profile_authority_probe.py`, `tests/test_runtime_bootstrap_capture.py`, live `mcd-runtime-bootstrap-receipt-v1` |
 | activation-derived Portal material is imported atomically without new auth/job issuance; commercial API-key transport, host binding and installation IDs are validated and persisted while legacy agent/Portal signing-key state is scrubbed | `mcd_agent/commercial_registration.py`, `mcd_agent/commercial_portal.py` | `tests/test_commercial_registration.py`, `tests/test_commercial_outbound_boundary.py`, redacted `mcd-portal-registration-receipt-v1` |
 | host-first Portal registration binds an activated MCD host before any Mautic instance exists; request contains only local DNS identity/display name, and the response must create a passive host installation with an active empty-inventory connection | `mcd_agent/commercial_portal.py`, `mcd_agent/commercial_host_registration.py`, `mcd_agent/cli.py` | `tests/test_commercial_portal.py`, redacted `portal-mcd-host-register-response-v1` |
-| self-hosted v2.1 jobs select exactly one ordered external stage through `stage_selection` plus matching `execution.stage`; MCD verifies dependencies and emits the existing typed stage/terminal receipts without adding a launcher or recipe layer | `mcd_agent/commercial_portal.py`, `mcd_agent/commercial_self_hosted.py`, `mcd_agent/scenario_launcher.py` | `tests/test_commercial_self_hosted_v2.py`, redacted stage/terminal receipts |
+| self-hosted v2.1 candidate jobs may omit stage metadata for a whole external composition; supplied `stage_selection` must structurally match `execution.stage`, without embedded stage-name/order recipes; existing receipts remain | `mcd_agent/commercial_portal.py`, `mcd_agent/commercial_self_hosted.py`, `mcd_agent/scenario_launcher.py` | `tests/test_commercial_self_hosted_v2.py`, redacted stage/terminal receipts |
 | manual existing commercial-key fallback keeps pending/active/disconnected state idempotently | `mcd_agent/commercial_manual_activation.py`, `mcd_agent/commercial_portal.py`, `mcd_agent/daemon.py` | `tests/test_commercial_manual_activation.py`, redacted `mcd-commercial-manual-activation-receipt-v1` |
 | active Portal state is reconciled after daemon startup; incomplete construction and exited workers retry without duplicates | `mcd_agent/daemon.py:_reconcile_commercial_worker` | `tests/test_daemon_commercial_guard.py` activation-material retry; `tests/test_commercial_self_hosted_v2.py` activate -> poll -> terminal v2 |
 | result-signing identity bootstraps from MCD-owned config and gates signed control execution on MCC ACK | `mcd_agent/config.py`, `mcd_agent/result_signing.py`, `mcd_agent/state_push.py`, `mcd_agent/mcd_control.py` | `tests/test_result_signing.py`, `tests/test_mcd_control.py`, live `mcd-state-v1` identity/key/ACK and terminal-receipt evidence |
@@ -1861,10 +1861,13 @@ existing failed instances are preserved as evidence rather than manually warmed.
 
 ### External installation scenario boundary
 
-All installation recipes, ordering, conditions and rollback belong to external
-versioned scenario blocks and their external composition. MCD must not encode
-OS, package/repository, service, database, web, PHP, mail or Mautic installation
-steps, seed scripts or install-specific fallback branches. The legacy managed
+The external script owns installation algorithm, ordering, conditions,
+algorithm-specific downloads and rollback. System-dependent package/repository,
+service, path/owner and configuration-generation actions belong to external
+blocks. MCD retains its own rings, scheduler, queues, task supervision and direct
+Mautic management. All bin/console commands, including Doctrine migrations, are
+performed by MCD through its existing execution mechanics; scripts request these
+operations via mcd-cli and never duplicate console/runtime resolution logic. The legacy managed
 image installer remains only during migration until its external replacement
 has passed the normal-path scenario test; its removal is required to complete
 the migration. Its previous release history is not rewritten.
@@ -1912,3 +1915,51 @@ configuration must consume existing MCC data through the applicable approved
 transport. Corporate managed hosts remain on their corporate lane; they are
 not silently re-enrolled into the separate Portal OWH lane. Tests exercise real
 runtime override preservation and CLI startup/auto/manual selection effects.
+
+
+### 1.7.0 candidate: instance-scoped Mautic commands and registration
+
+This section describes unshipped candidate behavior, not completed acceptance.
+Before registration, an external non-Mautic installer prepares resources and
+registers actual created facts through the existing inventory. After registration,
+commands use stable instance identity: `mcd-cli exec --instance-uid <uid>
+--command cache:warmup --console-arg=--env=prod --console-arg=--no-debug
+--console-arg=--no-interaction --timeout 600`. No PHP/root/user arguments are
+needed in that command. MCD resolves exactly one registered UID and complete
+runtime metadata; missing/ambiguous/incomplete data fails before execution, never
+selecting a first instance or global PHP. Literal arguments pass to the existing
+executor. Direct version and doctrine migration operations are exposed without
+changing workflow ordering or repairing known broken upgrade/migration flows.
+
+`instances add` accepts explicit UID, runtime PHP/user and `--json --operation-id`
+for actual created facts. The existing SQLite inventory transaction serializes
+creation and emits created-versus-existing receipt. Existing replay preserves DB
+metadata and never grants rollback ownership. Only newly created registrations
+carry the existing job/request ID in `registering_operation_id`; there is no new
+UUID credential/key layer. Owned removal matches exact UID/root/operation ID,
+without broad name/root fallback. Rescan preserves stable identity, declared host
+runtime and registration operation; complete explicit manual records survive a
+pre-vhost scan. Tests: `test_registered_instance_runtime` and
+`test_cli_console_arguments`; all ordinary CLI paths stay compatible.
+
+Hardware and HOST workload profiles remain independent universal external MCC
+data, shared by digest across families. External family/distro config generators
+consume these values; only real path/owner/layout differences justify overrides.
+First family sync includes its scenarios/generators and referenced universal
+objects; later sync reuses valid SHA bytes. Complete selected-task cache remains
+usable offline, including manual copies. Family catalog integration, commercial
+archive launcher/prefetch and final source cleanup remain unfinished.
+
+Evidence limits: local regression and fixture subprocess tests do not establish
+native installation acceptance. A prior Docker-descriptor-injected Mautic version/
+warmup proof covers real commands only. Actual installed R2 CLI without injection,
+external block integration and 1.7.0 publication remain outstanding. The shipped R2 CLI preferred an obsolete /opt/mcd/src marker; the runtime-only
+candidate removes that default read and reports the imported runtime version.
+Acceptance verifies imported paths, installed file hashes and distribution
+metadata. The updater requires a verified manifest/wheel, activates artifact
+cache under /opt/mcd/runtime and cannot install a project checkout. The bridge
+retains a legacy tree only during its guarded activation transaction, then
+retires it after verification; a failure restores the original runtime/state.
+Fresh bootstrap is owned externally and requires its own new revision removing
+the legacy src copy. R2 native CLI version/warmup has passed without injection;
+R3 clean Ubuntu clone and external consumer acceptance remain pending.

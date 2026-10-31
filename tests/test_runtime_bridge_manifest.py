@@ -49,15 +49,17 @@ def test_bridge_manifest_binds_current_release(tmp_path: Path) -> None:
     }
 
 
-def test_current_bridge_source_has_the_published_self_contained_digest() -> None:
+def test_changed_bridge_requires_new_immutable_revision() -> None:
     bridge = Path(__file__).parents[1] / "tools" / "mcd_runtime_bootstrap.py"
     manifest = build_manifest(
         bridge,
-        artifact_name="mcd-runtime-1.6.0.bridge.py",
-        artifact_url="https://servercontrol.sales-snap.com/mauticctl/mcd/mcd-runtime-1.6.0.bridge.py",
-        **{key: value for key, value in _kwargs().items() if key not in {"artifact_name", "artifact_url"}},
+        version="1.7.0",
+        artifact_name="mcd-runtime-1.7.0.bridge.py",
+        artifact_url="https://servercontrol.sales-snap.com/mauticctl/mcd/mcd-runtime-1.7.0.bridge.py",
+        **{key: value for key, value in _kwargs().items() if key not in {"version", "artifact_name", "artifact_url"}},
     )
-    assert manifest["artifact_sha256"] == BRIDGE_SHA
+    assert manifest["artifact_sha256"] != BRIDGE_SHA
+    assert manifest["artifact"] == "mcd-runtime-1.7.0.bridge.py"
 
 
 def test_bridge_revision_keeps_failed_immutable_artifact_untouched(tmp_path: Path) -> None:

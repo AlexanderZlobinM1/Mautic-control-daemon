@@ -1,69 +1,240 @@
 {
   "schema": "mcd-execution-ownership-audit-v1",
-  "status": "preservation-audit-required-before-deletion",
-  "rule": "MCC and Portal deliver signed commands/scenario revisions and receive status/receipts. MCD executes locally in standalone mode and in every connected mode. Connection type must not change execution semantics.",
+  "status": "externalization-required-before-1.7.0",
+  "rule": "MCD retains own agent logic and direct Mautic command/management, scheduling/task/supervision and generic cache/execution/receipts. External wrapping owns concrete OS/service/package/repository/path/owner/system-config-generator actions; MCC owns universal profile/matrix data and distribution. Preserve all currently working entrypoints.",
   "rows": [
     {
       "capability": "standalone_cli",
       "owner": "mcd",
-      "canonical_paths": ["mcd_agent/cli.py", "mcd_agent/mcd_control.py"],
-      "preserve_entrypoints": ["mcd-cli"],
-      "preservation_tests": ["tests/test_mcd_control.py", "tests/test_passive_dispatch.py"],
-      "connector_role": "none required; MCC/Portal attachment is additive"
+      "canonical_paths": [
+        "mcd_agent/cli.py",
+        "mcd_agent/mcd_control.py"
+      ],
+      "preserve_entrypoints": [
+        "mcd-cli"
+      ],
+      "preservation_tests": [
+        "tests/test_mcd_control.py",
+        "tests/test_passive_dispatch.py"
+      ],
+      "connector_role": "existing authenticated transport/brokering and exact selected-task pins; no embedded recipe",
+      "executor_owner": "mcd_generic",
+      "recipe_owner": "external_mcc_wrapping"
     },
     {
       "capability": "scheduler_cron_taskstore",
       "owner": "mcd",
-      "canonical_paths": ["mcd_agent/daemon.py", "mcd_agent/plugin_operations.py"],
-      "preserve_entrypoints": ["scheduler tick", "cron/catalog operations", "TaskStore adoption"],
-      "preservation_tests": ["tests/test_campaign_ring_dispatch.py", "tests/test_task_lifecycle.py", "tests/test_plugin_operation_cron.py"],
-      "connector_role": "delivery/status only; no scheduler control"
+      "canonical_paths": [
+        "mcd_agent/daemon.py",
+        "mcd_agent/plugin_operations.py"
+      ],
+      "preserve_entrypoints": [
+        "scheduler tick",
+        "cron/catalog operations",
+        "TaskStore adoption"
+      ],
+      "preservation_tests": [
+        "tests/test_campaign_ring_dispatch.py",
+        "tests/test_task_lifecycle.py",
+        "tests/test_plugin_operation_cron.py"
+      ],
+      "connector_role": "existing authenticated transport/brokering and exact selected-task pins; no embedded recipe",
+      "executor_owner": "mcd_generic",
+      "recipe_owner": "external_mcc_wrapping"
     },
     {
       "capability": "plugin_operations",
       "owner": "mcd",
-      "canonical_paths": ["mcd_agent/plugin_operations.py", "mcd_agent/plugins.py"],
-      "preserve_entrypoints": ["catalog-derived operation execution"],
-      "preservation_tests": ["tests/test_plugin_operations.py", "tests/test_plugin_registration.py"],
-      "connector_role": "delivery/status only; no plugin recipe"
+      "canonical_paths": [
+        "mcd_agent/plugin_operations.py",
+        "mcd_agent/plugins.py"
+      ],
+      "preservation_tests": [
+        "tests/test_plugin_operations.py",
+        "tests/test_plugin_registration.py"
+      ],
+      "connector_role": "existing authenticated transport/brokering and exact selected-task pins; no embedded recipe",
+      "executor_owner": "mcd_generic",
+      "recipe_owner": "external_mcc_wrapping",
+      "pending_recipe_paths": [
+        "mcd_agent/plugins.py"
+      ],
+      "legacy_entrypoints_pending_external_dispatch": [
+        "catalog-derived operation execution"
+      ],
+      "preserve_entrypoints": [
+        "generic external artifact execution, task state, observations and receipts only"
+      ]
     },
     {
       "capability": "upgrades_and_migrations",
       "owner": "mcd",
-      "canonical_paths": ["mcd_agent/mautic_upgrade.py", "mcd_agent/mautic_patch_plan_v3.py", "mcd_agent/mautic_patch_facts.py"],
-      "preserve_entrypoints": ["mautic-upgrade", "doctrine discovery/apply/verify"],
-      "preservation_tests": ["tests/test_mautic_upgrade_target.py", "tests/test_mautic_manual_upgrade.py", "tests/test_mautic_patch_plan_v3.py", "tests/test_mautic_patch_facts.py"],
-      "connector_role": "signed plan/package delivery and evidence only"
+      "canonical_paths": [
+        "mcd_agent/mautic_upgrade.py",
+        "mcd_agent/mautic_patch_plan_v3.py",
+        "mcd_agent/mautic_patch_facts.py"
+      ],
+      "preservation_tests": [
+        "tests/test_mautic_upgrade_target.py",
+        "tests/test_mautic_manual_upgrade.py",
+        "tests/test_mautic_patch_plan_v3.py",
+        "tests/test_mautic_patch_facts.py"
+      ],
+      "connector_role": "existing authenticated transport/brokering and exact selected-task pins; no embedded recipe",
+      "executor_owner": "mcd_generic",
+      "recipe_owner": "external_mcc_wrapping",
+      "pending_recipe_paths": [
+        "mcd_agent/mautic_image_install.py",
+        "mcd_agent/mautic_upgrade.py",
+        "mcd_agent/mautic_manual_upgrade.py",
+        "mcd_agent/instance_migrate.py",
+        "mcd_agent/mautic_composer_move.py",
+        "mcd_agent/mautic_prepared_restore.py",
+        "mcd_agent/mautic_core_restore.py",
+        "mcd_agent/mautic_patch_plan_v3.py"
+      ],
+      "legacy_entrypoints_pending_external_dispatch": [
+        "mautic-upgrade",
+        "doctrine discovery/apply/verify"
+      ],
+      "preserve_entrypoints": [
+        "generic external artifact execution, task state, observations and receipts only"
+      ]
     },
     {
       "capability": "backup_and_rollback",
       "owner": "mcd",
-      "canonical_paths": ["mcd_agent/backup.py", "mcd_agent/mautic_patch_backup.py", "mcd_agent/mautic_patch_plan_v3.py"],
-      "preserve_entrypoints": ["backup_run", "backup_restore", "immutable patch rollback"],
-      "preservation_tests": ["tests/test_backup_local_storage.py", "tests/test_mautic_patch_backup.py", "tests/test_upgrade_rollback_receipt.py"],
-      "connector_role": "backup evidence/receipt exchange only"
+      "canonical_paths": [
+        "mcd_agent/backup.py",
+        "mcd_agent/mautic_patch_backup.py",
+        "mcd_agent/mautic_patch_plan_v3.py"
+      ],
+      "preservation_tests": [
+        "tests/test_backup_local_storage.py",
+        "tests/test_mautic_patch_backup.py",
+        "tests/test_upgrade_rollback_receipt.py"
+      ],
+      "connector_role": "existing authenticated transport/brokering and exact selected-task pins; no embedded recipe",
+      "executor_owner": "mcd_generic",
+      "recipe_owner": "external_mcc_wrapping",
+      "pending_recipe_paths": [
+        "mcd_agent/backup.py",
+        "mcd_agent/mautic_patch_backup.py"
+      ],
+      "legacy_entrypoints_pending_external_dispatch": [
+        "backup_run",
+        "backup_restore",
+        "immutable patch rollback"
+      ],
+      "preserve_entrypoints": [
+        "generic external artifact execution, task state, observations and receipts only"
+      ]
     },
     {
       "capability": "scenario_execution",
       "owner": "mcd",
-      "canonical_paths": ["mcd_agent/scenario_launcher.py", "mcd_agent/scenario_artifact_store.py", "mcd_agent/commercial_self_hosted.py"],
-      "preserve_entrypoints": ["mcd-scenario-runner = mcd_agent.scenario_launcher:main", "ScenarioExecutor"],
-      "preservation_tests": ["tests/test_scenario_launcher.py", "tests/test_mcc_scenario_apply_boundary.py", "tests/test_commercial_self_hosted_v2.py"],
-      "connector_role": "signed latest artifact/context delivery and stage/terminal receipt"
+      "canonical_paths": [
+        "mcd_agent/scenario_launcher.py",
+        "mcd_agent/scenario_artifact_store.py",
+        "mcd_agent/commercial_self_hosted.py"
+      ],
+      "preserve_entrypoints": [
+        "mcd-scenario-runner = mcd_agent.scenario_launcher:main",
+        "ScenarioExecutor"
+      ],
+      "preservation_tests": [
+        "tests/test_scenario_launcher.py",
+        "tests/test_mcc_scenario_apply_boundary.py",
+        "tests/test_commercial_self_hosted_v2.py"
+      ],
+      "connector_role": "existing authenticated transport/brokering and exact selected-task pins; no embedded recipe",
+      "executor_owner": "mcd_generic",
+      "recipe_owner": "external_mcc_wrapping"
     },
     {
       "capability": "settings_recovery",
       "owner": "mcd",
-      "canonical_paths": ["mcd_agent/runtime_overrides.py", "mcd_agent/daemon.py", "mcd_agent/state_push.py"],
-      "preserve_entrypoints": ["full MCC-authoritative snapshot recovery"],
-      "preservation_tests": ["tests/test_runtime_override_direction.py"],
-      "connector_role": "MCC stores/returns complete snapshot; MCD materializes it locally"
+      "canonical_paths": [
+        "mcd_agent/runtime_overrides.py",
+        "mcd_agent/daemon.py",
+        "mcd_agent/state_push.py"
+      ],
+      "preservation_tests": [
+        "tests/test_runtime_override_direction.py"
+      ],
+      "connector_role": "existing authenticated transport/brokering and exact selected-task pins; no embedded recipe",
+      "executor_owner": "mcd_generic",
+      "recipe_owner": "external_mcc_wrapping",
+      "pending_recipe_paths": [
+        "mcd_agent/runtime_overrides.py",
+        "mcd_agent/config.py",
+        "mcd_agent/mode.py",
+        "mcd_agent/hardware_profile.py"
+      ],
+      "legacy_entrypoints_pending_external_dispatch": [
+        "full MCC-authoritative snapshot recovery"
+      ],
+      "preserve_entrypoints": [
+        "generic external artifact execution, task state, observations and receipts only"
+      ]
     }
   ],
   "deletion_gate": [
-    "Every row has passing standalone and connected-mode preservation evidence.",
-    "No command, schedule, migration, backup, rollback or settings path is removed or routed through MCC/Portal.",
-    "No duplicate execution runner or connection-specific scenario adapter exists.",
-    "Only after the audit passes may legacy paths be considered for removal."
-  ]
+    "Verify external replacements and preserve working instances/history.",
+    "Remove every forbidden implementation/import/automatic caller/fallback; compatibility is generic dispatch only.",
+    "Use one existing generic engine; no parallel recipe or new authority/security layer.",
+    "Verify exact selected-task complete closure, including manual cache; no online freshness/provenance gate offline.",
+    "Warm valid cache makes zero artifact GET/HEAD calls; missing/corrupt required objects never begin mutation.",
+    "Same external bundle/script/profile code passes isolated direct and MCD execution.",
+    "Static/native active-path proof: DNS mutation exclusively MCC.",
+    "Do not publish 1.7.0 while pending recipe paths/callers remain."
+  ],
+  "release_target": "1.7.0",
+  "additional_pending_recipe_paths": [
+    "mcd_agent/apt_profile.py",
+    "mcd_agent/service_profiles.py",
+    "mcd_agent/local_mail.py",
+    "mcd_agent/mail_config.py",
+    "mcd_agent/wazuh_profile.py",
+    "mcd_agent/security_blocklist.py",
+    "mcd_agent/amazon_mailer_dep.py",
+    "mcd_agent/self_update.py",
+    "mcd_agent/uninstall.py",
+    "mcd_agent/state_backend.py"
+  ],
+  "cache_contract": {
+    "identity": "selected task expected artifact/profile/component pins",
+    "manual_population": "allowed; exact SHA equality, no provenance gate",
+    "offline": "complete selected task closure only, no live CURRENT/global latest check",
+    "unselected_optional_objects": "not required",
+    "on_cache_hit": "reuse local bytes; zero artifact GET/HEAD",
+    "on_missing_or_corrupt": "fetch only required expected objects if online; concrete error/no partial start if unavailable"
+  },
+  "profile_data_boundary": {
+    "authority": "MCC universal external data",
+    "hardware_and_host_scopes": "independent; distro/family-independent",
+    "cache_identity": "shared object SHA-256; no per-family duplicate profile trees",
+    "configuration_generators": "external family/distro blocks consuming universal values",
+    "first_family_sync": "family scenarios/generators plus referenced universal objects",
+    "implementation_status": "contract only; catalog integration pending"
+  },
+  "classification_override": {
+    "keep": [
+      "agent logic",
+      "direct Mautic commands and management",
+      "scheduler/task queues/process supervision",
+      "generic retrieval/cache/integrity/execute/receipts",
+      "all Mautic bin/console commands including doctrine:migrations:migrate"
+    ],
+    "externalize": [
+      "OS packages/repositories",
+      "system service provisioning",
+      "OS-specific paths/owners/config generators",
+      "universal profile/matrix data outside MCD code"
+    ],
+    "unresolved": [],
+    "pending_recipe_paths_meaning": "classification candidates, not blanket deletion authorization",
+    "baseline": "preserve all currently working behavior; pre-existing broken flows deferred",
+    "composition_boundary": "external OS composition may request existing MCD Mautic operation; never duplicate Mautic CLI implementation"
+  }
 }

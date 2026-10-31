@@ -14,8 +14,9 @@ The bridge is deliberately fail-closed:
 * it takes the same durable MCD update lease and scheduler admission barrier;
 * an unreadable/active backup lock aborts before mutation;
 * the wheel is installed and imported from the managed venv before restart;
-* ``/opt/mcd/src`` is switched atomically and remains as bounded rollback
-  material until the supervisor is healthy;
+* verified artifacts are activated under ``/opt/mcd/runtime``;
+* legacy project sources are retained only during the activation transaction
+  and retired after verified activation, never used as installed identity;
 * the supervisor uses ``WorkingDirectory=/opt/mcd`` and ``KillMode=process``;
 * failure restores the old source, managed-venv package and running service,
   even when the legacy source has no ``pyproject.toml``.
@@ -773,7 +774,9 @@ def _successful_replay(
     target = str(payload.get("target") or "").strip()
     if not target or (expected_target and target != expected_target):
         return None
-    source_manifest = install_dir / "src" / MANIFEST_NAME
+    if (install_dir / "src").exists():
+        return None
+    source_manifest = install_dir / "runtime" / MANIFEST_NAME
     if not source_manifest.is_file():
         return None
     try:
@@ -809,7 +812,12 @@ def bridge(args: argparse.Namespace) -> dict[str, Any]:
     replay = _successful_replay(install_dir, actual_archive_sha, str(args.expected_target or "").strip())
     if replay is not None:
         return replay
-    src_dir = install_dir / "src"
+    legacy_dir = install_dir / "src"
+    runtime_dir = install_dir / "runtime"
+    src_dir = runtime_dir if runtime_dir.is_dir() else legacy_dir
+    original_dir = src_dir
+    if runtime_dir.exists() and legacy_dir.exists():
+        raise BridgeError("parallel legacy src requires audited retirement before runtime activation")
     if not src_dir.is_dir():
         raise BridgeError(f"legacy source directory not found: {src_dir}")
     if not (src_dir / "mcd_agent" / "__init__.py").is_file():
@@ -826,8 +834,8 @@ def bridge(args: argparse.Namespace) -> dict[str, Any]:
 
     updates_dir = install_dir / "var" / "updates"
     updates_dir.mkdir(parents=True, exist_ok=True)
-    stage = updates_dir / f"src.next-bridge-{os.getpid()}-{time.time_ns()}"
-    old_src = updates_dir / f"src.prev-bridge-{int(time.time())}"
+    stage = updates_dir / f"runtime.next-bridge-{os.getpid()}-{time.time_ns()}"
+    old_src = updates_dir / f"runtime.prev-bridge-{int(time.time())}"
     state_path = install_dir / "var" / STATE_NAME
     before_state = _state_read(state_path)
     before_state_bytes = state_path.read_bytes() if state_path.is_file() else None
@@ -837,6 +845,7 @@ def bridge(args: argparse.Namespace) -> dict[str, Any]:
     previous_dropin: bytes | None = None
     switched = False
     old_source_moved = False
+    migration_complete = False
     manifest: dict[str, Any] = {}
     target = ""
     legacy_runtime_snapshot: Path | None = None
@@ -869,7 +878,8 @@ def bridge(args: argparse.Namespace) -> dict[str, Any]:
                     raise BridgeError(f"rollback source path already exists: {old_src}")
                 os.replace(src_dir, old_src)
                 old_source_moved = True
-                os.replace(stage, src_dir)
+                os.replace(stage, runtime_dir)
+                src_dir = runtime_dir
                 switched = True
 
                 if not args.no_systemd:
@@ -926,19 +936,20 @@ def bridge(args: argparse.Namespace) -> dict[str, Any]:
                         "health": service_result,
                     },
                     "scheduler_barrier_created": bool(barrier_created),
-                    "rollback_source_retained": True,
+                    "rollback_source_retained": False,
                     "checked_at": datetime.now(timezone.utc).isoformat(),
                 }
                 receipt_path = _write_receipt(install_dir, receipt)
                 receipt["receipt"] = str(receipt_path)
                 _write_receipt(install_dir, receipt)
+                migration_complete = True
                 return receipt
             except Exception:
                 # Do not leave the service pointing at a half-installed source.
                 if switched or old_source_moved:
                     if src_dir.exists():
                         shutil.rmtree(src_dir)
-                    os.replace(old_src, src_dir)
+                    os.replace(old_src, original_dir)
                 if systemd_path is not None:
                     _restore_dropin(systemd_path, previous_dropin)
                     if not args.no_systemd:
@@ -959,6 +970,8 @@ def bridge(args: argparse.Namespace) -> dict[str, Any]:
                     os.replace(temporary, state_path)
                 raise
             finally:
+                if migration_complete and old_src.exists():
+                    shutil.rmtree(old_src)
                 if stage.exists():
                     shutil.rmtree(stage, ignore_errors=True)
                 if legacy_runtime_snapshot is not None and legacy_runtime_snapshot.exists():

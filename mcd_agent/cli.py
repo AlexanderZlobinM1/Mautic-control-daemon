@@ -595,6 +595,24 @@ def _select_root_for_ops(cfg, root: str | None, *, allow_missing_absolute: bool 
     return installs[0].root
 
 
+def _resolve_registered_command_runtime(cfg, instance_uid: str) -> tuple[str, str, str]:
+    """Resolve an exact stable identity; never infer a first instance or PHP."""
+    inv = InstanceInventory(cfg.state_db_path)
+    try:
+        matches = [inst for inst in inv.list_instances() if inst.instance_uid == instance_uid]
+    finally:
+        inv.conn.close()
+    if len(matches) != 1:
+        raise ValueError("Mautic instance identity is unknown or ambiguous")
+    inst = matches[0]
+    root = str(inst.root or "")
+    php = str(inst.runtime_php_bin or "")
+    user = str(inst.runtime_user or "")
+    if not Path(root).is_absolute() or not Path(php).is_absolute() or not user.strip():
+        raise ValueError("Registered Mautic instance runtime is incomplete")
+    return root, php, user
+
+
 def _select_instance_for_ops(cfg, root: str | None):
     inv = InstanceInventory(cfg.state_db_path)
     ensure_seeded(inv, cfg)
@@ -685,6 +703,7 @@ def _run_manual_command_with_scheduler(
     php_bin: str,
     timeout_sec: int,
     run_as_user: str | None,
+    console_args: list[str] | None = None,
 ) -> tuple[int, str]:
     task_type = command_task_type(command)
     if (
@@ -705,6 +724,7 @@ def _run_manual_command_with_scheduler(
                 command=command,
                 instance_id=instance_id,
                 run_as_user=run_as_user,
+                **({"console_args": console_args} if console_args else {}),
             )
         except ValueError as e:
             return 2, str(e)
@@ -726,6 +746,7 @@ def _run_manual_command_with_scheduler(
                 instance_id=instance_id,
                 timeout_sec=timeout_sec,
                 run_as_user=run_as_user,
+                **({"console_args": console_args} if console_args else {}),
             )
 
         store = TaskStore(cfg.state_db_path, cfg)
@@ -745,6 +766,7 @@ def _run_manual_command_with_scheduler(
                 instance_id=instance_id,
                 timeout_sec=timeout_sec,
                 run_as_user=run_as_user,
+                **({"console_args": console_args} if console_args else {}),
             )
 
         reqs: list[tuple[str, int]] = []
@@ -805,6 +827,7 @@ def _run_manual_command_with_scheduler(
         instance_id=instance_id,
         timeout_sec=timeout_sec,
         run_as_user=run_as_user,
+        **({"console_args": console_args} if console_args else {}),
     )
 
 
@@ -1676,7 +1699,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     exec_cmd = sub.add_parser("exec", help="Execute one Mautic command")
     exec_cmd.add_argument("--config", default=default_cfg)
-    exec_cmd.add_argument("--root", required=True)
+    exec_target = exec_cmd.add_mutually_exclusive_group(required=True)
+    exec_target.add_argument("--root")
+    exec_target.add_argument("--instance-uid", help="Exact registered stable instance identity; resolves its runtime")
     exec_cmd.add_argument(
         "--command",
         required=True,
@@ -1690,12 +1715,16 @@ def _build_parser() -> argparse.ArgumentParser:
             "import",
             "cache:clear",
             "cache:warmup",
+            "version",
+            "doctrine:migrations:migrate",
         ],
     )
     exec_cmd.add_argument("--instance-id", type=int)
     exec_cmd.add_argument("--php-bin", default="/usr/bin/php")
     exec_cmd.add_argument("--timeout", type=int, default=1800)
     exec_cmd.add_argument("--run-as-user", default="www-data")
+
+    exec_cmd.add_argument("--console-arg", action="append", default=[], help="One literal Mautic argument; repeat --console-arg=VALUE")
 
     def _add_shorthand_exec_args(p: argparse.ArgumentParser, *, with_instance_id: bool) -> None:
         p.add_argument("--config", default=default_cfg)
@@ -1963,7 +1992,6 @@ def _build_parser() -> argparse.ArgumentParser:
     img.add_argument("--image-ref", required=True)
     img.add_argument("--domain", required=True)
     img.add_argument("--php-version", required=True)
-    img.add_argument("--certbot-dns-credential-ref", default="")
     img.add_argument("--yes", action="store_true")
     img.add_argument("--no-certbot", action="store_true")
     img.add_argument("--own-mail", action="store_true")
@@ -2037,6 +2065,12 @@ def _build_parser() -> argparse.ArgumentParser:
     inv.add_argument("--db-user")
     inv.add_argument("--db-password")
     inv.add_argument("--db-table-prefix")
+
+    inv.add_argument("--instance-uid")
+    inv.add_argument("--runtime-php-bin")
+    inv.add_argument("--runtime-user")
+    inv.add_argument("--operation-id")
+    inv.add_argument("--json", action="store_true")
 
     reload_cfg = sub.add_parser("reload-config", help="Rescan instances from config/discovery")
     reload_cfg.add_argument("--config", default=default_cfg)
@@ -2379,6 +2413,7 @@ def _build_parser() -> argparse.ArgumentParser:
     custom.add_argument("--config", default=default_cfg)
     custom.add_argument("--list", action="store_true", help="List available custom scripts")
     custom.add_argument("--json", action="store_true")
+    custom.add_argument("--fetch-only", action="store_true", help="Verify/cache the selected artifact without executing it")
     custom.add_argument("--expected-sha256", help="Require the selected manifest entry and downloaded script to match this SHA-256")
     custom.add_argument(
         "--detach",
@@ -2386,7 +2421,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Detached run control. Default: auto (interactive scripts run foreground).",
     )
-    custom.add_argument("script", nargs="?", help="Script key (or display name) from custom manifest")
+    custom.add_argument("script", nargs="?", help="Exact script key from custom manifest")
     custom.add_argument("script_args", nargs=argparse.REMAINDER, help="Arguments for selected script (after --)")
 
     return parser
@@ -3127,17 +3162,25 @@ def main() -> int:
 
     if args.cmd == "exec":
         cfg = load_config(args.config)
+        root, php_bin, run_as_user = args.root, args.php_bin, args.run_as_user
+        if args.instance_uid:
+            try:
+                root, php_bin, run_as_user = _resolve_registered_command_runtime(cfg, args.instance_uid)
+            except ValueError as exc:
+                print(str(exc), file=sys.stderr)
+                return 2
         note = maybe_notify_update(cfg)
         if note:
             print(f"NOTICE: {note}")
         rc, output = _run_manual_command_with_scheduler(
             cfg=cfg,
-            php_bin=args.php_bin,
-            root=args.root,
+            php_bin=php_bin,
+            root=root,
             command=args.command,
             instance_id=args.instance_id,
             timeout_sec=args.timeout,
-            run_as_user=args.run_as_user,
+            run_as_user=run_as_user,
+            console_args=args.console_arg,
         )
         if output:
             print(output)
@@ -3426,7 +3469,7 @@ def main() -> int:
         cfg = load_config(args.config)
         note = maybe_notify_update(cfg)
         if note:
-            print(f"NOTICE: {note}")
+            print(f"NOTICE: {note}", file=sys.stderr if args.json else sys.stdout)
         inv = InstanceInventory(cfg.state_db_path)
         ensure_seeded(inv, cfg)
         if args.op == "list":
@@ -3455,23 +3498,40 @@ def main() -> int:
             if not (args.name and args.root and args.console_path):
                 print("--name --root --console-path are required for add")
                 return 2
-            inv.add_or_update_manual(
-                name=args.name,
-                root=args.root,
-                console_path=args.console_path,
-                local_php_path=args.local_php_path,
-                mautic_major=args.mautic_major,
-                db_host=args.db_host,
-                db_port=args.db_port,
-                db_name=args.db_name,
-                db_user=args.db_user,
-                db_password=args.db_password,
-                db_table_prefix=args.db_table_prefix,
-            )
-            print("Manual instance saved")
+            try:
+                receipt = inv.add_or_update_manual(
+                    name=args.name,
+                    root=args.root,
+                    console_path=args.console_path,
+                    local_php_path=args.local_php_path,
+                    mautic_major=args.mautic_major,
+                    db_host=args.db_host,
+                    db_port=args.db_port,
+                    db_name=args.db_name,
+                    db_user=args.db_user,
+                    db_password=args.db_password,
+                    db_table_prefix=args.db_table_prefix,
+                    instance_uid=args.instance_uid,
+                    runtime_php_bin=args.runtime_php_bin,
+                    runtime_user=args.runtime_user,
+                    registration_receipt=args.json,
+                    registering_operation_id=args.operation_id,
+                )
+            except ValueError as exc:
+                print(str(exc), file=sys.stderr)
+                return 2
+            print(json.dumps(receipt) if args.json else "Manual instance saved")
             _push_state_after_change(cfg, "instances-add")
             return 0
         if args.op == "remove":
+            if args.operation_id or args.instance_uid or args.json:
+                try:
+                    removed = inv.remove_owned_registration(instance_uid=args.instance_uid, root=args.root, registering_operation_id=args.operation_id)
+                except ValueError as exc:
+                    print(str(exc), file=sys.stderr)
+                    return 2
+                print(json.dumps({"status": "ok", "removed": removed}))
+                return 0
             if not args.name:
                 print("--name is required for remove")
                 return 2
@@ -3493,7 +3553,6 @@ def main() -> int:
                     php_version=str(args.php_version),
                     yes=bool(args.yes),
                     run_certbot=not bool(args.no_certbot),
-                    certbot_dns_credential_ref=str(args.certbot_dns_credential_ref or "").strip() or None,
                     own_mail=bool(args.own_mail),
                     mail_profile_id=str(args.mail_profile_id or "").strip() or None,
                 )
@@ -3505,7 +3564,6 @@ def main() -> int:
                 php_version=str(args.php_version),
                 yes=bool(args.yes),
                 run_certbot=not bool(args.no_certbot),
-                certbot_dns_credential_ref=str(args.certbot_dns_credential_ref or "").strip() or None,
                 own_mail=bool(args.own_mail),
                 mail_profile_id=str(args.mail_profile_id or "").strip() or None,
             )
@@ -5094,6 +5152,7 @@ def main() -> int:
             detach=args.detach,
             live_output=not bool(args.detach),
             expected_sha256=args.expected_sha256,
+            fetch_only=args.fetch_only,
         )
         if out:
             print(out)

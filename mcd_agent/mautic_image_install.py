@@ -5,7 +5,6 @@ from mcd_agent.mcc_transport import mcc_request
 from dataclasses import dataclass
 from pathlib import Path
 import gzip
-import json
 import os
 import re
 import secrets
@@ -16,8 +15,8 @@ import tempfile
 import time
 from typing import Any
 from urllib import request
-from urllib.parse import urlencode
 
+from mcd_agent.archive_utils import safe_extract_tar
 from mcd_agent.config import AgentConfig
 from mcd_agent.form_embed import render_form_embed_location
 from mcd_agent.nginx_templates import render_nginx_template
@@ -26,7 +25,6 @@ from mcd_agent.source_operation import stable_source_operation
 
 _LETSENCRYPT_LIVE = Path("/etc/letsencrypt/live")
 _LETSENCRYPT_RENEWAL = Path("/etc/letsencrypt/renewal")
-_LETSENCRYPT_MCD = Path("/etc/letsencrypt/mcd")
 _CERTBOT_LOCK_RETRY_SEC = 5
 _CERTBOT_LOCK_MAX_WAIT_SEC = 180
 
@@ -279,14 +277,7 @@ def _rollback_failed_install(
             )
             if rc != 0:
                 errors.append(f"certificate: {out or 'certbot delete failed'}")
-            else:
-                safe_domain = re.sub(r"[^a-z0-9_.-]+", "_", plan.domain.lower()).strip("._-") or "domain"
-                credential = _LETSENCRYPT_MCD / f"dns-cloudflare-{safe_domain}.ini"
-                try:
-                    if credential.exists():
-                        credential.unlink()
-                except OSError as exc:
-                    errors.append(f"certificate credential: {exc}")
+
 
         try:
             if plan.webroot.exists():
@@ -322,15 +313,6 @@ def _download(url: str, token: str, dst: Path) -> None:
     req = mcc_request(url, headers={"Authorization": f"Bearer {token}"})
     with request.urlopen(req, timeout=1800) as resp, dst.open("wb") as f:
         shutil.copyfileobj(resp, f)
-
-
-def _download_json(url: str, token: str, *, timeout_sec: int = 60) -> dict[str, Any]:
-    req = mcc_request(url, headers={"Authorization": f"Bearer {token}"})
-    with request.urlopen(req, timeout=timeout_sec) as resp:
-        payload = json.loads(resp.read().decode("utf-8", errors="replace"))
-    if not isinstance(payload, dict):
-        raise RuntimeError("MCC returned invalid JSON payload")
-    return payload
 
 
 _CREATE_TABLE_RE = re.compile(r"^CREATE TABLE `([^`]+)`")
@@ -650,16 +632,6 @@ def _artifact_url(cfg: AgentConfig, image_ref: str, kind: str) -> str:
     return f"{base}/api/v1/agent/mautic-images/{image_ref}/artifact/{kind}"
 
 
-def _agent_url(cfg: AgentConfig, path: str, query: dict[str, str] | None = None) -> str:
-    base = str(cfg.mcc_url or "").rstrip("/")
-    if not base:
-        raise RuntimeError("mcc.url is not configured")
-    suffix = "/" + str(path or "").lstrip("/")
-    if query:
-        suffix += "?" + urlencode(query)
-    return f"{base}{suffix}"
-
-
 def _patch_local_php(path: Path, plan: ImageInstallPlan) -> None:
     text = path.read_text(encoding="utf-8", errors="replace")
     text = text.replace("/var/www/ss/public_html", str(plan.webroot))
@@ -794,39 +766,6 @@ def _nginx_web_root(project_root: Path) -> Path:
     return root
 
 
-def _certbot_cloudflare_credentials_url(cfg: AgentConfig, plan: ImageInstallPlan, credential_ref: str) -> str:
-    return _agent_url(
-        cfg,
-        "/api/v1/agent/dns-credentials/certbot-cloudflare",
-        {"domain": plan.domain, "credential_ref": credential_ref},
-    )
-
-
-def _certbot_cloudflare_credentials_path(cfg: AgentConfig, plan: ImageInstallPlan, credential_ref: str) -> Path:
-    payload = _download_json(_certbot_cloudflare_credentials_url(cfg, plan, credential_ref), str(cfg.mcc_token), timeout_sec=60)
-    token = str(payload.get("api_token") or "").strip()
-    if not token:
-        raise RuntimeError("Cloudflare DNS credential has no API token")
-    safe_domain = re.sub(r"[^a-z0-9_.-]+", "_", plan.domain.lower()).strip("._-") or "domain"
-    cred_dir = _LETSENCRYPT_MCD
-    cred_dir.mkdir(parents=True, exist_ok=True)
-    os.chmod(cred_dir, 0o700)
-    path = cred_dir / f"dns-cloudflare-{safe_domain}.ini"
-    path.write_text("dns_cloudflare_api_token = " + token + "\n", encoding="utf-8")
-    os.chmod(path, 0o600)
-    return path
-
-
-def _ensure_certbot_cloudflare_plugin() -> None:
-    rc, out = _run(["certbot", "plugins"], timeout_sec=60)
-    if rc == 0 and "dns-cloudflare" in out:
-        return
-    _apt_install_packages(["python3-certbot-dns-cloudflare"])
-    rc, out = _run(["certbot", "plugins"], timeout_sec=60)
-    if rc != 0 or "dns-cloudflare" not in out:
-        raise RuntimeError("certbot dns-cloudflare plugin is not available: " + out)
-
-
 def _run_certbot_http01(plan: ImageInstallPlan) -> None:
     rc, out = _run_certbot(
         [
@@ -845,38 +784,6 @@ def _run_certbot_http01(plan: ImageInstallPlan) -> None:
         raise RuntimeError("certbot failed: " + out)
 
 
-def _run_certbot_cloudflare_dns01(cfg: AgentConfig, plan: ImageInstallPlan, credential_ref: str) -> None:
-    _ensure_certbot_cloudflare_plugin()
-    credentials_path = _certbot_cloudflare_credentials_path(cfg, plan, credential_ref)
-    rc, out = _run_certbot(
-        [
-            "certbot",
-            "certonly",
-            "--dns-cloudflare",
-            "--dns-cloudflare-credentials",
-            str(credentials_path),
-            "--dns-cloudflare-propagation-seconds",
-            "60",
-            "--cert-name",
-            plan.domain,
-            "-d",
-            plan.domain,
-            "--non-interactive",
-            "--agree-tos",
-            "--keep-until-expiring",
-            "--register-unsafely-without-email",
-        ],
-        timeout_sec=900,
-    )
-    if rc != 0:
-        raise RuntimeError("certbot dns-cloudflare failed: " + out)
-    _write_nginx_vhost(plan, ssl_enabled=True)
-    rc, out = _run(["nginx", "-t"], timeout_sec=30)
-    if rc != 0:
-        raise RuntimeError("nginx -t failed after SSL vhost update: " + out)
-    _run(["systemctl", "reload", "nginx"], timeout_sec=30)
-
-
 def _skip_image_archive_member(name: str) -> bool:
     normalized = str(name or "").replace("\\", "/")
     while normalized.startswith("./"):
@@ -885,20 +792,7 @@ def _skip_image_archive_member(name: str) -> bool:
 
 
 def _safe_extract(tar: tarfile.TarFile, dst: Path) -> None:
-    root = dst.resolve()
-    members: list[tarfile.TarInfo] = []
-    for member in tar.getmembers():
-        if _skip_image_archive_member(member.name):
-            continue
-        target = (dst / member.name).resolve()
-        if root != target and root not in target.parents:
-            raise RuntimeError(f"unsafe path in image archive: {member.name}")
-        if member.issym() or member.islnk():
-            link_target = (target.parent / member.linkname).resolve()
-            if root != link_target and root not in link_target.parents:
-                raise RuntimeError(f"unsafe link in image archive: {member.name} -> {member.linkname}")
-        members.append(member)
-    tar.extractall(dst, members=members)
+    safe_extract_tar(tar, dst, allow_links=True, skip_prefixes=(".mcd",))
 
 
 def _warm_image_runtime(plan: ImageInstallPlan) -> dict[str, Any]:
@@ -951,7 +845,6 @@ def install_from_image(
     php_version: str,
     yes: bool = False,
     run_certbot: bool = True,
-    certbot_dns_credential_ref: str | None = None,
     own_mail: bool = False,
     mail_profile_id: str | None = None,
 ) -> dict[str, Any]:
@@ -1037,13 +930,8 @@ def install_from_image(
                 raise RuntimeError("nginx reload failed: " + reload_out)
 
             if run_certbot:
-                dns_ref = str(certbot_dns_credential_ref or "").strip()
-                if dns_ref:
-                    print("Running certbot via Cloudflare DNS-01")
-                    _run_certbot_cloudflare_dns01(cfg, plan, dns_ref)
-                else:
-                    print("Running certbot via nginx HTTP-01")
-                    _run_certbot_http01(plan)
+                print("Running certbot via nginx HTTP-01")
+                _run_certbot_http01(plan)
 
             if mail_profile_id:
                 print("Applying MCC mail profile")

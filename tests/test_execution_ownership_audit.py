@@ -8,10 +8,11 @@ ROOT = Path(__file__).parents[1]
 AUDIT = ROOT / "mcd_agent" / "contracts" / "mcd-execution-ownership-audit-v1.json"
 
 
-def test_execution_ownership_audit_is_complete_and_preservation_gated() -> None:
+def test_execution_boundary_marks_all_unmigrated_recipes_pending_for_1_7() -> None:
     audit = json.loads(AUDIT.read_text(encoding="utf-8"))
     assert audit["schema"] == "mcd-execution-ownership-audit-v1"
-    assert audit["status"] == "preservation-audit-required-before-deletion"
+    assert audit["status"] == "externalization-required-before-1.7.0"
+    assert audit["release_target"] == "1.7.0"
     rows = {row["capability"]: row for row in audit["rows"]}
     assert set(rows) == {
         "standalone_cli",
@@ -23,7 +24,8 @@ def test_execution_ownership_audit_is_complete_and_preservation_gated() -> None:
         "settings_recovery",
     }
     for row in rows.values():
-        assert row["owner"] == "mcd"
+        assert row["executor_owner"] == "mcd_generic"
+        assert row["recipe_owner"] == "external_mcc_wrapping"
         assert row["canonical_paths"]
         assert row["preserve_entrypoints"]
         assert row["preservation_tests"]
