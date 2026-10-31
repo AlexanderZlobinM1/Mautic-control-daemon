@@ -1,5 +1,5 @@
 {
-  "status": "FROZEN-STOCK-FAILURE-PARITY-ACCEPTED-positive-pair-pending",
+  "status": "FROZEN-NATIVE-PARITY-PASS-TYPED-CLI-PENDING",
   "scope": "existing MySQL host tuning extraction, no schema/Mautic/cluster repair",
   "authority_export": {
     "path": "/tmp/mcc-live-resolved-mysql-v1-20261031.json",
@@ -43,7 +43,7 @@
     "authority_response": "/Users/azlobin/Documents/Projects/.mcc-mysql-qa.eJifo7/response.json",
     "profile_sha256": "914537e90f7e59ff7261a9aab6e8a874e36388aa4deca051481f1ced131eef94",
     "frozen_artifact_sha256": "e64c744ae58cd892b36bf557dbd7f3e22c591ff5518911660b662697308c504c",
-    "native_status": "old positive passed; external frozen e64 pending after reset"
+    "native_status": "old and external frozen positive passed; typed CLI pending"
   },
   "runtime_context_contract": {
     "required": "explicit descriptor.cluster_id exact current cfg.cluster_id; pinned same value in composition",
@@ -392,5 +392,33 @@
     "dropin_content_sha256": "4d3101839bc89e423eb7c6755a5592f181b7a622391a814e4349649dc702e4e0",
     "source_checkout_present": false,
     "canonical_full_reset_required": true
+  },
+  "frozen_qa_positive_comparison": {
+    "scope": "frozen explicit MCC QA override native positive algorithm equivalence, standalone MariaDB only",
+    "verification_status": "PASS",
+    "native_operation_success": true,
+    "old_reference_sha256": "9d96ccc064d06255dad9a9caaf2c7a3c4968828224cea5bda9df04ef66943e80",
+    "new_receipt_sha256": "d179bdf9b484cc1d4eb31041e5e5e92c675ce6e5b936018d899889da8400f8f0",
+    "bundle_sha256": "e64c744ae58cd892b36bf557dbd7f3e22c591ff5518911660b662697308c504c",
+    "profile_sha256": "914537e90f7e59ff7261a9aab6e8a874e36388aa4deca051481f1ced131eef94",
+    "context_proof_sha256": "723b503cc879cf7b7640e35ea3707f2e0cf89b214a61b3a10719bb8350fa168c",
+    "current_context_host_boot_verified": true,
+    "planned_exact": true,
+    "first_applied_dictionary_exact": true,
+    "repeat_applied_dictionary_exact": true,
+    "repeat_changed_files_empty_but_SQL_reapplied": true,
+    "all_10_dynamic_values_exact": true,
+    "before_files_12_vars_health_exact": true,
+    "after_files_12_vars_exact": true,
+    "within_actor_PID_unchanged": true,
+    "https_tls_verified_200": true,
+    "only_QA_profile_change": "max_user_connections134\u21920 explicitly MCC-authored; no live profile mutation",
+    "original_stock_partial_deferred_remains_failure": true,
+    "typed_outcome_consumer_proof": false,
+    "canonical_full_reset_required": true,
+    "canonical_full_reset_completed": false,
+    "MCD_writer_removed": false,
+    "activation": false,
+    "harness_sha256": "701f8d9b15fa030e279af168a61bb2e91966a5ef7982f9acdb1a6f204742abbd"
   }
 }

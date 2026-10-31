@@ -2139,9 +2139,12 @@ is valid only when both sides actually contain null, and no blank default or
 plan-derived cluster membership is invented. The producer pins that same context
 inside the composition data, so changing context changes whole-archive identity
 while the profile object/pin remains unchanged. The core maintenance guard and
-its shared Galera detection remain authoritative. This context admission is
-tested in isolation; automatic MySQL dispatch still uses the old writer until
-the external replacement passes its native and delivery gates.
+its shared Galera detection remain authoritative. Context admission is tested before execution. With frozen native parity now
+verified, PHP and MySQL public compatibility dispatch both use the generic
+external handler without a builtin fallback. The old MySQL function remains
+only for reference until typed public-CLI acceptance; it is no longer an
+automatic caller path. Typed CLI acceptance and cleaned-runtime recheck are
+still release gates.
 
 
 The first old-writer stock CPX22 native probe exposed an existing MariaDB 11.4
@@ -2186,3 +2189,11 @@ MCC URL. URL construction happens only after a cache miss; cached catalog lookup
 can also succeed without URL configuration. Reproduced tests failed before this
 change and now execute real cached script/gzip entrypoints with zero network
 calls. Missing/corrupt required artifacts still fail before execution.
+
+
+Frozen external e64 positive parity has passed against the old QA operator-zero
+reference: full planned/applied/repeat dictionaries, ten dynamic assignments,
+before/after files and variables, unchanged master PID and healthy verified
+HTTPS. Both frozen standalone MariaDB paths are accepted, including the stock
+expected failure. Native MySQL/Percona/Galera execution is not claimed. The
+ordinary typed CLI/HTTPS consumer remains the next gate before writer deletion.

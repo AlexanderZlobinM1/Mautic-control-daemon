@@ -136,12 +136,7 @@
       "function": "apply_mysql_profile",
       "line": 615,
       "classification": "EXTERNAL",
-      "lexical_name_callers": [
-        {
-          "path": "mcd_agent/service_profiles.py",
-          "line": 754
-        }
-      ],
+      "lexical_name_callers": [],
       "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive"
     },
     {
