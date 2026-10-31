@@ -1,5 +1,5 @@
 {
-  "status": "TYPED-POSITIVE-PASS-stock-negative-CLI-pending",
+  "status": "TYPED-POSITIVE-AND-NEGATIVE-PASS; cleaned R10 native recheck pending",
   "scope": "existing MySQL host tuning extraction, no schema/Mautic/cluster repair",
   "authority_export": {
     "path": "/tmp/mcc-live-resolved-mysql-v1-20261031.json",
@@ -52,7 +52,7 @@
     "core_cluster_maintenance_guards": "preserved"
   },
   "galera_native_claim": false,
-  "old_writer_removed": false,
+  "old_writer_removed": true,
   "activation": false,
   "old_stock_failure_reference": {
     "status": "EXPECTED_FAILURE_CAPTURED",
@@ -488,5 +488,46 @@
   },
   "native_mariadb_claim": true,
   "native_mysql_server_claim": false,
-  "native_percona_claim": false
+  "native_percona_claim": false,
+  "typed_cli_negative": {
+    "status": "PASS",
+    "operation_success": false,
+    "first_outer_status": "error",
+    "repeat_outer_status": "skipped",
+    "cli_exit_codes": [
+      1,
+      1
+    ],
+    "public_statuses": [
+      "partial",
+      "deferred"
+    ],
+    "validated_terminal_status": "failed",
+    "validated_terminal_exit_code": 1,
+    "all_public_results_equal_old_reference": true,
+    "files_variables_pid_and_verified_https_match": true,
+    "full_receipt_sha256": "f1d9c25ca1a5cbc499b9db323d43784aa8a0a27e83825312072aaffc0ba581b5",
+    "full_receipt": "/Users/azlobin/.codex/admin/host-diagnostics/mcd-mysql-profile-native-20261031/r9-typed-negative-receipt.json"
+  },
+  "source_cleanup": {
+    "component": "mysql_system_profile",
+    "removed_legacy_functions": 17,
+    "preserved_core_functions": [
+      "_agent_cluster_mode",
+      "_mysql_galera_config_detected"
+    ],
+    "preserved_core_constants": [
+      "_MYSQL_GALERA_MARKERS"
+    ],
+    "native_evidence": "docs/qa/mcd-mysql-generator-native-20261031.json",
+    "status": "source-cleaned; R10 native cleanup recheck and final reset pending"
+  },
+  "regression": {
+    "passed": 2001,
+    "failed": 61,
+    "skipped": 57,
+    "subtests_passed": 105,
+    "new_failure_ids": [],
+    "missing_baseline_failure_ids": []
+  }
 }

@@ -71,7 +71,7 @@
     {
       "path": "mcd_agent/service_profiles.py",
       "function": "fetch_service_profile",
-      "line": 68,
+      "line": 50,
       "classification": "KEEP",
       "lexical_name_callers": [
         {
@@ -108,7 +108,7 @@
     {
       "path": "mcd_agent/service_profiles.py",
       "function": "apply_docker_profile",
-      "line": 151,
+      "line": 133,
       "classification": "EXTERNAL",
       "lexical_name_callers": [
         {
@@ -120,29 +120,8 @@
     },
     {
       "path": "mcd_agent/service_profiles.py",
-      "function": "_build_mysql_override",
-      "line": 470,
-      "classification": "EXTERNAL",
-      "lexical_name_callers": [
-        {
-          "path": "mcd_agent/service_profiles.py",
-          "line": 633
-        }
-      ],
-      "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive"
-    },
-    {
-      "path": "mcd_agent/service_profiles.py",
-      "function": "apply_mysql_profile",
-      "line": 615,
-      "classification": "EXTERNAL",
-      "lexical_name_callers": [],
-      "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive"
-    },
-    {
-      "path": "mcd_agent/service_profiles.py",
       "function": "service_profiles_apply_once",
-      "line": 709,
+      "line": 230,
       "classification": "SPLIT",
       "lexical_name_callers": [
         {
@@ -391,7 +370,7 @@
     {
       "path": "mcd_agent/custom_scripts.py",
       "function": "_fetch_script_to_cache",
-      "line": 288,
+      "line": 289,
       "classification": "KEEP",
       "lexical_name_callers": [
         {
@@ -404,7 +383,7 @@
     {
       "path": "mcd_agent/custom_scripts.py",
       "function": "_run_direct",
-      "line": 409,
+      "line": 410,
       "classification": "KEEP",
       "lexical_name_callers": [
         {
@@ -417,7 +396,7 @@
     {
       "path": "mcd_agent/custom_scripts.py",
       "function": "run_custom_script_by_key",
-      "line": 418,
+      "line": 454,
       "classification": "KEEP",
       "lexical_name_callers": [
         {
@@ -456,7 +435,7 @@
           "line": 754
         }
       ],
-      "caller_resolution": "single explicit PHP service-profile generic dispatch; no builtin writer/fallback"
+      "caller_resolution": "explicit PHP and MySQL generic dispatch; no builtin writer/fallback"
     }
   ],
   "native_before_after_evidence": null,
@@ -468,14 +447,25 @@
       "former_path": "mcd_agent/service_profiles.py",
       "former_function": "apply_php_fpm_profile",
       "removed_php_functions": 13,
-      "retained_shared_mysql_helpers": [
-        "_service_exists",
-        "_write_file"
-      ],
+      "retained_shared_mysql_helpers": [],
       "recipe_owner": "external MCC/Portal immutable artifact and exact profile data",
       "generic_adapter": "mcd_agent/service_profile_external.py",
       "native_evidence": "docs/qa/mcd-legacy-service-profile-cli-native-20261031.json",
-      "cleanup_native_recheck": "PASS: R8 ordinary CLI, active descriptor in isolated QA only, exact operator profile preserved"
+      "cleanup_native_recheck": "PASS: R8 ordinary CLI, active descriptor in isolated QA only, exact operator profile preserved",
+      "shared_helpers_retirement": "Removed with MySQL extraction after R9 positive/negative CLI proof."
+    },
+    {
+      "component": "mysql_system_profile",
+      "removed_legacy_functions": 17,
+      "preserved_core_functions": [
+        "_agent_cluster_mode",
+        "_mysql_galera_config_detected"
+      ],
+      "preserved_core_constants": [
+        "_MYSQL_GALERA_MARKERS"
+      ],
+      "native_evidence": "docs/qa/mcd-mysql-generator-native-20261031.json",
+      "status": "source-cleaned; R10 native cleanup recheck and final reset pending"
     }
   ]
 }

@@ -245,15 +245,25 @@
         "mcd_agent/custom_scripts.py"
       ],
       "removed_legacy_function": "mcd_agent.service_profiles.apply_php_fpm_profile",
-      "retained_shared_mysql_helpers": [
-        "_service_exists",
-        "_write_file"
-      ],
+      "retained_shared_mysql_helpers": [],
       "native_evidence": "docs/qa/mcd-legacy-service-profile-cli-native-20261031.json",
       "remaining_release_gates": [
         "capability-aware active binding before complete 1.7 release"
       ],
       "other_service_profile_recipes": "still pending; no blanket externalization claim"
+    },
+    "mysql_system_profile": {
+      "component": "mysql_system_profile",
+      "removed_legacy_functions": 17,
+      "preserved_core_functions": [
+        "_agent_cluster_mode",
+        "_mysql_galera_config_detected"
+      ],
+      "preserved_core_constants": [
+        "_MYSQL_GALERA_MARKERS"
+      ],
+      "native_evidence": "docs/qa/mcd-mysql-generator-native-20261031.json",
+      "status": "source-cleaned; R10 native cleanup recheck and final reset pending"
     }
   }
 }

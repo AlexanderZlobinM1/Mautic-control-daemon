@@ -2206,3 +2206,16 @@ results match the old QA operator-zero reference. Config, twelve observed
 variables, ten dynamic assignments, PID and verified HTTPS agree. Installed
 consumer module hashes match its source and no automatic builtin MySQL caller
 remains. Stock negative CLI and cleaned-runtime recheck are still required.
+
+
+MySQL extraction checkpoint after typed stock negative acceptance: both ordinary
+CLI paths now preserve exact old public results. Stock partial/deferred remain
+error/skipped with exit 1; observed validated terminal frames are failed/exit 1.
+Files, twelve variables, unchanged PID and verified HTTPS match the references.
+Following this proof, 17 old recipe functions and two recipe constants were
+removed from MCD, superseding the earlier retention checkpoints above.
+Core cluster-mode/Galera detection and its marker constant remain unchanged.
+Three transferred writer tests were retired; 40 focused tests pass and full
+regression is 2001 passed, 61 exact baseline failures, 57 skipped. Cleaned R10
+installed CLI proof and final canonical reset remain required. No partial 1.7
+release or production activation is authorized by this component checkpoint.

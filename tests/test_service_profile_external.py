@@ -171,7 +171,6 @@ def test_mysql_public_dispatch_uses_pinned_external_context_without_old_writer(f
     cfg=SimpleNamespace(cluster_id=None)
     monkeypatch.setattr(profiles,'fetch_service_profile',lambda *a,**kw:fetched)
     monkeypatch.setattr(profiles,'_cluster_db_maintenance_guard',lambda *a,**kw:None)
-    monkeypatch.setattr(profiles,'apply_mysql_profile',lambda *a,**kw:pytest.fail('old writer must not be called'))
     monkeypatch.setattr(ext,'run_custom_script_by_key',lambda *a,**kw:(0,'{"status":"applied","changed_files":[]}'))
     result=profiles.service_profiles_apply_once(cfg,component='mysql')
     assert result['status']=='ok' and result['apply']['status']=='applied'
@@ -182,7 +181,6 @@ def test_mysql_public_dispatch_rejects_context_drift_before_artifact_execution(f
     fetched['external_handler'].update(component='mysql',runtime_context={'cluster_id':'different'})
     monkeypatch.setattr(profiles,'fetch_service_profile',lambda *a,**kw:fetched)
     monkeypatch.setattr(profiles,'_cluster_db_maintenance_guard',lambda *a,**kw:None)
-    monkeypatch.setattr(profiles,'apply_mysql_profile',lambda *a,**kw:pytest.fail('no fallback'))
     monkeypatch.setattr(ext,'run_custom_script_by_key',lambda *a,**kw:pytest.fail('context mismatch must stop before execution'))
     with pytest.raises(ValueError,match='runtime_context_mismatch'):
         profiles.service_profiles_apply_once(SimpleNamespace(cluster_id=None),component='mysql',allow_cluster_db_maintenance=True)
