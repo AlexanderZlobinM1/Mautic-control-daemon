@@ -11,20 +11,20 @@ from mcd_agent.custom_scripts import run_custom_script_by_key
 CUSTOM_RUNTIME_CAPABILITIES = frozenset({'custom-gzip-entrypoint', 'raw-jsonline-terminal-result'})
 
 
-def external_handler_selected(handler: Mapping[str, Any], *, allow_candidate: bool = False) -> bool:
+def external_handler_selected(handler: Mapping[str, Any]) -> bool:
     if handler.get('state') == 'candidate' and handler.get('active') is False:
-        return allow_candidate
+        return False
     if handler.get('state') == 'active' and handler.get('active') is True:
         return True
     raise ValueError('external_handler_activation_invalid')
 
 
 def apply_external_service_profile(cfg: Any, fetched: Mapping[str, Any], *,
-                                   dry_run: bool = False, allow_candidate: bool = False) -> dict[str, Any]:
+                                   dry_run: bool = False) -> dict[str, Any]:
     handler = fetched.get('external_handler')
     if not isinstance(handler, Mapping):
         raise ValueError('external_handler_missing')
-    if not external_handler_selected(handler, allow_candidate=allow_candidate):
+    if not external_handler_selected(handler):
         raise ValueError('external_handler_inactive')
     if handler.get('schema') != 'mcc-service-profile-external-handler-v1' or handler.get('transport') != 'mcd-custom-v1':
         raise ValueError('external_handler_transport_invalid')

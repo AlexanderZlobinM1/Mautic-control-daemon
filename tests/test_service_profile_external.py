@@ -60,54 +60,47 @@ def test_admission_failure_never_executes(fetched,monkeypatch,mutation):
     with pytest.raises(ValueError):ext.apply_external_service_profile(None,fetched)
 
 
-def test_candidate_requires_explicit_acceptance(fetched,monkeypatch):
+def test_inactive_candidate_is_rejected(fetched,monkeypatch):
     h=fetched['external_handler'];h.update(state='candidate',active=False)
     monkeypatch.setattr(ext,'run_custom_script_by_key',lambda *a,**kw:(0,'{"status":"noop"}'))
     with pytest.raises(ValueError,match='inactive'):ext.apply_external_service_profile(None,fetched)
-    assert ext.apply_external_service_profile(None,fetched,allow_candidate=True)=={'status':'noop'}
 
 
 def test_selected_external_failure_cannot_fallback(fetched,monkeypatch):
     monkeypatch.setattr(profiles,'fetch_service_profile',lambda *a,**kw:fetched)
     monkeypatch.setattr(profiles,'_cluster_db_maintenance_guard',lambda *a,**kw:None)
-    monkeypatch.setattr(profiles,'apply_php_fpm_profile',lambda *a,**kw:pytest.fail('no fallback'))
     monkeypatch.setattr(ext,'run_custom_script_by_key',lambda *a,**kw:(7,'validation_failed'))
     with pytest.raises(RuntimeError,match='validation_failed'):
         profiles.service_profiles_apply_once(None)
 
 
-def test_inactive_candidate_keeps_existing_writer_during_migration(fetched,monkeypatch):
+def test_inactive_candidate_cannot_execute_without_explicit_admission(fetched,monkeypatch):
     fetched['external_handler'].update(state='candidate',active=False)
     monkeypatch.setattr(profiles,'fetch_service_profile',lambda *a,**kw:fetched)
     monkeypatch.setattr(profiles,'_cluster_db_maintenance_guard',lambda *a,**kw:None)
-    monkeypatch.setattr(profiles,'apply_php_fpm_profile',lambda cfg,p,**kw:{'status':'noop','input':p})
     monkeypatch.setattr(ext,'run_custom_script_by_key',lambda *a,**kw:pytest.fail('inactive candidate'))
-    result=profiles.service_profiles_apply_once(None)
-    assert result['status']=='ok'
-    assert result['apply']['input']==fetched['profile']
+    with pytest.raises(ValueError,match='external_handler_inactive'):
+        profiles.service_profiles_apply_once(None)
 
 
-def test_explicit_candidate_admission_cannot_silently_use_legacy(fetched,monkeypatch):
+def test_missing_descriptor_cannot_silently_use_legacy(fetched,monkeypatch):
     del fetched['external_handler']
     monkeypatch.setattr(profiles,'fetch_service_profile',lambda *a,**kw:fetched)
     monkeypatch.setattr(profiles,'_cluster_db_maintenance_guard',lambda *a,**kw:None)
-    monkeypatch.setattr(profiles,'apply_php_fpm_profile',lambda *a,**kw:pytest.fail('explicit external must fail closed'))
     with pytest.raises(ValueError,match='external_handler_missing'):
-        profiles.service_profiles_apply_once(None,allow_candidate_handler=True)
+        profiles.service_profiles_apply_once(None)
 
 
-@pytest.mark.parametrize('opt_in', [False,True])
-def test_existing_post_advertises_actual_capabilities_and_only_explicit_candidate(monkeypatch,opt_in):
+def test_existing_post_advertises_actual_capabilities_without_candidate_opt_in(monkeypatch):
     cfg=SimpleNamespace(mcc_url='https://controller.invalid',mcc_token='test')
     monkeypatch.setattr(profiles,'resolve_agent_identity',lambda cfg:{'effective_hostname':'disposable'})
     calls=[]
     monkeypatch.setattr(profiles,'_post_json',lambda url,payload,*a,**kw:calls.append((url,payload)) or {'status':'ok'})
-    profiles.fetch_service_profile(cfg,'php_fpm',allow_candidate_handler=opt_in)
+    profiles.fetch_service_profile(cfg,'php_fpm')
     url,payload=calls[0]
     assert url.endswith('/api/v1/agent/service-profile/php-fpm')
     assert set(payload['external_handler_capabilities'])==ext.CUSTOM_RUNTIME_CAPABILITIES
-    assert payload.get('external_handler_candidate_opt_in',False)==opt_in
-    if not opt_in:assert 'external_handler_candidate_opt_in' not in payload
+    assert 'external_handler_candidate_opt_in' not in payload
 
 
 def test_profile_pin_uses_authority_utf8_without_ascii_escaping(fetched,monkeypatch):

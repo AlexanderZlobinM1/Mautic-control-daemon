@@ -236,5 +236,26 @@
     "pending_recipe_paths_meaning": "classification candidates, not blanket deletion authorization",
     "baseline": "preserve all currently working behavior; pre-existing broken flows deferred",
     "composition_boundary": "external OS composition may request existing MCD Mautic operation; never duplicate Mautic CLI implementation"
+  },
+  "completed_recipe_components": {
+    "php_system_profile": {
+      "status": "source-externalized-native-cleanup-recheck-pending",
+      "generic_dispatch_paths": [
+        "mcd_agent/service_profile_external.py",
+        "mcd_agent/custom_scripts.py"
+      ],
+      "removed_legacy_function": "mcd_agent.service_profiles.apply_php_fpm_profile",
+      "retained_shared_mysql_helpers": [
+        "_service_exists",
+        "_write_file"
+      ],
+      "native_evidence": "docs/qa/mcd-legacy-service-profile-cli-native-20261031.json",
+      "remaining_release_gates": [
+        "canonical final reset",
+        "native CLI recheck after writer deletion",
+        "capability-aware active binding before 1.7 release"
+      ],
+      "other_service_profile_recipes": "still pending; no blanket externalization claim"
+    }
   }
 }

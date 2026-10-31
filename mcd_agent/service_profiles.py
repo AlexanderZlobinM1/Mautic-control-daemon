@@ -17,13 +17,12 @@ from mcd_agent import __version__
 from mcd_agent.config import AgentConfig
 from mcd_agent.host_identity import resolve_agent_identity
 from mcd_agent.service_profile_external import (
-    CUSTOM_RUNTIME_CAPABILITIES, apply_external_service_profile, external_handler_selected,
+    CUSTOM_RUNTIME_CAPABILITIES, apply_external_service_profile,
 )
 from mcd_agent.mautic_db_indexes import apply_mautic_db_indexes
 from mcd_agent.wazuh_profile import apply_wazuh_profile
 
 
-_SYSCTL_PATH = Path("/etc/sysctl.d/99-mcd-hw.conf")
 _MYSQL_TOP_LEVEL_CONFIGS = (Path("/etc/mysql/my.cnf"), Path("/etc/mysql/mysql.cnf"))
 _MYSQL_PROFILE_MANAGED_KEYS = {
     "innodb_buffer_pool_size",
@@ -66,7 +65,7 @@ def _api_base(cfg: AgentConfig) -> str | None:
     return cfg.mcc_url.rstrip("/")
 
 
-def fetch_service_profile(cfg: AgentConfig, component: str, *, allow_candidate_handler: bool = False) -> dict[str, Any]:
+def fetch_service_profile(cfg: AgentConfig, component: str) -> dict[str, Any]:
     base = _api_base(cfg)
     if not base:
         return {"status": "disabled", "reason": "mcc_url_not_set"}
@@ -83,8 +82,6 @@ def fetch_service_profile(cfg: AgentConfig, component: str, *, allow_candidate_h
     }
     if comp == "php_fpm":
         payload["external_handler_capabilities"] = sorted(CUSTOM_RUNTIME_CAPABILITIES)
-        if allow_candidate_handler:
-            payload["external_handler_candidate_opt_in"] = True
     url = base + f"/api/v1/agent/service-profile/{comp.replace('_', '-')}"
     try:
         out = _post_json(url, payload, cfg.mcc_token, timeout_sec=12)
@@ -191,72 +188,6 @@ def apply_docker_profile(*, dry_run: bool = False) -> dict[str, Any]:
     return {"status": "applied", "before": before, "after": after, "commands": commands}
 
 
-def _detect_php_version() -> str:
-    p = Path("/etc/php")
-    if not p.exists():
-        raise RuntimeError("/etc/php not found")
-    versions = sorted(
-        [x.name for x in p.iterdir() if x.is_dir() and (x / "fpm").is_dir() and (x / "cli").is_dir()],
-        key=_php_ver_key,
-    )
-    if not versions:
-        raise RuntimeError("no php versions with fpm+cli found in /etc/php")
-    running = _detect_running_php_fpm_version()
-    if running and running in versions:
-        return running
-    return versions[-1]
-
-
-def _installed_php_versions() -> list[str]:
-    p = Path("/etc/php")
-    if not p.exists():
-        return []
-    versions = sorted(
-        [x.name for x in p.iterdir() if x.is_dir() and (x / "fpm").is_dir() and (x / "cli").is_dir()],
-        key=_php_ver_key,
-    )
-    return versions
-
-
-def _find_php_fpm_bin(ver: str) -> str:
-    for cand in (f"php-fpm{ver}", f"php-fpm{ver.split('.')[0]}", "php-fpm"):
-        path = shutil.which(cand)
-        if path:
-            return path
-    raise RuntimeError("php-fpm binary not found")
-
-
-def _php_ver_key(ver: str) -> tuple[int, ...]:
-    out: list[int] = []
-    for part in str(ver).split("."):
-        try:
-            out.append(int(part))
-        except Exception:
-            out.append(0)
-    return tuple(out)
-
-
-def _detect_running_php_fpm_version() -> str | None:
-    """
-    Prefer running php-fpm version when multiple versions are installed.
-    """
-    try:
-        proc = subprocess.run(["ps", "-eo", "comm=,args="], capture_output=True, text=True)
-    except Exception:
-        return None
-    if proc.returncode != 0:
-        return None
-    rx = re.compile(r"php-fpm(?P<ver>\d+\.\d+)")
-    found: set[str] = set()
-    for line in (proc.stdout or "").splitlines():
-        m = rx.search(line)
-        if m:
-            found.add(m.group("ver"))
-    if not found:
-        return None
-    return sorted(found, key=_php_ver_key)[-1]
-
-
 def _service_exists(name: str) -> bool:
     try:
         proc = subprocess.run(
@@ -269,14 +200,6 @@ def _service_exists(name: str) -> bool:
         return False
 
 
-def _detect_php_fpm_service_name(ver: str) -> str:
-    candidates = [f"php{ver}-fpm", f"php{ver.split('.')[0]}-fpm", "php-fpm"]
-    for svc in candidates:
-        if _service_exists(svc):
-            return svc
-    return candidates[0]
-
-
 def _write_file(path: Path, content: str) -> bool:
     path.parent.mkdir(parents=True, exist_ok=True)
     old = path.read_text(encoding="utf-8") if path.exists() else None
@@ -284,120 +207,6 @@ def _write_file(path: Path, content: str) -> bool:
         return False
     path.write_text(content, encoding="utf-8")
     return True
-
-
-def _remove_legacy_php_ini_baseline_files() -> list[str]:
-    """
-    Remove historical global php baseline file that caused side effects.
-    Applies to all installed PHP versions, not only active one.
-    """
-    removed: list[str] = []
-    for ver in _installed_php_versions():
-        for sap in ("fpm", "cli"):
-            p = Path(f"/etc/php/{ver}/{sap}/conf.d/98-mcd-php.ini")
-            if p.exists():
-                try:
-                    p.unlink()
-                    removed.append(str(p))
-                except Exception:
-                    pass
-    return removed
-
-
-def _build_pool_override(profile: dict[str, Any]) -> str:
-    pool = str(profile.get("pool", "www")).strip() or "www"
-    pm = str(profile.get("pm", "dynamic")).strip() or "dynamic"
-    pm_max_children = int(profile.get("pm_max_children", 16) or 16)
-    pm_start_servers = int(profile.get("pm_start_servers", 4) or 4)
-    pm_min_spare_servers = int(profile.get("pm_min_spare_servers", 2) or 2)
-    pm_max_spare_servers = int(profile.get("pm_max_spare_servers", 8) or 8)
-    pm_max_requests = int(profile.get("pm_max_requests", 1000) or 1000)
-    req_timeout = str(profile.get("request_terminate_timeout", "120s")).strip() or "120s"
-    listen_backlog = int(profile.get("listen_backlog", 4096) or 4096)
-
-    lines: list[str] = [
-        "; managed by mcd service profile (php-fpm hardware tuning)",
-        f"; pool={pool}",
-        f"pm = {pm}",
-        f"pm.max_children = {pm_max_children}",
-        f"pm.max_requests = {pm_max_requests}",
-        f"request_terminate_timeout = {req_timeout}",
-        f"listen.backlog = {listen_backlog}",
-    ]
-    if pm == "dynamic":
-        lines.extend(
-            [
-                f"pm.start_servers = {pm_start_servers}",
-                f"pm.min_spare_servers = {pm_min_spare_servers}",
-                f"pm.max_spare_servers = {pm_max_spare_servers}",
-            ]
-        )
-    return "\n".join(lines) + "\n"
-
-
-def _build_opcache_override(profile: dict[str, Any]) -> str:
-    opcache_mem = int(profile.get("opcache_memory_mb", 128) or 128)
-    php_profile = profile.get("php")
-    if not isinstance(php_profile, dict):
-        php_profile = {}
-    realpath_cache_size_kb = int(php_profile.get("realpath_cache_size_kb", 16384) or 16384)
-    realpath_cache_ttl_sec = int(php_profile.get("realpath_cache_ttl_sec", 600) or 600)
-    return (
-        "; managed by mcd service profile (php-fpm hardware tuning)\n"
-        "opcache.enable=1\n"
-        f"opcache.memory_consumption={opcache_mem}\n"
-        "opcache.interned_strings_buffer=16\n"
-        "opcache.max_accelerated_files=20000\n"
-        "opcache.revalidate_freq=2\n"
-        "opcache.validate_timestamps=1\n"
-        f"realpath_cache_size={realpath_cache_size_kb}K\n"
-        f"realpath_cache_ttl={realpath_cache_ttl_sec}\n"
-    )
-
-
-def _build_cli_opcache_override(profile: dict[str, Any]) -> str:
-    opcache_mem = int(profile.get("opcache_memory_mb", 128) or 128)
-    php_profile = profile.get("php")
-    if not isinstance(php_profile, dict):
-        php_profile = {}
-    realpath_cache_size_kb = int(php_profile.get("realpath_cache_size_kb", 16384) or 16384)
-    realpath_cache_ttl_sec = int(php_profile.get("realpath_cache_ttl_sec", 600) or 600)
-    return (
-        "; managed by mcd service profile (php-cli hardware-safe tuning)\n"
-        "opcache.enable=1\n"
-        f"opcache.memory_consumption={opcache_mem}\n"
-        "opcache.interned_strings_buffer=16\n"
-        "opcache.max_accelerated_files=20000\n"
-        "opcache.revalidate_freq=2\n"
-        "opcache.validate_timestamps=1\n"
-        f"realpath_cache_size={realpath_cache_size_kb}K\n"
-        f"realpath_cache_ttl={realpath_cache_ttl_sec}\n"
-    )
-
-
-def _build_redis_sessions_override(profile: dict[str, Any]) -> str:
-    save_handler = str(profile.get("redis_session_save_handler", "redis")).strip() or "redis"
-    save_path = str(profile.get("redis_session_save_path", "tcp://127.0.0.1:6379?database=10")).strip() or "tcp://127.0.0.1:6379?database=10"
-    save_path = save_path.replace('"', '\\"')
-    lock_enabled = int(profile.get("redis_session_locking_enabled", 1) or 1)
-    lock_retries = int(profile.get("redis_session_lock_retries", -1) or -1)
-    lock_wait = int(profile.get("redis_session_lock_wait_time", 10000) or 10000)
-    return (
-        "; managed by mcd service profile (redis sessions)\n"
-        f"session.save_handler = {save_handler}\n"
-        f"session.save_path = \"{save_path}\"\n\n"
-        f"redis.session.locking_enabled = {lock_enabled}\n"
-        f"redis.session.lock_retries = {lock_retries}\n"
-        f"redis.session.lock_wait_time = {lock_wait}\n"
-    )
-
-
-def _build_sysctl_override(profile: dict[str, Any]) -> str:
-    somaxconn = int(profile.get("sysctl_somaxconn", profile.get("listen_backlog", 4096)) or 4096)
-    return (
-        "# managed by mcd service profile (php-fpm hardware tuning)\n"
-        f"net.core.somaxconn={somaxconn}\n"
-    )
 
 
 def _detect_mysql_service_name() -> str:
@@ -803,121 +612,6 @@ def _apply_mysql_dynamic_profile(profile: dict[str, Any], *, engine: str, timeou
     }
 
 
-def apply_php_fpm_profile(cfg: AgentConfig, profile: dict[str, Any], *, dry_run: bool = False) -> dict[str, Any]:
-    if os.geteuid() != 0:
-        raise RuntimeError("service-profile apply requires root")
-
-    php_ver = _detect_php_version()
-    php_bin = _find_php_fpm_bin(php_ver)
-    service_name = _detect_php_fpm_service_name(php_ver)
-    pool_name = str(profile.get("pool", "www")).strip() or "www"
-    pool_override = Path(f"/etc/php/{php_ver}/fpm/pool.d/zz-mcd-hw.conf")
-    opcache_fpm = Path(f"/etc/php/{php_ver}/fpm/conf.d/99-mcd-hw.ini")
-    opcache_cli = Path(f"/etc/php/{php_ver}/cli/conf.d/99-mcd-hw.ini")
-    redis_fpm = Path(f"/etc/php/{php_ver}/fpm/conf.d/90-redis-sessions.ini")
-    redis_cli = Path(f"/etc/php/{php_ver}/cli/conf.d/90-redis-sessions.ini")
-
-    pool_content = _build_pool_override(profile)
-    opcache_content = _build_opcache_override(profile)
-    cli_opcache_content = _build_cli_opcache_override(profile)
-    redis_sessions_enabled = bool(profile.get("redis_sessions_enabled", True))
-    redis_content = _build_redis_sessions_override(profile)
-    sysctl_content = _build_sysctl_override(profile)
-
-    before: dict[Path, str | None] = {
-        pool_override: pool_override.read_text(encoding="utf-8") if pool_override.exists() else None,
-        opcache_fpm: opcache_fpm.read_text(encoding="utf-8") if opcache_fpm.exists() else None,
-        opcache_cli: opcache_cli.read_text(encoding="utf-8") if opcache_cli.exists() else None,
-        redis_fpm: redis_fpm.read_text(encoding="utf-8") if redis_fpm.exists() else None,
-        redis_cli: redis_cli.read_text(encoding="utf-8") if redis_cli.exists() else None,
-        _SYSCTL_PATH: _SYSCTL_PATH.read_text(encoding="utf-8") if _SYSCTL_PATH.exists() else None,
-    }
-
-    if dry_run:
-        files = [str(pool_override), str(opcache_fpm), str(opcache_cli), str(_SYSCTL_PATH)]
-        if redis_sessions_enabled:
-            files.insert(3, str(redis_fpm))
-            files.insert(4, str(redis_cli))
-        return {
-            "status": "planned",
-            "php_version": php_ver,
-            "php_fpm_bin": php_bin,
-            "service_name": service_name,
-            "pool": pool_name,
-            "files": files,
-        }
-
-    changed: list[str] = []
-    try:
-        for p in _remove_legacy_php_ini_baseline_files():
-            changed.append(p)
-        if _write_file(pool_override, pool_content):
-            changed.append(str(pool_override))
-        if _write_file(opcache_fpm, opcache_content):
-            changed.append(str(opcache_fpm))
-        if _write_file(opcache_cli, cli_opcache_content):
-            changed.append(str(opcache_cli))
-        if redis_sessions_enabled:
-            if _write_file(redis_fpm, redis_content):
-                changed.append(str(redis_fpm))
-            if _write_file(redis_cli, redis_content):
-                changed.append(str(redis_cli))
-        else:
-            if redis_fpm.exists():
-                redis_fpm.unlink()
-                changed.append(str(redis_fpm))
-            if redis_cli.exists():
-                redis_cli.unlink()
-                changed.append(str(redis_cli))
-        if _write_file(_SYSCTL_PATH, sysctl_content):
-            changed.append(str(_SYSCTL_PATH))
-
-        if not changed:
-            return {
-                "status": "noop",
-                "php_version": php_ver,
-                "php_fpm_bin": php_bin,
-                "service_name": service_name,
-                "pool": pool_name,
-                "changed_files": [],
-            }
-
-        proc_t = subprocess.run([php_bin, "-tt"], capture_output=True, text=True)
-        if proc_t.returncode != 0:
-            raise RuntimeError((proc_t.stderr or proc_t.stdout or "php-fpm -tt failed").strip())
-
-        somaxconn = int(profile.get("sysctl_somaxconn", profile.get("listen_backlog", 4096)) or 4096)
-        subprocess.run(["sysctl", "-w", f"net.core.somaxconn={somaxconn}"], capture_output=True, text=True)
-
-        proc_reload = subprocess.run(["systemctl", "reload", service_name], capture_output=True, text=True)
-        if proc_reload.returncode != 0:
-            proc_restart = subprocess.run(["systemctl", "restart", service_name], capture_output=True, text=True)
-            if proc_restart.returncode != 0:
-                msg = (proc_restart.stderr or proc_restart.stdout or "php-fpm restart failed").strip()
-                raise RuntimeError(msg)
-
-        return {
-            "status": "applied",
-            "php_version": php_ver,
-            "php_fpm_bin": php_bin,
-            "service_name": service_name,
-            "pool": pool_name,
-            "changed_files": changed,
-        }
-    except Exception:
-        for path, content in before.items():
-            try:
-                if content is None:
-                    if path.exists():
-                        path.unlink()
-                else:
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_text(content, encoding="utf-8")
-            except Exception:
-                pass
-        raise
-
-
 def apply_mysql_profile(cfg: AgentConfig, profile: dict[str, Any], *, dry_run: bool = False) -> dict[str, Any]:
     if os.geteuid() != 0:
         raise RuntimeError("service-profile apply requires root")
@@ -1019,7 +713,6 @@ def service_profiles_apply_once(
     dry_run: bool = False,
     force_apt_repo_rescan: bool = False,
     allow_cluster_db_maintenance: bool = False,
-    allow_candidate_handler: bool = False,
 ) -> dict[str, Any]:
     comp = (component or "php_fpm").strip().lower().replace("-", "_")
     if comp not in {"php_fpm", "mysql", "apt", "wazuh", "docker", "mautic_db_indexes", "db_indexes"}:
@@ -1046,8 +739,7 @@ def service_profiles_apply_once(
         if reason:
             out["reason"] = reason
         return out
-    fetched = (fetch_service_profile(cfg, comp, allow_candidate_handler=True)
-               if allow_candidate_handler else fetch_service_profile(cfg, comp))
+    fetched = fetch_service_profile(cfg, comp)
     status = str(fetched.get("status", "")).strip().lower()
     if status != "ok":
         return {"status": "error", "reason": fetched.get("reason", status or "fetch_failed"), "fetch": fetched}
@@ -1055,18 +747,9 @@ def service_profiles_apply_once(
     if not isinstance(profile, dict):
         return {"status": "error", "reason": "invalid profile payload", "fetch": fetched}
     if comp == "php_fpm":
-        handler = fetched.get("external_handler")
-        if allow_candidate_handler and handler is None:
-            raise ValueError("external_handler_missing")
-        if handler is not None and not isinstance(handler, dict):
-            raise ValueError("external_handler_invalid")
-        if handler is not None and external_handler_selected(handler, allow_candidate=allow_candidate_handler):
-            # No fallback after selecting external execution, including admission
-            # or child failure. The old writer survives only during migration.
-            applied = apply_external_service_profile(cfg, fetched, dry_run=dry_run,
-                                                     allow_candidate=allow_candidate_handler)
-        else:
-            applied = apply_php_fpm_profile(cfg, profile, dry_run=dry_run)
+        # Only delivery/admission lives here; the artifact owns the algorithm.
+        # No builtin writer or fallback exists after external selection.
+        applied = apply_external_service_profile(cfg, fetched, dry_run=dry_run)
     elif comp == "mysql":
         applied = apply_mysql_profile(cfg, profile, dry_run=dry_run)
     elif comp == "wazuh":

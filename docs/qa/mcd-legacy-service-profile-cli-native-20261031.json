@@ -1,5 +1,5 @@
 {
-  "status": "normal-and-negative-pass-reset-pending",
+  "status": "r7-all-contracts-pass-and-reset-clean-r8-source-cleanup-recheck-pending",
   "scope": "legacy service-profile CLI real HTTPS isolated MCC API/public catalog/native external recipe; not release or activation",
   "normal": {
     "scope": "actual installed legacy CLI through owner isolated real MCC HTTP API; no mocked fetch/process/downloader",
@@ -241,8 +241,257 @@
     "external_dispatch_failure_verified": true,
     "native_fpm_validation_exit_code": 78
   },
-  "final_reset": "canonical full reset requested after negative; next isolated operator-override case will follow",
+  "final_reset": {
+    "status": "PASS",
+    "scope": "after R7 static and exact-operator cases",
+    "independent_read_only_facts": {
+      "managed_files_absent": true,
+      "fault_absent": true,
+      "source_absent": true,
+      "services": {
+        "mariadb": "active",
+        "php8.5-fpm": "active",
+        "nginx": "active",
+        "mcd": "inactive"
+      },
+      "https": "200:0",
+      "https_rc": 0
+    },
+    "owner_receipt": "/Users/azlobin/Documents/Projects/Mautic-Operations/sandboxes/evidence/20261031-php-generator-cpx22-lease.json"
+  },
   "raw_evidence_directory": "/Users/azlobin/.codex/admin/host-diagnostics/mcd-legacy-profile-cli-native-20261031/",
   "activation": false,
-  "legacy_writer_deleted": false
+  "legacy_writer_deleted": true,
+  "operator_override": {
+    "scope": "actual installed legacy CLI through owner isolated real MCC HTTP API; no mocked fetch/process/downloader",
+    "before_files": {
+      "/etc/php/8.5/fpm/pool.d/zz-mcd-hw.conf": null,
+      "/etc/php/8.5/fpm/conf.d/99-mcd-hw.ini": null,
+      "/etc/php/8.5/cli/conf.d/99-mcd-hw.ini": null,
+      "/etc/sysctl.d/99-mcd-hw.conf": null,
+      "/etc/php/8.5/fpm/conf.d/90-redis-sessions.ini": null,
+      "/etc/php/8.5/cli/conf.d/90-redis-sessions.ini": null
+    },
+    "before_health": {
+      "https": 200,
+      "tls_verify": 0,
+      "services": {
+        "php8.5-fpm": "active",
+        "nginx": "active",
+        "mariadb": "active",
+        "mcd": "inactive"
+      }
+    },
+    "before_kernel": 4096,
+    "activation": false,
+    "canonical_full_reset_required": true,
+    "status": "PASS",
+    "mode": "normal",
+    "dryrun_public_result": {
+      "files": [
+        "/etc/php/8.5/fpm/pool.d/zz-mcd-hw.conf",
+        "/etc/php/8.5/fpm/conf.d/99-mcd-hw.ini",
+        "/etc/php/8.5/cli/conf.d/99-mcd-hw.ini",
+        "/etc/php/8.5/fpm/conf.d/90-redis-sessions.ini",
+        "/etc/php/8.5/cli/conf.d/90-redis-sessions.ini",
+        "/etc/sysctl.d/99-mcd-hw.conf"
+      ],
+      "php_fpm_bin": "/usr/sbin/php-fpm8.5",
+      "php_version": "8.5",
+      "pool": "www",
+      "service_name": "php8.5-fpm",
+      "status": "planned"
+    },
+    "apply_public_result": {
+      "changed_files": [
+        "/etc/php/8.5/fpm/pool.d/zz-mcd-hw.conf",
+        "/etc/php/8.5/fpm/conf.d/99-mcd-hw.ini",
+        "/etc/php/8.5/cli/conf.d/99-mcd-hw.ini",
+        "/etc/php/8.5/fpm/conf.d/90-redis-sessions.ini",
+        "/etc/php/8.5/cli/conf.d/90-redis-sessions.ini",
+        "/etc/sysctl.d/99-mcd-hw.conf"
+      ],
+      "php_fpm_bin": "/usr/sbin/php-fpm8.5",
+      "php_version": "8.5",
+      "pool": "www",
+      "service_name": "php8.5-fpm",
+      "status": "applied"
+    },
+    "noop_public_result": {
+      "changed_files": [],
+      "php_fpm_bin": "/usr/sbin/php-fpm8.5",
+      "php_version": "8.5",
+      "pool": "www",
+      "service_name": "php8.5-fpm",
+      "status": "noop"
+    },
+    "handler": {
+      "schema": "mcc-service-profile-external-handler-v1",
+      "component": "php_fpm",
+      "resolved_plan_key": "cpx22",
+      "state": "candidate",
+      "active": false,
+      "activation_required": true,
+      "transport": "mcd-custom-v1",
+      "artifact": {
+        "key": "php-system-profile-d45010ef943179ed5b98422075edab0730683612c6b966571cd42c66956f71fb",
+        "file": "bundles/exact-profiles/php-system-profile-d45010ef943179ed5b98422075edab0730683612c6b966571cd42c66956f71fb.tar.gz",
+        "uri": "https://servercontrol.sales-snap.com/mauticctl/custom/bundles/exact-profiles/php-system-profile-d45010ef943179ed5b98422075edab0730683612c6b966571cd42c66956f71fb.tar.gz",
+        "sha256": "d45010ef943179ed5b98422075edab0730683612c6b966571cd42c66956f71fb",
+        "size_bytes": 7200,
+        "media_type": "application/gzip",
+        "entrypoint": "scenarios/debian-family/skeleton.py",
+        "task_data": "profiles/task.json",
+        "default_selection": "php-system-profile-9480200d4f33eaafbde6d8ee1bc0b9039ba9055d87a62cd94fd7d758d0f3549e"
+      },
+      "command": {
+        "argv": [
+          "custom",
+          "--no-detach",
+          "--expected-sha256",
+          "d45010ef943179ed5b98422075edab0730683612c6b966571cd42c66956f71fb",
+          "php-system-profile-d45010ef943179ed5b98422075edab0730683612c6b966571cd42c66956f71fb",
+          "--",
+          "--composition",
+          "profiles/task.json",
+          "--selection",
+          "php-system-profile-9480200d4f33eaafbde6d8ee1bc0b9039ba9055d87a62cd94fd7d758d0f3549e"
+        ]
+      },
+      "profile_input": {
+        "source": "response.profile",
+        "sha256": "9480200d4f33eaafbde6d8ee1bc0b9039ba9055d87a62cd94fd7d758d0f3549e",
+        "expected_sha256": "9480200d4f33eaafbde6d8ee1bc0b9039ba9055d87a62cd94fd7d758d0f3549e",
+        "matches_expected": true
+      },
+      "dry_run_command": {
+        "argv": [
+          "custom",
+          "--no-detach",
+          "--expected-sha256",
+          "d45010ef943179ed5b98422075edab0730683612c6b966571cd42c66956f71fb",
+          "php-system-profile-d45010ef943179ed5b98422075edab0730683612c6b966571cd42c66956f71fb",
+          "--",
+          "--composition",
+          "profiles/task.json",
+          "--selection",
+          "php-system-profile-9480200d4f33eaafbde6d8ee1bc0b9039ba9055d87a62cd94fd7d758d0f3549e",
+          "--dry-run"
+        ]
+      },
+      "selection": "php-system-profile-9480200d4f33eaafbde6d8ee1bc0b9039ba9055d87a62cd94fd7d758d0f3549e",
+      "validation_profile": {
+        "path": "profiles/universal/9e2b2a842a1cbccd229e95fb4af757b577bea876cde91bf4e404364b1f2b5cdb.json",
+        "sha256": "9e2b2a842a1cbccd229e95fb4af757b577bea876cde91bf4e404364b1f2b5cdb",
+        "size_bytes": 731
+      },
+      "exact_profile_bundle": {
+        "schema": "mcc-exact-php-profile-bundle-v1",
+        "generated": true,
+        "template_key": "php-system-profile-1.0.4-all-plans",
+        "files": [
+          {
+            "path": "profiles/task.json",
+            "sha256": "265ceea3a1212c52eba8e59ecb4e95e1258a03b5060877034f2966d667d9f7e0",
+            "size_bytes": 612
+          },
+          {
+            "path": "profiles/universal/9e2b2a842a1cbccd229e95fb4af757b577bea876cde91bf4e404364b1f2b5cdb.json",
+            "sha256": "9e2b2a842a1cbccd229e95fb4af757b577bea876cde91bf4e404364b1f2b5cdb",
+            "size_bytes": 731
+          },
+          {
+            "path": "scenarios/debian-family/common/blocks/php-system-profile/1.0.1/block.py",
+            "sha256": "a687f753f79d25c430b1ada4ccec1f3635f4632f5ffb88f4bb3e26eb6afcea64",
+            "size_bytes": 14214
+          },
+          {
+            "path": "scenarios/debian-family/skeleton.py",
+            "sha256": "ce0156649206db28c42d1fb605984f0a1e9205f2a182eacb9e34fc2679c48382",
+            "size_bytes": 10654
+          }
+        ]
+      },
+      "minimum_runtime": {
+        "target": "MCD result-aware custom gzip entrypoint/raw JSONline capture plus legacy adapter; activation remains owner-gated",
+        "version_is_sufficient": false,
+        "required_capabilities": [
+          "custom-gzip-entrypoint",
+          "raw-jsonline-terminal-result"
+        ]
+      },
+      "terminal_result_contract": {
+        "schema": "mcd-self-hosted-executable-output-v1",
+        "contract_version": "1.0",
+        "result": "exact public generator apply/noop/dry_run result dictionary",
+        "public_result_component": "php_system_profile"
+      },
+      "source_ref": "MCC owner live normalized export immutable SHA3641962bf55e8ffc51fe880ce06c8212c0e607ad315e1c6f74f638e696a7a1f0",
+      "source_catalog": {
+        "path": "/tmp/mcc-live-resolved-php-fpm-v1-20261031.json",
+        "sha256": "3641962bf55e8ffc51fe880ce06c8212c0e607ad315e1c6f74f638e696a7a1f0",
+        "size_bytes": 28333,
+        "version": 1,
+        "authority": {
+          "authority": "live MCC persisted universal service-profile catalog",
+          "catalog_version": 2,
+          "path": "/opt/mcc/cache/service-profiles.json",
+          "sha256": "37d8fdba9d323c1b2043b54e0274177fb70539b99f35d2f4a9877601808799e2",
+          "size_bytes": 83138
+        },
+        "bundle_path": "profiles/universal/3641962bf55e8ffc51fe880ce06c8212c0e607ad315e1c6f74f638e696a7a1f0.json"
+      }
+    },
+    "after_files": {
+      "/etc/php/8.5/fpm/pool.d/zz-mcd-hw.conf": "a3bdb219b311b834b8720506db711e93e123777156c839909250d56dd3a3e30f",
+      "/etc/php/8.5/fpm/conf.d/99-mcd-hw.ini": "b3cff3cf4dff7c60b666192f75a0135810eabe8ef8c12020086b50fdbd2e5470",
+      "/etc/php/8.5/cli/conf.d/99-mcd-hw.ini": "4c38ca11cb62d6b5de036a4e9f132173a405487767435372e0165af13866422b",
+      "/etc/sysctl.d/99-mcd-hw.conf": "932e9b536c75969849d8e0b064ff2473481dd084e6b8ae17427e79f3c9e03158",
+      "/etc/php/8.5/fpm/conf.d/90-redis-sessions.ini": "a42ca56ad78eeab6c5e107fdb42fbd770af8062b57da29779ed41119adf3648d",
+      "/etc/php/8.5/cli/conf.d/90-redis-sessions.ini": "a42ca56ad78eeab6c5e107fdb42fbd770af8062b57da29779ed41119adf3648d"
+    },
+    "after_kernel": 1024,
+    "after_health": {
+      "https": 200,
+      "tls_verify": 0,
+      "services": {
+        "php8.5-fpm": "active",
+        "nginx": "active",
+        "mariadb": "active",
+        "mcd": "inactive"
+      }
+    },
+    "dryrun_unchanged": true,
+    "native_reference_dryrun_exact": true,
+    "native_reference_apply_exact": true,
+    "native_reference_noop_exact": true,
+    "actual_response_pm_max_children": 9,
+    "reference_scope": "Same exact operator profile rendered with unchanged frozen old five-function ASTs; native old dryrun independently executed with same profile; apply/noop envelope follows baseline native shape and all six paths unchanged.",
+    "native_old_override_dryrun": {
+      "files": [
+        "/etc/php/8.5/fpm/pool.d/zz-mcd-hw.conf",
+        "/etc/php/8.5/fpm/conf.d/99-mcd-hw.ini",
+        "/etc/php/8.5/cli/conf.d/99-mcd-hw.ini",
+        "/etc/php/8.5/fpm/conf.d/90-redis-sessions.ini",
+        "/etc/php/8.5/cli/conf.d/90-redis-sessions.ini",
+        "/etc/sysctl.d/99-mcd-hw.conf"
+      ],
+      "php_fpm_bin": "/usr/sbin/php-fpm8.5",
+      "php_version": "8.5",
+      "pool": "www",
+      "service_name": "php8.5-fpm",
+      "status": "planned"
+    }
+  },
+  "cleanup_native_recheck": "pending R8 cleaned package and active descriptor in isolated QA only",
+  "validation": {
+    "release_regression": "PASS",
+    "full_passed": 1982,
+    "full_failed": 61,
+    "full_skipped": 57,
+    "subtests_passed": 105,
+    "failure_ids_vs_approved_baseline": "identical",
+    "external_transferred_php_tests": 7,
+    "external_test_owner_commit": "f8900b8"
+  }
 }

@@ -71,20 +71,16 @@
     {
       "path": "mcd_agent/service_profiles.py",
       "function": "fetch_service_profile",
-      "line": 66,
+      "line": 68,
       "classification": "KEEP",
       "lexical_name_callers": [
         {
           "path": "mcd_agent/cli.py",
-          "line": 3735
+          "line": 3796
         },
         {
           "path": "mcd_agent/cli.py",
-          "line": 3689
-        },
-        {
-          "path": "mcd_agent/service_profiles.py",
-          "line": 95
+          "line": 3750
         },
         {
           "path": "mcd_agent/service_profiles.py",
@@ -100,7 +96,11 @@
         },
         {
           "path": "mcd_agent/service_profiles.py",
-          "line": 1041
+          "line": 111
+        },
+        {
+          "path": "mcd_agent/service_profiles.py",
+          "line": 742
         }
       ],
       "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive"
@@ -108,38 +108,12 @@
     {
       "path": "mcd_agent/service_profiles.py",
       "function": "apply_docker_profile",
-      "line": 147,
+      "line": 151,
       "classification": "EXTERNAL",
       "lexical_name_callers": [
         {
           "path": "mcd_agent/service_profiles.py",
-          "line": 1035
-        }
-      ],
-      "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive"
-    },
-    {
-      "path": "mcd_agent/service_profiles.py",
-      "function": "_build_pool_override",
-      "line": 300,
-      "classification": "EXTERNAL",
-      "lexical_name_callers": [
-        {
-          "path": "mcd_agent/service_profiles.py",
-          "line": 813
-        }
-      ],
-      "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive"
-    },
-    {
-      "path": "mcd_agent/service_profiles.py",
-      "function": "_build_opcache_override",
-      "line": 331,
-      "classification": "EXTERNAL",
-      "lexical_name_callers": [
-        {
-          "path": "mcd_agent/service_profiles.py",
-          "line": 814
+          "line": 736
         }
       ],
       "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive"
@@ -147,25 +121,12 @@
     {
       "path": "mcd_agent/service_profiles.py",
       "function": "_build_mysql_override",
-      "line": 654,
+      "line": 470,
       "classification": "EXTERNAL",
       "lexical_name_callers": [
         {
           "path": "mcd_agent/service_profiles.py",
-          "line": 932
-        }
-      ],
-      "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive"
-    },
-    {
-      "path": "mcd_agent/service_profiles.py",
-      "function": "apply_php_fpm_profile",
-      "line": 799,
-      "classification": "EXTERNAL",
-      "lexical_name_callers": [
-        {
-          "path": "mcd_agent/service_profiles.py",
-          "line": 1049
+          "line": 633
         }
       ],
       "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive"
@@ -173,12 +134,12 @@
     {
       "path": "mcd_agent/service_profiles.py",
       "function": "apply_mysql_profile",
-      "line": 914,
+      "line": 615,
       "classification": "EXTERNAL",
       "lexical_name_callers": [
         {
           "path": "mcd_agent/service_profiles.py",
-          "line": 1051
+          "line": 754
         }
       ],
       "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive"
@@ -186,20 +147,20 @@
     {
       "path": "mcd_agent/service_profiles.py",
       "function": "service_profiles_apply_once",
-      "line": 1008,
+      "line": 709,
       "classification": "SPLIT",
       "lexical_name_callers": [
         {
           "path": "mcd_agent/cli.py",
-          "line": 3710
+          "line": 3771
         },
         {
           "path": "mcd_agent/cli.py",
-          "line": 3697
+          "line": 3758
         },
         {
           "path": "mcd_agent/cli.py",
-          "line": 3681
+          "line": 3742
         },
         {
           "path": "mcd_agent/daemon.py",
@@ -488,9 +449,38 @@
       ],
       "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive",
       "reason": "retain direct Mautic commands and agent orchestration; externalize concrete OS recipes only; existing defect repair deferred"
+    },
+    {
+      "path": "mcd_agent/service_profile_external.py",
+      "function": "apply_external_service_profile",
+      "line": 22,
+      "classification": "KEEP",
+      "lexical_name_callers": [
+        {
+          "path": "mcd_agent/service_profiles.py",
+          "line": 752
+        }
+      ],
+      "caller_resolution": "single explicit PHP service-profile generic dispatch; no builtin writer/fallback"
     }
   ],
   "native_before_after_evidence": null,
   "native_status": "not executed; canonical sandbox lease pending",
-  "preexisting_broken_upgrade_migrate": "repair deferred"
+  "preexisting_broken_upgrade_migrate": "repair deferred",
+  "completed_externalizations": [
+    {
+      "component": "php_system_profile",
+      "former_path": "mcd_agent/service_profiles.py",
+      "former_function": "apply_php_fpm_profile",
+      "removed_php_functions": 13,
+      "retained_shared_mysql_helpers": [
+        "_service_exists",
+        "_write_file"
+      ],
+      "recipe_owner": "external MCC/Portal immutable artifact and exact profile data",
+      "generic_adapter": "mcd_agent/service_profile_external.py",
+      "native_evidence": "docs/qa/mcd-legacy-service-profile-cli-native-20261031.json",
+      "cleanup_native_recheck": "pending"
+    }
+  ]
 }

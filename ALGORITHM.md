@@ -1989,7 +1989,7 @@ extraction and canonical 1.7.0 publication are still outstanding.
 
 ### PHP system-profile first working extraction checkpoint
 
-Existing MCD PHP writer and the external `php-system-profile` candidate passed
+At the extraction checkpoint, the existing MCD PHP writer and the external `php-system-profile` candidate passed
 native normal and controlled validation-failure comparisons on separate serial
 runs from the same canonical reset baseline. The actual universal MCC export is
 passed intact as `resolved.profile`; no merge, capacity override or invented
@@ -2002,9 +2002,10 @@ verified healthy and fault-free. Evidence:
 `docs/qa/mcd-php-system-profile-native-parity-20261031.json`.
 
 This proves the transferred writer algorithm, not the completed legacy CLI
-migration. The writer remains until the existing MCC catalog/task descriptor
-selects the verified external composition and the legacy CLI preserves its
-results through generic dispatch. Artifact versions/paths and tuning values
+migration. The writer was retained at that checkpoint until the MCC catalog/task
+descriptor selected the verified external composition and the legacy CLI
+preserved its results through generic dispatch. The current cleanup checkpoint
+below records its subsequent removal. Artifact versions/paths and tuning values
 must not be embedded in the compatibility adapter.
 
 The candidate decoder accepts optional object `result` inside the existing
@@ -2053,10 +2054,10 @@ full reset after the mutable test; no customer host is part of this proof.
 ### Service-profile descriptor migration (unreleased)
 
 The existing PHP service-profile POST advertises actual
-`external_handler_capabilities`; candidate selection additionally requires
-`external_handler_candidate_opt_in=true`. The temporary hidden
-`service-profile --allow-candidate-handler` probe supplies that opt-in. Version
-alone never grants capability. Descriptor admission checks transport, component,
+`external_handler_capabilities`. Runtime service-profile dispatch accepts only
+`state=active, active=true` descriptors. The temporary candidate CLI flag/POST
+opt-in used during isolated R7 proof has been removed. Version alone never grants
+capability. Descriptor admission checks transport, component,
 resolved plan, required capabilities and the canonical SHA-256 of the complete
 `response.profile` (sorted compact UTF-8 JSON, no ASCII escaping, no newline,
 finite JSON numbers only). This profile-data canonicalization is separate from
@@ -2067,10 +2068,13 @@ An explicitly selected external handler executes through the generic custom
 cache and validated public-result capture. Descriptor admission, pin mismatch,
 unsupported dry-run or child failure never falls back to the legacy writer.
 Dry-run requires its own `dry_run_command` descriptor and never uses apply argv.
-During this unreleased migration only, an inactive candidate without explicit
-opt-in preserves the existing working writer, as do unconverted profiles. This
-compatibility branch and the old writer must be removed before the final 1.7
-release, after all working profiles and native command contracts pass.
+The old PHP writer and its temporary compatibility branch have now been removed
+following native static/override/failure acceptance. Missing, inactive or invalid
+handlers fail explicitly; there is no embedded fallback. All profile tuning and
+file rendering belong to the external artifact, including exact operator
+response profiles outside the catalog snapshots. The candidate probe has retired; the native cleaned-source recheck uses the
+ordinary CLI and an active descriptor in the isolated QA API only. Production
+activation remains a separate source-owner release gate.
 
 The result collector has no lifetime deadline in synchronous custom mode,
 including when a long-running child closes its output streams early. The framed
@@ -2100,3 +2104,12 @@ independently observed; this transfer does not invent a new rollback claim.
 Canonical full reset is mandatory after the retained invalid test fixture.
 Operator-override native proof and reset remain required before old-writer
 deletion, candidate activation or release.
+
+
+PHP source cleanup removes 13 PHP-specific writer/render/detection functions and
+three tests transferred to external-owner commit f8900b8 (seven PHP tests PASS).
+Shared `_service_exists` and `_write_file` remain because MySQL still calls them;
+MySQL and all direct Mautic/core paths retain their existing behavior. Runtime
+boundary/audit records distinguish this completed component from remaining
+recipes. A native CLI recheck of the cleaned package and final reset are still
+required before marking that cleanup accepted.
