@@ -2013,9 +2013,16 @@ secret-shape and size bounds remain in force; summary-only frames are unchanged.
 The framed runner exposes it as `runner.result`. External composition owns the
 explicit public payload; MCD does not choose PHP fields or workflow order.
 Non-object payloads are rejected. Tests exercise an actual child result roundtrip
-and guard rejection. Generic custom JSONline capture and the legacy CLI seam
-still require the validated catalog integration; no all-entrypoint support is
-claimed merely by this decoder extension.
+and guard rejection. Generic `custom --capture-result` runs synchronously,
+collects stdout separately from stderr under the existing process output bounds,
+and adapts raw JSONlines to the same validated terminal-frame decoder. It returns
+the exact public result object only after a successful terminal matching the
+child exit code. Missing/duplicate/invalid terminals and missing public results
+fail closed; interactive, detached and fetch-only capture are rejected. Ordinary
+custom execution is unchanged. Capture adds no implicit process lifetime limit.
+Tests use actual child processes, including stderr impersonation and failure
+cases. The legacy CLI seam still requires native catalog integration proof;
+no all-entrypoint support or activation is claimed by this extension.
 
 
 Runtime-only mismatch reporting compares installed distribution metadata with the
@@ -2029,3 +2036,15 @@ Runtime archive builder tests create an isolated Git fixture with canonical
 refs rather than assuming the developer's current branch equals origin/main.
 They exercise the real package payload, valid provenance, wrong-commit rejection
 and feature-checkout rejection. The production canonical-origin gate is unchanged.
+
+
+The custom CLI seam has additionally passed on a canonical disposable Ubuntu
+lease with an unlisted capability-bearing wheel: cold execution used the actual
+published candidate manifest and pinned archive, returning exactly the existing
+writer's native apply dictionary. Warm `--capture-result` returned the exact noop
+dictionary while an audit observer blocked any urllib request (zero attempts).
+Six rendered files, FPM validation, kernel state and verified HTTPS matched the
+native reference. This proves generic custom delivery, not activation, the
+legacy PHP command adapter or a published runtime capability. Evidence:
+`docs/qa/mcd-custom-cli-native-seam-20261031.json`. The canonical executor owns
+full reset after the mutable test; no customer host is part of this proof.

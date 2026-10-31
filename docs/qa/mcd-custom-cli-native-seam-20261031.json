@@ -1,0 +1,119 @@
+{
+  "status": "PASS",
+  "scope": "actual installed custom CLI live candidate cold apply and warm capture noop; not activation/release",
+  "catalog": "https://servercontrol.sales-snap.com/mauticctl/custom/manifest.json",
+  "key": "php-system-profile-1.0.1-cpx22",
+  "artifact_sha256": "2705aa6b433842e9f785f470136ee1c938efc2c1a6015ccceab16f969f7b1027",
+  "cold_cli": [
+    "/opt/mcd/venv/bin/mcd-cli",
+    "custom",
+    "--config",
+    "/tmp/mcd-native-custom-cli-seam-20261031/custom.toml",
+    "--no-detach",
+    "--expected-sha256",
+    "2705aa6b433842e9f785f470136ee1c938efc2c1a6015ccceab16f969f7b1027",
+    "php-system-profile-1.0.1-cpx22",
+    "--",
+    "--composition",
+    "profiles/task.json",
+    "--selection",
+    "php-system-profile-cpx22"
+  ],
+  "cold_exit_code": 0,
+  "cold_terminal": {
+    "schema": "mcd-self-hosted-executable-output-v1",
+    "contract_version": "1.0",
+    "frame_type": "result",
+    "status": "succeeded",
+    "exit_code": 0,
+    "completed": 1,
+    "total": 1,
+    "rollback": "not_attempted",
+    "result": {
+      "status": "applied",
+      "php_version": "8.5",
+      "php_fpm_bin": "/usr/sbin/php-fpm8.5",
+      "service_name": "php8.5-fpm",
+      "pool": "www",
+      "changed_files": [
+        "/etc/php/8.5/fpm/pool.d/zz-mcd-hw.conf",
+        "/etc/php/8.5/fpm/conf.d/99-mcd-hw.ini",
+        "/etc/php/8.5/cli/conf.d/99-mcd-hw.ini",
+        "/etc/php/8.5/fpm/conf.d/90-redis-sessions.ini",
+        "/etc/php/8.5/cli/conf.d/90-redis-sessions.ini",
+        "/etc/sysctl.d/99-mcd-hw.conf"
+      ]
+    }
+  },
+  "cold_stdout_sha256": "378d512ad183491bb2edb66a0540e74db1714411f100a54627ef30b702af8e77",
+  "warm_capture_exit_code": 0,
+  "warm_public_result": {
+    "changed_files": [],
+    "php_fpm_bin": "/usr/sbin/php-fpm8.5",
+    "php_version": "8.5",
+    "pool": "www",
+    "service_name": "php8.5-fpm",
+    "status": "noop"
+  },
+  "warm_artifact_and_manifest_requests": 0,
+  "warm_instrumentation": "Python audit urllib.Request observer/blocker around actual installed console script via runpy; no process/downloader mocks",
+  "before_files": {
+    "/etc/php/8.5/fpm/pool.d/zz-mcd-hw.conf": null,
+    "/etc/php/8.5/fpm/conf.d/99-mcd-hw.ini": null,
+    "/etc/php/8.5/cli/conf.d/99-mcd-hw.ini": null,
+    "/etc/sysctl.d/99-mcd-hw.conf": null,
+    "/etc/php/8.5/fpm/conf.d/90-redis-sessions.ini": null,
+    "/etc/php/8.5/cli/conf.d/90-redis-sessions.ini": null
+  },
+  "after_files": {
+    "/etc/php/8.5/fpm/pool.d/zz-mcd-hw.conf": "5d15042d97566fbb64ede3a7e7d5a55b96dd9f0e5c59647a6cca367c41bdc183",
+    "/etc/php/8.5/fpm/conf.d/99-mcd-hw.ini": "b3cff3cf4dff7c60b666192f75a0135810eabe8ef8c12020086b50fdbd2e5470",
+    "/etc/php/8.5/cli/conf.d/99-mcd-hw.ini": "4c38ca11cb62d6b5de036a4e9f132173a405487767435372e0165af13866422b",
+    "/etc/sysctl.d/99-mcd-hw.conf": "932e9b536c75969849d8e0b064ff2473481dd084e6b8ae17427e79f3c9e03158",
+    "/etc/php/8.5/fpm/conf.d/90-redis-sessions.ini": "a42ca56ad78eeab6c5e107fdb42fbd770af8062b57da29779ed41119adf3648d",
+    "/etc/php/8.5/cli/conf.d/90-redis-sessions.ini": "a42ca56ad78eeab6c5e107fdb42fbd770af8062b57da29779ed41119adf3648d"
+  },
+  "native_reference_apply_exact": true,
+  "native_reference_noop_exact": true,
+  "before_health": {
+    "https": 200,
+    "tls_verify": 0,
+    "services_active": true,
+    "mcd_active": false
+  },
+  "after_health": {
+    "https": 200,
+    "tls_verify": 0,
+    "services_active": true,
+    "mcd_active": false
+  },
+  "source_checkout_present": false,
+  "activation": false,
+  "canonical_full_reset_required": true,
+  "wheel": {
+    "scope": "UNLISTED dirty-source runtime-only test fixture; NOT canonical release or 1.7.0 acceptance",
+    "wheel": "/tmp/mcd-unlisted-core-20261031-r5/mcd_agent-1.6.38-py3-none-any.whl",
+    "wheel_sha256": "6f94e5c30f2ee1390bb56a93b854bf51056020f0659c53fee43ebe535bd17466",
+    "wheel_size": 1031873,
+    "archive": "/tmp/mcd-unlisted-core-20261031-r5/mcd-runtime-only-unlisted-r5.tar.gz",
+    "archive_sha256": "05a4b34cc405566674ca6caa428c9c05b0b8129ff9bee9b5edad7ac026f19be8",
+    "manifest_sha256": "d807322309ff5d7d97c6f6035e108284fb5ea179e7c392e7b5e50628288ee423",
+    "canonical_release": false,
+    "channel_publication": false
+  },
+  "validation": {
+    "focused_existing_and_new": 83,
+    "capture_suite_after_mode_tests": 12,
+    "release_regression": "PASS",
+    "full_suite": {
+      "passed": 1964,
+      "failed": 61,
+      "skipped": 57,
+      "subtests": 105,
+      "new_failures_vs_1_6_38": []
+    },
+    "full_suite_note": "Three additional capture admission tests added afterward and passed in the 12-test suite; implementation unchanged."
+  },
+  "canonical_reset": "requested; pending independent clean verification",
+  "raw_evidence_directory": "/Users/azlobin/.codex/admin/host-diagnostics/mcd-custom-cli-seam-20261031"
+}

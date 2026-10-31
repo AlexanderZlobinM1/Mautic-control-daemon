@@ -2413,6 +2413,7 @@ def _build_parser() -> argparse.ArgumentParser:
     custom.add_argument("--config", default=default_cfg)
     custom.add_argument("--list", action="store_true", help="List available custom scripts")
     custom.add_argument("--json", action="store_true")
+    custom.add_argument("--capture-result", action="store_true", help="Run synchronously and print the validated public terminal result object")
     custom.add_argument("--fetch-only", action="store_true", help="Verify/cache the selected artifact without executing it")
     custom.add_argument("--expected-sha256", help="Require the selected manifest entry and downloaded script to match this SHA-256")
     custom.add_argument(
@@ -5130,7 +5131,7 @@ def main() -> int:
         cfg = load_config(args.config)
         note = maybe_notify_update(cfg)
         if note:
-            print(f"NOTICE: {note}", file=sys.stderr if args.json else sys.stdout)
+            print(f"NOTICE: {note}", file=sys.stderr if (args.json or args.capture_result) else sys.stdout)
         if bool(args.list):
             rows, source = fetch_custom_manifest(cfg, use_cache_on_error=True)
             if bool(args.json):
@@ -5153,6 +5154,7 @@ def main() -> int:
             live_output=not bool(args.detach),
             expected_sha256=args.expected_sha256,
             fetch_only=args.fetch_only,
+            capture_result=args.capture_result,
         )
         if out:
             print(out)

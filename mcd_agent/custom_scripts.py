@@ -12,6 +12,7 @@ import tempfile
 import tarfile
 import shutil
 import subprocess
+import struct
 import time
 from typing import Any
 import urllib.error
@@ -415,6 +416,41 @@ def _run_direct(script_path: Path, args: list[str], *, live_output: bool, cwd: P
     return int(proc.returncode), out.strip()
 
 
+def _run_capture_result(script_path: Path, args: list[str], *, cwd: Path | None = None) -> tuple[int, str]:
+    """Reuse the existing process/terminal contract for raw JSONline artifacts."""
+    from mcd_agent.commercial_self_hosted import ExternalProcessPolicy
+    from mcd_agent.commercial_portal import canonical_json
+    argv = [str(script_path.resolve()), *args]
+    # Ordinary custom direct execution has no implicit lifetime cap. Keep that
+    # behavior while reusing bounded output collection and process supervision.
+    try:
+        policy = ExternalProcessPolicy(argv)
+        completed = policy._run_bounded(argv, b"", os.environ.copy(), cwd=cwd or Path.cwd(), unlimited=True)
+    except (ValueError, OSError, TimeoutError) as exc:
+        return 1, "custom structured execution rejected: " + str(exc)
+    try:
+        wire = bytearray()
+        for line in (completed.stdout or b"").splitlines():
+            if not line.strip():
+                continue
+            value = json.loads(line)
+            if not isinstance(value, dict):
+                raise ValueError("custom_result_frame_invalid")
+            payload = canonical_json(value)
+            wire.extend(struct.pack("!I", len(payload)))
+            wire.extend(payload)
+        terminal = policy._decode_output_frames(bytes(wire))[-1]
+        if terminal["exit_code"] != completed.returncode:
+            raise ValueError("custom_result_exit_mismatch")
+        if terminal["status"] != "succeeded":
+            return int(completed.returncode) or 1, json.dumps(terminal, sort_keys=True)
+        if "result" not in terminal:
+            raise ValueError("custom_public_result_missing")
+        return 0, json.dumps(terminal["result"], ensure_ascii=True, sort_keys=True)
+    except (ValueError, UnicodeError) as exc:
+        return int(completed.returncode) or 1, "custom structured result rejected: " + str(exc)
+
+
 def run_custom_script_by_key(
     config: AgentConfig,
     *,
@@ -424,7 +460,10 @@ def run_custom_script_by_key(
     live_output: bool = True,
     expected_sha256: str | None = None,
     fetch_only: bool = False,
+    capture_result: bool = False,
 ) -> tuple[int, str]:
+    if capture_result and (fetch_only or detach is True):
+        return 2, "custom result capture requires synchronous execution without fetch-only"
     expected = str(expected_sha256 or "").strip().lower()
     if expected and re.fullmatch(r"[0-9a-f]{64}", expected) is None:
         return 2, "custom expected SHA-256 is invalid"
@@ -455,6 +494,8 @@ def run_custom_script_by_key(
 
     if expected and str(found.get("sha256", "")).strip().lower() != expected:
         return 1, "custom script manifest checksum does not match the requested pin"
+    if capture_result and _to_bool(found.get("interactive", False)):
+        return 2, "custom result capture does not support interactive artifacts"
     try:
         script_path = _fetch_script_to_cache(config, found)
     except Exception as e:
@@ -470,6 +511,8 @@ def run_custom_script_by_key(
     execution_options: dict[str, Any] = {}
     if found.get("entrypoint") is not None:
         execution_options["cwd"] = script_path.parents[len(Path(found["entrypoint"]).parts) - 1]
+    if capture_result:
+        return _run_capture_result(script_path, arg_list, **execution_options)
     if detach_effective and mode == "tmux":
         return _run_detached_tmux(config, script_path, key, arg_list, **execution_options)
     if detach_effective and mode == "screen":

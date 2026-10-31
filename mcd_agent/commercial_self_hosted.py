@@ -625,14 +625,14 @@ class ExternalProcessPolicy:
             raise ValueError("self_hosted_mcd_runner_output_terminal_missing")
         return frames
 
-    def _run_bounded(self, argv: list[str], framed: bytes, env: Mapping[str, str]) -> subprocess.CompletedProcess[bytes]:
+    def _run_bounded(self, argv: list[str], framed: bytes, env: Mapping[str, str], *, cwd: str | Path = "/", unlimited: bool = False) -> subprocess.CompletedProcess[bytes]:
         try:
             process = subprocess.Popen(
                 argv,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                cwd="/",
+                cwd=cwd,
                 env=dict(env),
                 start_new_session=True,
             )
@@ -656,9 +656,9 @@ class ExternalProcessPolicy:
                 stdin_registered = True
             else:
                 process.stdin.close()
-            deadline = time.monotonic() + self.timeout_sec
+            deadline = None if unlimited else time.monotonic() + self.timeout_sec
             while selector.get_map():
-                remaining = deadline - time.monotonic()
+                remaining = 0.25 if deadline is None else deadline - time.monotonic()
                 if remaining <= 0:
                     self._terminate_process_group(process)
                     evidence = _runner_evidence(
