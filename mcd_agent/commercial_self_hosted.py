@@ -598,9 +598,16 @@ class ExternalProcessPolicy:
                 if terminal_seen:
                     raise ValueError("self_hosted_mcd_runner_output_terminal_order_invalid")
             elif status in {"succeeded", "failed"}:
-                allowed = {"schema", "contract_version", "frame_type", "status", "exit_code", "completed", "total", "rollback", "error_code"}
+                allowed = {"schema", "contract_version", "frame_type", "status", "exit_code", "completed", "total", "rollback", "error_code", "result"}
                 if terminal_seen or frame.get("frame_type") != "result" or set(frame) - allowed or not all(_nonnegative_int(frame.get(key)) for key in ("exit_code", "completed", "total")) or frame.get("total") < 1 or frame.get("completed") > frame.get("total") or frame.get("rollback") not in {"not_attempted", "not_started", "succeeded", "failed"}:
                     raise ValueError("self_hosted_mcd_runner_output_terminal_invalid")
+                if "result" in frame and not isinstance(frame["result"], Mapping):
+                    raise ValueError("self_hosted_mcd_runner_output_result_invalid")
+                if "result" in frame:
+                    try:
+                        json.dumps(frame["result"], allow_nan=False)
+                    except (ValueError, TypeError) as exc:
+                        raise ValueError("self_hosted_mcd_runner_output_result_invalid") from exc
                 if status == "succeeded" and frame.get("exit_code") != 0 or status == "failed" and frame.get("exit_code") == 0:
                     raise ValueError("self_hosted_mcd_runner_output_exit_status_invalid")
                 if status == "failed" and (not isinstance(frame.get("error_code"), str) or not re.fullmatch(r"[a-z0-9][a-z0-9_.:-]{0,127}", frame["error_code"])):

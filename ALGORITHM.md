@@ -1985,3 +1985,47 @@ hashes, inactive daemon and strict HTTPS 200/SSL verification 0. External block
 before/after. These are isolated checkpoints: fresh image creation/owned-new-row
 rollback and fresh bootstrap native acceptance, remaining system-dependent
 extraction and canonical 1.7.0 publication are still outstanding.
+
+
+### PHP system-profile first working extraction checkpoint
+
+Existing MCD PHP writer and the external `php-system-profile` candidate passed
+native normal and controlled validation-failure comparisons on separate serial
+runs from the same canonical reset baseline. The actual universal MCC export is
+passed intact as `resolved.profile`; no merge, capacity override or invented
+profile data is used. Six rendered files, complete apply/noop return dictionaries,
+real FPM validation, sysctl and HTTPS match. The identical invalid pool fixture
+makes real FPM validation fail with code 78; both actors restore six managed
+files, preserve kernel/master PID and keep HTTPS 200. Each fault is removed only
+by canonical full VM reset, not a manual repair. Final reset is independently
+verified healthy and fault-free. Evidence:
+`docs/qa/mcd-php-system-profile-native-parity-20261031.json`.
+
+This proves the transferred writer algorithm, not the completed legacy CLI
+migration. The writer remains until the existing MCC catalog/task descriptor
+selects the verified external composition and the legacy CLI preserves its
+results through generic dispatch. Artifact versions/paths and tuning values
+must not be embedded in the compatibility adapter.
+
+The candidate decoder accepts optional object `result` inside the existing
+terminal result frame. Existing framing/schema/version, counters, status,
+secret-shape and size bounds remain in force; summary-only frames are unchanged.
+The framed runner exposes it as `runner.result`. External composition owns the
+explicit public payload; MCD does not choose PHP fields or workflow order.
+Non-object payloads are rejected. Tests exercise an actual child result roundtrip
+and guard rejection. Generic custom JSONline capture and the legacy CLI seam
+still require the validated catalog integration; no all-entrypoint support is
+claimed merely by this decoder extension.
+
+
+Runtime-only mismatch reporting compares installed distribution metadata with the
+actually imported runtime even when no source tree exists. A stale metadata
+version must set package/version mismatch flags; removing implicit source reads
+must not hide that condition. Explicit development source diagnostics remain
+separate. A regression test first reproduced the missing-source false-negative
+and now verifies detection without reading a parallel project tree.
+
+Runtime archive builder tests create an isolated Git fixture with canonical
+refs rather than assuming the developer's current branch equals origin/main.
+They exercise the real package payload, valid provenance, wrong-commit rejection
+and feature-checkout rejection. The production canonical-origin gate is unchanged.

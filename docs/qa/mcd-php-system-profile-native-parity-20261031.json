@@ -1,0 +1,85 @@
+{
+  "schema": "mcd-external-generator-native-parity-v1",
+  "status": "native_equivalence_and_final_reset_passed",
+  "component": "php-system-profile",
+  "target": {
+    "family": "debian",
+    "distro": "ubuntu",
+    "php_version": "8.5"
+  },
+  "input_export_sha256": "26276bfceb7b557625aa819f978525a96a11b496c324bb3f6247c5fa8dfd0c58",
+  "existing_mcd_module_sha256": "b791b2a4b1d7c23e41f8771a0c08d1167af2da6de1c7519c8262436906a24c62",
+  "external_block_sha256": "a687f753f79d25c430b1ada4ccec1f3635f4632f5ffb88f4bb3e26eb6afcea64",
+  "normal": {
+    "status": "PASS",
+    "scope": "old MCD versus external native normal, same real MCC profile and reset baseline",
+    "before_files_equal": true,
+    "after_six_files_equal": true,
+    "apply_result_equal": true,
+    "noop_result_equal": true,
+    "kernel_equal": true,
+    "native_fpm_validation_equal": true,
+    "https_before_after": 200,
+    "MCD_writer_removed": false
+  },
+  "negative": {
+    "same_pristine_managed_files": true,
+    "real_fpm_validation_exit": 78,
+    "six_files_restored": true,
+    "kernel_unchanged_both": true,
+    "master_unchanged_both": true,
+    "service_active_both": true,
+    "https_before_after": 200,
+    "input_unchanged_external": true,
+    "old_receipt_sha256": "53e0b575dab8fcf30a21109e86a18e680b567b838648326a64ce227e77fc7281",
+    "external_receipt_sha256": "f431f7008ee7d53b21daa1f48a5aa5f0867bc8d148901101dde9226b151bcd95",
+    "same_fault_fixture_path": true,
+    "fault_fixture_sha256": "d05f1355789f48c8c0a603ad45e4940a979d2a926edabfc5adccd57c41cbbbe0",
+    "nonzero_master_pid_external": true
+  },
+  "final_reset": {
+    "status": "PASS",
+    "canonical_receipt_sha256": "5737bfcd1f433f2a5dcdb22e6d6bbe4647d1a1ad89a73975cc5865e909972f36",
+    "independently_checked": true,
+    "fault_absent": true,
+    "managed_six_files_absent": true,
+    "services_healthy": true,
+    "MCD_inactive": true,
+    "https": 200,
+    "tls_verify": 0
+  },
+  "receipt_sha256": {
+    "old-normal.json": "03c92df970f684736841981811060bfa51acbf64afda352761c74dcaa09cf334",
+    "external-normal.json": "0e508c5d123cebdcda79f47ae09bfb40b8fa5cd0d4b289f304d5e5effa2aec45",
+    "old-negative.json": "53e0b575dab8fcf30a21109e86a18e680b567b838648326a64ce227e77fc7281",
+    "external-negative.json": "f431f7008ee7d53b21daa1f48a5aa5f0867bc8d148901101dde9226b151bcd95",
+    "canonical-reset.json": "5737bfcd1f433f2a5dcdb22e6d6bbe4647d1a1ad89a73975cc5865e909972f36",
+    "profile-export.json": "26276bfceb7b557625aa819f978525a96a11b496c324bb3f6247c5fa8dfd0c58"
+  },
+  "evidence_location": "admin-local://host-diagnostics/mcd-php-system-profile-parity-20261031/",
+  "MCD_writer_removed": false,
+  "release_complete": false,
+  "remaining": "authoritative existing catalog/task descriptor and backward-compatible CLI dispatch; no hardcoded artifact revision or native fallback in completed 1.7.0",
+  "source_validation": {
+    "targeted_passed": 86,
+    "release_regression": "PASS",
+    "full_passed": 1955,
+    "full_failed": 61,
+    "same_failure_ids_as_1_6_38_baseline": true,
+    "failure_ids_sha256": "5ea2dea00696f7e484769587774e326e9591e1cbd49d9cb00a18678671281308",
+    "skipped": 57,
+    "subtests_passed": 105,
+    "runtime_builder_tests": "isolated Git canonical fixture; production gate unchanged",
+    "native_profile_algorithm": "R4 installed writer versus external block; not a native deployment claim for later decoder changes"
+  },
+  "harmless_transport_fixture": {
+    "archive_sha256": "b8ebe421d1133d70061c79393424cb85970cc8ab25fdbb33b2753ed9eeaa0b30",
+    "direct_cache_outputs_equal": true,
+    "artifact_network_calls": 0,
+    "domain_argument_required": false,
+    "public_result_preserved": true,
+    "existing_framed_decoder_validation": "PASS after test-only canonical framing conversion",
+    "native_system_apply": false,
+    "native_gzip_launcher_proof": false
+  }
+}

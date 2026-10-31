@@ -68,6 +68,6 @@ def agent_version_payload(source_dir: Path | str | None = None) -> dict[str, Any
         "agent_installed_version": installed,
         "agent_source_version": source,
         "agent_package_version": package,
-        "agent_package_mismatch": bool(source and package and source != package),
-        "agent_version_mismatch": bool((source and source != running) or (source and package and source != package)),
+        "agent_package_mismatch": bool(package and package != running),
+        "agent_version_mismatch": bool((source and source != running) or (package and package != running)),
     }

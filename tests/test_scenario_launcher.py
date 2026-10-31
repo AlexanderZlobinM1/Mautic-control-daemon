@@ -390,3 +390,29 @@ def test_policy_reports_broken_pipe_without_persisting_child_output(tmp_path: Pa
     with pytest.raises(RunnerExecutionError, match="runner_broken_pipe") as failure:
         _run_policy(runner, parameters={"payload": "x" * (240 * 1024)})
     assert failure.value.evidence["admission_stage"] == "stdin"
+
+
+def test_policy_preserves_public_structured_operation_result(tmp_path: Path) -> None:
+    operation = {"status": "applied", "php_version": "8.5", "changed_files": ["/etc/php/8.5/fpm/conf.d/99-mcd-hw.ini"]}
+    frame = {"schema": "mcd-self-hosted-executable-output-v1", "contract_version": "1.0", "frame_type": "result", "status": "succeeded", "exit_code": 0, "completed": 1, "total": 1, "rollback": "not_attempted", "result": operation}
+    body = "import json,struct; sys.stdin.buffer.read(); frame=" + repr(frame) + "; raw=json.dumps(frame,sort_keys=True,separators=(',',':')).encode(); sys.stdout.buffer.write(struct.pack('!I',len(raw))+raw)"
+    observed = _run_policy(_runner_script(tmp_path, body))
+    assert observed["runner"]["result"] == operation
+    assert observed["runner"]["completed"] == 1
+
+
+@pytest.mark.parametrize("value", [None, [], "ok", 3, {"invalid": float("nan")}, {"invalid": float("inf")}])
+def test_structured_operation_result_must_be_object(value) -> None:
+    import struct
+    frame = {"schema": "mcd-self-hosted-executable-output-v1", "contract_version": "1.0", "frame_type": "result", "status": "succeeded", "exit_code": 0, "completed": 1, "total": 1, "rollback": "not_attempted", "result": value}
+    raw = json.dumps(frame, sort_keys=True, separators=(",", ":")).encode()
+    with pytest.raises(ValueError, match="output_result_invalid"):
+        ExternalProcessPolicy._decode_output_frames(struct.pack("!I", len(raw)) + raw)
+
+
+def test_structured_operation_result_retains_secret_shape_guard() -> None:
+    import struct
+    frame = {"schema": "mcd-self-hosted-executable-output-v1", "contract_version": "1.0", "frame_type": "result", "status": "succeeded", "exit_code": 0, "completed": 1, "total": 1, "rollback": "not_attempted", "result": {"password": "fixture-only"}}
+    raw = json.dumps(frame, sort_keys=True, separators=(",", ":")).encode()
+    with pytest.raises(ValueError, match="output_secret_detected"):
+        ExternalProcessPolicy._decode_output_frames(struct.pack("!I", len(raw)) + raw)
