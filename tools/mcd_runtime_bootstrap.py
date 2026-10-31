@@ -864,7 +864,13 @@ def bridge(args: argparse.Namespace) -> dict[str, Any]:
                     f"runtime manifest SHA mismatch expected={args.expected_manifest_sha256} actual={actual_manifest_sha}"
                 )
         if _version_key(target) <= _version_key(old_source_version) and (src_dir / MANIFEST_NAME).is_file():
-            raise BridgeError(f"runtime bridge target is not newer than active source: {old_source_version} -> {target}")
+            same_pinned_layout_migration = (
+                original_dir == legacy_dir
+                and _version_key(target) == _version_key(old_source_version)
+                and _sha256(src_dir / MANIFEST_NAME) == _sha256(stage / MANIFEST_NAME)
+            )
+            if not same_pinned_layout_migration:
+                raise BridgeError(f"runtime bridge target is not newer than active source: {old_source_version} -> {target}")
 
         with _scheduler_barrier(install_dir) as barrier_created:
             try:

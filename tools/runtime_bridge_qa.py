@@ -267,6 +267,26 @@ def main(argv: list[str] | None = None) -> int:
             sandbox=True,
         )
         receipt = bridge.bridge(args_ns)
+        # Simulate a former bridge that put the exact same ready artifact in src.
+        # Equal-version content changes are forbidden; only exact layout migration
+        # may move this already verified artifact into the runtime namespace.
+        os.replace(install / "runtime", install / "src")
+        legacy_manifest = install / "src" / "mcd-runtime-manifest.json"
+        original_manifest = legacy_manifest.read_bytes()
+        modified_manifest = json.loads(original_manifest)
+        modified_manifest["unexpected_content_change"] = True
+        legacy_manifest.write_text(json.dumps(modified_manifest), encoding="utf-8")
+        try:
+            bridge.bridge(args_ns)
+        except bridge.BridgeError as exc:
+            if "not newer" not in str(exc):
+                raise
+        else:
+            raise RuntimeError("same-version manifest replacement was accepted")
+        legacy_manifest.write_bytes(original_manifest)
+        layout_receipt = bridge.bridge(args_ns)
+        if Path(layout_receipt["after"]["source_path"]).resolve() != (install / "runtime").resolve() or (install / "src").exists():
+            raise RuntimeError("same pinned version did not migrate legacy layout")
         replay = bridge.bridge(args_ns)
         if not replay.get("idempotent_replay") or replay.get("readback", {}).get("metadata_version") != expected_target:
             raise RuntimeError("same archive replay did not return an idempotent fresh readback")

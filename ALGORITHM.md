@@ -1963,3 +1963,25 @@ retires it after verification; a failure restores the original runtime/state.
 Fresh bootstrap is owned externally and requires its own new revision removing
 the legacy src copy. R2 native CLI version/warmup has passed without injection;
 R3 clean Ubuntu clone and external consumer acceptance remain pending.
+
+
+Native runtime-only acceptance checkpoint: the unlisted R4 artifact was activated
+on the isolated Ubuntu clone with an explicitly SHA-pinned current bridge. The
+first infrastructure attempt used an old release-checkout bridge and was rejected
+by owner postchecks; its package install was not counted as a clean migration.
+The corrected bridge moved the exact same pinned manifest from legacy src to
+runtime (equal-version layout migration only; changed manifest is rejected).
+Real-venv QA covers that admission, idempotent replay, running PID/task retention
+and failure rollback. After successful activation no project src or transaction
+source backup remains. A separate historical artifact directory was archived
+outside installed runtime, content-fingerprint verified and retired only after
+unit/process/cwd/pth/sys.path consumer checks.
+
+Actual installed CLI postchecks without injection verify runtime manifest/payload,
+site-packages import hashes against the wheel, matching running/installed/package
+version with no source marker, health, instance-UID Mautic version, preserved TOML
+hashes, inactive daemon and strict HTTPS 200/SSL verification 0. External block
+1.3.1 had separately passed existing-instance replay and UID warmup with HTTPS 200
+before/after. These are isolated checkpoints: fresh image creation/owned-new-row
+rollback and fresh bootstrap native acceptance, remaining system-dependent
+extraction and canonical 1.7.0 publication are still outstanding.
