@@ -2514,29 +2514,7 @@ def main() -> int:
         selection = reconcile_hardware_profile(config_path=args.config, install_dir="/opt/mcd")
         cfg = load_config(args.config)
         if selection.changed:
-            cron_result = reconcile_managed_cron(profile_name=selection.profile, install_dir="/opt/mcd")
-            if not cron_result.ok:
-                logging.warning("hardware profile cron reconcile failed: %s", "; ".join(cron_result.lines))
-            try:
-                queue_profile_event(
-                    cfg,
-                    source="mcd",
-                    initiated_by_user=selection.previous_profile != "farm",
-                    old_profile=selection.previous_profile or None,
-                    new_profile=selection.profile,
-                    reason=(
-                        "hardware_profile_farm_migration"
-                        if selection.previous_profile == "farm"
-                        else "hardware_profile_auto"
-                    ),
-                    details={
-                        "selection_mode": selection.mode,
-                        "cpu_count": selection.cpu_count,
-                        "memory_kib": selection.memory_kib,
-                    },
-                )
-            except Exception as e:
-                logging.warning("hardware profile event enqueue failed: %s", e)
+            logging.info("Hardware service profile changed: %s -> %s", selection.previous_profile, selection.profile)
         note = maybe_notify_update(cfg)
         if note:
             logging.info(note)
@@ -2547,29 +2525,7 @@ def main() -> int:
         selection = reconcile_hardware_profile(config_path=args.config, install_dir="/opt/mcd")
         cfg = load_config(args.config)
         if selection.changed:
-            cron_result = reconcile_managed_cron(profile_name=selection.profile, install_dir="/opt/mcd")
-            if not cron_result.ok:
-                logging.warning("hardware profile cron reconcile failed: %s", "; ".join(cron_result.lines))
-            try:
-                queue_profile_event(
-                    cfg,
-                    source="mcd",
-                    initiated_by_user=selection.previous_profile != "farm",
-                    old_profile=selection.previous_profile or None,
-                    new_profile=selection.profile,
-                    reason=(
-                        "hardware_profile_farm_migration"
-                        if selection.previous_profile == "farm"
-                        else "hardware_profile_auto"
-                    ),
-                    details={
-                        "selection_mode": selection.mode,
-                        "cpu_count": selection.cpu_count,
-                        "memory_kib": selection.memory_kib,
-                    },
-                )
-            except Exception as e:
-                logging.warning("hardware profile event enqueue failed: %s", e)
+            logging.info("Hardware service profile changed: %s -> %s", selection.previous_profile, selection.profile)
         note = maybe_notify_update(cfg)
         if note:
             logging.info(note)
@@ -4797,11 +4753,10 @@ def main() -> int:
                 print(f"hardware_memory_kib={memory_kib}")
             return 0
         if args.op == "auto":
-            previous_selection = read_profile_selection("/opt/mcd")
             write_profile_selection(
                 "/opt/mcd",
                 mode="auto",
-                profile=old_profile_name or "passive",
+                profile=str(getattr(cfg, "hardware_profile_name", "auto") or "auto"),
             )
             result = reconcile_hardware_profile(
                 config_path=args.config,
@@ -4809,27 +4764,6 @@ def main() -> int:
             )
             cfg_after = load_config(args.config)
             if result.changed:
-                cron_result = reconcile_managed_cron(profile_name=result.profile, install_dir="/opt/mcd")
-                if not cron_result.ok:
-                    print("profile auto: managed cron reconcile failed: " + "; ".join(cron_result.lines))
-                    return 1
-                try:
-                    queue_profile_event(
-                        cfg_after,
-                        source="mcd",
-                        initiated_by_user=True,
-                        old_profile=result.previous_profile or None,
-                        new_profile=result.profile,
-                        reason="hardware_profile_auto",
-                        details={
-                            "selection_mode": "auto",
-                            "previous_selection_mode": str(previous_selection.get("mode") or "auto"),
-                            "cpu_count": result.cpu_count,
-                            "memory_kib": result.memory_kib,
-                        },
-                    )
-                except Exception as e:
-                    logging.warning("hardware profile event enqueue failed: %s", e)
                 proc = subprocess.run(
                     ["systemctl", "restart", "mcd"],
                     capture_output=True,
@@ -4851,7 +4785,6 @@ def main() -> int:
             if ans not in {"y", "yes"}:
                 print("Cancelled")
                 return 1
-        write_profile_selection("/opt/mcd", mode="manual", profile=args.op)
         res = profile_set(
             profile=args.op,
             pause_flag_path=cfg.scheduler_pause_flag_path,

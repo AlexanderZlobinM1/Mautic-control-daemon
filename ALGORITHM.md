@@ -1471,18 +1471,18 @@ commercial worker can start.
 
 #### Manual fallback for an existing commercial key
 
-Fresh Portal bootstrap uses `tools/mcd_passive_install.py`: HTTPS + one existing
-commercial API key on stdin, exact archive/manifest/bridge SHA-256, then the
-existing redeem-commercial-key and same-key host-registration endpoints. DNS
-instance identity is explicit and independent from machine fingerprint. Import
-uses the installed wheel's offline atomic registration importer. The resulting
-config is passive with MCC disabled; the service remains disabled/inactive and
-uses KillMode=process. No stack/Mautic scenario is run during bootstrap.
-An exact completed-install replay verifies receipt pins, config/unit, installed
-version and durable key/agent/installation identity before returning without
-another enrollment. Foreign/partial installations fail closed and stay intact.
-Evidence: tests/test_passive_install.py, tools/passive_install_qa.py; double-only
-QA must not be presented as real Portal/systemd acceptance.
+Fresh Portal bootstrap is an immutable external `mcd-bootstrap` component in
+the shared scenario source. Its original exported bytes and existing live
+bootstrap SHA remain unchanged; it is no longer an MCD tools recipe or config/
+unit seed. The publisher copies only the approved external export after exact
+SHA/size verification. Runtime archive and verified update bridge pins remain
+separate and unchanged. Existing HTTPS/one-key transport, offline binding
+import, exact completed-replay checks, passive/inactive state and receipts are
+preserved by that external component. Its recipe tests/QA belong with the
+external source. The runtime module entrypoint never installs dependencies;
+missing modules fail normally and must be prepared by the verified external
+bootstrap. MCD retains generic verified runtime activation/update plumbing.
+See `docs/external-bootstrap-boundary.md` for the ownership and publication seam.
 
 New one-key OWH enrollment uses `identity_kind="dns"` and plain `local_identity`
 with server-issued agent/installation IDs. Material schema is
@@ -1894,3 +1894,21 @@ Do not create per-distribution/version copies when only target names or package
 and repository parameters differ. Overrides require demonstrated command or
 behavior differences. No installation artifact tree, embedded script seed or
 OS policy is added here.
+
+### Workload and hardware profile independence
+
+`[profile].name` is the MCD HOST workload choice; `[hardware].profile` and its
+selection marker identify component/hardware settings. Hardware reconciliation
+may update only the hardware coordinate and marker. It never clears workload
+runtime overrides, sanitizes a workload profile, reconciles workload cron, or
+emits a workload-profile change event. Startup and hardware-auto follow the
+same boundary. Explicit workload selection does not write the hardware marker.
+Hardware-auto seeds its marker from the current hardware coordinate, not from
+the workload name. State pushes retain both existing independent fields.
+
+This fix adds no hardware thresholds, provider rules, profile authority or
+component matrix. One-time recommended HOST selection and external component
+configuration must consume existing MCC data through the applicable approved
+transport. Corporate managed hosts remain on their corporate lane; they are
+not silently re-enrolled into the separate Portal OWH lane. Tests exercise real
+runtime override preservation and CLI startup/auto/manual selection effects.
