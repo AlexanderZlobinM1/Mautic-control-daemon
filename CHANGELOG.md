@@ -1,3 +1,12 @@
+## 1.6.35 - 2026-10-31
+
+- Fail closed before package installation when repository setup or APT refresh
+  fails. A skipped DB repository is not applied; cached success requires the
+  repository to remain present. Require an explicit DB target when autodetection
+  cannot establish a repository for requested DB packages.
+- Verify declared MariaDB family against the APT candidate and installed
+  packages; reject silent distro fallback and conflicting version settings.
+
 ## 1.6.34 - 2026-10-31
 
 - Make APT dry-run optional actions reflect the fetched external policy and
