@@ -21,6 +21,7 @@ from urllib.parse import urlencode
 from mcd_agent.config import AgentConfig
 from mcd_agent.form_embed import render_form_embed_location
 from mcd_agent.nginx_templates import render_nginx_template
+from mcd_agent.source_operation import stable_source_operation
 
 
 _LETSENCRYPT_LIVE = Path("/etc/letsencrypt/live")
@@ -193,7 +194,7 @@ def _preflight(plan: ImageInstallPlan) -> list[str]:
         problems.append("invalid php version")
     elif not Path(_selected_php_bin(plan)).is_file():
         problems.append(f"missing selected PHP CLI: {_selected_php_bin(plan)}")
-    for cmd in ("tar", "gzip", "nginx", "php"):
+    for cmd in ("tar", "gzip", "nginx", "php", "sudo", "curl"):
         if not shutil.which(cmd):
             problems.append(f"missing command: {cmd}")
     php_sock = Path(f"/run/php/php{plan.php_version}-fpm.sock")
@@ -900,6 +901,48 @@ def _safe_extract(tar: tarfile.TarFile, dst: Path) -> None:
     tar.extractall(dst, members=members)
 
 
+def _warm_image_runtime(plan: ImageInstallPlan) -> dict[str, Any]:
+    console = plan.webroot / "bin" / "console"
+    if not console.is_file():
+        console = plan.webroot / "app" / "console"
+    if not console.is_file():
+        raise RuntimeError("image runtime console is missing")
+    rc, _out = _run(
+        ["sudo", "-n", "-u", "www-data", "--", _selected_php_bin(plan), str(console),
+         "cache:warmup", "--env=prod", "--no-debug", "--no-interaction"],
+        timeout_sec=600,
+    )
+    if rc != 0:
+        # Console output may contain imported database credentials; keep errors bounded.
+        raise RuntimeError(f"image prod cache warmup failed rc={rc}")
+    return {"command": "cache:warmup", "environment": "prod", "debug": False,
+            "runtime_user": "www-data", "php_bin": _selected_php_bin(plan), "status": "ok"}
+
+
+def _verify_image_https(plan: ImageInstallPlan) -> dict[str, Any]:
+    """Probe this exact local vhost with real hostname/SNI and normal CA validation."""
+    import hashlib
+
+    with tempfile.TemporaryDirectory(prefix="mcd-image-https-") as td:
+        body = Path(td) / "login.html"
+        rc, status = _run(
+            ["curl", "--silent", "--show-error", "--noproxy", "*",
+             "--connect-timeout", "5", "--max-time", "30",
+             "--resolve", f"{plan.domain}:443:127.0.0.1",
+             "--output", str(body), "--write-out", "%{http_code}",
+             f"https://{plan.domain}/s/login"], timeout_sec=40,
+        )
+        if rc != 0 or status.strip() != "200":
+            raise RuntimeError(f"image HTTPS login verification failed rc={rc} http={status.strip()[:3]}")
+        html = body.read_bytes() if body.is_file() else b""
+        if not re.search(rb"type\s*=\s*[\"']password[\"']", html, re.IGNORECASE):
+            raise RuntimeError("image HTTPS response is not a login form")
+        return {"status": "ok", "url": f"https://{plan.domain}/s/login", "http_status": 200,
+                "connect_address": "127.0.0.1", "tls_verified": True,
+                "login_form": True, "body_sha256": hashlib.sha256(html).hexdigest()}
+
+
+@stable_source_operation
 def install_from_image(
     cfg: AgentConfig,
     *,
@@ -971,9 +1014,18 @@ def install_from_image(
             _mysql_import_artifact(cfg, db_artifact, plan.db_name)
 
             print("Fixing permissions")
-            _run(["chown", "-R", "www-data:www-data", str(plan.webroot.parent)], timeout_sec=300)
+            permission_rc, _ = _run(["chown", "-R", "www-data:www-data", str(plan.webroot.parent)], timeout_sec=300)
+            if permission_rc != 0:
+                raise RuntimeError("image runtime ownership setup failed")
             for rel in ("var/cache", "var/logs"):
-                shutil.rmtree(plan.webroot / rel, ignore_errors=True)
+                imported = plan.webroot / rel
+                if imported.is_symlink():
+                    imported.unlink()
+                elif imported.exists():
+                    shutil.rmtree(imported)
+
+            print("Warming prod runtime before publishing nginx vhost")
+            warmup = _warm_image_runtime(plan)
 
             print("Writing nginx vhost")
             _write_nginx_vhost(plan)
@@ -1016,6 +1068,11 @@ def install_from_image(
                     php_bin=_selected_php_bin(plan),
                     validate_runtime=False,
                 )
+            # Mail application can clear cache after its configuration mutation.
+            if mail_requested:
+                warmup = _warm_image_runtime(plan)
+            print("Verifying local HTTPS login with certificate validation")
+            runtime_verification = _verify_image_https(plan)
         except Exception as exc:
             rollback_errors = _rollback_failed_install(
                 cfg,
@@ -1043,4 +1100,6 @@ def install_from_image(
         "mail_mode": "own_host" if own_mail or mail_profile_id else "external",
         "mail_profile_id": str(mail_profile_id or ""),
         "instances": count,
+        "runtime_warmup": warmup,
+        "runtime_verification": runtime_verification,
     }
