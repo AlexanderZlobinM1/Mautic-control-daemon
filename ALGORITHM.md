@@ -2235,3 +2235,17 @@ no source checkout and no QA actor directory. Receipt SHA256
 2fe97f9ca999c8dc3060b2a6b0c8ac61d7f337999749f63d55d8952ee3e97e5e.
 The scoped MySQL transfer is closed; remaining system recipes and complete
 1.7 publication remain pending. Production handler activation remains held.
+
+
+The next scoped transfer is optional explicit Docker runtime installation,
+limited to _docker_runtime_state/apply_docker_profile. The daemon advisory
+allowlist continues to exclude Docker. Existing CLI fetch remains a dry-run
+operation, including ready-runtime noop. Preserve exact apt update/install
+docker.io and systemctl enable --now docker commands, timeout1800, failure
+results and root guard order (ready noop, dry-run planned, then root check).
+The frozen external block preserves both AST bodies and reads no profile
+values; its empty pinned envelope is existing composition admission only.
+Old native dry-run/install/repeat/ready-dry-run passed on a clean Ubuntu24.04
+lease; receipt d0773125924bca552fbe2a574b303d33be92a8effe3465e6847e7c38a647d683.
+External direct/CLI parity and source removal are pending; old bodies remain.
+See docs/qa/mcd-docker-runtime-native-20261101.json.

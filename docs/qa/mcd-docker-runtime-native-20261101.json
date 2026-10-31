@@ -1,0 +1,52 @@
+{
+  "status": "OLD-NATIVE-PASS; external direct and CLI parity pending",
+  "scope": "explicit optional Docker runtime installation only; no Mautic Docker engine/capability/preflight changes",
+  "source_reference": "19c640e74caa2c92e60e2ee87454d682525b23eb",
+  "closure_sha256": "633b281270212f811d2109ea1ff09ec00baca31b089b3c3dff493a5fc3f6cea1",
+  "recipe_functions": [
+    "_docker_runtime_state",
+    "apply_docker_profile"
+  ],
+  "source_archive_sha256": "39f9bf93b95e43877b984d998eef9ab1391e6c2ac34e33405e00273b230b7b17",
+  "external_archive_sha256": "803dcb3102a8eeb58f96c2b949215297edd9c74f7e96c9e7e95bbad97dc41176",
+  "external_block_sha256": "c8eed730c754f292ff7f63d04647081519220ba9eaba0ef099ed09d4627e2a77",
+  "all_member_pins_compile_and_two_body_ast_parity": "PASS",
+  "portal_pure_tests": {
+    "docker_passed": 13,
+    "suite_passed": 406,
+    "suite_skipped": 1,
+    "source_commit": "dfbf8a7"
+  },
+  "old_native": {
+    "status": "PASS",
+    "receipt": "/Users/azlobin/.codex/admin/host-diagnostics/mcd-docker-runtime-native-20261101/old-native-positive.json",
+    "sha256": "d0773125924bca552fbe2a574b303d33be92a8effe3465e6847e7c38a647d683",
+    "native_version": "Docker version 29.1.3, build 29.1.3-0ubuntu3~24.04.2",
+    "dry_run": "planned",
+    "first": "applied",
+    "repeat": "noop",
+    "ready_dry_run": "noop",
+    "health": "DB/FPM/nginx active; MCD inactive; HTTPS200 TLS0"
+  },
+  "selection": {
+    "task_default": null,
+    "explicit_selection_required": true,
+    "manifest_default_selection_is_historical_explicit_argv_metadata": true
+  },
+  "boundaries": {
+    "daemon_allowlist_excludes_docker": true,
+    "cli_fetch_preserves_dryrun_compatibility": true,
+    "root_order": "ready noop, dry-run planned, root guard, commands",
+    "profile_values_read": false
+  },
+  "old_writer_removed": false,
+  "activation": "HOLD until complete MCD 1.7 Test/Approved",
+  "next_gates": [
+    "full reset after old native actor",
+    "frozen external direct native parity",
+    "ordinary installed CLI native parity",
+    "remove two replaced functions",
+    "cleaned runtime native proof",
+    "final full reset and independent verification"
+  ]
+}
