@@ -1,3 +1,13 @@
+## 1.6.37 - 2026-10-31
+
+- Extend the existing generic custom-script executor with an expected SHA-256
+  pin. Reject malformed or mismatched job/manifest pins before downloading or
+  executing a script. Preserve direct noninteractive execution and script output.
+- Download into isolated staging and atomically publish verified content-addressed
+  script revisions, so failed downloads cannot replace a running revision.
+- Keep machine-output notices on stderr. This release adds no installation
+  recipe; external scenario migration and legacy installer removal are pending.
+
 ## 1.6.36 - 2026-10-31
 
 - Warm the image's production cache as www-data with its selected PHP before
