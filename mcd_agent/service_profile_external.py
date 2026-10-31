@@ -4,11 +4,22 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import struct
 from typing import Any, Mapping
 
 from mcd_agent.custom_scripts import run_custom_script_by_key
+from mcd_agent.commercial_portal import canonical_json
+from mcd_agent.commercial_self_hosted import ExternalProcessPolicy
 
 CUSTOM_RUNTIME_CAPABILITIES = frozenset({'custom-gzip-entrypoint', 'raw-jsonline-terminal-result'})
+
+
+class ExternalProfileOperationError(RuntimeError):
+    """A failed validated terminal may still carry the exact public outcome."""
+    def __init__(self, terminal: dict[str, Any]):
+        super().__init__("external_handler_execution_failed")
+        self.terminal = terminal
+        self.public_result = dict(terminal["result"])
 
 
 def external_handler_selected(handler: Mapping[str, Any]) -> bool:
@@ -82,6 +93,22 @@ def apply_external_service_profile(cfg: Any, fetched: Mapping[str, Any], *,
         expected_entrypoint=entrypoint, args=argv[len(prefix):], detach=False,
         live_output=False, capture_result=True)
     if rc != 0:
+        # Reuse the existing frame validator; no component business statuses are
+        # interpreted by the generic decoder or this failure carrier.
+        try:
+            parsed = json.loads(output)
+        except (ValueError, UnicodeError):
+            raise RuntimeError('external_handler_execution_failed: ' + output) from None
+        try:
+            payload = canonical_json(parsed)
+            frames = ExternalProcessPolicy._decode_output_frames(struct.pack("!I", len(payload)) + payload)
+            terminal = frames[-1]
+        except (ValueError, UnicodeError):
+            # Never echo a rejected structured payload into an exception/log.
+            raise RuntimeError("external_handler_failed_result_rejected") from None
+        if (terminal is not None and terminal["status"] == "failed"
+                and terminal["exit_code"] == rc and isinstance(terminal.get("result"), dict)):
+            raise ExternalProfileOperationError(terminal)
         raise RuntimeError('external_handler_execution_failed: ' + output)
     result = json.loads(output)
     if not isinstance(result, dict):

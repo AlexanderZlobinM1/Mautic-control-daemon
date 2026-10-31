@@ -453,12 +453,12 @@
     {
       "path": "mcd_agent/service_profile_external.py",
       "function": "apply_external_service_profile",
-      "line": 22,
+      "line": 33,
       "classification": "KEEP",
       "lexical_name_callers": [
         {
           "path": "mcd_agent/service_profiles.py",
-          "line": 752
+          "line": 754
         }
       ],
       "caller_resolution": "single explicit PHP service-profile generic dispatch; no builtin writer/fallback"

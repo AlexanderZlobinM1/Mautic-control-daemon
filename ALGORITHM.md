@@ -2154,3 +2154,21 @@ will compare that failure contract. A separate explicitly approved QA-only
 operator profile changes just max_user_connections to zero for the working
 normal case; this is test data, never a runtime fallback or live catalog change.
 See `docs/qa/mcd-mysql-generator-native-20261031.json`.
+
+
+A fresh checkpointed old stock reference now records the expected partial /
+deferred operation failure, persisted first four assignments and unchanged
+later variables, durable drop-in, unchanged master PID and healthy verified
+HTTPS. Verification resumed the saved first-return checkpoint after a harness
+field-name correction; it did not repeat the first mutation. External frozen
+before/after comparison and the explicit operator-zero positive case remain
+pending. Existing broken DB behavior is not repaired.
+
+Failure outcome projection is external: a typed component exception carries its
+exact public result through the existing failed terminal's optional result
+field. The generic MCD adapter reuses the frame validator and carries that
+validated object to the existing legacy service-profile outcome mapper. Partial
+remains error/CLI 1, deferred or skipped remains skipped/CLI 1 on apply; a failed
+terminal cannot become success even if its payload says applied. Missing/unsafe
+payloads keep the normal failure path. No MySQL business-status mapping is added
+to the generic decoder, and no status-map DSL or new protocol is introduced.

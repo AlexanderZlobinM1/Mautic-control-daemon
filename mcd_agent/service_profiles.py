@@ -17,7 +17,7 @@ from mcd_agent import __version__
 from mcd_agent.config import AgentConfig
 from mcd_agent.host_identity import resolve_agent_identity
 from mcd_agent.service_profile_external import (
-    CUSTOM_RUNTIME_CAPABILITIES, apply_external_service_profile,
+    CUSTOM_RUNTIME_CAPABILITIES, ExternalProfileOperationError, apply_external_service_profile,
 )
 from mcd_agent.mautic_db_indexes import apply_mautic_db_indexes
 from mcd_agent.wazuh_profile import apply_wazuh_profile
@@ -746,10 +746,15 @@ def service_profiles_apply_once(
     profile = fetched.get("profile")
     if not isinstance(profile, dict):
         return {"status": "error", "reason": "invalid profile payload", "fetch": fetched}
+    external_failed = False
     if comp == "php_fpm":
         # Only delivery/admission lives here; the artifact owns the algorithm.
         # No builtin writer or fallback exists after external selection.
-        applied = apply_external_service_profile(cfg, fetched, component=comp, dry_run=dry_run)
+        try:
+            applied = apply_external_service_profile(cfg, fetched, component=comp, dry_run=dry_run)
+        except ExternalProfileOperationError as exc:
+            applied = exc.public_result
+            external_failed = True
     elif comp == "mysql":
         applied = apply_mysql_profile(cfg, profile, dry_run=dry_run)
     elif comp == "wazuh":
@@ -765,6 +770,8 @@ def service_profiles_apply_once(
             force_repo_rescan=bool(force_apt_repo_rescan),
         )
     result_status, reason = _service_profile_apply_outcome(applied)
+    if external_failed and result_status == "ok":
+        result_status, reason = "error", "external_handler_execution_failed"
     out = {"status": result_status, "fetch": fetched, "apply": applied}
     if reason:
         out["reason"] = reason

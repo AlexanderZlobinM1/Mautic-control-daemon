@@ -136,3 +136,29 @@ def test_response_and_handler_cannot_change_requested_component(fetched,monkeypa
     monkeypatch.setattr(ext,'run_custom_script_by_key',lambda *a,**kw:pytest.fail('wrong endpoint component'))
     with pytest.raises(ValueError,match='requested_component_mismatch'):
         ext.apply_external_service_profile(None,fetched,component='php_fpm')
+
+
+def failed_terminal(result):
+    return {'schema':'mcd-self-hosted-executable-output-v1','contract_version':'1.0',
+            'frame_type':'result','status':'failed','exit_code':1,'completed':0,
+            'total':1,'rollback':'not_attempted','error_code':'task_component_operation_failed','result':result}
+
+
+@pytest.mark.parametrize('status,outer', [('partial','error'),('deferred','skipped'),('skipped','skipped'),('applied','error')])
+def test_failed_terminal_preserves_raw_result_and_legacy_outcome(fetched,monkeypatch,status,outer):
+    raw={'status':status,'changed_files':['/managed/config'],'dynamic':{'status':'error','attempted':['operation']}}
+    monkeypatch.setattr(profiles,'fetch_service_profile',lambda *a,**kw:fetched)
+    monkeypatch.setattr(profiles,'_cluster_db_maintenance_guard',lambda *a,**kw:None)
+    monkeypatch.setattr(ext,'run_custom_script_by_key',lambda *a,**kw:(1,json.dumps(failed_terminal(raw))))
+    result=profiles.service_profiles_apply_once(None)
+    assert result['status']==outer
+    assert result['apply']==raw
+
+
+@pytest.mark.parametrize('raw', [{'password':'must-never-be-forwarded'}, {'value':float('nan')}])
+def test_failed_payload_guards_stay_in_force(fetched,monkeypatch,raw):
+    monkeypatch.setattr(ext,'run_custom_script_by_key',lambda *a,**kw:(1,json.dumps(failed_terminal(raw))))
+    with pytest.raises(RuntimeError) as error:
+        ext.apply_external_service_profile(None,fetched,component='php_fpm')
+    assert not isinstance(error.value,ext.ExternalProfileOperationError)
+    assert "must-never-be-forwarded" not in str(error.value)
