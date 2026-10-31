@@ -2197,3 +2197,12 @@ before/after files and variables, unchanged master PID and healthy verified
 HTTPS. Both frozen standalone MariaDB paths are accepted, including the stock
 expected failure. Native MySQL/Percona/Galera execution is not claimed. The
 ordinary typed CLI/HTTPS consumer remains the next gate before writer deletion.
+
+
+The ordinary typed MySQL CLI positive path has passed through the real isolated
+MCC HTTPS API and its owner-published catalog without a candidate opt-in. The
+58b archive was actually downloaded/cached; planned, apply and repeat public
+results match the old QA operator-zero reference. Config, twelve observed
+variables, ten dynamic assignments, PID and verified HTTPS agree. Installed
+consumer module hashes match its source and no automatic builtin MySQL caller
+remains. Stock negative CLI and cleaned-runtime recheck are still required.

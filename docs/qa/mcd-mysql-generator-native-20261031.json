@@ -1,5 +1,5 @@
 {
-  "status": "FROZEN-NATIVE-PARITY-PASS-TYPED-CLI-PENDING",
+  "status": "TYPED-POSITIVE-PASS-stock-negative-CLI-pending",
   "scope": "existing MySQL host tuning extraction, no schema/Mautic/cluster repair",
   "authority_export": {
     "path": "/tmp/mcc-live-resolved-mysql-v1-20261031.json",
@@ -51,7 +51,6 @@
     "explicit_null": "only when both actual values are null",
     "core_cluster_maintenance_guards": "preserved"
   },
-  "my_sql_native_claim": false,
   "galera_native_claim": false,
   "old_writer_removed": false,
   "activation": false,
@@ -420,5 +419,74 @@
     "MCD_writer_removed": false,
     "activation": false,
     "harness_sha256": "701f8d9b15fa030e279af168a61bb2e91966a5ef7982f9acdb1a6f204742abbd"
-  }
+  },
+  "typed_cli_positive": {
+    "verification_status": "PASS",
+    "native_operation_success": true,
+    "profile_sha256": "914537e90f7e59ff7261a9aab6e8a874e36388aa4deca051481f1ced131eef94",
+    "artifact_sha256": "58b1e0404907f4a9752321f7c12b7dd1a8c36a7d53f1db8dd838c3aa13b3f834",
+    "runtime_context": {
+      "cluster_id": null
+    },
+    "candidate_opt_in": false,
+    "first_outer_status": "ok",
+    "repeat_outer_status": "ok",
+    "planned_public_result_sha256": "6f4a9e4e17177bf6762d2307f7ff0f44eefdbc67505bd05f7367d4235e0f8584",
+    "first_public_result_sha256": "686624b59898289b83b8e236ae81923bd6d75aa6d5f5a50c793302d77b1804d5",
+    "repeat_public_result_sha256": "58217f4615cf3ea6c0bf1e0b447112452bd951dc7a783af7c43f827c01998d23",
+    "all_public_results_equal_old_reference": true,
+    "after_files": {
+      "/etc/mysql/mariadb.conf.d/99-mcd-hw.cnf": "4d3101839bc89e423eb7c6755a5592f181b7a622391a814e4349649dc702e4e0",
+      "/etc/mysql/my.cnf": "d186308dcf11ee9685e22365f24142c13a490d8a01213ee49318d4a134a9c84d",
+      "/etc/mysql/mysql.cnf": null
+    },
+    "after_variables": {
+      "innodb_buffer_pool_size": "2147483648",
+      "innodb_io_capacity": "2000",
+      "innodb_io_capacity_max": "4000",
+      "max_allowed_packet": "67108864",
+      "max_connections": "200",
+      "max_heap_table_size": "67108864",
+      "max_user_connections": "0",
+      "table_definition_cache": "1000",
+      "table_open_cache": "2000",
+      "thread_cache_size": "16",
+      "tmp_table_size": "67108864",
+      "wsrep_on": "OFF"
+    },
+    "master_pid_unchanged": true,
+    "after_health": {
+      "https": 200,
+      "tls_verify": 0,
+      "services": {
+        "mariadb": "active",
+        "php8.5-fpm": "active",
+        "nginx": "active",
+        "mcd": "inactive"
+      }
+    },
+    "full_receipt": "/Users/azlobin/.codex/admin/host-diagnostics/mcd-mysql-profile-native-20261031/r9-typed-positive-receipt.json",
+    "full_receipt_sha256": "963f192e29f4beb9059e6ac9b733a3a0122e3863eb0e31f6c1af584caec7490d",
+    "installed_source_proof": {
+      "status": "PASS",
+      "installed_modules_match_R9": true,
+      "builtin_mysql_automatic_callers": 0,
+      "source_checkout_present": false
+    },
+    "runtime_candidate": {
+      "scope": "UNLISTED feature-source runtime-only test fixture; NOT canonical release or 1.7.0 acceptance",
+      "wheel": "/tmp/mcd-unlisted-core-20261101-r9/mcd_agent-1.6.38-py3-none-any.whl",
+      "wheel_sha256": "cb5773477f64c657a5afb7e43a66f935d65739e42159884491af6514531b89f1",
+      "wheel_size": 1032800,
+      "archive": "/tmp/mcd-unlisted-core-20261101-r9/mcd-runtime-only-unlisted-r9.tar.gz",
+      "archive_sha256": "3e16eb8e018d4bd3f32164dafc590b449dda380d8f7ac59f5665574fff1ab16f",
+      "manifest_sha256": "4e705aa0313be82bc58c2717e45ca808d4c766812cc6b871869ba6f223b5fd1c",
+      "canonical_release": false,
+      "channel_publication": false,
+      "source_commit": "99586ac134ef7f1b89dd158e2e6a4bad87736c7e"
+    }
+  },
+  "native_mariadb_claim": true,
+  "native_mysql_server_claim": false,
+  "native_percona_claim": false
 }
