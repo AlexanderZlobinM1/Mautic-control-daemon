@@ -1,6 +1,8 @@
 """Consume MCC-issued private authorization without knowing its signing key."""
 from __future__ import annotations
 
+from mcd_agent.mcc_transport import mcc_request
+
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -125,7 +127,7 @@ def authorize(config: Any, context: dict[str, Any], context_sha256: str, expecte
     validate_context(context, expected)
     if not getattr(config, "mcc_url", "") or not getattr(config, "mcc_token", ""):
         raise RuntimeError("release_transition_live_authorization_required")
-    request = urllib.request.Request(
+    request = mcc_request(
         config.mcc_url.rstrip("/") + "/api/v1/agent/mautic/releases/authorize-transition",
         data=canonical({"authorization_context": context, "authorization_context_sha256": context_sha256}),
         headers={"Authorization": "Bearer " + config.mcc_token, "Content-Type": "application/json"},

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from mcd_agent.mcc_transport import mcc_request
+
 import json
 import os
 from pathlib import Path
@@ -46,7 +48,7 @@ _MYSQL_GALERA_MARKERS = (
 
 def _post_json(url: str, payload: dict[str, Any], token: str | None, timeout_sec: int = 12) -> dict[str, Any]:
     data = json.dumps(payload, ensure_ascii=True).encode("utf-8")
-    req = request.Request(url=url, data=data, method="POST", headers={"Content-Type": "application/json"})
+    req = mcc_request(url=url, data=data, method="POST", headers={"Content-Type": "application/json"})
     if token:
         req.add_header("Authorization", f"Bearer {token}")
     with request.urlopen(req, timeout=timeout_sec) as resp:

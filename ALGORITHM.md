@@ -1676,6 +1676,19 @@ not invent a full version; existing registration/observed-major fallback remains
 Installed evidence takes precedence over registration hints and desired lock
 versions. The recovery tests cover both metadata formats and conflicting evidence.
 
+### Corporate HTTP client identity
+
+Corporate requests identify the actual client as
+`mcd-agent/<installed-version> corporate-managed/1.0`; an explicitly supplied
+User-Agent is preserved case-insensitively. The shared Request constructor
+copies headers and does not change bearer credentials, URL, method, body,
+TLS verification, routing or retry policy. This covers state/signals, service
+profiles, config/runtime sync, authorization and artifact/download clients.
+Portal keeps its existing independent transport. Tests exercise native JSON
+callers and the actual state sender, proving payload/auth preservation. Live
+acceptance requires standard unmodified CLI and genuine HTTPS heartbeat; a
+diagnostic header probe alone is not an installed fix or registration receipt.
+
 ### OWH-AUTO и generic command broker Portal↔MCD
 
 Автоматическая первая установка OWH является отдельным self-hosted потоком.

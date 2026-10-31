@@ -1,3 +1,10 @@
+## 1.6.33 - 2026-10-31
+
+- Identify corporate HTTP requests with the actual versioned MCD product
+  User-Agent instead of urllib's generic default. Cover heartbeat, profiles,
+  config/runtime sync, authorization and artifact clients while preserving
+  existing explicit client identity, bearer authentication, URLs and TLS.
+
 ## 1.6.32 - 2026-10-31
 
 - Expose the native inventory rescan through the existing Portal generic

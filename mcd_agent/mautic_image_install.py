@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from mcd_agent.mcc_transport import mcc_request
+
 from dataclasses import dataclass
 from pathlib import Path
 import gzip
@@ -316,13 +318,13 @@ def _rollback_failed_install(
 
 
 def _download(url: str, token: str, dst: Path) -> None:
-    req = request.Request(url, headers={"Authorization": f"Bearer {token}"})
+    req = mcc_request(url, headers={"Authorization": f"Bearer {token}"})
     with request.urlopen(req, timeout=1800) as resp, dst.open("wb") as f:
         shutil.copyfileobj(resp, f)
 
 
 def _download_json(url: str, token: str, *, timeout_sec: int = 60) -> dict[str, Any]:
-    req = request.Request(url, headers={"Authorization": f"Bearer {token}"})
+    req = mcc_request(url, headers={"Authorization": f"Bearer {token}"})
     with request.urlopen(req, timeout=timeout_sec) as resp:
         payload = json.loads(resp.read().decode("utf-8", errors="replace"))
     if not isinstance(payload, dict):

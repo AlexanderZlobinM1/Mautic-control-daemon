@@ -1,4 +1,6 @@
 """Online-only check-only admission; no signing key or mutation authority."""
+
+from mcd_agent.mcc_transport import mcc_request
 import json
 import time
 import re
@@ -43,7 +45,7 @@ def authorize_target_verification(*, snapshot, authorization_context, mcc_url, t
     if type(token) is not str or not token or any(c in token for c in "\r\n"):
         raise ValueError("target_verification_token_invalid")
     context_hash = canonical_json_sha256(claims)
-    request = urllib.request.Request(mcc_url.rstrip("/") + "/api/v1/mautic/patches/authorize-target-verification",
+    request = mcc_request(mcc_url.rstrip("/") + "/api/v1/mautic/patches/authorize-target-verification",
         data=json.dumps(dict(authorization_context=claims, authorization_context_sha256=context_hash),
             sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode(),
         headers={"Content-Type": "application/json", "Authorization": "Bearer " + token}, method="POST")

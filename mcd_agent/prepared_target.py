@@ -7,6 +7,8 @@ Composer invocation, release selection, signature scheme or network fallback.
 """
 from __future__ import annotations
 
+from mcd_agent.mcc_transport import mcc_request
+
 import hashlib
 import json
 import os
@@ -213,7 +215,7 @@ def download_prepared_target(config: Any, prepared: Mapping[str, Any], *, opener
     if not base.startswith("https://") or not token:
         raise PreparedTargetError("prepared_target_mcc_transport_required")
     artifact = normalized["artifact"]
-    request = urllib.request.Request(
+    request = mcc_request(
         base + artifact["path"],
         headers={
             "Authorization": "Bearer " + token,

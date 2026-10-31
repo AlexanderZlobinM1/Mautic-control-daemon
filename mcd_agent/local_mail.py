@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from mcd_agent.mcc_transport import mcc_request
+
 from datetime import datetime, timezone
 from email import policy
 from email.parser import BytesParser
@@ -156,7 +158,7 @@ def _mcc_json(
         body = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
         headers["Content-Type"] = "application/json"
         method = "POST"
-    req = request.Request(url, data=body, headers=headers, method=method)
+    req = mcc_request(url, data=body, headers=headers, method=method)
     with request.urlopen(req, timeout=max(1, int(timeout_sec))) as response:
         parsed = json.loads(response.read().decode("utf-8", errors="replace"))
     if not isinstance(parsed, dict):
