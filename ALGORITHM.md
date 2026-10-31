@@ -1676,6 +1676,19 @@ not invent a full version; existing registration/observed-major fallback remains
 Installed evidence takes precedence over registration hints and desired lock
 versions. The recovery tests cover both metadata formats and conflicting evidence.
 
+### APT service-profile plan
+
+APT policy remains the externally fetched MCC service profile. Dry-run lists
+declared packages and enables optional actions only under the same policy
+flags/defaults used by native apply; disabled Composer, package-service,
+Zabbix, directory or repository actions are not presented as enabled work.
+The obsolete `ensure_nodejs20=true` switch fails closed before any probe,
+repository write or package operation, including in dry-run. Absent/false
+does not install Node or select another version. Node runtime selection is
+external policy, not a host/version default hidden in MCD. Tests assert the
+no-side-effect rejection and enabled/disabled package/service plans. Live
+acceptance uses the unchanged service-profile CLI and scoped server profile.
+
 ### Corporate HTTP client identity
 
 Corporate requests identify the actual client as
