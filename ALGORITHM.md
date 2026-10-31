@@ -2219,3 +2219,11 @@ Three transferred writer tests were retired; 40 focused tests pass and full
 regression is 2001 passed, 61 exact baseline failures, 57 skipped. Cleaned R10
 installed CLI proof and final canonical reset remain required. No partial 1.7
 release or production activation is authorized by this component checkpoint.
+
+
+Cleaned R10 has now passed the ordinary installed CLI positive path through
+the real QA API and catalog: exact planned/apply/repeat results, files, twelve
+variables, unchanged PID and verified HTTPS. Installed source hashes match,
+legacy recipe symbols are absent, core cluster detection remains. Full receipt
+fc2eb57bebd152a6f8ecfd14d1507a65c868d299c8b7de15e3210ce0f96aeef7.
+Final full canonical reset and independent baseline verification remain pending.

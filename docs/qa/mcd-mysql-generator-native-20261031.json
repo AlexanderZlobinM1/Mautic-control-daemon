@@ -1,5 +1,5 @@
 {
-  "status": "TYPED-POSITIVE-AND-NEGATIVE-PASS; cleaned R10 native recheck pending",
+  "status": "TYPED-POSITIVE-NEGATIVE-AND-CLEANED-R10-PASS; final reset pending",
   "scope": "existing MySQL host tuning extraction, no schema/Mautic/cluster repair",
   "authority_export": {
     "path": "/tmp/mcc-live-resolved-mysql-v1-20261031.json",
@@ -520,7 +520,7 @@
       "_MYSQL_GALERA_MARKERS"
     ],
     "native_evidence": "docs/qa/mcd-mysql-generator-native-20261031.json",
-    "status": "source-cleaned; R10 native cleanup recheck and final reset pending"
+    "status": "source and R10 native cleanup recheck PASS; final reset pending"
   },
   "regression": {
     "passed": 2001,
@@ -529,5 +529,28 @@
     "subtests_passed": 105,
     "new_failure_ids": [],
     "missing_baseline_failure_ids": []
+  },
+  "typed_cli_cleaned_r10": {
+    "status": "PASS",
+    "full_receipt_sha256": "fc2eb57bebd152a6f8ecfd14d1507a65c868d299c8b7de15e3210ce0f96aeef7",
+    "full_receipt": "/Users/azlobin/.codex/admin/host-diagnostics/mcd-mysql-profile-native-20261031/r10-cleaned-positive-receipt.json",
+    "runtime_candidate": {
+      "scope": "UNLISTED feature-source runtime-only test fixture; NOT canonical release or 1.7.0 acceptance",
+      "wheel": "/tmp/mcd-unlisted-core-20261101-r10/mcd_agent-1.6.38-py3-none-any.whl",
+      "wheel_sha256": "79fa7a930f1c34b0318cd88ffb95d54a6a3bc22cd9ef67503c9b7a2bd18332e9",
+      "wheel_size": 1028877,
+      "archive": "/tmp/mcd-unlisted-core-20261101-r10/mcd-runtime-only-unlisted-r10.tar.gz",
+      "archive_sha256": "9fb329ff66ad904a7aebb6be1d05beb9b43b7cf951f4b991f10bd3db01f7f647",
+      "manifest_sha256": "8f52e0c1a0b0f7f3392b1603b970a841f212dbf42e86ac7c8e04ca043316dbfc",
+      "canonical_release": false,
+      "channel_publication": false,
+      "source_commit": "ae12615f5a2263853fc6f0033cfb1cc3e01a1372"
+    },
+    "old_recipe_symbols_absent": true,
+    "core_cluster_facts_preserved": true,
+    "installed_service_profiles_sha256": "c248e54c79532b39406311c9093a6c28c7a8f65d67188474c0700dab064dad56",
+    "all_public_results_equal_old_reference": true,
+    "files_variables_pid_verified_https_match": true,
+    "final_reset": "pending"
   }
 }
