@@ -1,0 +1,70 @@
+"""Descriptor admission for service profiles; algorithms belong to artifacts."""
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+from typing import Any, Mapping
+
+from mcd_agent.commercial_portal import canonical_json
+from mcd_agent.custom_scripts import run_custom_script_by_key
+
+CUSTOM_RUNTIME_CAPABILITIES = frozenset({'custom-gzip-entrypoint', 'raw-jsonline-terminal-result'})
+
+
+def external_handler_selected(handler: Mapping[str, Any], *, allow_candidate: bool = False) -> bool:
+    if handler.get('state') == 'candidate' and handler.get('active') is False:
+        return allow_candidate
+    if handler.get('state') == 'active' and handler.get('active') is True:
+        return True
+    raise ValueError('external_handler_activation_invalid')
+
+
+def apply_external_service_profile(cfg: Any, fetched: Mapping[str, Any], *,
+                                   dry_run: bool = False, allow_candidate: bool = False) -> dict[str, Any]:
+    handler = fetched.get('external_handler')
+    if not isinstance(handler, Mapping):
+        raise ValueError('external_handler_missing')
+    if not external_handler_selected(handler, allow_candidate=allow_candidate):
+        raise ValueError('external_handler_inactive')
+    if handler.get('schema') != 'mcc-service-profile-external-handler-v1' or handler.get('transport') != 'mcd-custom-v1':
+        raise ValueError('external_handler_transport_invalid')
+    for coordinate in ('component', 'resolved_plan_key'):
+        value = handler.get(coordinate)
+        if not isinstance(value, str) or not value or value != fetched.get(coordinate):
+            raise ValueError('external_handler_binding_invalid')
+    runtime = handler.get('minimum_runtime')
+    required = runtime.get('required_capabilities') if isinstance(runtime, Mapping) else None
+    if (not isinstance(required, list) or not required or
+            any(not isinstance(c, str) or c not in CUSTOM_RUNTIME_CAPABILITIES for c in required) or
+            set(required) != CUSTOM_RUNTIME_CAPABILITIES):
+        raise ValueError('external_handler_capability_unavailable')
+    profile_input = handler.get('profile_input')
+    profile = fetched.get('profile')
+    if not isinstance(profile_input, Mapping) or profile_input.get('source') != 'response.profile' or not isinstance(profile, Mapping):
+        raise ValueError('external_handler_profile_input_invalid')
+    expected_profile = profile_input.get('sha256')
+    if not isinstance(expected_profile, str) or re.fullmatch('[0-9a-f]{64}', expected_profile) is None:
+        raise ValueError('external_handler_profile_pin_invalid')
+    if hashlib.sha256(canonical_json(profile)).hexdigest() != expected_profile:
+        raise ValueError('external_handler_profile_pin_mismatch')
+    artifact = handler.get('artifact')
+    if not isinstance(artifact, Mapping) or artifact.get('media_type') != 'application/gzip':
+        raise ValueError('external_handler_artifact_invalid')
+    key, digest, entrypoint = (artifact.get(k) for k in ('key', 'sha256', 'entrypoint'))
+    if not isinstance(key, str) or not key or not isinstance(digest, str) or re.fullmatch('[0-9a-f]{64}', digest) is None or not isinstance(entrypoint, str) or not entrypoint:
+        raise ValueError('external_handler_artifact_pin_invalid')
+    command = handler.get('dry_run_command' if dry_run else 'command')
+    argv = command.get('argv') if isinstance(command, Mapping) else None
+    prefix = ['custom', '--no-detach', '--expected-sha256', digest, key, '--']
+    if not isinstance(argv, list) or len(argv) <= len(prefix) or argv[:len(prefix)] != prefix or any(not isinstance(v, str) or '\x00' in v for v in argv):
+        raise ValueError('external_handler_dry_run_unavailable' if dry_run else 'external_handler_command_invalid')
+    rc, output = run_custom_script_by_key(cfg, script_key=key, expected_sha256=digest,
+        expected_entrypoint=entrypoint, args=argv[len(prefix):], detach=False,
+        live_output=False, capture_result=True)
+    if rc != 0:
+        raise RuntimeError('external_handler_execution_failed: ' + output)
+    result = json.loads(output)
+    if not isinstance(result, dict):
+        raise ValueError('external_handler_public_result_invalid')
+    return result

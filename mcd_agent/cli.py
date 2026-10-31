@@ -2105,6 +2105,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default="php_fpm",
     )
     svc.add_argument("--dry-run", action="store_true")
+    svc.add_argument("--allow-candidate-handler", action="store_true", help=argparse.SUPPRESS)
     svc.add_argument(
         "--allow-cluster-db-maintenance",
         action="store_true",
@@ -3747,7 +3748,8 @@ def main() -> int:
                 )
                 print(json.dumps(res, ensure_ascii=True, indent=2))
                 return 0 if str(res.get("status", "")).strip().lower() in {"ok", "skipped"} else 1
-            res = fetch_service_profile(cfg, comp)
+            res = (fetch_service_profile(cfg, comp, allow_candidate_handler=True)
+                   if args.allow_candidate_handler else fetch_service_profile(cfg, comp))
             print(json.dumps(res, ensure_ascii=True, indent=2))
             return 0 if str(res.get("status", "")).strip().lower() == "ok" else 1
         if args.op == "rescan":
@@ -3773,6 +3775,7 @@ def main() -> int:
             component=comp,
             dry_run=bool(args.dry_run),
             allow_cluster_db_maintenance=bool(args.allow_cluster_db_maintenance),
+            allow_candidate_handler=bool(args.allow_candidate_handler),
         )
         print(json.dumps(res, ensure_ascii=True, indent=2))
         ok = str(res.get("status", "")).strip().lower() == "ok"

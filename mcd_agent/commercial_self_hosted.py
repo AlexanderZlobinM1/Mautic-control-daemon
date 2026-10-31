@@ -706,7 +706,7 @@ class ExternalProcessPolicy:
                         code = "self_hosted_mcd_runner_output_too_large" if label == "stdout" else "self_hosted_mcd_runner_stderr_too_large"
                         raise RunnerExecutionError(code, evidence=evidence)
                     target.extend(chunk)
-            process.wait(timeout=5)
+            process.wait(timeout=None if unlimited else 5)
             completed = subprocess.CompletedProcess(argv, process.returncode, bytes(stdout), bytes(stderr))
             completed.stdout_truncated = False  # type: ignore[attr-defined]
             completed.stderr_truncated = False  # type: ignore[attr-defined]

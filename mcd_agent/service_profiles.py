@@ -16,6 +16,9 @@ from mcd_agent.apt_profile import apply_apt_profile
 from mcd_agent import __version__
 from mcd_agent.config import AgentConfig
 from mcd_agent.host_identity import resolve_agent_identity
+from mcd_agent.service_profile_external import (
+    CUSTOM_RUNTIME_CAPABILITIES, apply_external_service_profile, external_handler_selected,
+)
 from mcd_agent.mautic_db_indexes import apply_mautic_db_indexes
 from mcd_agent.wazuh_profile import apply_wazuh_profile
 
@@ -63,7 +66,7 @@ def _api_base(cfg: AgentConfig) -> str | None:
     return cfg.mcc_url.rstrip("/")
 
 
-def fetch_service_profile(cfg: AgentConfig, component: str) -> dict[str, Any]:
+def fetch_service_profile(cfg: AgentConfig, component: str, *, allow_candidate_handler: bool = False) -> dict[str, Any]:
     base = _api_base(cfg)
     if not base:
         return {"status": "disabled", "reason": "mcc_url_not_set"}
@@ -78,6 +81,10 @@ def fetch_service_profile(cfg: AgentConfig, component: str) -> dict[str, Any]:
         "configured_host_name": str(ident.get("configured_host_name") or ""),
         "agent_version": __version__,
     }
+    if comp == "php_fpm":
+        payload["external_handler_capabilities"] = sorted(CUSTOM_RUNTIME_CAPABILITIES)
+        if allow_candidate_handler:
+            payload["external_handler_candidate_opt_in"] = True
     url = base + f"/api/v1/agent/service-profile/{comp.replace('_', '-')}"
     try:
         out = _post_json(url, payload, cfg.mcc_token, timeout_sec=12)
@@ -1012,6 +1019,7 @@ def service_profiles_apply_once(
     dry_run: bool = False,
     force_apt_repo_rescan: bool = False,
     allow_cluster_db_maintenance: bool = False,
+    allow_candidate_handler: bool = False,
 ) -> dict[str, Any]:
     comp = (component or "php_fpm").strip().lower().replace("-", "_")
     if comp not in {"php_fpm", "mysql", "apt", "wazuh", "docker", "mautic_db_indexes", "db_indexes"}:
@@ -1038,7 +1046,8 @@ def service_profiles_apply_once(
         if reason:
             out["reason"] = reason
         return out
-    fetched = fetch_service_profile(cfg, comp)
+    fetched = (fetch_service_profile(cfg, comp, allow_candidate_handler=True)
+               if allow_candidate_handler else fetch_service_profile(cfg, comp))
     status = str(fetched.get("status", "")).strip().lower()
     if status != "ok":
         return {"status": "error", "reason": fetched.get("reason", status or "fetch_failed"), "fetch": fetched}
@@ -1046,7 +1055,18 @@ def service_profiles_apply_once(
     if not isinstance(profile, dict):
         return {"status": "error", "reason": "invalid profile payload", "fetch": fetched}
     if comp == "php_fpm":
-        applied = apply_php_fpm_profile(cfg, profile, dry_run=dry_run)
+        handler = fetched.get("external_handler")
+        if allow_candidate_handler and handler is None:
+            raise ValueError("external_handler_missing")
+        if handler is not None and not isinstance(handler, dict):
+            raise ValueError("external_handler_invalid")
+        if handler is not None and external_handler_selected(handler, allow_candidate=allow_candidate_handler):
+            # No fallback after selecting external execution, including admission
+            # or child failure. The old writer survives only during migration.
+            applied = apply_external_service_profile(cfg, fetched, dry_run=dry_run,
+                                                     allow_candidate=allow_candidate_handler)
+        else:
+            applied = apply_php_fpm_profile(cfg, profile, dry_run=dry_run)
     elif comp == "mysql":
         applied = apply_mysql_profile(cfg, profile, dry_run=dry_run)
     elif comp == "wazuh":

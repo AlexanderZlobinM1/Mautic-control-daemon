@@ -2048,3 +2048,36 @@ native reference. This proves generic custom delivery, not activation, the
 legacy PHP command adapter or a published runtime capability. Evidence:
 `docs/qa/mcd-custom-cli-native-seam-20261031.json`. The canonical executor owns
 full reset after the mutable test; no customer host is part of this proof.
+
+
+### Service-profile descriptor migration (unreleased)
+
+The existing PHP service-profile POST advertises actual
+`external_handler_capabilities`; candidate selection additionally requires
+`external_handler_candidate_opt_in=true`. The temporary hidden
+`service-profile --allow-candidate-handler` probe supplies that opt-in. Version
+alone never grants capability. Descriptor admission checks transport, component,
+resolved plan, required capabilities and the canonical SHA-256 of the complete
+`response.profile`. Artifact key/hash/entrypoint and execution arguments come
+from the descriptor; MCD embeds no artifact version, plan tuning or recipe.
+
+An explicitly selected external handler executes through the generic custom
+cache and validated public-result capture. Descriptor admission, pin mismatch,
+unsupported dry-run or child failure never falls back to the legacy writer.
+Dry-run requires its own `dry_run_command` descriptor and never uses apply argv.
+During this unreleased migration only, an inactive candidate without explicit
+opt-in preserves the existing working writer, as do unconverted profiles. This
+compatibility branch and the old writer must be removed before the final 1.7
+release, after all working profiles and native command contracts pass.
+
+The result collector has no lifetime deadline in synchronous custom mode,
+including when a long-running child closes its output streams early. The framed
+runner's default deadline remains unchanged. A real child sleeping beyond the
+previous five-second post-output wait verifies this behavior.
+
+The consumer independently admitted all 22 owner-exported live profile selections
+and matched 110 pure rendering results against the existing writer, without
+copying universal profile data into MCD. This is not native apply proof; see
+`docs/qa/mcd-php-all-live-plans-consumer-20261031.json`. Legacy CLI native
+HTTP integration still requires the isolated MCC API/DB and canonical disposable
+lease; no fabricated production host or billing identity is permitted.

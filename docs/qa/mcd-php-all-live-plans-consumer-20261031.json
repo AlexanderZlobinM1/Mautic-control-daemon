@@ -1,0 +1,12 @@
+{
+  "status": "PASS",
+  "scope": "consumer read-only all-live-plan artifact admission and pure render parity; not native apply",
+  "artifact_sha256": "681e1124aec2ef18a5d7885c51c4e86412f2980ee29ae27b7643135044e073d5",
+  "artifact_size_bytes": 10975,
+  "plan_count": 22,
+  "exact_render_comparisons": 110,
+  "all_profile_hashes_match": true,
+  "all_file_pins_match": true,
+  "default_selection": null,
+  "host_mutations": false
+}

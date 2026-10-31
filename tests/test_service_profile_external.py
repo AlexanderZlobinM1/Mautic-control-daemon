@@ -1,0 +1,110 @@
+import copy
+import hashlib
+import json
+from types import SimpleNamespace
+
+import pytest
+
+from mcd_agent import service_profile_external as ext, service_profiles as profiles
+from mcd_agent.commercial_portal import canonical_json
+
+
+@pytest.fixture
+def fetched():
+    profile={'pool':'qa','pm_max_children':11}
+    digest='a'*64
+    command={'argv':['custom','--no-detach','--expected-sha256',digest,'test-profile','--','--composition','profiles/task.json','--selection','operator-choice']}
+    return {'status':'ok','component':'php_fpm','resolved_plan_key':'operator-choice','profile':profile,
+      'external_handler':{'schema':'mcc-service-profile-external-handler-v1','transport':'mcd-custom-v1',
+        'component':'php_fpm','resolved_plan_key':'operator-choice','state':'active','active':True,
+        'minimum_runtime':{'required_capabilities':sorted(ext.CUSTOM_RUNTIME_CAPABILITIES)},
+        'profile_input':{'source':'response.profile','sha256':hashlib.sha256(canonical_json(profile)).hexdigest()},
+        'artifact':{'media_type':'application/gzip','key':'test-profile','sha256':digest,'entrypoint':'recipe/main.py'},
+        'command':command,'dry_run_command':{'argv':command['argv']+['--dry-run']}}}
+
+
+def test_descriptor_dispatch_preserves_public_result_and_arguments(fetched, monkeypatch):
+    result={'status':'applied','arbitrary_public_value':[1,'operator']}
+    calls=[]
+    monkeypatch.setattr(ext,'run_custom_script_by_key',lambda cfg,**kw:calls.append(kw) or (0,json.dumps(result)))
+    assert ext.apply_external_service_profile(None,fetched)==result
+    assert calls[0]['args']==fetched['external_handler']['command']['argv'][6:]
+    assert calls[0]['expected_entrypoint']=='recipe/main.py'
+    assert calls[0]['capture_result'] is True
+    assert calls[0]['detach'] is False
+
+
+def test_dry_run_uses_only_explicit_nonmutating_descriptor(fetched,monkeypatch):
+    calls=[]
+    monkeypatch.setattr(ext,'run_custom_script_by_key',lambda cfg,**kw:calls.append(kw) or (0,'{"status":"planned"}'))
+    assert ext.apply_external_service_profile(None,fetched,dry_run=True)['status']=='planned'
+    assert calls[0]['args'][-1]=='--dry-run'
+    del fetched['external_handler']['dry_run_command']
+    with pytest.raises(ValueError,match='dry_run_unavailable'):
+        ext.apply_external_service_profile(None,fetched,dry_run=True)
+    assert len(calls)==1
+
+
+@pytest.mark.parametrize('mutation', ['profile','capabilities','component','plan','pin','command','activation','transport'])
+def test_admission_failure_never_executes(fetched,monkeypatch,mutation):
+    monkeypatch.setattr(ext,'run_custom_script_by_key',lambda *a,**kw:pytest.fail('must not execute'))
+    h=fetched['external_handler']
+    if mutation=='profile':fetched['profile']['pm_max_children']=90
+    elif mutation=='capabilities':h['minimum_runtime']['required_capabilities'].append('unknown-runtime')
+    elif mutation=='component':h['component']='other'
+    elif mutation=='plan':h['resolved_plan_key']='other'
+    elif mutation=='pin':h['artifact']['sha256']='bad'
+    elif mutation=='command':h['command']['argv'][0]='sh'
+    elif mutation=='activation':h['active']=False
+    elif mutation=='transport':h['transport']='shell'
+    with pytest.raises(ValueError):ext.apply_external_service_profile(None,fetched)
+
+
+def test_candidate_requires_explicit_acceptance(fetched,monkeypatch):
+    h=fetched['external_handler'];h.update(state='candidate',active=False)
+    monkeypatch.setattr(ext,'run_custom_script_by_key',lambda *a,**kw:(0,'{"status":"noop"}'))
+    with pytest.raises(ValueError,match='inactive'):ext.apply_external_service_profile(None,fetched)
+    assert ext.apply_external_service_profile(None,fetched,allow_candidate=True)=={'status':'noop'}
+
+
+def test_selected_external_failure_cannot_fallback(fetched,monkeypatch):
+    monkeypatch.setattr(profiles,'fetch_service_profile',lambda *a,**kw:fetched)
+    monkeypatch.setattr(profiles,'_cluster_db_maintenance_guard',lambda *a,**kw:None)
+    monkeypatch.setattr(profiles,'apply_php_fpm_profile',lambda *a,**kw:pytest.fail('no fallback'))
+    monkeypatch.setattr(ext,'run_custom_script_by_key',lambda *a,**kw:(7,'validation_failed'))
+    with pytest.raises(RuntimeError,match='validation_failed'):
+        profiles.service_profiles_apply_once(None)
+
+
+def test_inactive_candidate_keeps_existing_writer_during_migration(fetched,monkeypatch):
+    fetched['external_handler'].update(state='candidate',active=False)
+    monkeypatch.setattr(profiles,'fetch_service_profile',lambda *a,**kw:fetched)
+    monkeypatch.setattr(profiles,'_cluster_db_maintenance_guard',lambda *a,**kw:None)
+    monkeypatch.setattr(profiles,'apply_php_fpm_profile',lambda cfg,p,**kw:{'status':'noop','input':p})
+    monkeypatch.setattr(ext,'run_custom_script_by_key',lambda *a,**kw:pytest.fail('inactive candidate'))
+    result=profiles.service_profiles_apply_once(None)
+    assert result['status']=='ok'
+    assert result['apply']['input']==fetched['profile']
+
+
+def test_explicit_candidate_admission_cannot_silently_use_legacy(fetched,monkeypatch):
+    del fetched['external_handler']
+    monkeypatch.setattr(profiles,'fetch_service_profile',lambda *a,**kw:fetched)
+    monkeypatch.setattr(profiles,'_cluster_db_maintenance_guard',lambda *a,**kw:None)
+    monkeypatch.setattr(profiles,'apply_php_fpm_profile',lambda *a,**kw:pytest.fail('explicit external must fail closed'))
+    with pytest.raises(ValueError,match='external_handler_missing'):
+        profiles.service_profiles_apply_once(None,allow_candidate_handler=True)
+
+
+@pytest.mark.parametrize('opt_in', [False,True])
+def test_existing_post_advertises_actual_capabilities_and_only_explicit_candidate(monkeypatch,opt_in):
+    cfg=SimpleNamespace(mcc_url='https://controller.invalid',mcc_token='test')
+    monkeypatch.setattr(profiles,'resolve_agent_identity',lambda cfg:{'effective_hostname':'disposable'})
+    calls=[]
+    monkeypatch.setattr(profiles,'_post_json',lambda url,payload,*a,**kw:calls.append((url,payload)) or {'status':'ok'})
+    profiles.fetch_service_profile(cfg,'php_fpm',allow_candidate_handler=opt_in)
+    url,payload=calls[0]
+    assert url.endswith('/api/v1/agent/service-profile/php-fpm')
+    assert set(payload['external_handler_capabilities'])==ext.CUSTOM_RUNTIME_CAPABILITIES
+    assert payload.get('external_handler_candidate_opt_in',False)==opt_in
+    if not opt_in:assert 'external_handler_candidate_opt_in' not in payload

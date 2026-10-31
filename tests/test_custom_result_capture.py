@@ -77,3 +77,23 @@ def test_interactive_capture_rejected_before_download(monkeypatch):
     code, output = custom.run_custom_script_by_key(None, script_key='any', capture_result=True)
     assert code == 2
     assert 'interactive' in output
+
+
+def test_descriptor_entrypoint_mismatch_rejected_before_download(monkeypatch):
+    from mcd_agent import custom_scripts as custom
+    monkeypatch.setattr(custom, 'fetch_custom_manifest', lambda *a, **kw: ([{'key': 'any', 'entrypoint':'other.py'}], 'test'))
+    monkeypatch.setattr(custom, '_fetch_script_to_cache', lambda *a: pytest.fail('descriptor mismatch'))
+    code, output = custom.run_custom_script_by_key(None, script_key='any', expected_entrypoint='recipe.py')
+    assert code == 1
+    assert 'entrypoint' in output
+
+
+def test_capture_waits_for_long_child_after_output_streams_close(tmp_path):
+    # Some recipes finish logging before their long final operation completes.
+    # Closing both pipes must not activate the framed runner's five-second wait.
+    script=tmp_path/'close-streams.py'
+    script.write_text('#!'+sys.executable+'\nimport os,time\nprint('+repr(json.dumps(terminal()))+',flush=True)\nos.close(1)\nos.close(2)\ntime.sleep(5.2)\n')
+    script.chmod(0o700)
+    code, output=_run_capture_result(script,[])
+    assert code==0
+    assert json.loads(output)==terminal()['result']

@@ -461,6 +461,7 @@ def run_custom_script_by_key(
     expected_sha256: str | None = None,
     fetch_only: bool = False,
     capture_result: bool = False,
+    expected_entrypoint: str | None = None,
 ) -> tuple[int, str]:
     if capture_result and (fetch_only or detach is True):
         return 2, "custom result capture requires synchronous execution without fetch-only"
@@ -494,6 +495,8 @@ def run_custom_script_by_key(
 
     if expected and str(found.get("sha256", "")).strip().lower() != expected:
         return 1, "custom script manifest checksum does not match the requested pin"
+    if expected_entrypoint is not None and found.get("entrypoint") != expected_entrypoint:
+        return 1, "custom script entrypoint does not match the requested descriptor"
     if capture_result and _to_bool(found.get("interactive", False)):
         return 2, "custom result capture does not support interactive artifacts"
     try:
