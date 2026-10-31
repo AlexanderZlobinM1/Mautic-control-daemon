@@ -1487,7 +1487,9 @@ def _apply_repo_profiles(
     db_same_profile = str(db_row.get("profile_hash", "") or "") == profile_hash
     if not db_enabled:
         actions.append("db_repo_profile:disabled")
-    elif db_once and bool(db_row.get("applied", False)) and db_same_profile and not force_rescan:
+    elif (db_once and bool(db_row.get("applied", False)) and db_same_profile
+          and not force_rescan and db_row.get("last_status") in {"applied", "already_present"}
+          and _repo_profile_present(str((db_row.get("detected") or {}).get("profile", "none")))):
         actions.append("db_repo_profile:skip_once")
     else:
         explicit_db_target = str(profile.get("db_repo_profile_target", "") or "").strip().lower()
@@ -1504,13 +1506,18 @@ def _apply_repo_profiles(
                 "action": "ensure",
                 "reason": "explicit_db_repo_profile_target",
             }
+        elif explicit_db_target:
+            detected = {"profile": explicit_db_target, "action": "ensure", "reason": "unsupported_explicit_target"}
         else:
             detected = _detect_db_repo_target(timeout_sec=max(10, int(timeout_sec)))
         det_profile = str(detected.get("profile", "none") or "none")
         det_action = str(detected.get("action", "none") or "none")
         if det_action in {"none", "skip"}:
-            _mark("db_repo", status="skipped", applied=True, reason=str(detected.get("reason", "")), detected=detected)
+            _mark("db_repo", status="skipped", applied=False, reason=str(detected.get("reason", "")), detected=detected)
             actions.append(f"db_repo_profile:skipped:{det_profile}")
+            if any(str(pkg).split(":")[0] in {"mariadb-server", "mariadb-client", "mysql-server", "mysql-client", "percona-server-server", "percona-xtradb-cluster"}
+                   for pkg in profile.get("packages_present", []) or []):
+                errors.append("db_repo_profile:explicit_target_required")
         else:
             if _repo_profile_present(det_profile):
                 _mark("db_repo", status="already_present", applied=True, detected=detected)
@@ -2735,6 +2742,30 @@ def _planned_apt_actions(profile: dict[str, Any]) -> list[str]:
     return actions
 
 
+def _declared_db_version_errors(profile: dict[str, Any], *, installed: bool, timeout_sec: int) -> list[str]:
+    target = str(profile.get("db_repo_profile_target", ""))
+    if not target.startswith("mariadb_"):
+        return []
+    expected = target.removeprefix("mariadb_").replace("_", ".")
+    configured = str(profile.get("mariadb_repo_setup_version", "mariadb-" + expected)).removeprefix("mariadb-")
+    if configured != expected:
+        return ["db_repo_profile:conflicting_mariadb_version"]
+    errors: list[str] = []
+    for raw_package in profile.get("packages_present", []) or []:
+        package = str(raw_package).split(":")[0]
+        if package not in {"mariadb-server", "mariadb-client"}:
+            continue
+        if installed:
+            version = _dpkg_installed_versions(timeout_sec=timeout_sec).get(package, "")
+        else:
+            result = _run(["apt-cache", "policy", package], timeout_sec=timeout_sec)
+            match = re.search(r"^\s*Candidate:\s*(\S+)", result.stdout or "", re.MULTILINE)
+            version = match.group(1) if result.returncode == 0 and match else ""
+        if _version_mm(version) != expected:
+            errors.append(f"db_repo_profile:{package}:{'installed' if installed else 'candidate'}_version_mismatch:expected={expected}:actual={version or 'missing'}")
+    return errors
+
+
 def apply_apt_profile(
     profile: dict[str, Any],
     *,
@@ -2810,6 +2841,9 @@ def apply_apt_profile(
     )
     actions.extend(repo_actions)
     errors.extend(repo_errors)
+    if repo_errors:
+        return {"status": "error", "reason": "apt_profile_repo_failed", "actions": actions,
+                "changed_files": changed, "errors": errors}
     unattended_actions, unattended_errors, unattended_changed = _apply_unattended_upgrades(
         profile, timeout_sec=max(30, int(refresh_timeout_sec))
     )
@@ -2877,6 +2911,14 @@ def apply_apt_profile(
             if not retry_errors:
                 actions.append("apt_update_repair_ok")
 
+    if errors:
+        return {"status": "error", "reason": "apt_profile_refresh_failed", "actions": actions,
+                "changed_files": changed, "errors": errors}
+    db_version_errors = _declared_db_version_errors(profile, installed=False, timeout_sec=refresh_timeout_sec)
+    if db_version_errors:
+        return {"status": "error", "reason": "apt_profile_db_candidate_mismatch", "actions": actions,
+                "changed_files": changed, "errors": db_version_errors}
+
     if ensure_local_fqdn_hosts:
         changed_hosts, hosts_msg = ensure_local_fqdn_hosts_entry(suffix=local_fqdn_suffix)
         actions.append(hosts_msg)
@@ -2889,6 +2931,10 @@ def apply_apt_profile(
         cmd = ["apt-get", "install", "-y"] + packages_present
         p = _run(cmd, timeout_sec=refresh_timeout_sec)
         if p.returncode == 0:
+            db_version_errors = _declared_db_version_errors(profile, installed=True, timeout_sec=refresh_timeout_sec)
+            if db_version_errors:
+                return {"status": "error", "reason": "apt_profile_db_installed_mismatch", "actions": actions,
+                        "changed_files": changed, "errors": db_version_errors}
             actions.append(f"packages_present:{len(packages_present)}")
             if ensure_package_services_started:
                 svc_actions, svc_errors = _enable_start_services(

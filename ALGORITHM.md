@@ -1801,3 +1801,31 @@ Portal idempotency — `{job_id}:{sequence}`. При недоступном Port
 продвигается только после принятого terminal receipt. Этот канал не является
 MCC-каналом: публикация MCD-кандидата и продвижение в `test`/`approved` всегда
 передаются треду **Publish MCD**; MCC лишь регистрирует каталог.
+
+### Declared database repository verification
+
+Repository setup errors and unrepaired APT refresh errors terminate profile
+apply before package installation, purge, or upgrade. A skipped DB repository
+is recorded as unapplied. Apply-once success is reusable only for successful
+statuses with the same policy hash and an actually present repository. Fresh
+hosts requesting DB packages need an explicit supported repository target if
+installed-stack detection cannot select one; detection does not authorize an
+implicit major upgrade. Unsupported explicit targets fail closed.
+
+For an explicit MariaDB target, repository setup version must agree with its
+major/minor family. Before installation, each requested MariaDB server/client
+APT candidate must match that family; after installation, dpkg versions must
+match independently. Missing candidates and distro fallback are errors, even
+when apt update or apt install returns zero. Tests in
+`tests/test_apt_db_fail_closed.py` cover cache repair, absent repositories,
+empty-host detection, candidate and installed mismatches, version conflicts,
+and prevention of package operations after repository errors. Host evidence
+must include actual installed versions and a fresh native full-state receipt;
+profile metadata alone is not readiness evidence.
+
+The installed wheel's supported native CLI is
+`/opt/mcd/venv/bin/mcd-cli`; it does not require a global PATH wrapper.
+For example, native IPv6 policy operations are
+`/opt/mcd/venv/bin/mcd-cli env ipv6 disable --config /opt/mcd/etc/mcd.toml`
+and `env ipv6 status` with the same config. Optional `/var/www` preparation
+remains controlled by the fetched profile's `ensure_var_www` flag.
