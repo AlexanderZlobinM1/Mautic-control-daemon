@@ -1,3 +1,15 @@
+## 1.6.38 - 2026-10-31
+
+- Preserve MCD workload profile overrides, cron and profile events when only
+  hardware service selection changes. Keep explicit workload selection out of
+  hardware selection state; hardware-auto uses the hardware coordinate.
+- Remove the duplicated fresh-bootstrap recipe/config/unit seeds and its
+  obsolete in-repository recipe QA. The byte-identical approved external
+  component owns that source; publisher bootstrap pins and runtime bridge
+  remain unchanged. Runtime entrypoint no longer installs missing dependencies.
+- This is a partial boundary cleanup. Remaining embedded installation recipes
+  require verified external replacements and are not claimed removed here.
+
 ## 1.6.37 - 2026-10-31
 
 - Extend the existing generic custom-script executor with an expected SHA-256

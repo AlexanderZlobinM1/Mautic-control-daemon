@@ -74,7 +74,7 @@ class HardwareProfileTests(unittest.TestCase):
             self.assertEqual(read_profile_selection(str(install))["profile"], "farm-midi")
             self.assertEqual(read_profile_selection(str(install))["mode"], "manual")
 
-    def test_fresh_passive_install_is_automatically_profiled(self) -> None:
+    def test_fresh_hardware_selection_preserves_passive_workload_and_overrides(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             config = root / "mcd.toml"
@@ -96,7 +96,7 @@ class HardwareProfileTests(unittest.TestCase):
             self.assertEqual(_read_profile_name(str(config)), "passive")
             self.assertEqual(_read_hardware_profile_name(str(config)), "mini")
             self.assertEqual(read_profile_selection(str(root / "install"))["mode"], "auto")
-            self.assertNotIn("campaign_total_parallel", config.read_text(encoding="utf-8"))
+            self.assertIn("campaign_total_parallel = 99", config.read_text(encoding="utf-8"))
 
     def test_legacy_active_profile_is_preserved_as_manual(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
