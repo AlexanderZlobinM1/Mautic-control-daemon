@@ -2249,3 +2249,13 @@ Old native dry-run/install/repeat/ready-dry-run passed on a clean Ubuntu24.04
 lease; receipt d0773125924bca552fbe2a574b303d33be92a8effe3465e6847e7c38a647d683.
 External direct/CLI parity and source removal are pending; old bodies remain.
 See docs/qa/mcd-docker-runtime-native-20261101.json.
+
+
+Frozen Docker external direct native parity passed against the old baseline:
+exact planned/applied/repeat-noop/ready-dry-run-noop dictionaries and healthy
+DB/FPM/nginx/verified HTTPS, without importing MCD. Receipt SHA256
+6b283c0f2f6bdd0ef2c120cbfb20a587b434ac9485a6039986ec4c905db57ab9.
+Docker now uses the existing capability-aware service-profile fetch and active
+external descriptor dispatcher; no builtin fallback. The legacy two bodies
+remain reference-only until ordinary installed CLI acceptance and cleanup.
+CLI fetch retains its existing dry-run behavior; daemon exclusion is unchanged.

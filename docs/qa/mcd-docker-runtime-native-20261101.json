@@ -1,5 +1,5 @@
 {
-  "status": "OLD-NATIVE-PASS; external direct and CLI parity pending",
+  "status": "OLD-AND-DIRECT-EXTERNAL-NATIVE-PASS; ordinary CLI and cleaned runtime pending",
   "scope": "explicit optional Docker runtime installation only; no Mautic Docker engine/capability/preflight changes",
   "source_reference": "19c640e74caa2c92e60e2ee87454d682525b23eb",
   "closure_sha256": "633b281270212f811d2109ea1ff09ec00baca31b089b3c3dff493a5fc3f6cea1",
@@ -48,5 +48,29 @@
     "remove two replaced functions",
     "cleaned runtime native proof",
     "final full reset and independent verification"
-  ]
+  ],
+  "external_direct_native": {
+    "status": "PASS",
+    "receipt": "/Users/azlobin/.codex/admin/host-diagnostics/mcd-docker-runtime-native-20261101/external-direct-positive.json",
+    "sha256": "6b283c0f2f6bdd0ef2c120cbfb20a587b434ac9485a6039986ec4c905db57ab9",
+    "all_public_results_exact_old": true,
+    "native_mcd_imports": false,
+    "health_matches": true,
+    "harness_correction": "Initial absolute composition path was rejected before any component execution; corrected harness only to frozen relative profiles/task.json argv. Archive unchanged."
+  },
+  "adapter": {
+    "components": "Docker uses existing capability-aware fetch and generic active descriptor dispatcher",
+    "builtin_fallback": false,
+    "retained_old_bodies": "reference only until ordinary CLI parity",
+    "focused_tests_passed": 47,
+    "release_regression": "PASS",
+    "full_regression": {
+      "passed": 2006,
+      "failed": 61,
+      "skipped": 57,
+      "subtests_passed": 105,
+      "new_failure_ids": [],
+      "missing_baseline_failure_ids": []
+    }
+  }
 }

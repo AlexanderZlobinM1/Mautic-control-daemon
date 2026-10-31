@@ -52,7 +52,7 @@ def fetch_service_profile(cfg: AgentConfig, component: str) -> dict[str, Any]:
     if not base:
         return {"status": "disabled", "reason": "mcc_url_not_set"}
     comp = (component or "").strip().lower().replace("-", "_")
-    if comp not in {"php_fpm", "mysql", "apt", "wazuh", "mautic_db_indexes", "db_indexes"}:
+    if comp not in {"php_fpm", "mysql", "docker", "apt", "wazuh", "mautic_db_indexes", "db_indexes"}:
         return {"status": "error", "reason": f"unsupported component: {component}"}
     ident = resolve_agent_identity(cfg)
     payload = {
@@ -62,7 +62,7 @@ def fetch_service_profile(cfg: AgentConfig, component: str) -> dict[str, Any]:
         "configured_host_name": str(ident.get("configured_host_name") or ""),
         "agent_version": __version__,
     }
-    if comp in {"php_fpm", "mysql"}:
+    if comp in {"php_fpm", "mysql", "docker"}:
         payload["external_handler_capabilities"] = sorted(CUSTOM_RUNTIME_CAPABILITIES)
     url = base + f"/api/v1/agent/service-profile/{comp.replace('_', '-')}"
     try:
@@ -253,13 +253,6 @@ def service_profiles_apply_once(
         if status == "deferred":
             return {"status": "skipped", "reason": applied.get("reason", "deferred"), "apply": applied}
         return {"status": "error", "reason": applied.get("reason", status or "apply_failed"), "apply": applied}
-    if comp == "docker":
-        applied = apply_docker_profile(dry_run=dry_run)
-        result_status, reason = _service_profile_apply_outcome(applied)
-        out = {"status": result_status, "fetch": {"status": "ok", "source": "builtin"}, "apply": applied}
-        if reason:
-            out["reason"] = reason
-        return out
     fetched = fetch_service_profile(cfg, comp)
     status = str(fetched.get("status", "")).strip().lower()
     if status != "ok":
@@ -268,7 +261,7 @@ def service_profiles_apply_once(
     if not isinstance(profile, dict):
         return {"status": "error", "reason": "invalid profile payload", "fetch": fetched}
     external_failed = False
-    if comp in {"php_fpm", "mysql"}:
+    if comp in {"php_fpm", "mysql", "docker"}:
         # Only delivery/admission lives here; the artifact owns the algorithm.
         # No builtin writer or fallback exists after external selection.
         try:

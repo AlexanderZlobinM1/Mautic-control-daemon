@@ -91,7 +91,7 @@ def test_missing_descriptor_cannot_silently_use_legacy(fetched,monkeypatch):
         profiles.service_profiles_apply_once(None)
 
 
-@pytest.mark.parametrize('component',['php_fpm','mysql'])
+@pytest.mark.parametrize('component',['php_fpm','mysql','docker'])
 def test_existing_post_advertises_actual_capabilities_without_candidate_opt_in(monkeypatch,component):
     cfg=SimpleNamespace(mcc_url='https://controller.invalid',mcc_token='test')
     monkeypatch.setattr(profiles,'resolve_agent_identity',lambda cfg:{'effective_hostname':'disposable'})
@@ -184,3 +184,29 @@ def test_mysql_public_dispatch_rejects_context_drift_before_artifact_execution(f
     monkeypatch.setattr(ext,'run_custom_script_by_key',lambda *a,**kw:pytest.fail('context mismatch must stop before execution'))
     with pytest.raises(ValueError,match='runtime_context_mismatch'):
         profiles.service_profiles_apply_once(SimpleNamespace(cluster_id=None),component='mysql',allow_cluster_db_maintenance=True)
+
+
+@pytest.mark.parametrize('dry_run,raw,exit_code,outer', [
+    (True, {'status':'planned','commands':[['operator-command']]}, 0, 'ok'),
+    (False, {'status':'noop','reason':'docker_runtime_ready'}, 0, 'ok'),
+    (False, {'status':'error','reason':'command_failed:apt-get update:failure'}, 1, 'error'),
+])
+def test_docker_public_dispatch_preserves_external_result_without_builtin_fallback(fetched,monkeypatch,dry_run,raw,exit_code,outer):
+    fetched.update(component='docker',resolved_plan_key='universal',profile={})
+    fetched['external_handler'].update(component='docker',resolved_plan_key='universal',
+        profile_input={'source':'response.profile','sha256':hashlib.sha256(b'{}').hexdigest()})
+    monkeypatch.setattr(profiles,'fetch_service_profile',lambda *a,**kw:fetched)
+    monkeypatch.setattr(profiles,'apply_docker_profile',lambda **kw:pytest.fail('builtin fallback forbidden'))
+    calls=[]
+    payload=raw if exit_code==0 else failed_terminal(raw)
+    monkeypatch.setattr(ext,'run_custom_script_by_key',lambda *a,**kw:calls.append(kw) or (exit_code,json.dumps(payload)))
+    result=profiles.service_profiles_apply_once(SimpleNamespace(cluster_id=None),component='docker',dry_run=dry_run)
+    assert result['status']==outer and result['apply']==raw
+    assert calls[0]['args']==fetched['external_handler']['dry_run_command' if dry_run else 'command']['argv'][6:]
+
+
+def test_docker_missing_descriptor_does_not_run_retained_reference_writer(monkeypatch):
+    monkeypatch.setattr(profiles,'fetch_service_profile',lambda *a,**kw:{'status':'ok','component':'docker','profile':{}})
+    monkeypatch.setattr(profiles,'apply_docker_profile',lambda **kw:pytest.fail('missing descriptor cannot select builtin'))
+    with pytest.raises(ValueError,match='external_handler_missing'):
+        profiles.service_profiles_apply_once(SimpleNamespace(cluster_id=None),component='docker')
