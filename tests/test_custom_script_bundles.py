@@ -81,3 +81,15 @@ def test_bundle_execution_uses_same_entrypoint_arguments_and_bundle_working_dire
     assert actual_args==args
     assert path.relative_to(options['cwd']).as_posix()==row['entrypoint']
     assert (options['cwd']/'profiles/default.json').is_file()
+
+
+def test_complete_manual_bundle_runs_standalone_without_repository_url(cfg,monkeypatch):
+    import json
+    data=bundle();row=item(data)
+    cfg.custom_repo_base_url='';cfg.plugins_repo_base_url='';cfg.mcc_url=''
+    cache=Path(cfg.custom_cache_dir);cache.mkdir()
+    (cache/'manifest.json').write_text(json.dumps({'items':[row]}))
+    target=cache/'downloads'/row['key']/f"{row['key']}-{row['sha256']}.tar.gz"
+    target.parent.mkdir(parents=True);target.write_bytes(data)
+    monkeypatch.setattr(custom.urllib.request,'urlopen',lambda *a,**kw:pytest.fail('complete offline bundle requires no network'))
+    assert custom.run_custom_script_by_key(cfg,script_key=row['key'],expected_sha256=row['sha256'],detach=False,live_output=False)==(0,'ok')

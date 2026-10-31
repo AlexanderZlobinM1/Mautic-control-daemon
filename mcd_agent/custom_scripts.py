@@ -228,10 +228,10 @@ def _parse_manifest(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def fetch_custom_manifest(config: AgentConfig, *, use_cache_on_error: bool = True) -> tuple[list[dict[str, Any]], str]:
-    url = _manifest_url(config)
-    req = mcc_request(url, headers=_headers(config))
     cache_path = _cache_manifest_path(config)
     try:
+        url = _manifest_url(config)
+        req = mcc_request(url, headers=_headers(config))
         with urllib.request.urlopen(req, timeout=12) as resp:
             text = (resp.read() or b"").decode("utf-8", errors="replace")
         payload = json.loads(text)
@@ -293,8 +293,6 @@ def _fetch_script_to_cache(config: AgentConfig, script: dict[str, Any]) -> Path:
     if file_rel.startswith("/") or ".." in Path(file_rel).parts:
         raise RuntimeError("custom script file path is invalid")
 
-    base = _manifest_url(config).rsplit("/", 1)[0] + "/"
-    url = urllib.parse.urljoin(base, file_rel)
     key = str(script.get("key", "")).strip() or "script"
     expected_sha = str(script.get("sha256", "")).strip().lower()
     if re.fullmatch(r"[0-9a-f]{64}", expected_sha) is None:
@@ -318,6 +316,8 @@ def _fetch_script_to_cache(config: AgentConfig, script: dict[str, Any]) -> Path:
             return _activate_bundle(cached, dl_dir, expected_sha, entrypoint)
         cached.chmod(cached.stat().st_mode | 0o500)
         return cached
+    base = _manifest_url(config).rsplit("/", 1)[0] + "/"
+    url = urllib.parse.urljoin(base, file_rel)
     req = mcc_request(url, headers=_headers(config))
     staged: Path | None = None
     try:

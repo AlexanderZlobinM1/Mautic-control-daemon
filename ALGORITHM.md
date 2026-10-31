@@ -2180,3 +2180,9 @@ public dictionaries, error text, earlier SQL side effects, PID and verified HTTP
 This is failure equivalence, not successful tuning. The exact authority-owned
 QA operator-zero profile has now passed the old native normal path with ten
 dynamic values verified; its external comparison and typed CLI proof remain.
+
+Standalone complete-cache execution does not require a configured repository or
+MCC URL. URL construction happens only after a cache miss; cached catalog lookup
+can also succeed without URL configuration. Reproduced tests failed before this
+change and now execute real cached script/gzip entrypoints with zero network
+calls. Missing/corrupt required artifacts still fail before execution.

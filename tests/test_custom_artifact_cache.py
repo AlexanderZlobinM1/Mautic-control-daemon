@@ -60,3 +60,18 @@ def test_cache_does_not_guess_another_task_revision(setup_cache,monkeypatch):
     monkeypatch.setattr(custom,'_run_direct',lambda *a,**kw:pytest.fail('wrong task revision must not execute'))
     rc,_=custom.run_custom_script_by_key(cfg,script_key=row['key'],expected_sha256='0'*64,detach=False)
     assert rc != 0
+
+
+def test_standalone_verified_cache_needs_no_repository_or_mcc_url(setup_cache,monkeypatch):
+    cfg,row,data,target=setup_cache
+    cfg.custom_repo_base_url='';cfg.plugins_repo_base_url='';cfg.mcc_url=''
+    monkeypatch.setattr(custom.urllib.request,'urlopen',lambda *a,**kw:pytest.fail('offline standalone task must not request a URL'))
+    assert custom.run_custom_script_by_key(cfg,script_key=row['key'],expected_sha256=row['sha256'],detach=False,live_output=False)==(0,'cached')
+
+
+def test_standalone_cached_catalog_is_available_without_repository_url(setup_cache,monkeypatch):
+    cfg,row,data,target=setup_cache
+    cfg.custom_repo_base_url='';cfg.plugins_repo_base_url='';cfg.mcc_url=''
+    monkeypatch.setattr(custom.urllib.request,'urlopen',lambda *a,**kw:pytest.fail('no repository is configured'))
+    rows,source=custom.fetch_custom_manifest(cfg)
+    assert source=='cache' and rows[0]['key']==row['key']
