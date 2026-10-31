@@ -263,7 +263,8 @@
         "_MYSQL_GALERA_MARKERS"
       ],
       "native_evidence": "docs/qa/mcd-mysql-generator-native-20261031.json",
-      "status": "source and R10 native cleanup recheck PASS; final reset pending"
+      "status": "source-and-native-cleanup-verified-final-reset-clean",
+      "final_reset_receipt_sha256": "2fe97f9ca999c8dc3060b2a6b0c8ac61d7f337999749f63d55d8952ee3e97e5e"
     }
   }
 }

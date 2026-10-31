@@ -1,5 +1,5 @@
 {
-  "status": "TYPED-POSITIVE-NEGATIVE-AND-CLEANED-R10-PASS; final reset pending",
+  "status": "SCOPED-MYSQL-TRANSFER-PASS; final-reset independently verified; complete 1.7 still pending",
   "scope": "existing MySQL host tuning extraction, no schema/Mautic/cluster repair",
   "authority_export": {
     "path": "/tmp/mcc-live-resolved-mysql-v1-20261031.json",
@@ -520,7 +520,7 @@
       "_MYSQL_GALERA_MARKERS"
     ],
     "native_evidence": "docs/qa/mcd-mysql-generator-native-20261031.json",
-    "status": "source and R10 native cleanup recheck PASS; final reset pending"
+    "status": "source-and-native-cleanup-verified-final-reset-clean"
   },
   "regression": {
     "passed": 2001,
@@ -551,6 +551,18 @@
     "installed_service_profiles_sha256": "c248e54c79532b39406311c9093a6c28c7a8f65d67188474c0700dab064dad56",
     "all_public_results_equal_old_reference": true,
     "files_variables_pid_verified_https_match": true,
-    "final_reset": "pending"
+    "final_reset": "PASS"
+  },
+  "final_reset": {
+    "status": "PASS",
+    "path": "/Users/azlobin/.codex/admin/host-diagnostics/mcd-mysql-profile-native-20261031/r10-final-reset-independent.json",
+    "sha256": "2fe97f9ca999c8dc3060b2a6b0c8ac61d7f337999749f63d55d8952ee3e97e5e",
+    "baseline_files_and_12_variables_exact": true,
+    "actor_directory_absent": true,
+    "source_checkout_absent": true,
+    "mcd_inactive": true,
+    "https": 200,
+    "tls_verify": 0,
+    "owner_full_reset_confirmed": true
   }
 }

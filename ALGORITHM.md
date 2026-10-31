@@ -2227,3 +2227,11 @@ variables, unchanged PID and verified HTTPS. Installed source hashes match,
 legacy recipe symbols are absent, core cluster detection remains. Full receipt
 fc2eb57bebd152a6f8ecfd14d1507a65c868d299c8b7de15e3210ce0f96aeef7.
 Final full canonical reset and independent baseline verification remain pending.
+
+
+The final MySQL full canonical reset is independently verified: exact baseline
+files and twelve variables, active DB/FPM/nginx, inactive MCD, HTTPS200/TLS0,
+no source checkout and no QA actor directory. Receipt SHA256
+2fe97f9ca999c8dc3060b2a6b0c8ac61d7f337999749f63d55d8952ee3e97e5e.
+The scoped MySQL transfer is closed; remaining system recipes and complete
+1.7 publication remain pending. Production handler activation remains held.
