@@ -1,5 +1,5 @@
 {
-  "status": "OLD-STOCK-EXPECTED-FAILURE-CAPTURED-external-parity-pending",
+  "status": "FROZEN-STOCK-FAILURE-PARITY-ACCEPTED-positive-pair-pending",
   "scope": "existing MySQL host tuning extraction, no schema/Mautic/cluster repair",
   "authority_export": {
     "path": "/tmp/mcc-live-resolved-mysql-v1-20261031.json",
@@ -43,7 +43,7 @@
     "authority_response": "/Users/azlobin/Documents/Projects/.mcc-mysql-qa.eJifo7/response.json",
     "profile_sha256": "914537e90f7e59ff7261a9aab6e8a874e36388aa4deca051481f1ced131eef94",
     "frozen_artifact_sha256": "e64c744ae58cd892b36bf557dbd7f3e22c591ff5518911660b662697308c504c",
-    "native_status": "pending"
+    "native_status": "old positive passed; external frozen e64 pending after reset"
   },
   "runtime_context_contract": {
     "required": "explicit descriptor.cluster_id exact current cfg.cluster_id; pinned same value in composition",
@@ -218,5 +218,179 @@
     ],
     "typed_stock_artifact_sha256": "02a0259bdc3d6695e28737830c8c88bf60bb55cf441a0d5883c984ab29512a86",
     "typed_qa_artifact_sha256": "58b1e0404907f4a9752321f7c12b7dd1a8c36a7d53f1db8dd838c3aa13b3f834"
+  },
+  "frozen_stock_negative_comparison": {
+    "scope": "frozen stock native algorithm negative equivalence, not normal operation success",
+    "verification_status": "PASS",
+    "native_operation_success": false,
+    "old_reference_sha256": "cac9a09a560e94e361383a1eb547529cca21615822fa59f22989832435b8c6f7",
+    "new_receipt_sha256": "71096cdc0e67fbdcd27ee95d318b0f99dffbcf8073a77e86b66c4b295612c8e2",
+    "bundle_sha256": "bde659239e594dbc76f34fdadf52b692793b2cf945bf17240a80dd3b81e684e7",
+    "planned_exact": true,
+    "first_partial_dictionary_exact": true,
+    "repeat_deferred_dictionary_exact": true,
+    "before_files_vars_health_exact": true,
+    "after_files_vars_exact": true,
+    "sql_error1290_preserved": true,
+    "first_four_sql_sideeffects_preserved": true,
+    "within_actor_pid_unchanged": true,
+    "https_tls_verified_200": true,
+    "legacy_success_transport_header_not_business_success": true,
+    "original_MCD_reference_resumed_saved_checkpoint": true,
+    "external_reference_resumed": false,
+    "initial_context_authority": "current canonical infra readiness before apply",
+    "independent_MCD_current_context_proof_sha256": "abf478ca96b8e02807b68f596506357716cff9a1320d11c5fbfc92f0100ea149",
+    "canonical_full_reset_required": true,
+    "MCD_writer_removed": false,
+    "activation": false
+  },
+  "old_qa_positive_reference": {
+    "status": "PASS",
+    "verification_status": "PASS",
+    "native_operation_success": true,
+    "resumed_saved_first_result": false,
+    "scope": "old installed writer standalone MariaDB native reference; MySQL/Percona/Galera native not claimed",
+    "expected_outcome": "applied",
+    "profile_sha256": "914537e90f7e59ff7261a9aab6e8a874e36388aa4deca051481f1ced131eef94",
+    "runtime_context": {
+      "cluster_id": null
+    },
+    "source_module_sha256": "b791b2a4b1d7c23e41f8771a0c08d1167af2da6de1c7519c8262436906a24c62",
+    "reference_closure_sha256": "ec3b916d17196f0251999ac751de4103cd949469ac6265ad43bc8bbb07f1c151",
+    "before": {
+      "files": {
+        "/etc/mysql/mariadb.conf.d/99-mcd-hw.cnf": null,
+        "/etc/mysql/my.cnf": "d186308dcf11ee9685e22365f24142c13a490d8a01213ee49318d4a134a9c84d",
+        "/etc/mysql/mysql.cnf": null
+      },
+      "variables": {
+        "innodb_buffer_pool_size": "134217728",
+        "innodb_io_capacity": "200",
+        "innodb_io_capacity_max": "2000",
+        "max_allowed_packet": "16777216",
+        "max_connections": "151",
+        "max_heap_table_size": "16777216",
+        "max_user_connections": "0",
+        "table_definition_cache": "400",
+        "table_open_cache": "2000",
+        "thread_cache_size": "151",
+        "tmp_table_size": "16777216",
+        "wsrep_on": "OFF"
+      },
+      "master_pid": 749,
+      "health": {
+        "https": 200,
+        "tls_verify": 0,
+        "services": {
+          "mariadb": "active",
+          "php8.5-fpm": "active",
+          "nginx": "active",
+          "mcd": "inactive"
+        }
+      }
+    },
+    "planned": {
+      "status": "planned",
+      "engine": "mariadb",
+      "service_name": "mysql",
+      "files": [
+        "/etc/mysql/mariadb.conf.d/99-mcd-hw.cnf"
+      ]
+    },
+    "first_apply": {
+      "status": "applied",
+      "engine": "mariadb",
+      "service_name": "mysql",
+      "changed_files": [
+        "/etc/mysql/mariadb.conf.d/99-mcd-hw.cnf"
+      ],
+      "dynamic": {
+        "status": "applied",
+        "applied": [
+          "SET GLOBAL innodb_buffer_pool_size=2147483648",
+          "SET GLOBAL innodb_io_capacity=2000",
+          "SET GLOBAL innodb_io_capacity_max=4000",
+          "SET GLOBAL max_connections=200",
+          "SET GLOBAL thread_cache_size=16",
+          "SET GLOBAL table_open_cache=2000",
+          "SET GLOBAL table_definition_cache=1000",
+          "SET GLOBAL tmp_table_size=67108864",
+          "SET GLOBAL max_heap_table_size=67108864",
+          "SET GLOBAL max_allowed_packet=67108864"
+        ],
+        "client": "/usr/bin/mysql -u root"
+      },
+      "reload": "Failed to reload mysql.service: Job type reload is not applicable for unit mariadb.service."
+    },
+    "repeat": {
+      "status": "applied",
+      "engine": "mariadb",
+      "service_name": "mysql",
+      "changed_files": [],
+      "dynamic": {
+        "status": "applied",
+        "applied": [
+          "SET GLOBAL innodb_buffer_pool_size=2147483648",
+          "SET GLOBAL innodb_io_capacity=2000",
+          "SET GLOBAL innodb_io_capacity_max=4000",
+          "SET GLOBAL max_connections=200",
+          "SET GLOBAL thread_cache_size=16",
+          "SET GLOBAL table_open_cache=2000",
+          "SET GLOBAL table_definition_cache=1000",
+          "SET GLOBAL tmp_table_size=67108864",
+          "SET GLOBAL max_heap_table_size=67108864",
+          "SET GLOBAL max_allowed_packet=67108864"
+        ],
+        "client": "/usr/bin/mysql -u root"
+      },
+      "reload": "Failed to reload mysql.service: Job type reload is not applicable for unit mariadb.service."
+    },
+    "after_files": {
+      "/etc/mysql/mariadb.conf.d/99-mcd-hw.cnf": "4d3101839bc89e423eb7c6755a5592f181b7a622391a814e4349649dc702e4e0",
+      "/etc/mysql/my.cnf": "d186308dcf11ee9685e22365f24142c13a490d8a01213ee49318d4a134a9c84d",
+      "/etc/mysql/mysql.cnf": null
+    },
+    "after_variables": {
+      "innodb_buffer_pool_size": "2147483648",
+      "innodb_io_capacity": "2000",
+      "innodb_io_capacity_max": "4000",
+      "max_allowed_packet": "67108864",
+      "max_connections": "200",
+      "max_heap_table_size": "67108864",
+      "max_user_connections": "0",
+      "table_definition_cache": "1000",
+      "table_open_cache": "2000",
+      "thread_cache_size": "16",
+      "tmp_table_size": "67108864",
+      "wsrep_on": "OFF"
+    },
+    "expected_dynamic_values": {
+      "innodb_buffer_pool_size": "2147483648",
+      "innodb_io_capacity": "2000",
+      "innodb_io_capacity_max": "4000",
+      "max_connections": "200",
+      "thread_cache_size": "16",
+      "table_open_cache": "2000",
+      "table_definition_cache": "1000",
+      "tmp_table_size": "67108864",
+      "max_heap_table_size": "67108864",
+      "max_allowed_packet": "67108864"
+    },
+    "master_pid_unchanged": true,
+    "after_health": {
+      "https": 200,
+      "tls_verify": 0,
+      "services": {
+        "mariadb": "active",
+        "php8.5-fpm": "active",
+        "nginx": "active",
+        "mcd": "inactive"
+      }
+    },
+    "profile_input_unchanged": true,
+    "dropin_path": "/etc/mysql/mariadb.conf.d/99-mcd-hw.cnf",
+    "dropin_content_sha256": "4d3101839bc89e423eb7c6755a5592f181b7a622391a814e4349649dc702e4e0",
+    "source_checkout_present": false,
+    "canonical_full_reset_required": true
   }
 }

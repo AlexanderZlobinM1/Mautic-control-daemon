@@ -2172,3 +2172,11 @@ remains error/CLI 1, deferred or skipped remains skipped/CLI 1 on apply; a faile
 terminal cannot become success even if its payload says applied. Missing/unsafe
 payloads keep the normal failure path. No MySQL business-status mapping is added
 to the generic decoder, and no status-map DSL or new protocol is introduced.
+
+
+The frozen stock external actor matched the complete old expected-failure
+reference: before/after files, twelve observed variables, planned/partial/deferred
+public dictionaries, error text, earlier SQL side effects, PID and verified HTTPS.
+This is failure equivalence, not successful tuning. The exact authority-owned
+QA operator-zero profile has now passed the old native normal path with ten
+dynamic values verified; its external comparison and typed CLI proof remain.
