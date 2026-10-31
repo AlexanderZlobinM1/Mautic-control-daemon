@@ -2058,7 +2058,9 @@ The existing PHP service-profile POST advertises actual
 `service-profile --allow-candidate-handler` probe supplies that opt-in. Version
 alone never grants capability. Descriptor admission checks transport, component,
 resolved plan, required capabilities and the canonical SHA-256 of the complete
-`response.profile`. Artifact key/hash/entrypoint and execution arguments come
+`response.profile` (sorted compact UTF-8 JSON, no ASCII escaping, no newline,
+finite JSON numbers only). This profile-data canonicalization is separate from
+the existing framed protocol canonicalization. Artifact key/hash/entrypoint and execution arguments come
 from the descriptor; MCD embeds no artifact version, plan tuning or recipe.
 
 An explicitly selected external handler executes through the generic custom

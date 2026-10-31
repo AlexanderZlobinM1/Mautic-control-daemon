@@ -6,7 +6,6 @@ import json
 import re
 from typing import Any, Mapping
 
-from mcd_agent.commercial_portal import canonical_json
 from mcd_agent.custom_scripts import run_custom_script_by_key
 
 CUSTOM_RUNTIME_CAPABILITIES = frozenset({'custom-gzip-entrypoint', 'raw-jsonline-terminal-result'})
@@ -46,7 +45,9 @@ def apply_external_service_profile(cfg: Any, fetched: Mapping[str, Any], *,
     expected_profile = profile_input.get('sha256')
     if not isinstance(expected_profile, str) or re.fullmatch('[0-9a-f]{64}', expected_profile) is None:
         raise ValueError('external_handler_profile_pin_invalid')
-    if hashlib.sha256(canonical_json(profile)).hexdigest() != expected_profile:
+    profile_bytes = json.dumps(profile, ensure_ascii=False, sort_keys=True,
+                               separators=(",", ":"), allow_nan=False).encode("utf-8")
+    if hashlib.sha256(profile_bytes).hexdigest() != expected_profile:
         raise ValueError('external_handler_profile_pin_mismatch')
     artifact = handler.get('artifact')
     if not isinstance(artifact, Mapping) or artifact.get('media_type') != 'application/gzip':

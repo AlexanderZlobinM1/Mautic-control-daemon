@@ -108,3 +108,11 @@ def test_existing_post_advertises_actual_capabilities_and_only_explicit_candidat
     assert set(payload['external_handler_capabilities'])==ext.CUSTOM_RUNTIME_CAPABILITIES
     assert payload.get('external_handler_candidate_opt_in',False)==opt_in
     if not opt_in:assert 'external_handler_candidate_opt_in' not in payload
+
+
+def test_profile_pin_uses_authority_utf8_without_ascii_escaping(fetched,monkeypatch):
+    fetched['profile']['operator_note']='Профиль оператора'
+    exact=json.dumps(fetched['profile'],ensure_ascii=False,sort_keys=True,separators=(',',':'),allow_nan=False).encode('utf-8')
+    fetched['external_handler']['profile_input']['sha256']=hashlib.sha256(exact).hexdigest()
+    monkeypatch.setattr(ext,'run_custom_script_by_key',lambda *a,**kw:(0,'{"status":"noop"}'))
+    assert ext.apply_external_service_profile(None,fetched)=={'status':'noop'}
