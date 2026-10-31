@@ -114,6 +114,23 @@
     },
     "full_suite_note": "Three additional capture admission tests added afterward and passed in the 12-test suite; implementation unchanged."
   },
-  "canonical_reset": "requested; pending independent clean verification",
+  "canonical_reset": {
+    "status": "PASS",
+    "mode": "canonical full VM recreation from clean R4 source",
+    "owner_receipt": "/Users/azlobin/Documents/Projects/Mautic-Operations/sandboxes/evidence/20261031-php-generator-cpx22-lease.json",
+    "independent_read_only_check": {
+      "managed_files_absent": true,
+      "fault_absent": true,
+      "source_absent": true,
+      "services": {
+        "mariadb": "active",
+        "php8.5-fpm": "active",
+        "nginx": "active",
+        "mcd": "inactive"
+      },
+      "https": "200:0",
+      "https_rc": 0
+    }
+  },
   "raw_evidence_directory": "/Users/azlobin/.codex/admin/host-diagnostics/mcd-custom-cli-seam-20261031"
 }
