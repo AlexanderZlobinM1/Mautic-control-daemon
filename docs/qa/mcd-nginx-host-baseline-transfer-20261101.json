@@ -1,0 +1,51 @@
+{
+  "status": "corrected OLD and standalone DIRECT native PASS; ordinary CLI/cache bridge and cleaned runtime pending",
+  "authorized_delta": "docs/qa/mcd-nginx-default-stub-http-only-20261101.json",
+  "reference_commit": "a6f1f1ed8110be35536568d1a9de0373083adaf6",
+  "reference_module_sha256": "b824aea0532c06486cf2687e6072a72765625bf4719e92b871342e85db562b26",
+  "owner_handoff_sha256": "b8454fffd9694455c4def0c26c0eba0fa0dbf0ab814d81a8efd84baf15d386b9",
+  "portal_source_commit": "f85ff392b54ed241d490494fa3bb67c50d0e5439",
+  "portal_source_archive_sha256": "61c0e58698ea93015b9473f8500c38b2e64f9716be87e186fe89200f790ba998",
+  "portal_generator_sha256": "abcd65aadd0ef408b150acf6c080fb0ee52bf84d7a9915677cadf92ba59066fb",
+  "portal_exact_artifact_sha256": "3075055662a2c4f6b87402b54ddeac9f0bf3662bde04212da965946ddfcabec2",
+  "portal_member_review_sha256": "974e97f096ae5b01d6b6c7ee5dcdf59898634c7c01a5367413103bb323205af1",
+  "exact_definition_count": 59,
+  "exact_constant_count": 22,
+  "core_fact_adapter": "_ipv6_listen_forbidden, exact supplied bool; original core read-only measurement retained",
+  "mcc_public_projection_fixture_sha256": "dd4e6d0bb4644ac99496821adbe1d383df60db6e38007b0efaf12de9b58e297a",
+  "native_receipts": {
+    "r16_installed_source": "c1270cabbb541b947b381332cd20f0d588ad3bdd3f9067b949345dab9eaee09e",
+    "corrected_old": "41e4e7ca2acbdbfd08bed574957bf0ee70e686ffb956c129242fcbd13adfd3af",
+    "old_post_fault_raw_observations": "7f995870bd76033e8bd4a2b2fc917219c3718e6e00cd30b184060cf6c52e6de5",
+    "external_direct": "b38586aba25c16a35afa59c7a3d666b2d586675706cc5bbacebe5624393e2ed8",
+    "direct_current_core_fact": "8723b997b216a18dfe7b300ea00261dbfb99770ba23ea1533c356d5109a4d748"
+  },
+  "native_scenarios": [
+    "own managed legacy443/missing certificate reference repair by actual CLI",
+    "read-only drift, apply and repeat without reload",
+    "full baseline first/repeat",
+    "CF absent, enabled/repeat, disabled/repeat using exact MCC public profiles",
+    "real nginx-t failure restores only own file, preserves neighbors/certificates",
+    "MariaDB/FPM/nginx active; MCD inactive; canonical HTTPS200 verifiedTLS"
+  ],
+  "comparison": {
+    "all_business_public_results_equal_corrected_old": true,
+    "raw_direct_argv_stdout_stderr_terminals_saved": true,
+    "normalized_fields": [
+      "generated backup_dir path only; raw values retained"
+    ],
+    "cross_reset_config_bytes_equal": true,
+    "mtime": "checked for within-actor neighbor nonmutation, not equalized across runs"
+  },
+  "lifecycle": "full reset completed between OLD and DIRECT; full reset requested after DIRECT; no manual fault cleanup",
+  "native_external_agent_generator_imports": false,
+  "channel_publication": false,
+  "production_activation": false,
+  "remaining": [
+    "same external artifact ordinary installed CLI and no-config/no-registration/no-URL complete-cache zeroGET proof",
+    "typed missing/incomplete cache and mismatched fact/profile before mutation",
+    "remove only proven replaced writers; preserve pending shared Mautic/delete callers",
+    "cleaned runtime proof and final reset",
+    "whole 1.7 acceptance and Publish MCD Test/Approved release"
+  ]
+}
