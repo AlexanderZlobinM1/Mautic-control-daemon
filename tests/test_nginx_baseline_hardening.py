@@ -61,9 +61,9 @@ class NginxBaselineHardeningTests(unittest.TestCase):
 
         self.assertIn(nginx_baseline.DEFAULT_DENY_MARKER, content)
         self.assertIn("listen 80 default_server;", content)
-        self.assertIn("listen 443 ssl default_server;", content)
+        self.assertNotIn("443", content)
         self.assertIn("server_name _;", content)
-        self.assertEqual(content.count("return 444;"), 2)
+        self.assertEqual(content.count("return 444;"), 1)
 
     def test_default_deny_vhost_avoids_occupied_default_server_ports(self) -> None:
         content = nginx_baseline._desired_default_deny_config(
@@ -72,7 +72,7 @@ class NginxBaselineHardeningTests(unittest.TestCase):
 
         self.assertNotIn("listen 80;", content)
         self.assertNotIn("listen 80 default_server;", content)
-        self.assertIn("listen 443 ssl default_server;", content)
+        self.assertNotIn("443", content)
 
     def test_listen_default_server_ports_detects_legacy_default_vhost(self) -> None:
         src = """server {
@@ -106,7 +106,7 @@ class NginxBaselineHardeningTests(unittest.TestCase):
 
         self.assertEqual(actions, ["default_deny_vhost"])
         self.assertIn("listen 80 default_server;", text)
-        self.assertIn("listen 443 ssl default_server;", text)
+        self.assertNotIn("443", text)
         self.assertIn("return 444;", text)
 
     def test_ensure_cloudflare_real_ip_writes_managed_conf(self) -> None:

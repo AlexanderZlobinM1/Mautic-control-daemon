@@ -1,0 +1,68 @@
+{
+  "status": "PASS",
+  "scope": "explicit operator behavior delta, not exact-old parity",
+  "operator_source": {
+    "thread": "01a07d46-213b-7e62-b910-08c7a9dacde1",
+    "quote": "Это явно баг; не долдно быть в генераторе в дефолт 443",
+    "user_turn_id": "not exported; not invented"
+  },
+  "before_source_commit": "5444978cd5",
+  "before_module_sha256": "7bdc275b9e60e4926bb419d6b19c55624d3f6ba0da3aec64c039e069f8153952",
+  "after_module_sha256": "b824aea0532c06486cf2687e6072a72765625bf4719e92b871342e85db562b26",
+  "changed_definition_only": [
+    "_desired_default_deny_config"
+  ],
+  "cases": [
+    {
+      "existing_default_ports": [],
+      "before_generated_ports": [
+        80,
+        443
+      ],
+      "after_generated_ports": [
+        80
+      ]
+    },
+    {
+      "existing_default_ports": [
+        80
+      ],
+      "before_generated_ports": [
+        443
+      ],
+      "after_generated_ports": []
+    },
+    {
+      "existing_default_ports": [
+        443
+      ],
+      "before_generated_ports": [
+        80
+      ],
+      "after_generated_ports": [
+        80
+      ]
+    },
+    {
+      "existing_default_ports": [
+        80,
+        443
+      ],
+      "before_generated_ports": [],
+      "after_generated_ports": []
+    }
+  ],
+  "other_nginx_policy_definitions_unchanged": true,
+  "native_nginx_execution": false,
+  "focused_tests": "nginx baseline, default stub transaction, instance deletion ownership/certificate retention",
+  "test_count": 49,
+  "full_regression": {
+    "passed": 2045,
+    "failed": 61,
+    "failures_exact_baseline_ids": true,
+    "skipped": 57,
+    "subtests_passed": 105,
+    "log_sha256": "dcfc2f74ac1ec561913b5b099112c2fe93842aebe291eb336cdced3bd07b68ca"
+  },
+  "neighbor_vhost_and_certificate_bytes_and_mtime_preserved": true
+}

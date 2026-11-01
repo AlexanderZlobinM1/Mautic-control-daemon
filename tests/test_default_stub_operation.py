@@ -12,7 +12,7 @@ def stub(tmp_path, monkeypatch):
     conf = tmp_path / 'conf.d'
     conf.mkdir()
     path = conf / '00-mcd-default-deny.conf'
-    path.write_text(baseline.DEFAULT_DENY_MARKER + '\n# old managed stub\n')
+    path.write_text(baseline.DEFAULT_DENY_MARKER + '\nserver {\n    listen 443 ssl default_server;\n    server_name _;\n    ssl_certificate /synthetic/removed-instance/fullchain.pem;\n    ssl_certificate_key /synthetic/removed-instance/privkey.pem;\n    return 444;\n}\n')
     monkeypatch.setattr(baseline, 'DEFAULT_DENY_FILE', path)
     monkeypatch.setattr(baseline, 'BACKUP_ROOT', tmp_path / 'backups')
     monkeypatch.setattr(baseline, '_active_default_server_ports', lambda: set())
@@ -36,10 +36,15 @@ def test_apply_changes_only_stub_and_replay_does_not_reload(stub):
     neighbor = stub.parent / 'keep.conf'
     neighbor.write_bytes(b'neighbor vhost must stay exactly as it was\n')
     original, mtime = neighbor.read_bytes(), neighbor.stat().st_mtime_ns
+    certificate = stub.parent.parent / 'neighbor-cert.pem'
+    certificate.write_bytes(b'synthetic certificate owned by another vhost\n')
+    cert_before = (certificate.read_bytes(), certificate.stat().st_mtime_ns)
     events = []
     def validate():
         events.append('test')
-        assert 'ssl_reject_handshake on;' in stub.read_text()
+        assert 'listen 80 default_server;' in stub.read_text()
+        assert '443' not in stub.read_text()
+        assert 'ssl_' not in stub.read_text()
         assert 'ssl_certificate' not in stub.read_text()
         return True, 'nginx_test:ok'
     def reload():
@@ -53,6 +58,7 @@ def test_apply_changes_only_stub_and_replay_does_not_reload(stub):
     assert events == ['test', 'reload', 'test']
     assert neighbor.read_bytes() == original and neighbor.stat().st_mtime_ns == mtime
     assert set(stub.parent.iterdir()) == {stub, neighbor}
+    assert (certificate.read_bytes(), certificate.stat().st_mtime_ns) == cert_before
 
 
 def test_validation_failure_restores_only_stub(stub):
