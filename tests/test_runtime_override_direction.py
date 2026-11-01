@@ -2873,3 +2873,7 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+import pytest
+pytestmark = pytest.mark.usefixtures("installed_workload_data")

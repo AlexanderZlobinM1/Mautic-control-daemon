@@ -4853,7 +4853,7 @@ def main() -> int:
                 "selection_exists": selection_path.exists(),
                 "selection": selection,
                 "selection_mode": str(selection.get("mode") or "auto"),
-                "hardware_recommendation": recommended_profile(cpu_count=cpus, memory_kib=memory_kib),
+                "hardware_recommendation": recommended_profile(cpu_count=cpus, memory_kib=memory_kib, config_path=args.config),
                 "hardware_cpu_count": cpus,
                 "hardware_memory_kib": memory_kib,
             }

@@ -40,29 +40,18 @@ def read_memory_kib(path: Path = Path("/proc/meminfo")) -> int:
     return 0
 
 
-def recommended_profile(*, cpu_count: int, memory_kib: int) -> str:
-    cpus = max(1, int(cpu_count or 1))
-    gib = max(0.0, float(memory_kib or 0) / (1024.0 * 1024.0))
-    # MemTotal is lower than the provider's nominal RAM because firmware and
-    # the kernel reserve part of it. Use conservative lower bounds for the
-    # common 4/8/16/32 GiB hardware classes instead of misclassifying every
-    # nominal class by one tier (for example, a CX23 reports about 3.73 GiB).
-    if cpus <= 1 or (gib and gib < 3.5):
-        return "tiny"
-    if cpus <= 2 or (gib and gib < 7):
-        return "mini"
-    if cpus <= 4 or (gib and gib < 14):
-        return "midi"
-    if cpus <= 8 or (gib and gib < 28):
-        return "maxi"
-    if cpus >= 24 and (not gib or gib >= 96):
-        return "ultra"
-    return "hiload"
+def recommended_profile(*, cpu_count: int, memory_kib: int, config_path: str = "/opt/mcd/etc/mcd.toml") -> str:
+    from mcd_agent.config import load_config
+    from mcd_agent.universal_workload import required_workload_resource, recommend_workload_profile
+    cfg = load_config(config_path, allow_recover_from_mcc=False)
+    return recommend_workload_profile(required_workload_resource(cfg), cpu_count=cpu_count, memory_kib=memory_kib)
 
 
-def recommended_farm_profile(*, cpu_count: int, memory_kib: int) -> str:
-    standard = recommended_profile(cpu_count=cpu_count, memory_kib=memory_kib)
-    return f"farm-{standard}"
+def recommended_farm_profile(*, cpu_count: int, memory_kib: int, config_path: str = "/opt/mcd/etc/mcd.toml") -> str:
+    from mcd_agent.config import load_config
+    from mcd_agent.universal_workload import required_workload_resource, recommend_workload_profile
+    cfg = load_config(config_path, allow_recover_from_mcc=False)
+    return recommend_workload_profile(required_workload_resource(cfg), cpu_count=cpu_count, memory_kib=memory_kib, farm=True)
 
 
 def _state_path(install_dir: str) -> Path:
@@ -171,7 +160,7 @@ def reconcile_hardware_profile(
     state = read_profile_selection(install_dir)
     mode = str(state.get("mode") or "auto").strip().lower()
     if current == "farm":
-        target = recommended_farm_profile(cpu_count=cpus, memory_kib=memory)
+        target = recommended_farm_profile(cpu_count=cpus, memory_kib=memory, config_path=config_path)
         _write_hardware_profile_name(config_path, target)
         write_profile_selection(
             install_dir,
@@ -203,7 +192,7 @@ def reconcile_hardware_profile(
         )
         return HardwareProfileResult("manual", current, current, cpus, memory, False)
 
-    target = recommended_profile(cpu_count=cpus, memory_kib=memory)
+    target = recommended_profile(cpu_count=cpus, memory_kib=memory, config_path=config_path)
     changed = target != current
     if changed:
         _write_hardware_profile_name(config_path, target)

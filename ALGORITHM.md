@@ -2743,3 +2743,18 @@ src и retired template отсутствуют. QA44 не публичный в�
 absent. Reset receipt SHA bc9171d4366b12c043ad27e44c01b337fcc25568742766deff8d9321c5801c7a. Full suite:
 2100 PASS,61 строго прежних baseline failures,57 skip,105 subtests PASS.
 Legacy cleanup/cleaned native и full Portal fresh gate ещё pending;1.7 HOLD.
+
+Universal numerical cleanup: встроенные named workload values и CPU/RAM
+recommendation branches удалены после R25/R27 proofs. _apply_profile применяет
+только exact selected DATA; custom сохраняет supplied значения. Именованный
+profile без selection/cache теперь typed missing-or-corrupt, а не старый
+встроенный fallback. Recommendation reader использует те же DATA bounds,
+CLI/reconcile передают actual config path.204 boundary pairs сравниваются
+с freeze actual pre-retirement functions;14 профилей — с owner values freeze.
+Test-only frozen archives явно подключены семью legacy test modules, без
+autouse и без замены reader/downloader/profile функций. Полная регрессия:
+2111 PASS/61 exact baseline failures/57 skip/105 subtests; отдельно новая
+204-pair проверка PASS; release-regression PASS. Numerical cleanup требует
+новых cleaned installed fresh/upgrade/offline proofs. Static profile identity
+allowlists и legacy compatibility guards здесь не удалены и остаются отдельным
+audit пунктом; universal scope целиком пока не CLOSED,1.7 HOLD.

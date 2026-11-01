@@ -1,0 +1,1231 @@
+{
+  "source_commit": "777f5e4b1359e407b8c06d9d9724f73d9fd315e9",
+  "source_sha256": "b05d951608c3bdfbf5c083fc1b6d40b99d788e6e28342efc8ba6b55b8da72a37",
+  "scope": "204 boundary pairs evaluated by actual pre-retirement functions, fixture only",
+  "cases": [
+    {
+      "cpu_count": 0,
+      "memory_kib": 0,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 0,
+      "memory_kib": 1,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 0,
+      "memory_kib": 3670015,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 0,
+      "memory_kib": 3670016,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 0,
+      "memory_kib": 3670017,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 0,
+      "memory_kib": 7340031,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 0,
+      "memory_kib": 7340032,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 0,
+      "memory_kib": 7340033,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 0,
+      "memory_kib": 14680063,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 0,
+      "memory_kib": 14680064,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 0,
+      "memory_kib": 14680065,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 0,
+      "memory_kib": 29360127,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 0,
+      "memory_kib": 29360128,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 0,
+      "memory_kib": 29360129,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 0,
+      "memory_kib": 100663295,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 0,
+      "memory_kib": 100663296,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 0,
+      "memory_kib": 100663297,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 1,
+      "memory_kib": 0,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 1,
+      "memory_kib": 1,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 1,
+      "memory_kib": 3670015,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 1,
+      "memory_kib": 3670016,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 1,
+      "memory_kib": 3670017,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 1,
+      "memory_kib": 7340031,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 1,
+      "memory_kib": 7340032,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 1,
+      "memory_kib": 7340033,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 1,
+      "memory_kib": 14680063,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 1,
+      "memory_kib": 14680064,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 1,
+      "memory_kib": 14680065,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 1,
+      "memory_kib": 29360127,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 1,
+      "memory_kib": 29360128,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 1,
+      "memory_kib": 29360129,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 1,
+      "memory_kib": 100663295,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 1,
+      "memory_kib": 100663296,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 1,
+      "memory_kib": 100663297,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 2,
+      "memory_kib": 0,
+      "profile": "mini",
+      "farm_profile": "farm-mini"
+    },
+    {
+      "cpu_count": 2,
+      "memory_kib": 1,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 2,
+      "memory_kib": 3670015,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 2,
+      "memory_kib": 3670016,
+      "profile": "mini",
+      "farm_profile": "farm-mini"
+    },
+    {
+      "cpu_count": 2,
+      "memory_kib": 3670017,
+      "profile": "mini",
+      "farm_profile": "farm-mini"
+    },
+    {
+      "cpu_count": 2,
+      "memory_kib": 7340031,
+      "profile": "mini",
+      "farm_profile": "farm-mini"
+    },
+    {
+      "cpu_count": 2,
+      "memory_kib": 7340032,
+      "profile": "mini",
+      "farm_profile": "farm-mini"
+    },
+    {
+      "cpu_count": 2,
+      "memory_kib": 7340033,
+      "profile": "mini",
+      "farm_profile": "farm-mini"
+    },
+    {
+      "cpu_count": 2,
+      "memory_kib": 14680063,
+      "profile": "mini",
+      "farm_profile": "farm-mini"
+    },
+    {
+      "cpu_count": 2,
+      "memory_kib": 14680064,
+      "profile": "mini",
+      "farm_profile": "farm-mini"
+    },
+    {
+      "cpu_count": 2,
+      "memory_kib": 14680065,
+      "profile": "mini",
+      "farm_profile": "farm-mini"
+    },
+    {
+      "cpu_count": 2,
+      "memory_kib": 29360127,
+      "profile": "mini",
+      "farm_profile": "farm-mini"
+    },
+    {
+      "cpu_count": 2,
+      "memory_kib": 29360128,
+      "profile": "mini",
+      "farm_profile": "farm-mini"
+    },
+    {
+      "cpu_count": 2,
+      "memory_kib": 29360129,
+      "profile": "mini",
+      "farm_profile": "farm-mini"
+    },
+    {
+      "cpu_count": 2,
+      "memory_kib": 100663295,
+      "profile": "mini",
+      "farm_profile": "farm-mini"
+    },
+    {
+      "cpu_count": 2,
+      "memory_kib": 100663296,
+      "profile": "mini",
+      "farm_profile": "farm-mini"
+    },
+    {
+      "cpu_count": 2,
+      "memory_kib": 100663297,
+      "profile": "mini",
+      "farm_profile": "farm-mini"
+    },
+    {
+      "cpu_count": 3,
+      "memory_kib": 0,
+      "profile": "midi",
+      "farm_profile": "farm-midi"
+    },
+    {
+      "cpu_count": 3,
+      "memory_kib": 1,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 3,
+      "memory_kib": 3670015,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 3,
+      "memory_kib": 3670016,
+      "profile": "mini",
+      "farm_profile": "farm-mini"
+    },
+    {
+      "cpu_count": 3,
+      "memory_kib": 3670017,
+      "profile": "mini",
+      "farm_profile": "farm-mini"
+    },
+    {
+      "cpu_count": 3,
+      "memory_kib": 7340031,
+      "profile": "mini",
+      "farm_profile": "farm-mini"
+    },
+    {
+      "cpu_count": 3,
+      "memory_kib": 7340032,
+      "profile": "midi",
+      "farm_profile": "farm-midi"
+    },
+    {
+      "cpu_count": 3,
+      "memory_kib": 7340033,
+      "profile": "midi",
+      "farm_profile": "farm-midi"
+    },
+    {
+      "cpu_count": 3,
+      "memory_kib": 14680063,
+      "profile": "midi",
+      "farm_profile": "farm-midi"
+    },
+    {
+      "cpu_count": 3,
+      "memory_kib": 14680064,
+      "profile": "midi",
+      "farm_profile": "farm-midi"
+    },
+    {
+      "cpu_count": 3,
+      "memory_kib": 14680065,
+      "profile": "midi",
+      "farm_profile": "farm-midi"
+    },
+    {
+      "cpu_count": 3,
+      "memory_kib": 29360127,
+      "profile": "midi",
+      "farm_profile": "farm-midi"
+    },
+    {
+      "cpu_count": 3,
+      "memory_kib": 29360128,
+      "profile": "midi",
+      "farm_profile": "farm-midi"
+    },
+    {
+      "cpu_count": 3,
+      "memory_kib": 29360129,
+      "profile": "midi",
+      "farm_profile": "farm-midi"
+    },
+    {
+      "cpu_count": 3,
+      "memory_kib": 100663295,
+      "profile": "midi",
+      "farm_profile": "farm-midi"
+    },
+    {
+      "cpu_count": 3,
+      "memory_kib": 100663296,
+      "profile": "midi",
+      "farm_profile": "farm-midi"
+    },
+    {
+      "cpu_count": 3,
+      "memory_kib": 100663297,
+      "profile": "midi",
+      "farm_profile": "farm-midi"
+    },
+    {
+      "cpu_count": 4,
+      "memory_kib": 0,
+      "profile": "midi",
+      "farm_profile": "farm-midi"
+    },
+    {
+      "cpu_count": 4,
+      "memory_kib": 1,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 4,
+      "memory_kib": 3670015,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 4,
+      "memory_kib": 3670016,
+      "profile": "mini",
+      "farm_profile": "farm-mini"
+    },
+    {
+      "cpu_count": 4,
+      "memory_kib": 3670017,
+      "profile": "mini",
+      "farm_profile": "farm-mini"
+    },
+    {
+      "cpu_count": 4,
+      "memory_kib": 7340031,
+      "profile": "mini",
+      "farm_profile": "farm-mini"
+    },
+    {
+      "cpu_count": 4,
+      "memory_kib": 7340032,
+      "profile": "midi",
+      "farm_profile": "farm-midi"
+    },
+    {
+      "cpu_count": 4,
+      "memory_kib": 7340033,
+      "profile": "midi",
+      "farm_profile": "farm-midi"
+    },
+    {
+      "cpu_count": 4,
+      "memory_kib": 14680063,
+      "profile": "midi",
+      "farm_profile": "farm-midi"
+    },
+    {
+      "cpu_count": 4,
+      "memory_kib": 14680064,
+      "profile": "midi",
+      "farm_profile": "farm-midi"
+    },
+    {
+      "cpu_count": 4,
+      "memory_kib": 14680065,
+      "profile": "midi",
+      "farm_profile": "farm-midi"
+    },
+    {
+      "cpu_count": 4,
+      "memory_kib": 29360127,
+      "profile": "midi",
+      "farm_profile": "farm-midi"
+    },
+    {
+      "cpu_count": 4,
+      "memory_kib": 29360128,
+      "profile": "midi",
+      "farm_profile": "farm-midi"
+    },
+    {
+      "cpu_count": 4,
+      "memory_kib": 29360129,
+      "profile": "midi",
+      "farm_profile": "farm-midi"
+    },
+    {
+      "cpu_count": 4,
+      "memory_kib": 100663295,
+      "profile": "midi",
+      "farm_profile": "farm-midi"
+    },
+    {
+      "cpu_count": 4,
+      "memory_kib": 100663296,
+      "profile": "midi",
+      "farm_profile": "farm-midi"
+    },
+    {
+      "cpu_count": 4,
+      "memory_kib": 100663297,
+      "profile": "midi",
+      "farm_profile": "farm-midi"
+    },
+    {
+      "cpu_count": 5,
+      "memory_kib": 0,
+      "profile": "maxi",
+      "farm_profile": "farm-maxi"
+    },
+    {
+      "cpu_count": 5,
+      "memory_kib": 1,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 5,
+      "memory_kib": 3670015,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 5,
+      "memory_kib": 3670016,
+      "profile": "mini",
+      "farm_profile": "farm-mini"
+    },
+    {
+      "cpu_count": 5,
+      "memory_kib": 3670017,
+      "profile": "mini",
+      "farm_profile": "farm-mini"
+    },
+    {
+      "cpu_count": 5,
+      "memory_kib": 7340031,
+      "profile": "mini",
+      "farm_profile": "farm-mini"
+    },
+    {
+      "cpu_count": 5,
+      "memory_kib": 7340032,
+      "profile": "midi",
+      "farm_profile": "farm-midi"
+    },
+    {
+      "cpu_count": 5,
+      "memory_kib": 7340033,
+      "profile": "midi",
+      "farm_profile": "farm-midi"
+    },
+    {
+      "cpu_count": 5,
+      "memory_kib": 14680063,
+      "profile": "midi",
+      "farm_profile": "farm-midi"
+    },
+    {
+      "cpu_count": 5,
+      "memory_kib": 14680064,
+      "profile": "maxi",
+      "farm_profile": "farm-maxi"
+    },
+    {
+      "cpu_count": 5,
+      "memory_kib": 14680065,
+      "profile": "maxi",
+      "farm_profile": "farm-maxi"
+    },
+    {
+      "cpu_count": 5,
+      "memory_kib": 29360127,
+      "profile": "maxi",
+      "farm_profile": "farm-maxi"
+    },
+    {
+      "cpu_count": 5,
+      "memory_kib": 29360128,
+      "profile": "maxi",
+      "farm_profile": "farm-maxi"
+    },
+    {
+      "cpu_count": 5,
+      "memory_kib": 29360129,
+      "profile": "maxi",
+      "farm_profile": "farm-maxi"
+    },
+    {
+      "cpu_count": 5,
+      "memory_kib": 100663295,
+      "profile": "maxi",
+      "farm_profile": "farm-maxi"
+    },
+    {
+      "cpu_count": 5,
+      "memory_kib": 100663296,
+      "profile": "maxi",
+      "farm_profile": "farm-maxi"
+    },
+    {
+      "cpu_count": 5,
+      "memory_kib": 100663297,
+      "profile": "maxi",
+      "farm_profile": "farm-maxi"
+    },
+    {
+      "cpu_count": 8,
+      "memory_kib": 0,
+      "profile": "maxi",
+      "farm_profile": "farm-maxi"
+    },
+    {
+      "cpu_count": 8,
+      "memory_kib": 1,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 8,
+      "memory_kib": 3670015,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 8,
+      "memory_kib": 3670016,
+      "profile": "mini",
+      "farm_profile": "farm-mini"
+    },
+    {
+      "cpu_count": 8,
+      "memory_kib": 3670017,
+      "profile": "mini",
+      "farm_profile": "farm-mini"
+    },
+    {
+      "cpu_count": 8,
+      "memory_kib": 7340031,
+      "profile": "mini",
+      "farm_profile": "farm-mini"
+    },
+    {
+      "cpu_count": 8,
+      "memory_kib": 7340032,
+      "profile": "midi",
+      "farm_profile": "farm-midi"
+    },
+    {
+      "cpu_count": 8,
+      "memory_kib": 7340033,
+      "profile": "midi",
+      "farm_profile": "farm-midi"
+    },
+    {
+      "cpu_count": 8,
+      "memory_kib": 14680063,
+      "profile": "midi",
+      "farm_profile": "farm-midi"
+    },
+    {
+      "cpu_count": 8,
+      "memory_kib": 14680064,
+      "profile": "maxi",
+      "farm_profile": "farm-maxi"
+    },
+    {
+      "cpu_count": 8,
+      "memory_kib": 14680065,
+      "profile": "maxi",
+      "farm_profile": "farm-maxi"
+    },
+    {
+      "cpu_count": 8,
+      "memory_kib": 29360127,
+      "profile": "maxi",
+      "farm_profile": "farm-maxi"
+    },
+    {
+      "cpu_count": 8,
+      "memory_kib": 29360128,
+      "profile": "maxi",
+      "farm_profile": "farm-maxi"
+    },
+    {
+      "cpu_count": 8,
+      "memory_kib": 29360129,
+      "profile": "maxi",
+      "farm_profile": "farm-maxi"
+    },
+    {
+      "cpu_count": 8,
+      "memory_kib": 100663295,
+      "profile": "maxi",
+      "farm_profile": "farm-maxi"
+    },
+    {
+      "cpu_count": 8,
+      "memory_kib": 100663296,
+      "profile": "maxi",
+      "farm_profile": "farm-maxi"
+    },
+    {
+      "cpu_count": 8,
+      "memory_kib": 100663297,
+      "profile": "maxi",
+      "farm_profile": "farm-maxi"
+    },
+    {
+      "cpu_count": 9,
+      "memory_kib": 0,
+      "profile": "hiload",
+      "farm_profile": "farm-hiload"
+    },
+    {
+      "cpu_count": 9,
+      "memory_kib": 1,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 9,
+      "memory_kib": 3670015,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 9,
+      "memory_kib": 3670016,
+      "profile": "mini",
+      "farm_profile": "farm-mini"
+    },
+    {
+      "cpu_count": 9,
+      "memory_kib": 3670017,
+      "profile": "mini",
+      "farm_profile": "farm-mini"
+    },
+    {
+      "cpu_count": 9,
+      "memory_kib": 7340031,
+      "profile": "mini",
+      "farm_profile": "farm-mini"
+    },
+    {
+      "cpu_count": 9,
+      "memory_kib": 7340032,
+      "profile": "midi",
+      "farm_profile": "farm-midi"
+    },
+    {
+      "cpu_count": 9,
+      "memory_kib": 7340033,
+      "profile": "midi",
+      "farm_profile": "farm-midi"
+    },
+    {
+      "cpu_count": 9,
+      "memory_kib": 14680063,
+      "profile": "midi",
+      "farm_profile": "farm-midi"
+    },
+    {
+      "cpu_count": 9,
+      "memory_kib": 14680064,
+      "profile": "maxi",
+      "farm_profile": "farm-maxi"
+    },
+    {
+      "cpu_count": 9,
+      "memory_kib": 14680065,
+      "profile": "maxi",
+      "farm_profile": "farm-maxi"
+    },
+    {
+      "cpu_count": 9,
+      "memory_kib": 29360127,
+      "profile": "maxi",
+      "farm_profile": "farm-maxi"
+    },
+    {
+      "cpu_count": 9,
+      "memory_kib": 29360128,
+      "profile": "hiload",
+      "farm_profile": "farm-hiload"
+    },
+    {
+      "cpu_count": 9,
+      "memory_kib": 29360129,
+      "profile": "hiload",
+      "farm_profile": "farm-hiload"
+    },
+    {
+      "cpu_count": 9,
+      "memory_kib": 100663295,
+      "profile": "hiload",
+      "farm_profile": "farm-hiload"
+    },
+    {
+      "cpu_count": 9,
+      "memory_kib": 100663296,
+      "profile": "hiload",
+      "farm_profile": "farm-hiload"
+    },
+    {
+      "cpu_count": 9,
+      "memory_kib": 100663297,
+      "profile": "hiload",
+      "farm_profile": "farm-hiload"
+    },
+    {
+      "cpu_count": 16,
+      "memory_kib": 0,
+      "profile": "hiload",
+      "farm_profile": "farm-hiload"
+    },
+    {
+      "cpu_count": 16,
+      "memory_kib": 1,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 16,
+      "memory_kib": 3670015,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 16,
+      "memory_kib": 3670016,
+      "profile": "mini",
+      "farm_profile": "farm-mini"
+    },
+    {
+      "cpu_count": 16,
+      "memory_kib": 3670017,
+      "profile": "mini",
+      "farm_profile": "farm-mini"
+    },
+    {
+      "cpu_count": 16,
+      "memory_kib": 7340031,
+      "profile": "mini",
+      "farm_profile": "farm-mini"
+    },
+    {
+      "cpu_count": 16,
+      "memory_kib": 7340032,
+      "profile": "midi",
+      "farm_profile": "farm-midi"
+    },
+    {
+      "cpu_count": 16,
+      "memory_kib": 7340033,
+      "profile": "midi",
+      "farm_profile": "farm-midi"
+    },
+    {
+      "cpu_count": 16,
+      "memory_kib": 14680063,
+      "profile": "midi",
+      "farm_profile": "farm-midi"
+    },
+    {
+      "cpu_count": 16,
+      "memory_kib": 14680064,
+      "profile": "maxi",
+      "farm_profile": "farm-maxi"
+    },
+    {
+      "cpu_count": 16,
+      "memory_kib": 14680065,
+      "profile": "maxi",
+      "farm_profile": "farm-maxi"
+    },
+    {
+      "cpu_count": 16,
+      "memory_kib": 29360127,
+      "profile": "maxi",
+      "farm_profile": "farm-maxi"
+    },
+    {
+      "cpu_count": 16,
+      "memory_kib": 29360128,
+      "profile": "hiload",
+      "farm_profile": "farm-hiload"
+    },
+    {
+      "cpu_count": 16,
+      "memory_kib": 29360129,
+      "profile": "hiload",
+      "farm_profile": "farm-hiload"
+    },
+    {
+      "cpu_count": 16,
+      "memory_kib": 100663295,
+      "profile": "hiload",
+      "farm_profile": "farm-hiload"
+    },
+    {
+      "cpu_count": 16,
+      "memory_kib": 100663296,
+      "profile": "hiload",
+      "farm_profile": "farm-hiload"
+    },
+    {
+      "cpu_count": 16,
+      "memory_kib": 100663297,
+      "profile": "hiload",
+      "farm_profile": "farm-hiload"
+    },
+    {
+      "cpu_count": 23,
+      "memory_kib": 0,
+      "profile": "hiload",
+      "farm_profile": "farm-hiload"
+    },
+    {
+      "cpu_count": 23,
+      "memory_kib": 1,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 23,
+      "memory_kib": 3670015,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 23,
+      "memory_kib": 3670016,
+      "profile": "mini",
+      "farm_profile": "farm-mini"
+    },
+    {
+      "cpu_count": 23,
+      "memory_kib": 3670017,
+      "profile": "mini",
+      "farm_profile": "farm-mini"
+    },
+    {
+      "cpu_count": 23,
+      "memory_kib": 7340031,
+      "profile": "mini",
+      "farm_profile": "farm-mini"
+    },
+    {
+      "cpu_count": 23,
+      "memory_kib": 7340032,
+      "profile": "midi",
+      "farm_profile": "farm-midi"
+    },
+    {
+      "cpu_count": 23,
+      "memory_kib": 7340033,
+      "profile": "midi",
+      "farm_profile": "farm-midi"
+    },
+    {
+      "cpu_count": 23,
+      "memory_kib": 14680063,
+      "profile": "midi",
+      "farm_profile": "farm-midi"
+    },
+    {
+      "cpu_count": 23,
+      "memory_kib": 14680064,
+      "profile": "maxi",
+      "farm_profile": "farm-maxi"
+    },
+    {
+      "cpu_count": 23,
+      "memory_kib": 14680065,
+      "profile": "maxi",
+      "farm_profile": "farm-maxi"
+    },
+    {
+      "cpu_count": 23,
+      "memory_kib": 29360127,
+      "profile": "maxi",
+      "farm_profile": "farm-maxi"
+    },
+    {
+      "cpu_count": 23,
+      "memory_kib": 29360128,
+      "profile": "hiload",
+      "farm_profile": "farm-hiload"
+    },
+    {
+      "cpu_count": 23,
+      "memory_kib": 29360129,
+      "profile": "hiload",
+      "farm_profile": "farm-hiload"
+    },
+    {
+      "cpu_count": 23,
+      "memory_kib": 100663295,
+      "profile": "hiload",
+      "farm_profile": "farm-hiload"
+    },
+    {
+      "cpu_count": 23,
+      "memory_kib": 100663296,
+      "profile": "hiload",
+      "farm_profile": "farm-hiload"
+    },
+    {
+      "cpu_count": 23,
+      "memory_kib": 100663297,
+      "profile": "hiload",
+      "farm_profile": "farm-hiload"
+    },
+    {
+      "cpu_count": 24,
+      "memory_kib": 0,
+      "profile": "ultra",
+      "farm_profile": "farm-ultra"
+    },
+    {
+      "cpu_count": 24,
+      "memory_kib": 1,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 24,
+      "memory_kib": 3670015,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 24,
+      "memory_kib": 3670016,
+      "profile": "mini",
+      "farm_profile": "farm-mini"
+    },
+    {
+      "cpu_count": 24,
+      "memory_kib": 3670017,
+      "profile": "mini",
+      "farm_profile": "farm-mini"
+    },
+    {
+      "cpu_count": 24,
+      "memory_kib": 7340031,
+      "profile": "mini",
+      "farm_profile": "farm-mini"
+    },
+    {
+      "cpu_count": 24,
+      "memory_kib": 7340032,
+      "profile": "midi",
+      "farm_profile": "farm-midi"
+    },
+    {
+      "cpu_count": 24,
+      "memory_kib": 7340033,
+      "profile": "midi",
+      "farm_profile": "farm-midi"
+    },
+    {
+      "cpu_count": 24,
+      "memory_kib": 14680063,
+      "profile": "midi",
+      "farm_profile": "farm-midi"
+    },
+    {
+      "cpu_count": 24,
+      "memory_kib": 14680064,
+      "profile": "maxi",
+      "farm_profile": "farm-maxi"
+    },
+    {
+      "cpu_count": 24,
+      "memory_kib": 14680065,
+      "profile": "maxi",
+      "farm_profile": "farm-maxi"
+    },
+    {
+      "cpu_count": 24,
+      "memory_kib": 29360127,
+      "profile": "maxi",
+      "farm_profile": "farm-maxi"
+    },
+    {
+      "cpu_count": 24,
+      "memory_kib": 29360128,
+      "profile": "hiload",
+      "farm_profile": "farm-hiload"
+    },
+    {
+      "cpu_count": 24,
+      "memory_kib": 29360129,
+      "profile": "hiload",
+      "farm_profile": "farm-hiload"
+    },
+    {
+      "cpu_count": 24,
+      "memory_kib": 100663295,
+      "profile": "hiload",
+      "farm_profile": "farm-hiload"
+    },
+    {
+      "cpu_count": 24,
+      "memory_kib": 100663296,
+      "profile": "ultra",
+      "farm_profile": "farm-ultra"
+    },
+    {
+      "cpu_count": 24,
+      "memory_kib": 100663297,
+      "profile": "ultra",
+      "farm_profile": "farm-ultra"
+    },
+    {
+      "cpu_count": 32,
+      "memory_kib": 0,
+      "profile": "ultra",
+      "farm_profile": "farm-ultra"
+    },
+    {
+      "cpu_count": 32,
+      "memory_kib": 1,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 32,
+      "memory_kib": 3670015,
+      "profile": "tiny",
+      "farm_profile": "farm-tiny"
+    },
+    {
+      "cpu_count": 32,
+      "memory_kib": 3670016,
+      "profile": "mini",
+      "farm_profile": "farm-mini"
+    },
+    {
+      "cpu_count": 32,
+      "memory_kib": 3670017,
+      "profile": "mini",
+      "farm_profile": "farm-mini"
+    },
+    {
+      "cpu_count": 32,
+      "memory_kib": 7340031,
+      "profile": "mini",
+      "farm_profile": "farm-mini"
+    },
+    {
+      "cpu_count": 32,
+      "memory_kib": 7340032,
+      "profile": "midi",
+      "farm_profile": "farm-midi"
+    },
+    {
+      "cpu_count": 32,
+      "memory_kib": 7340033,
+      "profile": "midi",
+      "farm_profile": "farm-midi"
+    },
+    {
+      "cpu_count": 32,
+      "memory_kib": 14680063,
+      "profile": "midi",
+      "farm_profile": "farm-midi"
+    },
+    {
+      "cpu_count": 32,
+      "memory_kib": 14680064,
+      "profile": "maxi",
+      "farm_profile": "farm-maxi"
+    },
+    {
+      "cpu_count": 32,
+      "memory_kib": 14680065,
+      "profile": "maxi",
+      "farm_profile": "farm-maxi"
+    },
+    {
+      "cpu_count": 32,
+      "memory_kib": 29360127,
+      "profile": "maxi",
+      "farm_profile": "farm-maxi"
+    },
+    {
+      "cpu_count": 32,
+      "memory_kib": 29360128,
+      "profile": "hiload",
+      "farm_profile": "farm-hiload"
+    },
+    {
+      "cpu_count": 32,
+      "memory_kib": 29360129,
+      "profile": "hiload",
+      "farm_profile": "farm-hiload"
+    },
+    {
+      "cpu_count": 32,
+      "memory_kib": 100663295,
+      "profile": "hiload",
+      "farm_profile": "farm-hiload"
+    },
+    {
+      "cpu_count": 32,
+      "memory_kib": 100663296,
+      "profile": "ultra",
+      "farm_profile": "farm-ultra"
+    },
+    {
+      "cpu_count": 32,
+      "memory_kib": 100663297,
+      "profile": "ultra",
+      "farm_profile": "farm-ultra"
+    }
+  ]
+}

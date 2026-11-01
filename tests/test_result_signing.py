@@ -273,3 +273,7 @@ def test_state_push_does_not_reconcile_wrong_conflict_job_id(tmp_path):
             pusher.send({"schema":"mcd-state-v1", "agent_id":"a", "host_fingerprint":"sha256:h"})
     assert pusher._control_push_pending is True
     assert ControlStore(db_path).receipts()[0]["status"] == "succeeded"
+
+
+import pytest
+pytestmark = pytest.mark.usefixtures("installed_workload_data")

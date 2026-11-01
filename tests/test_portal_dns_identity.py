@@ -172,3 +172,7 @@ def test_dns_passive_daemon_builds_independent_portal_worker(tmp_path, monkeypat
     assert worker is not None, state.get("commercial_worker_status")
     assert worker.identity_coordinate == {"identity_kind": "dns", "local_identity": DNS}
     assert "host_fingerprint" not in worker._minimal_inventory("installation-1")["binding"]
+
+
+import pytest
+pytestmark = pytest.mark.usefixtures("installed_workload_data")

@@ -27,24 +27,24 @@ class HardwareProfileTests(unittest.TestCase):
 
     def test_recommendation_uses_conservative_cpu_and_memory_class(self) -> None:
         gib = 1024 * 1024
-        self.assertEqual(recommended_profile(cpu_count=1, memory_kib=64 * gib), "tiny")
-        self.assertEqual(recommended_profile(cpu_count=2, memory_kib=2 * gib), "tiny")
-        self.assertEqual(recommended_profile(cpu_count=2, memory_kib=4 * gib), "mini")
-        self.assertEqual(recommended_profile(cpu_count=4, memory_kib=8 * gib), "midi")
-        self.assertEqual(recommended_profile(cpu_count=8, memory_kib=16 * gib), "maxi")
-        self.assertEqual(recommended_profile(cpu_count=16, memory_kib=32 * gib), "hiload")
-        self.assertEqual(recommended_profile(cpu_count=32, memory_kib=128 * gib), "ultra")
-        self.assertEqual(recommended_profile(cpu_count=16, memory_kib=8 * gib), "midi")
-        self.assertEqual(recommended_profile(cpu_count=2, memory_kib=3_911_572), "mini")
+        self.assertEqual(recommended_profile(cpu_count=1, memory_kib=64 * gib, config_path=self.workload_config), "tiny")
+        self.assertEqual(recommended_profile(cpu_count=2, memory_kib=2 * gib, config_path=self.workload_config), "tiny")
+        self.assertEqual(recommended_profile(cpu_count=2, memory_kib=4 * gib, config_path=self.workload_config), "mini")
+        self.assertEqual(recommended_profile(cpu_count=4, memory_kib=8 * gib, config_path=self.workload_config), "midi")
+        self.assertEqual(recommended_profile(cpu_count=8, memory_kib=16 * gib, config_path=self.workload_config), "maxi")
+        self.assertEqual(recommended_profile(cpu_count=16, memory_kib=32 * gib, config_path=self.workload_config), "hiload")
+        self.assertEqual(recommended_profile(cpu_count=32, memory_kib=128 * gib, config_path=self.workload_config), "ultra")
+        self.assertEqual(recommended_profile(cpu_count=16, memory_kib=8 * gib, config_path=self.workload_config), "midi")
+        self.assertEqual(recommended_profile(cpu_count=2, memory_kib=3_911_572, config_path=self.workload_config), "mini")
 
     def test_farm_recommendation_uses_separate_hardware_line(self) -> None:
         gib = 1024 * 1024
-        self.assertEqual(recommended_farm_profile(cpu_count=1, memory_kib=1 * gib), "farm-tiny")
-        self.assertEqual(recommended_farm_profile(cpu_count=2, memory_kib=4 * gib), "farm-mini")
-        self.assertEqual(recommended_farm_profile(cpu_count=4, memory_kib=8 * gib), "farm-midi")
-        self.assertEqual(recommended_farm_profile(cpu_count=8, memory_kib=16 * gib), "farm-maxi")
-        self.assertEqual(recommended_farm_profile(cpu_count=12, memory_kib=64 * gib), "farm-hiload")
-        self.assertEqual(recommended_farm_profile(cpu_count=32, memory_kib=128 * gib), "farm-ultra")
+        self.assertEqual(recommended_farm_profile(cpu_count=1, memory_kib=1 * gib, config_path=self.workload_config), "farm-tiny")
+        self.assertEqual(recommended_farm_profile(cpu_count=2, memory_kib=4 * gib, config_path=self.workload_config), "farm-mini")
+        self.assertEqual(recommended_farm_profile(cpu_count=4, memory_kib=8 * gib, config_path=self.workload_config), "farm-midi")
+        self.assertEqual(recommended_farm_profile(cpu_count=8, memory_kib=16 * gib, config_path=self.workload_config), "farm-maxi")
+        self.assertEqual(recommended_farm_profile(cpu_count=12, memory_kib=64 * gib, config_path=self.workload_config), "farm-hiload")
+        self.assertEqual(recommended_farm_profile(cpu_count=32, memory_kib=128 * gib, config_path=self.workload_config), "farm-ultra")
 
     def test_legacy_farm_is_forced_to_hardware_class_even_when_manual(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -246,3 +246,7 @@ class HardwareProfileTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+import pytest
+pytestmark = pytest.mark.usefixtures("installed_workload_data")

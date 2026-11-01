@@ -12,6 +12,7 @@ def test_profile_status_json_publishes_selection_path(monkeypatch, tmp_path, cap
     selection_path = tmp_path / "var" / "hardware-profile-selection.json"
     selection_path.parent.mkdir()
     selection_path.write_text('{"mode":"manual","profile":"farm-hiload"}\n', encoding="utf-8")
+    (tmp_path / "mcd.toml").write_text('[profile]\nname="farm-hiload"\n')
     cfg = SimpleNamespace(profile_name="farm-hiload", scheduler_pause_flag_path=str(tmp_path / "pause"))
 
     monkeypatch.setattr(sys, "argv", [
@@ -34,3 +35,7 @@ def test_profile_status_json_publishes_selection_path(monkeypatch, tmp_path, cap
     assert payload["selection_exists"] is True
     assert payload["selection_mode"] == "manual"
 
+
+
+import pytest
+pytestmark = pytest.mark.usefixtures("installed_workload_data")

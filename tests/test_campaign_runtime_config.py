@@ -412,7 +412,7 @@ class CampaignRuntimeConfigTests(unittest.TestCase):
         from mcd_agent.hardware_profile import recommended_farm_profile
 
         self.assertEqual(
-            recommended_farm_profile(cpu_count=1, memory_kib=2 * 1024 * 1024),
+            recommended_farm_profile(cpu_count=1, memory_kib=2 * 1024 * 1024, config_path=self.workload_config),
             "farm-tiny",
         )
         path = Path(tempfile.mkdtemp()) / "mcd.toml"
@@ -587,3 +587,7 @@ class CampaignRuntimeConfigTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+import pytest
+pytestmark = pytest.mark.usefixtures("installed_workload_data")

@@ -108,6 +108,15 @@ def load_universal_workload_resource(config: Any, selected: dict[str, Any], *,
     return verify_universal_workload_archive(path.read_bytes(), selected)
 
 
+def required_workload_resource(config: Any) -> dict[str, Any]:
+    """Read the exact selected data; named profiles have no embedded fallback."""
+    from mcd_agent.custom_scripts import CustomSelectedTaskError
+    ref = getattr(config, "universal_workload_resource_ref", None)
+    if not ref:
+        raise CustomSelectedTaskError("custom_selected_task_artifact_missing_or_corrupt")
+    return load_universal_workload_resource(config, selected_universal_resource(ref))
+
+
 def preseed_universal_workload_resource(config: Any, ref: dict[str, Any], raw: bytes) -> Any:
     """Use the normal cache's atomic writer; never select or fetch another revision."""
     from mcd_agent.custom_scripts import _fetch_script_to_cache

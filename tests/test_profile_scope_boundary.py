@@ -66,3 +66,7 @@ def test_hardware_auto_uses_hardware_marker_and_never_host_profile_or_cron(monke
     assert cli.main()==0
     assert markers==[{'mode':'auto','profile':'mini'}]
     assert cfg.profile_name=='hiload'
+
+
+import pytest
+pytestmark = pytest.mark.usefixtures("installed_workload_data")
