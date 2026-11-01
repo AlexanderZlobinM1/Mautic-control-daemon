@@ -905,6 +905,29 @@ def _apply_profile(cfg: AgentConfig) -> AgentConfig:
     return replace(cfg, profile_name=p, **workload_profile_values(data, p))
 
 
+def prepare_profile_selection(cfg: AgentConfig, profile_name: str, runtime: dict[str, Any]) -> AgentConfig:
+    """Admit a selected profile and its resolved data together, without config writes."""
+    from mcd_agent.universal_workload import (
+        resolve_universal_workload_reference, required_workload_resource, workload_profile_names,
+    )
+    selected = str(profile_name).strip().lower()
+    if re.fullmatch(r"[a-z][a-z0-9-]{0,63}", selected) is None:
+        raise ValueError("invalid workload profile identity")
+    ref = cfg.universal_workload_resource_ref
+    key = "universal_workload_resource_ref"
+    if key in runtime:
+        ref = resolve_universal_workload_reference(runtime_settings={key: runtime[key]},
+                                                  config=cfg, runtime_dir=DEFAULT_RUNTIME_ARTIFACT_DIR)
+    candidate = replace(cfg, profile_name=selected, universal_workload_resource_ref=ref)
+    if selected != "custom":
+        resource = required_workload_resource(candidate)
+        # Public selection excludes legacy, but existing legacy remains valid.
+        names = workload_profile_names(resource, include_legacy=selected == cfg.profile_name)
+        if selected not in names:
+            raise ValueError("selected universal workload profile is not selectable")
+    return _apply_profile(candidate)
+
+
 def reapply_profile_authority(cfg: AgentConfig, profile_name: str | None) -> AgentConfig:
     """Rebase an effective config onto the selected workload profile.
 
@@ -1479,25 +1502,17 @@ def _toml_literal(value: object) -> str:
     return json.dumps("" if value is None else str(value), ensure_ascii=True)
 
 
-def upsert_section_values(config_path: str, section_name: str, updates: dict[str, object]) -> tuple[str, bool]:
-    """
-    Upsert plain key-value entries in mutable config section and return
-    (mutable_path, changed).
-    """
-    p = _resolve_mutable_config_path(config_path)
+def _upsert_section_values_text(text: str, section_name: str, updates: dict[str, object]) -> str:
     if not updates:
-        return str(p), False
-    p.parent.mkdir(parents=True, exist_ok=True)
-    text = p.read_text(encoding="utf-8") if p.exists() else ""
+        return text
     section_lines = [f"{k} = {_toml_literal(v)}" for k, v in updates.items()]
     section = f"[{section_name}]\n" + "\n".join(section_lines) + "\n\n"
     m = re.search(rf"(?ms)^(\[{re.escape(section_name)}\]\s*\n)(.*?)(?=^\[|\Z)", text)
     if not m:
         text2 = section + text
         if text2 == text:
-            return str(p), False
-        p.write_text(text2, encoding="utf-8")
-        return str(p), True
+            return text
+        return text2
     body = m.group(2)
     # Runtime reconciliation may repeat the same effective values after a
     # restart.  Do not rewrite the mutable include merely to normalize
@@ -1510,7 +1525,7 @@ def upsert_section_values(config_path: str, section_name: str, updates: dict[str
             key in current_section and current_section[key] == value
             for key, value in updates.items()
         ):
-            return str(p), False
+            return text
     except Exception:
         pass
     key_set = set(updates.keys())
@@ -1535,8 +1550,51 @@ def upsert_section_values(config_path: str, section_name: str, updates: dict[str
         new_body = new_body + "\n"
     text2 = text[: m.start(2)] + new_body + tail
     if text2 == text:
+        return text
+    return text2
+
+
+
+def upsert_section_values(config_path: str, section_name: str, updates: dict[str, object]) -> tuple[str, bool]:
+    """Upsert the existing mutable config section, preserving stable bytes."""
+    p = _resolve_mutable_config_path(config_path)
+    if not updates:
+        return str(p), False
+    p.parent.mkdir(parents=True, exist_ok=True)
+    text = p.read_text(encoding="utf-8") if p.exists() else ""
+    text2 = _upsert_section_values_text(text, section_name, updates)
+    if text2 == text:
         return str(p), False
     p.write_text(text2, encoding="utf-8")
+    return str(p), True
+
+
+def persist_profile_runtime_values(config_path: str, profile_name: str, updates: dict[str, object],
+                                   removals: set[str]) -> tuple[str, bool]:
+    """Commit a prevalidated profile/ref pair in one mutable-config replacement."""
+    import os
+    import tempfile
+    p = _resolve_mutable_config_path(config_path).resolve()
+    text = p.read_text(encoding="utf-8") if p.exists() else ""
+    text2 = _upsert_section_values_text(text, "runtime", updates)
+    if removals:
+        text2, _ = _remove_section_keys_text(text2, "runtime", removals)
+    text2 = _upsert_section_values_text(text2, "profile", {"name": profile_name})
+    if text2 == text:
+        return str(p), False
+    p.parent.mkdir(parents=True, exist_ok=True)
+    before = p.stat() if p.exists() else None
+    fd, temporary = tempfile.mkstemp(prefix="." + p.name + ".", dir=p.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            if before is not None:
+                os.fchmod(stream.fileno(), before.st_mode & 0o7777)
+                if os.geteuid() == 0:
+                    os.fchown(stream.fileno(), before.st_uid, before.st_gid)
+            stream.write(text2); stream.flush(); os.fsync(stream.fileno())
+        os.replace(temporary, p)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
     return str(p), True
 
 
@@ -1972,7 +2030,7 @@ def runtime_overrides_from_config_file(path: str) -> dict[str, Any]:
         allowed = runtime_remote_allowed_keys()
         out: dict[str, Any] = {}
         for key, value in values.items():
-            if key not in allowed or (key == "universal_workload_resource_ref" and value in (None, "", {})):
+            if key not in allowed or (key == "universal_workload_resource_ref" and value == {}):
                 continue
             # TOML has no null literal; the existing writer emits an empty
             # string. Restore the declared optional type on the runtime wire.
@@ -2009,7 +2067,7 @@ def runtime_effective_map(cfg: AgentConfig) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, attr in _RUNTIME_TO_ATTR.items():
         if hasattr(cfg, attr):
-            if key == "universal_workload_resource_ref" and not getattr(cfg, attr):
+            if key == "universal_workload_resource_ref" and getattr(cfg, attr) == {}:
                 continue
             out[key] = getattr(cfg, attr)
     legacy = out.get("segment_whitelist_instance_settings")

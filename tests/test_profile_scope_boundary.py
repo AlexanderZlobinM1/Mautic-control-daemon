@@ -50,10 +50,10 @@ def test_explicit_workload_profile_selection_does_not_change_hardware_selection_
     assert cli.main()==0
 
 
-def test_hardware_auto_uses_hardware_marker_and_never_host_profile_or_cron(monkeypatch):
+def test_hardware_auto_uses_hardware_marker_and_never_host_profile_or_cron(monkeypatch, installed_workload_data):
     from mcd_agent import cli
     cfg=SimpleNamespace(profile_name='hiload',hardware_profile_name='mini')
-    monkeypatch.setattr(sys,'argv',['mcd-cli','profile','auto','--config','/unused/config'])
+    monkeypatch.setattr(sys,'argv',['mcd-cli','profile','auto','--config',installed_workload_data['config_path']])
     monkeypatch.setattr(cli,'load_config',lambda *a,**kw: cfg)
     monkeypatch.setattr(cli,'maybe_notify_update',lambda cfg: None)
     markers=[]

@@ -167,9 +167,11 @@ def resolve_universal_workload_reference(*, runtime_settings: dict[str, Any], co
     if key in runtime_settings:
         ref = runtime_settings[key]
         if isinstance(ref, str):
-            ref = json.loads(ref) if ref.strip() else {}
-        if ref is None or ref == {}:
-            return {}  # Explicit clearing is never replaced with initial data.
+            ref = json.loads(ref) if ref.strip() else None
+        if ref is None:
+            return None  # Literal null remains a value on the existing wire.
+        if ref == {}:
+            return {}  # An absent/tombstoned selection suppresses initial data.
         selected = selected_universal_resource(ref)
         try:
             load_universal_workload_resource(config, selected, offline_only=True)
@@ -184,12 +186,12 @@ def resolve_universal_workload_reference(*, runtime_settings: dict[str, Any], co
         return dict(ref)
     manifest_path = runtime / "mcd-runtime-manifest.json"
     if not manifest_path.is_file():
-        return None
+        return {}
     from mcd_agent.self_update import _runtime_manifest
     manifest = _runtime_manifest(runtime)
     ref = manifest.get(key) if manifest is not None else None
     if ref is None:
-        return None
+        return {}
     selected_universal_resource(ref)
     preseed_universal_workload_resource(config, ref, (runtime / ref["file"]).read_bytes())
     return dict(ref)
@@ -204,6 +206,21 @@ def _catalog_member(resource: dict[str, Any], pin: dict[str, Any]) -> dict[str, 
         raise RuntimeError("selected universal catalog member is missing")
     # Catalog references must agree with the exact already verified bytes.
     return value
+
+
+def workload_profile_names(resource: dict[str, Any], *, include_legacy: bool = False) -> tuple[str, ...]:
+    """The catalog owns selectable identities; legacy records remain readable."""
+    names = []
+    for name, pin in resource["catalog"].get("profiles", {}).items():
+        profile = _catalog_member(resource, pin)
+        if profile.get("profile_id") != name:
+            raise RuntimeError("selected universal workload profile identity is inconsistent")
+        if include_legacy or not profile.get("legacy_compatibility_only", False):
+            names.append(name)
+    custom = resource["catalog"].get("custom", {})
+    if custom.get("operator_owned") is True:
+        names.append(custom["profile_id"])
+    return tuple(names)
 
 
 def workload_profile_values(resource: dict[str, Any], profile_id: str) -> dict[str, Any]:

@@ -1,5 +1,5 @@
 {
-  "status": "configuration/first-start integrated; R25 fresh-prefix and R27 ordinary39 upgrade native PASS; legacy cleanup and full Portal fresh gate pending; whole1.7 HOLD",
+  "status": "numerical legacy retirement verified R28 fresh/ordinary upgrade/offline; catalog identity retirement source/tests ready, installed proof and Portal full fresh pending; whole1.7 HOLD",
   "scope": "future1.7 only; immutable approved1.6.39 unchanged",
   "manifest": "existing mcd-runtime-package-v1 optional universal_workload_resource_ref plus same ref.file in payload_sha256",
   "builder": {
@@ -117,11 +117,39 @@
     }
   },
   "latest_full_regression": {
-    "passed": 2100,
+    "passed": 2119,
     "failed": 61,
     "baseline_failure_ids_exact": true,
     "skipped": 57,
     "subtests_passed": 105,
-    "log": "/tmp/mcd-universal-roundtrip-frozen-full.log"
+    "log": "/tmp/mcd-identifier-null-final-full.log",
+    "required_release_regression": "PASS"
+  },
+  "R28_numerical_cleanup": {
+    "source_commit": "5e6eaec466989d3175a1a21a4bfb34f95901611d",
+    "archive_sha256": "488fd5bcafdad05ec90b8c40bb5965da0fd63685b33beece1a9ba28b8d005e29",
+    "fresh_receipt_sha256": "f01317e5aca32718a3bc440f0b6b33b221ad723b2d63efd9a4924727b8c2b36f",
+    "fresh_public_receipt_sha256": "d8f57b8aa090457ad7b5eae8c8381fdda4020e5050feaab8415dfde304e1a2d7",
+    "fresh_literal_profiles": 14,
+    "fresh_recommendation_boundary_pairs": 204,
+    "fresh_profile_artifact_GET_HEAD": 0,
+    "standalone_unrelated_metadata_CONNECT": 1,
+    "fresh_reset_sha256": "9d81fe2e7b11c90a3c3af5c68cf7019233e401a4b493758f42205dc36032f995",
+    "ordinary39_upgrade_receipt_sha256": "295b22d6be2db8b86334c3ba2521643a56e31caeb16647884efb2056a643c081",
+    "ordinary_upgrade_reset_sha256": "977b3b6be22fec8c8a51cf21220b90fc8026d39b467ccbe55348804bbfc17c2c",
+    "ordinary_upgrade_full_settings_recovery_and_frozen_MCC_consumer": "PASS",
+    "source_absent_and_foreign_config_bytes_mtime_preserved": true,
+    "scope": "MCD standalone fresh-prefix/real installed39 updater; not commercial Portal installer or live MCC session",
+    "public_channels_changed": false
+  },
+  "catalog_identity_retirement": {
+    "status": "source/regression complete; new installed proof pending",
+    "selection_authority": "verified catalog profiles/legacy_compatibility_only; core parses syntax only",
+    "old_legacy_profile_readable": true,
+    "new_legacy_public_choice_still_excluded": true,
+    "new_ref_and_new_name": "admitted together against new catalog before one atomic mutable-config replacement; existing LWW engine unchanged",
+    "literal_null": "retained as None on existing wire, distinct from absent/tombstone marker {}; neither resurrects initial package data",
+    "tests": "18 authority tests plus null roundtrip and existing suite",
+    "no_new_registry_runner_or_wire_protocol": true
   }
 }

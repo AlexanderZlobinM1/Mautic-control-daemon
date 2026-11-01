@@ -1127,22 +1127,12 @@ def mode_passive(*, pause_flag_path: str, install_dir: str, config_path: str) ->
     return ModeResult(ok=True, lines=lines)
 
 
-SUPPORTED_PROFILE_NAMES = (
-    "passive",
-    "tiny",
-    "mini",
-    "midi",
-    "maxi",
-    "hiload",
-    "ultra",
-    "farm-tiny",
-    "farm-mini",
-    "farm-midi",
-    "farm-maxi",
-    "farm-hiload",
-    "farm-ultra",
-    "custom",
-)
+def supported_profile_names(config_path: str) -> tuple[str, ...]:
+    from mcd_agent.config import load_config
+    from mcd_agent.universal_workload import required_workload_resource, workload_profile_names
+    cfg = load_config(config_path, allow_recover_from_mcc=False)
+    return workload_profile_names(required_workload_resource(cfg))
+
 
 # Runtime keys controlled by named profiles.
 # If these remain in [runtime], they override profile baseline and can cause
@@ -1270,6 +1260,8 @@ def profile_status(*, pause_flag_path: str, config_path: str) -> ModeResult:
 
 def profile_set(*, profile: str, pause_flag_path: str, install_dir: str, config_path: str) -> ModeResult:
     name = (profile or "").strip().lower()
+    if name != "custom" and name not in supported_profile_names(config_path):
+        return ModeResult(ok=False, lines=[f"unsupported profile: {profile}"])
     if name == "passive":
         res = mode_passive(
             pause_flag_path=pause_flag_path,
@@ -1281,8 +1273,6 @@ def profile_set(*, profile: str, pause_flag_path: str, install_dir: str, config_
             if removed:
                 res.lines.append(f"runtime overrides cleared for profile baseline: {removed}")
         return res
-    if name not in SUPPORTED_PROFILE_NAMES:
-        return ModeResult(ok=False, lines=[f"unsupported profile: {profile}"])
 
     if os.geteuid() != 0:
         return ModeResult(ok=False, lines=["profile apply requires root"])

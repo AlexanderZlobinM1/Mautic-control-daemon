@@ -114,3 +114,26 @@ def test_nullable_settings_round_trip_clear_through_existing_toml_and_runtime_wi
     assert getattr(restored, config._RUNTIME_TO_ATTR[key]) is None
     assert config.runtime_overrides_from_config_file(str(path))[key] is None
     assert config.runtime_effective_map(restored)[key] is None
+
+
+def test_literal_null_selection_is_distinct_from_absent_tombstone_and_roundtrips(tmp_path, monkeypatch):
+    from test_universal_workload import configuration
+    cache_cfg, ref, _, stage = runtime_resource_fixture(tmp_path)
+    monkeypatch.setattr(config, 'DEFAULT_RUNTIME_ARTIFACT_DIR', str(stage))
+    path = tmp_path / 'mcd.toml'
+    configuration(path, cache_dir=cache_cfg.custom_cache_dir, ref=ref, include_ref=True)
+    path.write_text(path.read_text().replace('name="large"', 'name="custom"'))
+    key = 'universal_workload_resource_ref'
+    loaded = config.load_config(str(path), allow_recover_from_mcc=False)
+    cleared, _, _, _ = config.apply_runtime_overrides(loaded, {key: None})
+    assert cleared.universal_workload_resource_ref is None
+    assert config.runtime_effective_map(cleared)[key] is None
+    daemon._persist_resolved_runtime_to_config(loaded, {key: ref}, {key: None}, {}, full_snapshot=True)
+    loaded = config.load_config(str(path), allow_recover_from_mcc=False)
+    assert loaded.universal_workload_resource_ref is None  # No initial-package resurrection.
+    assert local_runtime_overrides(loaded)[key] is None
+    assert config.runtime_effective_map(loaded)[key] is None
+    assert not daemon._runtime_snapshot_loss_detected(local_runtime_overrides(loaded), {key: None})
+    before = (path.read_bytes(), path.stat().st_mtime_ns)
+    daemon._persist_resolved_runtime_to_config(loaded, {key: None}, {key: None}, {}, full_snapshot=True)
+    assert (path.read_bytes(), path.stat().st_mtime_ns) == before

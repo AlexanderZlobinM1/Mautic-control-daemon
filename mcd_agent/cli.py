@@ -2226,27 +2226,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     profile = sub.add_parser("profile", help="Switch MCD profile (single source of state)")
     profile.add_argument("--config", default=default_cfg)
-    profile.add_argument(
-        "op",
-        choices=[
-            "status",
-            "auto",
-            "passive",
-            "tiny",
-            "mini",
-            "midi",
-            "maxi",
-            "hiload",
-            "ultra",
-            "farm-tiny",
-            "farm-mini",
-            "farm-midi",
-            "farm-maxi",
-            "farm-hiload",
-            "farm-ultra",
-            "custom",
-        ],
-    )
+    profile.add_argument("op", help="status, auto, custom, or a profile from the selected catalog")
     profile.add_argument("--yes", action="store_true")
     profile.add_argument("--json", action="store_true")
 
@@ -4842,6 +4822,9 @@ def main() -> int:
             selection = read_profile_selection("/opt/mcd")
             cpus = max(1, int(os.cpu_count() or 1))
             memory_kib = read_memory_kib()
+            recommendation = None
+            if getattr(cfg, "universal_workload_resource_ref", None):
+                recommendation = recommended_profile(cpu_count=cpus, memory_kib=memory_kib, config_path=args.config)
             status_payload = {
                 "schema": "mcd-profile-status-v1",
                 "status": "ok" if res.ok else "error",
@@ -4853,7 +4836,7 @@ def main() -> int:
                 "selection_exists": selection_path.exists(),
                 "selection": selection,
                 "selection_mode": str(selection.get("mode") or "auto"),
-                "hardware_recommendation": recommended_profile(cpu_count=cpus, memory_kib=memory_kib, config_path=args.config),
+                "hardware_recommendation": recommendation,
                 "hardware_cpu_count": cpus,
                 "hardware_memory_kib": memory_kib,
             }
@@ -4870,6 +4853,9 @@ def main() -> int:
                 print(f"hardware_memory_kib={memory_kib}")
             return 0
         if args.op == "auto":
+            # Admit the advisory dataset before changing the auto-mode marker.
+            recommended_profile(cpu_count=max(1, int(os.cpu_count() or 1)),
+                                memory_kib=read_memory_kib(), config_path=args.config)
             write_profile_selection(
                 "/opt/mcd",
                 mode="auto",

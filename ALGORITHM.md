@@ -2758,3 +2758,32 @@ autouse и без замены reader/downloader/profile функций. Пол�
 новых cleaned installed fresh/upgrade/offline proofs. Static profile identity
 allowlists и legacy compatibility guards здесь не удалены и остаются отдельным
 audit пунктом; universal scope целиком пока не CLOSED,1.7 HOLD.
+
+R28 numerical retirement accepted within its scope: fresh receipt f01317e5
+(14 literal profiles,204 actual installed recommendation boundary pairs,0
+profile GET/HEAD, manual cache without parent manifest, RO/typed negatives),
+ordinary installed39 updater receipt295b22d6 (real PID restart/first-start
+preseed/14profiles/frozen MCC consumer/full delivered-settings restore).
+Оба actors завершены полным Infra reset и независимым read-only proof:
+fresh9d81fe2e, upgrade977b3b6b. Один standalone metadata CONNECT в fresh
+учтён отдельно; это не commercial all-network/no-MCC proof.
+
+Следующий source checkpoint удаляет static profile ID списки из mode,
+runtime response parser и CLI choices. Публичный список идёт из verified
+catalog, legacy_compatibility_only исключён только из нового выбора; чтение
+и применение уже записанного legacy остаётся. Remote newref+newname проходят
+единое admission по НОВОМУ catalog до persist; startup bootstrap использует
+тот же путь. Existing mutable config section renderer переиспользован,
+profile+runtime updates/removals заменяют один файл атомарно, сохраняя
+symlink target/mode; failure оставляет original и убирает temporary.
+Core syntax/LWW/queues/rings/compatibility guards сохранены.
+
+Literal null resource selection теперь отдельное значение None на existing
+wire (TOML empty string), а absence/explicit tombstone — пустой marker{},
+не проецируемый на wire. Оба подавляют initial package intake; повторный
+null roundtrip не выглядит потерей настроек и не переписывает конфиг.
+Custom supplied values и status работают без matrix; advisory auto admission
+проверяет DATA до записи auto marker. Full2119PASS/61exactbaselineFAIL/57skip/
+105subtestsPASS, required release-regression PASS. Identifier/null checkpoint
+ещё требует installed proof; Portal1.4.1fullfresh/zeroMCC egress pending,
+universal whole scope не CLOSED, общий1.7 HOLD.

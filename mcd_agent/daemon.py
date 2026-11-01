@@ -38,6 +38,8 @@ from mcd_agent.config import (
     check_profile_drift_with_mcc,
     load_config,
     persist_profile_authority,
+    prepare_profile_selection,
+    persist_profile_runtime_values,
     reapply_profile_authority,
     recover_config_from_mcc,
     remove_runtime_values,
@@ -1972,6 +1974,7 @@ def _persist_resolved_runtime_to_config(
     resolved_metadata: Mapping[str, Any],
     *,
     full_snapshot: bool = False,
+    profile_name: str | None = None,
 ) -> None:
     """Persist resolved values and explicit MCC tombstones.
 
@@ -2000,6 +2003,21 @@ def _persist_resolved_runtime_to_config(
     resource_cleared = bool(resource_key not in resolved and resource_stamp and resource_stamp.get("tombstone"))
     if resource_cleared:
         updates[resource_key] = {}
+    if isinstance(config, AgentConfig) and (resource_key in updates or profile_name is not None):
+        admission_runtime = {**resolved, **({resource_key: {}} if resource_cleared else {})}
+        prepare_profile_selection(config, profile_name or config.profile_name, admission_runtime)
+    removals = {
+        str(key)
+        for key in stable_keys
+        if key in previous
+        and key not in resolved
+        and _runtime_metadata_has_remote_tombstone(resolved_metadata, str(key))
+    }
+    if resource_cleared:
+        removals.discard(resource_key)
+    if profile_name is not None:
+        persist_profile_runtime_values(config.config_file_path, profile_name, updates, removals)
+        return
     if updates:
         try:
             path, changed = upsert_runtime_values(config.config_file_path, updates)
@@ -2011,15 +2029,6 @@ def _persist_resolved_runtime_to_config(
                 )
         except Exception as exc:
             logging.warning("runtime-overrides resolved persistence failed: %s", exc)
-    removals = {
-        str(key)
-        for key in stable_keys
-        if key in previous
-        and key not in resolved
-        and _runtime_metadata_has_remote_tombstone(resolved_metadata, str(key))
-    }
-    if resource_cleared:
-        removals.discard(resource_key)
     if removals:
         try:
             path, changed = remove_runtime_values(config.config_file_path, removals)
@@ -2571,6 +2580,7 @@ def _bootstrap_remote_runtime_before_local_baseline(
             recover_after_update=recover_after_update,
             local_runtime_was_reset=local_runtime_was_reset,
         ),
+        profile_name=desired_profile_from_runtime_response(response),
     )
     store.put_runtime_sync("local_runtime", resolved_runtime)
     store.put_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY, resolved_metadata)
@@ -20469,6 +20479,10 @@ def run_loop(
                     desired_response_profile is not None or response_profile != "passive"
                 ):
                     profile_authority = response_profile
+                if profile_authority:
+                    # A new ref and new profile are one admission. Never persist
+                    # a ref first and try loading it under the old profile name.
+                    prepare_profile_selection(config, profile_authority, overrides)
                 fp = overrides_fingerprint(overrides)
                 config_profile = str(getattr(config, "profile_name", "") or "").strip().lower()
                 profile_sync_needed = bool(profile_authority and config_profile != profile_authority)
@@ -20479,7 +20493,7 @@ def run_loop(
                     # removed only when the winning MCC metadata is an
                     # explicit tombstone; an old/partial response cannot
                     # erase a local stable value during startup.
-                    if fp != last_runtime_overrides_fp or runtime_apply_needed:
+                    if fp != last_runtime_overrides_fp or runtime_apply_needed or profile_sync_needed:
                         _persist_resolved_runtime_to_config(
                             config,
                             local_runtime_overrides(config),
@@ -20490,6 +20504,7 @@ def run_loop(
                                 recover_after_update=False,
                                 local_runtime_was_reset=local_runtime_was_reset,
                             ),
+                            profile_name=profile_authority,
                         )
                     base_config = load_config(config.config_file_path, allow_recover_from_mcc=False)
                     if profile_authority:

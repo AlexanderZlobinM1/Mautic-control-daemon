@@ -4,6 +4,7 @@ from mcd_agent.mcc_transport import mcc_request
 
 import hashlib
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -87,22 +88,6 @@ def _canonical_legacy_whitelist_value(value: object) -> object:
 _SPECIAL_RING_TARGET_KEYS = {
     "priority": "segment_priority_instance_settings",
     "super_priority": "segment_super_priority_instance_settings",
-}
-_PROFILE_NAMES = {
-    "passive",
-    "tiny",
-    "mini",
-    "midi",
-    "maxi",
-    "hiload",
-    "ultra",
-    "farm-tiny",
-    "farm-mini",
-    "farm-midi",
-    "farm-maxi",
-    "farm-hiload",
-    "farm-ultra",
-    "custom",
 }
 
 
@@ -1216,12 +1201,12 @@ def acknowledge_desired_runtime_states(
 
 
 def canonical_profile_from_runtime_response(response: object) -> str | None:
-    """Read the MCC-selected workload profile without binding to a host."""
+    """Parse identity only; the selected catalog admits it before config persistence."""
 
     def value_from(raw: object) -> str | None:
         if isinstance(raw, str):
             candidate = raw.strip().lower()
-            return candidate if candidate in _PROFILE_NAMES else None
+            return candidate if re.fullmatch(r"[a-z][a-z0-9-]{0,63}", candidate) else None
         if not isinstance(raw, dict):
             return None
         for key in (
@@ -1238,7 +1223,7 @@ def canonical_profile_from_runtime_response(response: object) -> str | None:
                     return nested
             elif isinstance(value, str):
                 candidate = value.strip().lower()
-                if candidate in _PROFILE_NAMES:
+                if re.fullmatch(r"[a-z][a-z0-9-]{0,63}", candidate):
                     return candidate
         return None
 

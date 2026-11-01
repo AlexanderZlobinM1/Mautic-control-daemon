@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from mcd_agent.config import load_config
 from mcd_agent.daemon import _campaign_native_fallback_args, _campaign_native_fallback_metrics
-from mcd_agent.mode import SUPPORTED_PROFILE_NAMES
+from mcd_agent.mode import supported_profile_names
 from mcd_agent.runtime_overrides import local_runtime_overrides
 from mcd_agent.state_push import MCCStatePusher
 
@@ -24,13 +24,13 @@ class CampaignRuntimeConfigTests(unittest.TestCase):
             "farm-ultra": (23, 12, 24, 12),
         }
 
-        self.assertNotIn("farm", SUPPORTED_PROFILE_NAMES)
+        self.assertNotIn("farm", supported_profile_names(self.workload_config))
         for profile, (segment_total, trigger_total, host_limit, instance_limit) in expected.items():
             with self.subTest(profile=profile):
                 path = Path(tempfile.mkdtemp()) / "mcd.toml"
                 path.write_text(f'[profile]\nname = "{profile}"\n', encoding="utf-8")
                 cfg = load_config(str(path), allow_recover_from_mcc=False)
-                self.assertIn(profile, SUPPORTED_PROFILE_NAMES)
+                self.assertIn(profile, supported_profile_names(self.workload_config))
                 self.assertEqual(
                     cfg.segment_priority_parallel_idle + cfg.segment_regular_parallel_idle,
                     segment_total,
