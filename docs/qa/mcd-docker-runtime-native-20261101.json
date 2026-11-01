@@ -1,5 +1,5 @@
 {
-  "status": "OLD-DIRECT-R11-CLI-PASS; cleaned R12 attempt1 FAILED at APT deadline; fresh proof pending",
+  "status": "SCOPED-DOCKER-NATIVE-CLEANUP-PASS; final full reset and independent verification pending",
   "scope": "explicit optional Docker runtime installation only; no Mautic Docker engine/capability/preflight changes",
   "source_reference": "19c640e74caa2c92e60e2ee87454d682525b23eb",
   "closure_sha256": "633b281270212f811d2109ea1ff09ec00baca31b089b3c3dff493a5fc3f6cea1",
@@ -103,7 +103,7 @@
       "apply_docker_profile"
     ],
     "retired_transferred_tests": 2,
-    "status": "source-cleaned after direct and ordinary CLI proof; R12 cleaned native and final reset pending",
+    "status": "source and cleaned R12 native verified; final reset pending",
     "native_evidence": "docs/qa/mcd-docker-runtime-native-20261101.json",
     "external_archive_sha256": "803dcb3102a8eeb58f96c2b949215297edd9c74f7e96c9e7e95bbad97dc41176",
     "daemon_installation": false,
@@ -135,6 +135,30 @@
       "manual_actor_intervention": false,
       "full_reset_requested": true,
       "same_bytes_fresh_proof_pending": true
+    },
+    {
+      "attempt": 2,
+      "status": "PASS",
+      "binding_receipt": "/Users/azlobin/.codex/admin/host-diagnostics/mcd-docker-runtime-native-20261101/r12-attempt2-accepted-binding.json",
+      "binding_receipt_sha256": "aea391cbfb822f990285b7d22c2fd24e134bee5f57a69858e4586a4c8c52667c",
+      "raw_receipt_sha256": "491cdbe9ef66c298574abbe1b3d41cfb3bffe2933671a9418836a57e9d36ce1f",
+      "raw_receipt_byte_identical_to_R11": true,
+      "identity_note": "Public dictionaries contain no per-run timestamps; current R12 producer is bound independently by baseline runtime hashes, progression and owner install ACK.",
+      "baseline_sha256": "bd9b24f5f2456bfd2ae220da2a1ec89b08386d71dab8fc6e748beec8cfea306a",
+      "apt_progression_sha256": "15b6b168035363c4869937ff804c3190bfde747f7aa008bfe944b75afb7d471e",
+      "metadata_samples": 19,
+      "metadata_elapsed_sec": 287.7345417309999,
+      "apt_version": "2.8.3",
+      "apt_source_config_sha256": "cb1a2c50d3f407002b1ab402098f161313ff9604e8560fd013b866a92bca6f1a",
+      "apt_source_config_files": 26,
+      "config_and_runtime_unchanged_during_actor": true,
+      "all_six_public_results_exact_old": true,
+      "old_docker_bodies_absent": true,
+      "core_cluster_helpers_preserved": true,
+      "health_matches": true,
+      "recipe_and_timeout_unchanged": true,
+      "token_absence_checked": true,
+      "final_reset_requested": true
     }
   ],
   "cleaned_r12_candidate": {

@@ -466,10 +466,11 @@
         "apply_docker_profile"
       ],
       "retired_transferred_tests": 2,
-      "status": "source-cleaned after direct and ordinary CLI proof; R12 cleaned native and final reset pending",
+      "status": "source and cleaned R12 native verified; final reset pending",
       "native_evidence": "docs/qa/mcd-docker-runtime-native-20261101.json",
       "external_archive_sha256": "803dcb3102a8eeb58f96c2b949215297edd9c74f7e96c9e7e95bbad97dc41176",
-      "daemon_installation": false
+      "daemon_installation": false,
+      "cleaned_native_receipt_sha256": "aea391cbfb822f990285b7d22c2fd24e134bee5f57a69858e4586a4c8c52667c"
     }
   ]
 }

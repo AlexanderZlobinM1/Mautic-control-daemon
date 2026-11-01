@@ -2283,3 +2283,16 @@ Failure receipt290da381a54e8a570cf4a3ec0624f490332403cc0eaf0ba8ccf110d197508602
 is retained alongside diagnostic619fdf3c…; no algorithm/policy/repository change
 was made. Full reset and a separately recorded same-bytes fresh proof are
 pending; this failure is not relabeled as success or proven network outage.
+
+
+Cleaned R12 fresh attempt2 passed after a complete canonical reset, with the
+same wheel/archive/recipe/timeout: all six ordinary CLI public results equal
+the old baseline, Docker ready and verified health. Binding receipt SHA256
+aea391cbfb822f990285b7d22c2fd24e134bee5f57a69858e4586a4c8c52667c
+separately binds current R12 module hashes, fresh baseline and nineteen safe
+read-only metadata samples over287.73s. APT2.8.3 and26source/config fingerprints
+remained unchanged. Raw result receipt491cdbe9… equals R11 byte-for-byte because
+its dictionaries have no per-run timestamp; current producer proof is separate.
+First failed attempt290da381… remains NOT_ACCEPTED, with unknown APT wait cause;
+a successful fresh run does not establish network outage or erase that failure.
+Final full reset and independent clean-baseline verification remain pending.
