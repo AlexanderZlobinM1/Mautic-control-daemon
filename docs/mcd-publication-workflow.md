@@ -89,7 +89,7 @@ using its owner proofs. It is not the template for Dev iteration. Shared hotfixe
 still require the synchronous paired stable/Dev source-and-test cycle above;
 stable publication occurs only in its separately agreed stable release cycle.
 
-## Subsequent operator freeze and stable40 STOP
+## Subsequent operator freeze and operational stable40 HOLD
 
 The operator freezes 1.6 feature development. No new features, scenarios, Portal
 adaptations or architecture-validation builds may target 1.6. New 1.6 work must
@@ -102,8 +102,10 @@ Tests and final Git commits never constitute production authorization: no 1.7
 Approved/latest activation, broad Test assignment, auto-deploy, fleet rollout or
 other host use without a separate explicit operator command. Dev may remain empty.
 
-The latest direct operator STOP also halts the separate stable40 promotion lane,
-superseding the earlier permission to finish it. Preserve immutable Test40 and its
+The operator's direct steering was to freeze 1.6 and move Portal development
+directly to 1.7; the operator did not literally say "STOP40". MCD Inbox interpreted
+that steering as an operational HOLD on stable40 promotion, and the coordinator
+confirmed the HOLD, superseding the earlier permission to finish it. Preserve immutable Test40 and its
 receipts; do not promote it to Approved. Publish's next owned 1.7 action is to
 collect exact owner evidence/final handoff from direct two-host work, without
 per-iteration builds, publication or host operations. Do not interrupt live Dev.
