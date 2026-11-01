@@ -32,12 +32,16 @@
     "public_fetch": "runtime_input removed by default and from apply.fetch",
     "production_enrollment": false,
     "host_actor": false,
-    "channel_publication": false
+    "channel_publication": false,
+    "full_passed": 2044,
+    "full_log_sha256": "9d901489f28890db6f8df2e4b29d4313270a96c763da4df40f4f9e65d00f2782",
+    "full_wire": "final UTF8/256KiB contract"
   },
   "remaining": [
     "Portal-owned standalone private-input success/failure and no-secret regression",
     "MCC-owned authenticated response and capability proof",
     "MCD real pinned external artifact integrated success/failure proof",
     "complete whole 1.7 acceptance before Publish MCD promotion"
-  ]
+  ],
+  "mcd_source_commit": "9bc29e4300"
 }

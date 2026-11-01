@@ -2421,3 +2421,6 @@ normalization and0600 file behavior. No new secret refs/keys/store/runner exists
 MCD focused104checks pass; full snapshot2042pass with exact61baseline failures,
 57skip and105subtests, release-regressionPASS. Cross-owner pinned-artifact and
 standalone success/failure proof still pending; see private-runtime-input QA JSON.
+
+Final private-input UTF8/256KiB source snapshot:2044PASS, same exact61baseline
+failure IDs,57skip and105subtests; no new failures after final wire alignment.
