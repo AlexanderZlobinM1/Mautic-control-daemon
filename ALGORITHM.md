@@ -2727,3 +2727,17 @@ Nullable runtime values определяются существующей AgentC
 строкой; runtime projection восстанавливает declared None, чтобы roundtrip
 не стал ложной пользовательской правкой. Защита рабочего local MySQL socket
 сохранена.91 целевая проверка config/settings PASS; aliases не добавлялись.
+
+R27 ordinary upgrade gate (receipt415b026e) PASS: exact installed Approved39
+updater принимает unlisted QA44, реальный systemd PID меняется; первый startup
+готовит DATA в existing custom cache до profile probe.14 literal профилей и
+два explicit inherited значения совпали, profile artifact GET/HEAD=0.
+Installed consumer через disposable loopback HTTP принимает неизменённые
+MCC-owner handler exports:12 доставленных настроек восстановлены после
+потери projection, revision31/33 ACK applied, unsupported negative ACK
+rejected, более новая локальная timestamp сохраняет приоритет. Это не live
+MCC session/enrollment proof. Config bytes/mtime и foreign file сохранены;
+src и retired template отсутствуют. QA44 не публичный выпуск;39 unchanged.
+Полный reset запрошен; независимая проверка reset ещё требуется. Full suite:
+2100 PASS,61 строго прежних baseline failures,57 skip,105 subtests PASS.
+Legacy cleanup/cleaned native и full Portal fresh gate ещё pending;1.7 HOLD.

@@ -1,5 +1,5 @@
 {
-  "status": "mechanism owner freeze; configuration/first-start integration and native proof pending",
+  "status": "configuration/first-start integrated; R25 fresh-prefix and R27 ordinary39 upgrade native PASS; legacy cleanup and full Portal fresh gate pending; whole1.7 HOLD",
   "scope": "future1.7 only; immutable approved1.6.39 unchanged",
   "manifest": "existing mcd-runtime-package-v1 optional universal_workload_resource_ref plus same ref.file in payload_sha256",
   "builder": {
@@ -85,5 +85,38 @@
     "configuration_file_rewrite_for_initial_ref": false,
     "settings_transport": "existing generic runtime map and LWW/reset engine",
     "winning_tombstone": "empty local config marker suppresses initial bootstrap; projected as absence on runtime wire; no new clock/event"
+  },
+  "R27_native": {
+    "source_commit": "777f5e4b1359e407b8c06d9d9724f73d9fd315e9",
+    "receipt_sha256": "415b026e7f42999064d948e62b531df0ab040e5dba81ed946f34a2e949ac5500",
+    "status": "PASS",
+    "scope": "ordinary installed Approved39 updater to unlisted QA44; actual systemd restart and installed consumer of immutable MCC handler exports through disposable loopback HTTP",
+    "first_start_preseed_before_profile_probe": true,
+    "literal_profiles_checked": 14,
+    "explicit_inherited_values": {
+      "jobs_max_workers": 17,
+      "segment_retry_count": 9
+    },
+    "profile_artifact_GET_HEAD": 0,
+    "runtime_loss_all_delivered_settings_restored": true,
+    "MCC_ack_revisions": [
+      31,
+      33
+    ],
+    "unsupported_keys_ack": "rejected",
+    "newer_local_timestamp_wins": true,
+    "live_MCC_session_or_enrollment": false,
+    "source_and_retired_template_absent": true,
+    "config_bytes_mtime_and_foreign_data_preserved": true,
+    "public_channels_changed": false,
+    "full_reset": "requested; independent final reset proof pending"
+  },
+  "latest_full_regression": {
+    "passed": 2100,
+    "failed": 61,
+    "baseline_failure_ids_exact": true,
+    "skipped": 57,
+    "subtests_passed": 105,
+    "log": "/tmp/mcd-universal-roundtrip-frozen-full.log"
   }
 }
