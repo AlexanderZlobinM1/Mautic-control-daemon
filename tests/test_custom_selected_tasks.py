@@ -60,13 +60,19 @@ def test_private_data_is_rejected_without_cache_mutation(cached,field):
     assert (root/'manifest.json').read_bytes()==before and not list(root.glob('.manifest-*'))
 
 
-def test_remote_catalog_removal_preserves_selected_pins_and_offline_execution(cached,monkeypatch):
+@pytest.mark.parametrize("remote_missing", [False, True])
+def test_remote_catalog_removal_preserves_selected_pins_and_offline_execution(cached,monkeypatch,remote_missing):
     cfg,root,row,file,response=cached;custom.cache_selected_task(cfg,response)
     cfg.custom_repo_base_url='https://fixture.invalid'
     calls=[]
-    monkeypatch.setattr(custom.urllib.request,'urlopen',lambda *a,**kw:calls.append('explicit-refresh') or BytesIO(b'{"items":[]}'))
+    def refresh(*args,**kwargs):
+        calls.append('explicit-refresh')
+        if remote_missing:
+            raise custom.urllib.error.HTTPError('https://fixture.invalid',404,'missing',{},None)
+        return BytesIO(b'{"items":[]}')
+    monkeypatch.setattr(custom.urllib.request,'urlopen',refresh)
     rows,source=custom.fetch_custom_manifest(cfg)
-    assert source=='remote' and any(item['key']==row['key'] and item['sha256']==row['sha256'] for item in rows)
+    assert source==('remote-empty' if remote_missing else 'remote') and any(item['key']==row['key'] and item['sha256']==row['sha256'] for item in rows)
     assert custom.cached_selected_task(cfg,component='nginx',operation='default_stub_operation',operation_input={'apply':False})==response
     monkeypatch.setattr(custom.urllib.request,'urlopen',lambda *a,**kw:pytest.fail('remote latest must not gate cached execution'))
     assert custom.run_custom_script_by_key(cfg,script_key=row['key'],expected_sha256=row['sha256'],detach=False,live_output=False,offline_only=True)==(0,'verified-cache')
@@ -122,3 +128,18 @@ def test_changed_current_fact_is_typed_without_fetch_or_any_write(cached,monkeyp
     with pytest.raises(custom.CustomSelectedTaskError,match='input_mismatch'):
         custom.cached_selected_task(cfg,component='nginx',operation='default_stub_operation',operation_input={'apply':False},runtime_context={'ipv6_listen_forbidden':True})
     assert (root/'manifest.json').read_bytes()==before
+
+
+def test_scheduled_cleanup_keeps_old_selected_task_executable_offline(cached,monkeypatch):
+    import os
+    cfg,root,row,file,response=cached
+    custom.cache_selected_task(cfg,response)
+    cfg.custom_logs_keep_days=cfg.custom_downloads_keep_days=1
+    cfg.custom_logs_max_files=cfg.custom_downloads_max_entries=1
+    unused=root/'downloads'/'unused';unused.mkdir();(unused/'old.sh').write_bytes(b'unselected')
+    os.utime(file.parent,(1,1));os.utime(unused,(1,1))
+    monkeypatch.setattr(custom.urllib.request,'urlopen',lambda *a,**kw:pytest.fail('selected cache must stay offline'))
+    result=custom.cleanup_custom_cache(cfg,known_keys={'unrelated-remote-row'})
+    assert result['downloads_removed']==1 and not unused.exists() and file.exists()
+    assert custom.cached_selected_task(cfg,component='nginx',operation='default_stub_operation',operation_input={'apply':False})==response
+    assert custom.run_custom_script_by_key(cfg,script_key=row['key'],expected_sha256=row['sha256'],detach=False,live_output=False,offline_only=True)==(0,'verified-cache')

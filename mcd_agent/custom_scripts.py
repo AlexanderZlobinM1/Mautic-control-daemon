@@ -148,6 +148,19 @@ def cleanup_custom_cache(config: AgentConfig, *, known_keys: set[str] | None = N
 
     downloads_dir = root / "downloads"
     manifest_keys = set(known_keys or set()) or cached_custom_manifest_keys(config)
+    # An operator-selected task has no TTL. Retain its existing key directory,
+    # including the verified archive/activation, until selection changes explicitly.
+    selected_keys: set[str] = set()
+    try:
+        manifest = json.loads((root / "manifest.json").read_text())
+        rows = _parse_manifest(manifest, deduplicate=False)
+        selections = manifest.get("selected_tasks", {})
+        if isinstance(selections, dict):
+            selected_keys = {record["response"]["external_handler"]["artifact"]["key"]
+                             for key, record in selections.items()
+                             if _public_selected_task(record, key, rows)}
+    except (OSError, ValueError, TypeError, RuntimeError, AttributeError):
+        pass
     if downloads_dir.exists():
         entries = [p for p in downloads_dir.iterdir() if p.is_dir() or p.is_file()]
         entries.sort(key=_safe_mtime, reverse=True)
@@ -155,6 +168,8 @@ def cleanup_custom_cache(config: AgentConfig, *, known_keys: set[str] | None = N
             mtime = _safe_mtime(path)
             age = max(0.0, now - mtime)
             key = path.name
+            if key in selected_keys:
+                continue
             unknown_key_expired = bool(manifest_keys) and key not in manifest_keys and age > missing_key_grace_sec
             if age > downloads_keep_sec or idx >= downloads_max_entries or unknown_key_expired:
                 try:
@@ -483,8 +498,8 @@ def fetch_custom_manifest(config: AgentConfig, *, use_cache_on_error: bool = Tru
         # This keeps interactive UX stable on fresh MCC installs before first custom publish.
         if int(getattr(e, "code", 0) or 0) == 404:
             empty = {"manifest_version": 1, "items": []}
-            cache_path.write_text(json.dumps(empty, ensure_ascii=False) + "\n", encoding="utf-8")
-            return [], "remote-empty"
+            merged = _merge_cached_manifest(config, empty)
+            return _parse_manifest(merged), "remote-empty"
         if use_cache_on_error and cache_path.exists():
             text = cache_path.read_text(encoding="utf-8", errors="replace")
             payload = json.loads(text)
