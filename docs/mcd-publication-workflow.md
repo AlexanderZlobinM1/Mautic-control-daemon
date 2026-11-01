@@ -88,3 +88,22 @@ The separately authorized stable40 Test hotfix lane may reach terminal acceptanc
 using its owner proofs. It is not the template for Dev iteration. Shared hotfixes
 still require the synchronous paired stable/Dev source-and-test cycle above;
 stable publication occurs only in its separately agreed stable release cycle.
+
+## Subsequent operator freeze and stable40 STOP
+
+The operator freezes 1.6 feature development. No new features, scenarios, Portal
+adaptations or architecture-validation builds may target 1.6. New 1.6 work must
+first be justified as a narrow necessary production defect; shared fixes remain
+synchronous with 1.7. Do not backport 1.7 architecture. Existing live Portal/MCD
+versions do not establish a compatibility target for new development.
+
+Portal development proceeds directly with MCD 1.7 on the two authorized Dev hosts.
+Tests and final Git commits never constitute production authorization: no 1.7
+Approved/latest activation, broad Test assignment, auto-deploy, fleet rollout or
+other host use without a separate explicit operator command. Dev may remain empty.
+
+The latest direct operator STOP also halts the separate stable40 promotion lane,
+superseding the earlier permission to finish it. Preserve immutable Test40 and its
+receipts; do not promote it to Approved. Publish's next owned 1.7 action is to
+collect exact owner evidence/final handoff from direct two-host work, without
+per-iteration builds, publication or host operations. Do not interrupt live Dev.
