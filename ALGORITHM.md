@@ -2709,3 +2709,14 @@ ref после restart; marker проецируется в отсутствие 
 второго clock/registry. 87 целевых cfg/settings проверок прошли. Встроенные
 профильные таблицы пока сохранены только для незавершённого legacy-перехода;
 их удаление требует fresh/upgrade/offline installed startup proof.
+
+R25 fresh-prefix native принят как ограниченный MCD startup gate
+(receipt71421a81): plain new venv/ready wheel/preseed до cfg,14 literal
+профилей, два explicit inherited значения,0 profile GET/HEAD; ручной кеш
+работает без parent manifest. Actual passive run-once завершился0; один
+не связанный с profile-data CONNECT metadata-запрос сохранён отдельно.
+Installed verify_only даёт типизированный missing/corrupt code без repair;
+normal mode восстанавливает тот же SHA. Это не full Portal enrollment proof.
+Actual MCC v3 fixture также выявил nullable cluster_node_index: clear после
+числового значения теперь остаётся None вместо int(None). Прочие типы и
+existing LWW clocks не меняются.88 целевых config/settings проверок PASS.

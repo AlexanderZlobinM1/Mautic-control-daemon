@@ -81,3 +81,17 @@ def test_winning_clear_survives_restart_without_resurrecting_initial_package_ref
     daemon._persist_resolved_runtime_to_config(loaded, {}, {}, metadata, full_snapshot=True)
     assert (path.read_bytes(), path.stat().st_mtime_ns) == before
     assert metadata == before_metadata
+
+
+def test_existing_nullable_cluster_index_can_clear_after_a_real_integer_value(tmp_path, monkeypatch):
+    from test_universal_workload import configuration
+    cfg_cache, ref, _, stage = runtime_resource_fixture(tmp_path)
+    monkeypatch.setattr(config, 'DEFAULT_RUNTIME_ARTIFACT_DIR', str(stage))
+    path = tmp_path / 'mcd.toml'; configuration(path, cache_dir=cfg_cache.custom_cache_dir, ref=ref, include_ref=True)
+    path.write_text(path.read_text().replace('name="large"', 'name="custom"'))
+    cfg = config.load_config(str(path), allow_recover_from_mcc=False)
+    cfg, _, _, _ = config.apply_runtime_overrides(cfg, {'cluster_node_index': 1})
+    assert cfg.cluster_node_index == 1
+    cleared, applied, unsupported, blocked = config.apply_runtime_overrides(cfg, {'cluster_node_index': None})
+    assert cleared.cluster_node_index is None and applied == ['cluster_node_index']
+    assert not unsupported and not blocked
