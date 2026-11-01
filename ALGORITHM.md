@@ -2322,8 +2322,24 @@ those remain in MCD, with16recipe-only functions removable only after proof.
 Existing local seven-test baseline passes. Core host identity resolution stays
 in MCD; the recipe consumes effective_mcc_host_name/configured_host_name/
 local_hostname. Existing registration_password is a supported secret input:
-real secrets must never enter public immutable profile artifacts. MCC owner
-must confirm existing protected delivery/ref and identity bindings; Portal
-authoring is synthetic/pure-only pending that integration. No Wazuh host write
-or production enrollment is part of this checkpoint, and old bodies remain.
+real secrets must never enter public immutable profile artifacts. Current no-secret live profile omits empty registration_password and unused
+api_* fields; no new encrypted refs/keys/transport are introduced. Nonempty
+legacy private-input support remains an explicit existing-channel gap, not
+an excuse to publish secrets or change old bodies. No enabled Wazuh host write
+or production enrollment has occurred in this checkpoint, and old bodies remain.
 See docs/qa/mcd-wazuh-system-profile-transfer-20261101.json.
+
+
+Wazuh consumer source now advertises the existing two capabilities and validates
+handler runtime_context as exactly three explicit flat identity fields against
+fresh core resolve_agent_identity before any download/execute. First two fields
+allow explicit null; local_hostname must be nonempty. Missing keys, stale facts
+or a mixed response/handler context fail before execution. This changes no
+existing agent-name selection policy: all25old recipe bodies and fallbacks stay.
+Old read-only native defaults pass (planned/disabled, before==after), receipt
+fb70b48a8d68a1eaf58b42fac52084913c950b004807a7fe7c28e47ba2bd7f8b.
+77focused tests and release-regression pass; full2026PASS/61exactbaselinefail/
+57skip. Portal source06d68… has25exact bodies/16pure tests; synthetic executable
+9ad697… is authoring-only and MUST be recomposed with controlled loopback QA
+profile and actual current identity before native execution. Original inactive
+MCC draft remains rejected; a local active-copy mocked probe is not acceptance.

@@ -1,5 +1,5 @@
 {
-  "status": "BOUNDARY-FROZEN; pure baseline PASS; native/transport integration pending",
+  "status": "CONSUMER-SOURCE-PASS; no-secret authoring frozen; enabled native parity pending",
   "scope": "entire existing apply_wazuh_profile recipe, not isolated helper extraction",
   "source_commit": "62941290ecbc8c70b801b56b4a7db130be48ae23",
   "source_module_sha256": "604d81a8ca7e4c91dc7b32286d878242ae9e81752d607a7f6b70eeb3e5df6f5b",
@@ -72,14 +72,65 @@
   "secret_field_names_only": [
     "registration_password"
   ],
-  "profile_secret_policy": "Never place real secrets in public immutable archive/catalog; existing protected transport/ref contract must be confirmed by MCC owner before integration. Synthetic pure fixtures only.",
+  "profile_secret_policy": "No real secrets in public immutable archive/catalog; current live registration_password is empty. No new encrypted refs/keys/transport. Existing nonempty legacy runtime-input gap is recorded separately; original body branch remains.",
   "owners": {
     "mcd": "adapter, current identity facts, baseline, native proof and cleanup",
     "portal": "exact recipe authoring and pure tests only",
     "mcc": "profile authority, identity/secret delivery contract and distribution",
     "canonical_infra": "disposable lease lifecycle"
   },
-  "native_baseline": "pending read-only phase; no Wazuh writes/enrollment authorized in this checkpoint",
+  "native_baseline": "read-only defaults passed; enabled controlled loopback profile and fresh actual identity still pending",
   "old_writer_removed": false,
-  "production_activation": "HOLD until complete 1.7 acceptance"
+  "production_activation": "HOLD until complete 1.7 acceptance",
+  "identity_contract": {
+    "shape": "flat-three-fields",
+    "handler_and_composition_context_equal": true,
+    "effective_mcc_host_name": "string|null",
+    "configured_host_name": "string|null",
+    "local_hostname": "nonempty string",
+    "fresh_core_exact_compare_before_download_and_execute": true,
+    "old_agent_name_selector_fallbacks_preserved": true,
+    "projection_receipt_sha256": "050565e92a9f95be3921f7b662857fc673f62fbc1cfa9c1ecf567f8bd8e8bd23"
+  },
+  "authority_no_secret_profile": {
+    "raw_sha256": "7ac90bdfe6cbe8ae092a29cbf2d3c806d5418962449e7b4178f17908f8215d95",
+    "canonical_sha256": "965af43098207aa578d78561cbc39872c77ed247e87894acaa3b26512e610d8d",
+    "apply_fields": 18,
+    "registration_password_and_api_fields_omitted": true
+  },
+  "native_readonly_baseline": {
+    "status": "PASS",
+    "scope": "default None\u2192{} absent observation/planned/disabled only; no enabled/enrollment claim",
+    "receipt": "/Users/azlobin/.codex/admin/host-diagnostics/mcd-wazuh-profile-native-20261101/old-native-readonly-default-cases.json",
+    "sha256": "fb70b48a8d68a1eaf58b42fac52084913c950b004807a7fe7c28e47ba2bd7f8b",
+    "before_equals_after": true,
+    "bytecode_writes_disabled": true
+  },
+  "authoring": {
+    "source_archive_sha256": "06d68c60f81f3fc1f906fa078c12552d02d9cc79f0fed52bdfc2bd7344f2f4fe",
+    "generator_sha256": "9a052a954130527614d1422f4460826dc7db7719fb7b36a17caf1abac03d66de",
+    "synthetic_executable_sha256": "9ad6974e642208dec86b2910899e4d8fafcb69a856624c9dd977bb5b9fb4f7eb",
+    "handoff_sha256": "87d0564c8bffb1885ee6b374e127a4ebf4a888190cf794eca43601c425376490",
+    "function_bodies_and_argument_names_exact": 25,
+    "external_annotation_note": "cfg type annotation Any replaces MCD-only AgentConfig; function bodies unchanged",
+    "member_pins_compile_safe_paths_no_mcd_imports": "PASS",
+    "synthetic_context_not_allowed_for_native": true,
+    "portal_pure_tests_passed": 16,
+    "portal_suite_passed": 407,
+    "portal_suite_skipped": 1,
+    "source_commit": "48bd82a"
+  },
+  "consumer_checks": {
+    "focused_passed": 77,
+    "release_regression": "PASS",
+    "full_passed": 2026,
+    "full_failed": 61,
+    "full_skipped": 57,
+    "subtests_passed": 105,
+    "new_failure_ids": [],
+    "missing_baseline_failure_ids": [],
+    "mcc_draft_fixture_sha256": "614b4c5b9d8681ac752db78af278c6db67fd0dbf4174a94a496f63c54cc7a969",
+    "draft_candidate_rejected_inactive": true,
+    "local_in_memory_active_copy_admission": "PASS with mocked execution only; no catalog/native mutation"
+  }
 }

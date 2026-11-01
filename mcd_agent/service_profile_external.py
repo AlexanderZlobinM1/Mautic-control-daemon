@@ -10,6 +10,7 @@ from typing import Any, Mapping
 from mcd_agent.custom_scripts import run_custom_script_by_key
 from mcd_agent.commercial_portal import canonical_json
 from mcd_agent.commercial_self_hosted import ExternalProcessPolicy
+from mcd_agent.host_identity import resolve_agent_identity
 
 CUSTOM_RUNTIME_CAPABILITIES = frozenset({'custom-gzip-entrypoint', 'raw-jsonline-terminal-result'})
 
@@ -62,9 +63,27 @@ def apply_external_service_profile(cfg: Any, fetched: Mapping[str, Any], *,
                                separators=(",", ":"), allow_nan=False).encode("utf-8")
     if hashlib.sha256(profile_bytes).hexdigest() != expected_profile:
         raise ValueError('external_handler_profile_pin_mismatch')
-    # Cluster membership is current agent state, not a hardware-plan default.
+    # Runtime facts come from current agent state, not profile/plan defaults.
     # The producer pins the same explicit context inside the composition data.
-    if component == "mysql" or "runtime_context" in handler:
+    if component == "wazuh":
+        context = handler.get("runtime_context")
+        identity_keys = {"effective_mcc_host_name", "configured_host_name", "local_hostname"}
+        if not isinstance(context, Mapping) or set(context) != identity_keys:
+            raise ValueError("external_handler_runtime_context_missing")
+        if (any(context[key] is not None and not isinstance(context[key], str)
+                for key in ("effective_mcc_host_name", "configured_host_name"))
+                or not isinstance(context["local_hostname"], str)
+                or not context["local_hostname"].strip()):
+            raise ValueError("external_handler_runtime_context_invalid")
+        if "runtime_context" in fetched and fetched["runtime_context"] != context:
+            raise ValueError("external_handler_runtime_context_response_mismatch")
+        identity = resolve_agent_identity(cfg)
+        if not isinstance(identity, Mapping) or not identity_keys <= set(identity):
+            raise ValueError("external_handler_runtime_context_unavailable")
+        actual = {key: identity[key] for key in identity_keys}
+        if dict(context) != actual:
+            raise ValueError("external_handler_runtime_context_mismatch")
+    elif component == "mysql" or "runtime_context" in handler:
         context = handler.get("runtime_context")
         if not isinstance(context, Mapping) or set(context) != {"cluster_id"}:
             raise ValueError("external_handler_runtime_context_missing")

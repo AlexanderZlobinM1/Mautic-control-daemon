@@ -77,7 +77,7 @@ class WazuhServiceProfileTests(unittest.TestCase):
 
     def test_wazuh_apply_once_returns_ok_for_applied_profile(self) -> None:
         old_fetch = service_profiles.fetch_service_profile
-        old_apply = service_profiles.apply_wazuh_profile
+        old_apply = service_profiles.apply_external_service_profile
         try:
             service_profiles.fetch_service_profile = lambda _cfg, _comp: {
                 "status": "ok",
@@ -86,7 +86,7 @@ class WazuhServiceProfileTests(unittest.TestCase):
                     "manager_address": "10.0.0.10",
                 },
             }
-            service_profiles.apply_wazuh_profile = lambda _profile, _cfg, dry_run=False: {
+            service_profiles.apply_external_service_profile = lambda _cfg, _fetched, *, component, dry_run=False: {
                 "status": "applied",
                 "dry_run": bool(dry_run),
             }
@@ -97,14 +97,14 @@ class WazuhServiceProfileTests(unittest.TestCase):
             )
         finally:
             service_profiles.fetch_service_profile = old_fetch
-            service_profiles.apply_wazuh_profile = old_apply
+            service_profiles.apply_external_service_profile = old_apply
 
         self.assertEqual(res.get("status"), "ok")
         self.assertEqual(res.get("apply", {}).get("status"), "applied")
 
     def test_wazuh_apply_once_returns_error_for_failed_profile(self) -> None:
         old_fetch = service_profiles.fetch_service_profile
-        old_apply = service_profiles.apply_wazuh_profile
+        old_apply = service_profiles.apply_external_service_profile
         try:
             service_profiles.fetch_service_profile = lambda _cfg, _comp: {
                 "status": "ok",
@@ -113,7 +113,7 @@ class WazuhServiceProfileTests(unittest.TestCase):
                     "manager_address": "10.0.0.10",
                 },
             }
-            service_profiles.apply_wazuh_profile = lambda _profile, _cfg, dry_run=False: {
+            service_profiles.apply_external_service_profile = lambda _cfg, _fetched, *, component, dry_run=False: {
                 "status": "error",
                 "reason": "manager_unreachable",
             }
@@ -124,7 +124,7 @@ class WazuhServiceProfileTests(unittest.TestCase):
             )
         finally:
             service_profiles.fetch_service_profile = old_fetch
-            service_profiles.apply_wazuh_profile = old_apply
+            service_profiles.apply_external_service_profile = old_apply
 
         self.assertEqual(res.get("status"), "error")
         self.assertEqual(res.get("reason"), "manager_unreachable")

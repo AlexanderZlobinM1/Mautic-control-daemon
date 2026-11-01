@@ -60,7 +60,7 @@ def fetch_service_profile(cfg: AgentConfig, component: str) -> dict[str, Any]:
         "configured_host_name": str(ident.get("configured_host_name") or ""),
         "agent_version": __version__,
     }
-    if comp in {"php_fpm", "mysql", "docker"}:
+    if comp in {"php_fpm", "mysql", "docker", "wazuh"}:
         payload["external_handler_capabilities"] = sorted(CUSTOM_RUNTIME_CAPABILITIES)
     url = base + f"/api/v1/agent/service-profile/{comp.replace('_', '-')}"
     try:
@@ -191,7 +191,7 @@ def service_profiles_apply_once(
     if not isinstance(profile, dict):
         return {"status": "error", "reason": "invalid profile payload", "fetch": fetched}
     external_failed = False
-    if comp in {"php_fpm", "mysql", "docker"}:
+    if comp in {"php_fpm", "mysql", "docker", "wazuh"}:
         # Only delivery/admission lives here; the artifact owns the algorithm.
         # No builtin writer or fallback exists after external selection.
         try:
@@ -199,8 +199,6 @@ def service_profiles_apply_once(
         except ExternalProfileOperationError as exc:
             applied = exc.public_result
             external_failed = True
-    elif comp == "wazuh":
-        applied = apply_wazuh_profile(profile, cfg, dry_run=dry_run)
     else:
         if os.geteuid() != 0:
             raise RuntimeError("service-profile apply requires root")

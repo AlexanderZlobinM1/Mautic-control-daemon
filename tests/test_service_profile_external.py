@@ -91,7 +91,7 @@ def test_missing_descriptor_cannot_silently_use_legacy(fetched,monkeypatch):
         profiles.service_profiles_apply_once(None)
 
 
-@pytest.mark.parametrize('component',['php_fpm','mysql','docker'])
+@pytest.mark.parametrize('component',['php_fpm','mysql','docker','wazuh'])
 def test_existing_post_advertises_actual_capabilities_without_candidate_opt_in(monkeypatch,component):
     cfg=SimpleNamespace(mcc_url='https://controller.invalid',mcc_token='test')
     monkeypatch.setattr(profiles,'resolve_agent_identity',lambda cfg:{'effective_hostname':'disposable'})
@@ -210,3 +210,80 @@ def test_docker_missing_descriptor_does_not_run_retained_reference_writer(monkey
     assert not hasattr(profiles,'apply_docker_profile')
     with pytest.raises(ValueError,match='external_handler_missing'):
         profiles.service_profiles_apply_once(SimpleNamespace(cluster_id=None),component='docker')
+
+
+@pytest.fixture
+def wazuh_fetched(fetched):
+    context={'effective_mcc_host_name':None,'configured_host_name':None,'local_hostname':'observed-local'}
+    profile={'enabled':True,'agent_name_source':'mcc_host_name'}
+    fetched.update(component='wazuh',resolved_plan_key='wazuh:default',profile=profile,runtime_context=copy.deepcopy(context))
+    fetched['external_handler'].update(component='wazuh',resolved_plan_key='wazuh:default',runtime_context=context,
+        profile_input={'source':'response.profile','sha256':hashlib.sha256(canonical_json(profile)).hexdigest()})
+    return fetched
+
+
+@pytest.mark.parametrize('source',['mcc_host_name','configured_host_name','local_hostname','legacy-unknown-source'])
+def test_wazuh_identity_transports_exact_nullable_facts_without_changing_old_selector_policy(wazuh_fetched,monkeypatch,source):
+    profile=wazuh_fetched['profile'];profile['agent_name_source']=source
+    wazuh_fetched['external_handler']['profile_input']['sha256']=hashlib.sha256(canonical_json(profile)).hexdigest()
+    context=copy.deepcopy(wazuh_fetched['external_handler']['runtime_context'])
+    monkeypatch.setattr(ext,'resolve_agent_identity',lambda cfg:{**context,'effective_hostname':'must-not-replace-local'})
+    calls=[]
+    monkeypatch.setattr(ext,'run_custom_script_by_key',lambda *a,**kw:calls.append(kw) or (0,'{"status":"planned"}'))
+    assert ext.apply_external_service_profile(object(),wazuh_fetched,component='wazuh',dry_run=True)=={'status':'planned'}
+    assert len(calls)==1 and wazuh_fetched['external_handler']['runtime_context']==context
+    assert context['effective_mcc_host_name'] is None and context['configured_host_name'] is None
+
+
+@pytest.mark.parametrize('key',['effective_mcc_host_name','configured_host_name','local_hostname'])
+def test_wazuh_missing_identity_key_cannot_be_filled_from_another_name(wazuh_fetched,monkeypatch,key):
+    del wazuh_fetched['external_handler']['runtime_context'][key]
+    monkeypatch.setattr(ext,'run_custom_script_by_key',lambda *a,**kw:pytest.fail('missing fact before download/execution'))
+    with pytest.raises(ValueError,match='runtime_context_missing'):
+        ext.apply_external_service_profile(None,wazuh_fetched,component='wazuh')
+
+
+@pytest.mark.parametrize('key,value',[
+    ('effective_mcc_host_name',False),('effective_mcc_host_name',1),
+    ('configured_host_name',[]),('configured_host_name',{}),
+    ('local_hostname',None),('local_hostname',''),('local_hostname','  '),('local_hostname',True),
+])
+def test_wazuh_invalid_identity_types_never_execute(wazuh_fetched,monkeypatch,key,value):
+    wazuh_fetched['external_handler']['runtime_context'][key]=value
+    monkeypatch.setattr(ext,'run_custom_script_by_key',lambda *a,**kw:pytest.fail('invalid context before execution'))
+    with pytest.raises(ValueError,match='runtime_context_invalid'):
+        ext.apply_external_service_profile(None,wazuh_fetched,component='wazuh')
+
+
+@pytest.mark.parametrize('key',['effective_mcc_host_name','configured_host_name','local_hostname'])
+def test_wazuh_current_identity_drift_blocks_execution(wazuh_fetched,monkeypatch,key):
+    actual={**wazuh_fetched['runtime_context'],key:'changed-current-fact'}
+    monkeypatch.setattr(ext,'resolve_agent_identity',lambda cfg:actual)
+    monkeypatch.setattr(ext,'run_custom_script_by_key',lambda *a,**kw:pytest.fail('stale fact before download/execution'))
+    with pytest.raises(ValueError,match='runtime_context_mismatch'):
+        ext.apply_external_service_profile(None,wazuh_fetched,component='wazuh')
+
+
+def test_wazuh_response_and_descriptor_context_must_agree(wazuh_fetched,monkeypatch):
+    wazuh_fetched['runtime_context']['local_hostname']='different-response'
+    monkeypatch.setattr(ext,'run_custom_script_by_key',lambda *a,**kw:pytest.fail('mixed descriptor response'))
+    with pytest.raises(ValueError,match='runtime_context_response_mismatch'):
+        ext.apply_external_service_profile(None,wazuh_fetched,component='wazuh')
+
+
+def test_wazuh_unavailable_current_fact_is_not_inferred_as_null(wazuh_fetched,monkeypatch):
+    actual=dict(wazuh_fetched['runtime_context']);del actual['configured_host_name']
+    monkeypatch.setattr(ext,'resolve_agent_identity',lambda cfg:actual)
+    monkeypatch.setattr(ext,'run_custom_script_by_key',lambda *a,**kw:pytest.fail('core fact unavailable'))
+    with pytest.raises(ValueError,match='runtime_context_unavailable'):
+        ext.apply_external_service_profile(None,wazuh_fetched,component='wazuh')
+
+
+def test_wazuh_external_dispatch_preserves_failed_public_dictionary_without_builtin_fallback(wazuh_fetched,monkeypatch):
+    raw={'status':'error','reason':'manager_unreachable','actions':['wazuh_repo:ok']}
+    monkeypatch.setattr(ext,'resolve_agent_identity',lambda cfg:wazuh_fetched['runtime_context'])
+    monkeypatch.setattr(profiles,'fetch_service_profile',lambda *a,**kw:wazuh_fetched)
+    monkeypatch.setattr(profiles,'apply_wazuh_profile',lambda *a,**kw:pytest.fail('builtin fallback forbidden'))
+    monkeypatch.setattr(ext,'run_custom_script_by_key',lambda *a,**kw:(1,json.dumps(failed_terminal(raw))))
+    result=profiles.service_profiles_apply_once(SimpleNamespace(cluster_id=None),component='wazuh')
+    assert result['status']=='error' and result['reason']=='manager_unreachable' and result['apply']==raw
