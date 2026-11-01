@@ -241,6 +241,26 @@ def workload_profile_values(resource: dict[str, Any], profile_id: str) -> dict[s
     return dict(values)
 
 
+def workload_resume_profile(resource: dict[str, Any]) -> str:
+    """Resolve the catalog's existing resume policy, never guess an active preset."""
+    from mcd_agent.custom_scripts import CustomSelectedTaskError
+    defaults = resource["catalog"].get("defaults")
+    name = defaults.get("resume_profile") if isinstance(defaults, dict) else None
+    if not isinstance(name, str):
+        raise CustomSelectedTaskError("custom_selected_task_resume_profile_default_missing_or_invalid")
+    custom = resource["catalog"].get("custom", {})
+    if name == custom.get("profile_id") and custom.get("operator_owned") is True:
+        return name
+    pin = resource["catalog"].get("profiles", {}).get(name)
+    if not isinstance(pin, dict):
+        raise CustomSelectedTaskError("custom_selected_task_resume_profile_default_missing_or_invalid")
+    profile = _catalog_member(resource, pin)
+    if profile.get("legacy_compatibility_only", False):
+        raise CustomSelectedTaskError("custom_selected_task_resume_profile_default_missing_or_invalid")
+    workload_profile_values(resource, name)
+    return name
+
+
 def recommend_workload_profile(resource: dict[str, Any], *, cpu_count: int,
                                memory_kib: float, farm: bool = False) -> str:
     table = _catalog_member(resource, resource["catalog"]["hardware_recommendations"])

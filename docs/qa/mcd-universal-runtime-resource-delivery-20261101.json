@@ -117,12 +117,12 @@
     }
   },
   "latest_full_regression": {
-    "passed": 2119,
+    "passed": 2133,
     "failed": 61,
     "baseline_failure_ids_exact": true,
     "skipped": 57,
     "subtests_passed": 105,
-    "log": "/tmp/mcd-identifier-null-final-full.log",
+    "log": "/tmp/mcd-resume-policy-full.log",
     "required_release_regression": "PASS"
   },
   "R28_numerical_cleanup": {
@@ -173,12 +173,16 @@
     "public_channels_changed": false
   },
   "resume_policy_metadata": {
-    "status": "owner freeze delivered to Portal for additive DATA1.0.1; consumer/proofs pending",
+    "status": "DATA1.0.1 explicit MCC QA ref available; minimal generic consumer/source/regression complete; narrow installed proof pending",
     "source_freeze_sha256": "de2c69a453a52fae56f9a9416057dba8effac954c581769105b3a2082d6304a3",
     "field": "catalog.defaults.resume_profile",
     "existing_value": "tiny",
     "saved_nonempty_precedence": "preserve including legacy name",
-    "core_tiny_scheduler_and_legacy_guards": "KEEP"
+    "core_tiny_scheduler_and_legacy_guards": "KEEP",
+    "data_sha256": "b9b654166906b03b439f0db285da3a2fc2a678cfb62db0167f0a82c262f7b5db",
+    "selected_ref_sha256": "a76fd4dfb4419b33b2106edcf544630da36e7f21cf34079a2e133268627dc373",
+    "tests": "14 narrow resume cases; full2133PASS/61exactbaselineFAIL/57skip/105subtestsPASS; release-regressionPASS",
+    "transport": "existing global selected cache only; no latest/provenance/TTL or embedded tiny fallback"
   },
   "Portal_fresh": {
     "producer_version": "1.4.2",
@@ -187,6 +191,16 @@
     "status": "actual native pending; 1.4.1 source defect fixed by Portal before native; no old acceptance inferred",
     "target": "R29/data210; frozen separately, no silent advance",
     "fixture_scope": "limited fake Portal HTTPS registration peer; no production enrollment or live Portal handler claim",
-    "network_gate": "actual independent observer, zero MCC attempts/connections required"
+    "network_gate": "actual independent observer, zero MCC attempts/connections required",
+    "attempt1": {
+      "status": "FAIL",
+      "phase": "pip before preseed/helper and registration",
+      "receipt_sha256": "359413a32753a35fed62696f2d5d0133be38ce432fa1ca60392f3a9b8040cc8a",
+      "traces_sha256": "f42fd399e4e254542603df598985763c1e6d5a9e30ffd0c68e623e3ba510cff3",
+      "helper_count": 0,
+      "activation_registration_count": 0,
+      "cause": "unconfirmed; test-only CA/proxy environment under investigation; no producer/MCD defect asserted",
+      "full_actor_clone_reset": "performed from stopped fresh-MCD-only baseline; canonical VM untouched"
+    }
   }
 }

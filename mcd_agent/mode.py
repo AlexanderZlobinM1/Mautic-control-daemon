@@ -1036,6 +1036,20 @@ def mode_status(*, pause_flag_path: str, config_path: str) -> ModeResult:
     )
 
 
+def _activation_profile(config_path: str, install_dir: str, current_profile: str) -> str:
+    """Preserve saved-profile precedence; only the missing-name default is DATA."""
+    if current_profile != "passive":
+        return current_profile
+    saved = _profile_file(install_dir)
+    previous = saved.read_text(encoding="utf-8").strip() if saved.exists() else ""
+    if previous:
+        return previous.lower()
+    from mcd_agent.config import load_config
+    from mcd_agent.universal_workload import required_workload_resource, workload_resume_profile
+    cfg = load_config(config_path, allow_recover_from_mcc=False)
+    return workload_resume_profile(required_workload_resource(cfg))
+
+
 def mode_activate(*, pause_flag_path: str, install_dir: str, config_path: str) -> ModeResult:
     if os.geteuid() != 0:
         return ModeResult(ok=False, lines=["profile activate requires root"])
@@ -1043,13 +1057,7 @@ def mode_activate(*, pause_flag_path: str, install_dir: str, config_path: str) -
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     lines: list[str] = []
     current_profile = _read_profile_name(config_path)
-    target_profile = current_profile
-    if current_profile == "passive":
-        pf = _profile_file(install_dir)
-        if pf.exists():
-            target_profile = (pf.read_text(encoding="utf-8").strip() or "tiny").lower()
-        else:
-            target_profile = "tiny"
+    target_profile = _activation_profile(config_path, install_dir, current_profile)
     _write_profile_name(config_path, target_profile)
     lines.append(f"profile set: {target_profile}")
 

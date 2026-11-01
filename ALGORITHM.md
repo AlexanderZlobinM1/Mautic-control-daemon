@@ -2805,3 +2805,25 @@ Portal1.4.1nativefresh не принят: ownerдоnativeвыявилnestedcache
 actualfreshgatepending на explicitR29/data210 (не автоматическийnewDATA).
 FixturefakePortalpeer ограниченregistration/archive, zeroMCC проверяет
 отдельный networkobserver. Новых publicchannels/fleetactions нет;1.7HOLD.
+
+Resume DATA source checkpoint: independentPortalDATA1.0.1 b9b65416 и explicit
+MCCQAref a76fd4df доступны, старый210/d910 immutable. Единственнаяpolicydelta
+в metadata — catalog.defaults.resume_profile=tiny; все14profile/hardware/
+settings bytes unchanged. Core _activation_profile оставляет currentactive/
+custom и savednonempty strip+lower (включаяlegacyfarm) как раньше; только
+missing/blank savedname читает generic workload_resume_profile из selected
+verifiedcache. Ссылочныйprofile валидируется, builtin fallback отсутствует.
+Отсутствующий/invaliddefault останавливает mode_activate до profilewrite/cron.
+Core tiny queues/Mautic algorithms не менялись.14 narrow resumecases PASS;
+full2133PASS/61exactbaselineFAIL/57skip/105subtests,release-regressionPASS.
+Новый checkpoint требует только narrow installed lookup/precedence proof,
+без повторения незатронутых закрытых numerical/native gates.
+
+Portalactualfreshattempt1 1.4.2/R29/210 остановлен на pip rc1 до helper0 и
+registration0. Failedreceipt359413a3/tracesf42fd399 сохранены; полныйreset
+ownedactorclone из stoppedfresh-MCD-onlybaseline выполнен. Причинаещёне
+утверждается: test-onlyCA/proxy trust проверяется; production source неpatched.
+Clone является fresh-MCD-only, НЕcleanOS; hostQA /var/www populated. STARTgate
+должен использовать ordinarypopulatedview/passive0businessslots, preserving
+protectedneighbors и0MCC attempts; namespaceempty не подменяет этот proof.
+Текущие frozenPortalactors остаются R29/data210, не newDATA1.0.1.1.7HOLD.

@@ -11,11 +11,9 @@ from pathlib import Path
 import pytest
 
 
-@pytest.fixture
-def installed_workload_data(tmp_path, monkeypatch, request):
+def _installed_workload_fixture(tmp_path, monkeypatch, request, frozen):
     from mcd_agent import config
     from mcd_agent.universal_workload import preseed_runtime_workload_resources
-    frozen = Path(__file__).parent / 'fixtures/universal-workload'
     ref = json.loads((frozen / 'selected-ref.json').read_text())
     raw = (frozen / 'data.tar.gz').read_bytes()
     assert hashlib.sha256(raw).hexdigest() == ref['sha256']
@@ -42,3 +40,15 @@ def installed_workload_data(tmp_path, monkeypatch, request):
     if request.cls is not None:
         request.cls.workload_config = str(path)
     return {'runtime': stage, 'cache': cache, 'config_path': str(path), 'ref': ref}
+
+
+@pytest.fixture
+def installed_workload_data(tmp_path, monkeypatch, request):
+    return _installed_workload_fixture(tmp_path, monkeypatch, request,
+                                       Path(__file__).parent / 'fixtures/universal-workload')
+
+
+@pytest.fixture
+def resume_workload_data(tmp_path, monkeypatch, request):
+    return _installed_workload_fixture(tmp_path, monkeypatch, request,
+                                       Path(__file__).parent / 'fixtures/universal-workload-1.0.1')
