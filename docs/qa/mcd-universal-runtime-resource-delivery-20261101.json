@@ -1,0 +1,66 @@
+{
+  "status": "mechanism owner freeze; configuration/first-start integration and native proof pending",
+  "scope": "future1.7 only; immutable approved1.6.39 unchanged",
+  "manifest": "existing mcd-runtime-package-v1 optional universal_workload_resource_ref plus same ref.file in payload_sha256",
+  "builder": {
+    "flags": [
+      "--universal-workload-ref <explicit immutable JSON>",
+      "--universal-workload-archive <local exact bytes>"
+    ],
+    "together_required": true,
+    "automatic_selection_or_fetch": false,
+    "source_wheel_embedding": false,
+    "closure_verified_before_build_staging": true
+  },
+  "preseed": {
+    "callable": "mcd_agent.universal_workload.preseed_runtime_workload_resources",
+    "keyword_arguments": {
+      "runtime_dir": "str|Path, verified ready runtime directory",
+      "cache_dir": "str|Path, explicit existing custom cache directory",
+      "expected_manifest_sha256": "str|None, detached pin from caller when present",
+      "verify_only": "bool=False"
+    },
+    "returns": {
+      "selected_resource": "{status:ok,key,sha256,cache_path}",
+      "old_package_without_resource_ref": "{status:not_required}"
+    },
+    "fresh_order": "verify complete staged package/resource closure before pip; install wheel; invoke installed preseed helper before first config/profile/registration/start",
+    "normal_mode": "matching cache has no writes; missing/corrupt exact selected cache repaired atomically from the same embedded verified bytes, no HTTP",
+    "completed_replay_mode": "verify_only=True, matching cache no writes; missing/corrupt fails typed without repair; invoke after existing identity/key binding checks",
+    "cache_error": "CustomSelectedTaskError(custom_selected_task_artifact_missing_or_corrupt)",
+    "no_config_or_settings_DB_load": true,
+    "no_profile_or_registration_execution": true,
+    "no_script_runner_or_network": true,
+    "replay_python_flags": [
+      "-I",
+      "-B"
+    ]
+  },
+  "transported_bridge": {
+    "validation": "self-contained stdlib checks match installed data validator AST; full member closure before pip",
+    "cache_directory": "--custom-cache-dir required when ref present",
+    "installer_method": "_install_runtime(install_dir,stage,manifest,custom_cache_dir=Path(...))",
+    "preseed_call": "installed package only after pip, before config/profile; no source/staging import fallback"
+  },
+  "commercial_binding_replay": {
+    "class": "mcd_agent.commercial_portal.CommercialState",
+    "constructor": "CommercialState(path,read_only=True)",
+    "semantics": "existing regular DB required; SQLite mode=ro, no init/schema/scrub/chmod; get supported, writes rejected by SQLite",
+    "import_calls_load_config": false,
+    "legacy_default_constructor": "unchanged mutating initialization for existing callers"
+  },
+  "QA_explicit_MCC_ref": {
+    "sha256": "d910bc80d441c0a630ceb7e689037f53f8dc15778154f04b425562c0f406d87d",
+    "size_bytes": 3989,
+    "archive_sha256": "210ac92079dc9b8b3aba17fdcb3dc1ae7426e4e4f719e7754f8fc8b835f93e96",
+    "production_activation": false
+  },
+  "tests": {
+    "latest_focused_passed": 24,
+    "prior_runtime_distribution_lifecycle_passed": 15,
+    "prior_runtime_bootstrap_passed": 8,
+    "full_regression": "running"
+  },
+  "profile_tables_removed": false,
+  "native_consumer_acceptance": false
+}

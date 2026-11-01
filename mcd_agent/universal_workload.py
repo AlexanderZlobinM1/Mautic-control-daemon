@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 import re
 import tarfile
 from typing import Any
@@ -24,11 +24,22 @@ def _relative_path(value: Any) -> str:
     return value
 
 
-def load_universal_workload_resource(config: Any, selected: dict[str, Any], *,
-                                     offline_only: bool = True) -> dict[str, Any]:
-    """Verify the exact selected data closure without extracting or executing it."""
-    from mcd_agent.custom_scripts import _fetch_script_to_cache
+def selected_universal_resource(ref: dict[str, Any]) -> dict[str, Any]:
+    """Adapt the existing host runtime-map reference to the shared data cache."""
+    fields = {"schema", "key", "file", "sha256", "size_bytes", "resource_root", "catalog", "files"}
+    if (not isinstance(ref, dict) or set(ref) != fields
+            or ref["schema"] != "mcc-universal-workload-resource-ref-v1"
+            or type(ref["size_bytes"]) is not int or ref["size_bytes"] < 0):
+        raise RuntimeError("selected universal workload resource reference is invalid")
+    _relative_path(ref["file"])
+    selected = {key: ref[key] for key in ("key", "file", "sha256", "size_bytes")}
+    selected.update(kind="data_only_no_entrypoint", entrypoint=None,
+                    resource={key: ref[key] for key in ("resource_root", "catalog", "files")})
+    _selection_pins(selected)
+    return selected
 
+
+def _selection_pins(selected: dict[str, Any]) -> tuple[str, dict[str, Any], dict[str, Any]]:
     if (selected.get("kind") != "data_only_no_entrypoint"
             or selected.get("entrypoint") is not None
             or selected.get("key") in {".", ".."}
@@ -54,9 +65,15 @@ def load_universal_workload_resource(config: Any, selected: dict[str, Any], *,
     catalog_pin = descriptor.get("catalog")
     if not isinstance(catalog_pin, dict) or pins.get(catalog_pin.get("path")) != catalog_pin:
         raise RuntimeError("selected universal resource catalog pin is missing or inconsistent")
-    archive_path = _fetch_script_to_cache(config, selected, offline_only=offline_only, data_only=True)
+    return root, pins, catalog_pin
+
+
+def verify_universal_workload_archive(raw: bytes, selected: dict[str, Any]) -> dict[str, Any]:
+    """Verify immutable data before a package install or cache preseed mutates state."""
+    root, pins, catalog_pin = _selection_pins(selected)
+    if "size_bytes" in selected and len(raw) != selected["size_bytes"]:
+        raise RuntimeError("selected universal resource archive size mismatch")
     # Recheck the bytes opened for parsing, rather than trusting a mutable path.
-    raw = archive_path.read_bytes()
     if hashlib.sha256(raw).hexdigest() != selected["sha256"]:
         raise RuntimeError("selected universal resource archive checksum mismatch")
     members: dict[str, Any] = {}
@@ -81,6 +98,55 @@ def load_universal_workload_resource(config: Any, selected: dict[str, Any], *,
     if not isinstance(catalog, dict):
         raise RuntimeError("selected universal resource catalog is invalid")
     return {"root": root, "catalog": catalog, "members": members, "pins": pins}
+
+
+def load_universal_workload_resource(config: Any, selected: dict[str, Any], *,
+                                     offline_only: bool = True) -> dict[str, Any]:
+    from mcd_agent.custom_scripts import _fetch_script_to_cache
+    _selection_pins(selected)
+    path = _fetch_script_to_cache(config, selected, offline_only=offline_only, data_only=True)
+    return verify_universal_workload_archive(path.read_bytes(), selected)
+
+
+def preseed_universal_workload_resource(config: Any, ref: dict[str, Any], raw: bytes) -> Any:
+    """Use the normal cache's atomic writer; never select or fetch another revision."""
+    from mcd_agent.custom_scripts import _fetch_script_to_cache
+    selected = selected_universal_resource(ref)
+    verify_universal_workload_archive(raw, selected)
+    return _fetch_script_to_cache(config, selected, offline_only=True, data_only=True, preseed_bytes=raw)
+
+
+def preseed_runtime_workload_resources(*, runtime_dir: str | Path, cache_dir: str | Path,
+                                      expected_manifest_sha256: str | None = None,
+                                      verify_only: bool = False) -> dict[str, Any]:
+    """Prepare verified ready-package data before configuration/profile loading.
+
+    Package installers already verify their detached archive/manifest pins. This
+    callable repeats payload/closure verification, uses installed code only, and
+    does not load configuration, register an agent, apply a profile or start it.
+    """
+    from mcd_agent.custom_scripts import standalone_custom_cache_config
+    from mcd_agent.self_update import _runtime_manifest
+
+    runtime = Path(runtime_dir)
+    manifest_path = runtime / "mcd-runtime-manifest.json"
+    if expected_manifest_sha256 is not None and hashlib.sha256(manifest_path.read_bytes()).hexdigest() != expected_manifest_sha256:
+        raise RuntimeError("runtime resource manifest checksum mismatch")
+    manifest = _runtime_manifest(runtime)
+    if manifest is None:
+        raise RuntimeError("runtime resource preseed requires a verified runtime manifest")
+    ref = manifest.get("universal_workload_resource_ref")
+    if ref is None:
+        return {"status": "not_required"}
+    selected = selected_universal_resource(ref)
+    config = standalone_custom_cache_config(cache_dir)
+    if verify_only:
+        from mcd_agent.custom_scripts import _fetch_script_to_cache
+        cached = _fetch_script_to_cache(config, selected, offline_only=True, data_only=True)
+        verify_universal_workload_archive(cached.read_bytes(), selected)
+    else:
+        cached = preseed_universal_workload_resource(config, ref, (runtime / ref["file"]).read_bytes())
+    return {"status": "ok", "key": ref["key"], "sha256": ref["sha256"], "cache_path": str(cached)}
 
 
 def _catalog_member(resource: dict[str, Any], pin: dict[str, Any]) -> dict[str, Any]:

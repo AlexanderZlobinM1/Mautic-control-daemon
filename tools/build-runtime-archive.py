@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -200,10 +201,29 @@ def _write_deterministic_archive(stage: Path, destination: Path) -> None:
                     )
 
 
-def build(source: Path, destination: Path, *, source_commit: str = "", source_archive_sha256: str = "") -> Path:
+def build(source: Path, destination: Path, *, source_commit: str = "", source_archive_sha256: str = "",
+          universal_workload_ref: Path | None = None, universal_workload_archive: Path | None = None) -> Path:
     source = source.resolve()
     source_commit = _canonical_source_commit(source, source_commit)
     version = _source_version(source)
+    if (universal_workload_ref is None) != (universal_workload_archive is None):
+        raise RuntimeError("universal workload reference and archive must be supplied together")
+    resource_ref = None
+    resource_bytes = None
+    if universal_workload_ref is not None:
+        if universal_workload_ref.is_symlink() or universal_workload_archive.is_symlink():
+            raise RuntimeError("universal workload build inputs must be regular files, not links")
+        resource_ref = json.loads(universal_workload_ref.read_text(encoding="utf-8"))
+        resource_bytes = universal_workload_archive.read_bytes()
+        # This is a development build input, never a production import fallback.
+        helper_path = source / "mcd_agent" / "universal_workload.py"
+        spec = importlib.util.spec_from_file_location("mcd_build_universal_data", helper_path)
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        selected = helper.selected_universal_resource(resource_ref)
+        if Path(resource_ref["file"]).parts[0] != "resources":
+            raise RuntimeError("universal workload data must occupy the resources payload namespace")
+        helper.verify_universal_workload_archive(resource_bytes, selected)
     manifest_sha256 = ""
     with tempfile.TemporaryDirectory(prefix="mcd-runtime-build-") as tmp:
         tmp_path = Path(tmp)
@@ -212,6 +232,12 @@ def build(source: Path, destination: Path, *, source_commit: str = "", source_ar
         stage = tmp_path / "stage"
         stage.mkdir()
         _copy_runtime_resources(source, stage)
+        if resource_ref is not None:
+            target = stage / resource_ref["file"]
+            if target.exists() or target.is_symlink():
+                raise RuntimeError("universal workload data collides with runtime payload")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(resource_bytes)
         wheel_stage = stage / "wheel"
         wheel_stage.mkdir()
         staged_wheel = wheel_stage / wheel.name
@@ -230,6 +256,8 @@ def build(source: Path, destination: Path, *, source_commit: str = "", source_ar
             "payload_sha256": payload,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
+        if resource_ref is not None:
+            manifest["universal_workload_resource_ref"] = resource_ref
         manifest_path = stage / MANIFEST_NAME
         manifest_path.write_text(
             json.dumps(manifest, ensure_ascii=True, indent=2, sort_keys=True) + "\n",
@@ -259,6 +287,13 @@ def build(source: Path, destination: Path, *, source_commit: str = "", source_ar
         "forbidden_source_material": [],
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
+    if resource_ref is not None:
+        receipt["universal_workload_resource"] = {
+            "reference_sha256": _sha256(universal_workload_ref),
+            "archive_sha256": resource_ref["sha256"],
+            "archive_size_bytes": resource_ref["size_bytes"],
+            "ref": resource_ref,
+        }
     receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return receipt_path
 
@@ -271,12 +306,16 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--source-commit", default="")
     parser.add_argument("--source-archive-sha256", default="")
+    parser.add_argument("--universal-workload-ref", type=Path)
+    parser.add_argument("--universal-workload-archive", type=Path)
     args = parser.parse_args()
     receipt = build(
         args.source,
         args.output,
         source_commit=args.source_commit,
         source_archive_sha256=args.source_archive_sha256,
+        universal_workload_ref=args.universal_workload_ref,
+        universal_workload_archive=args.universal_workload_archive,
     )
     print(receipt)
     return 0

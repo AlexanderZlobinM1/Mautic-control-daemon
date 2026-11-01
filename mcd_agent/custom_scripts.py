@@ -540,7 +540,7 @@ def _activate_bundle(archive_path: Path, cache_dir: Path, digest: str, entrypoin
 
 
 def _fetch_script_to_cache(config: AgentConfig, script: dict[str, Any], *, offline_only: bool = False,
-                           data_only: bool = False) -> Path:
+                           data_only: bool = False, preseed_bytes: bytes | None = None) -> Path:
     file_rel = str(script.get("file", "")).strip()
     if not file_rel:
         raise RuntimeError("custom script entry has empty file field")
@@ -551,6 +551,8 @@ def _fetch_script_to_cache(config: AgentConfig, script: dict[str, Any], *, offli
     expected_sha = str(script.get("sha256", "")).strip().lower()
     if re.fullmatch(r"[0-9a-f]{64}", expected_sha) is None:
         raise RuntimeError("custom artifact requires an expected SHA-256")
+    if preseed_bytes is not None and (not data_only or hashlib.sha256(preseed_bytes).hexdigest() != expected_sha):
+        raise RuntimeError("data-only cache preseed checksum mismatch")
 
     entrypoint = script.get("entrypoint")
     if data_only and entrypoint is not None:
@@ -572,18 +574,21 @@ def _fetch_script_to_cache(config: AgentConfig, script: dict[str, Any], *, offli
         if not data_only:
             cached.chmod(cached.stat().st_mode | 0o500)
         return cached
-    if offline_only:
+    if offline_only and preseed_bytes is None:
         raise CustomSelectedTaskError("custom_selected_task_artifact_missing_or_corrupt")
     dl_dir.mkdir(parents=True, exist_ok=True)
-    base = _manifest_url(config).rsplit("/", 1)[0] + "/"
-    url = urllib.parse.urljoin(base, file_rel)
-    req = mcc_request(url, headers=_headers(config))
     staged: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(dir=dl_dir, prefix=".download-", delete=False) as temporary:
             staged = Path(temporary.name)
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                shutil.copyfileobj(resp, temporary)
+            if preseed_bytes is not None:
+                temporary.write(preseed_bytes)
+            else:
+                base = _manifest_url(config).rsplit("/", 1)[0] + "/"
+                url = urllib.parse.urljoin(base, file_rel)
+                req = mcc_request(url, headers=_headers(config))
+                with urllib.request.urlopen(req, timeout=120) as resp:
+                    shutil.copyfileobj(resp, temporary)
             temporary.flush()
             os.fsync(temporary.fileno())
         got_sha = hashlib.sha256(staged.read_bytes()).hexdigest().lower()

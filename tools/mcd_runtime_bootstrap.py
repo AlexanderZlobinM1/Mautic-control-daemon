@@ -32,9 +32,10 @@ import ast
 import base64
 from contextlib import contextmanager
 import hashlib
+import io
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shutil
 import subprocess
@@ -111,6 +112,94 @@ def _safe_relative(root: Path, raw_name: str) -> Path:
     return candidate
 
 
+# The transported installer is self-contained: keep these pure data checks
+# equivalent to the installed universal_workload consumer, with no source imports.
+def _universal_relative_path(value: Any) -> str:
+    if not isinstance(value, str) or not value or "\x00" in value:
+        raise RuntimeError("universal resource path is invalid")
+    path = PurePosixPath(value)
+    if path.is_absolute() or ".." in path.parts or path.as_posix() != value:
+        raise RuntimeError("universal resource path is invalid")
+    return value
+
+
+def _universal_selected_resource(ref: dict[str, Any]) -> dict[str, Any]:
+    """Adapt the existing host runtime-map reference to the shared data cache."""
+    fields = {"schema", "key", "file", "sha256", "size_bytes", "resource_root", "catalog", "files"}
+    if (not isinstance(ref, dict) or set(ref) != fields
+            or ref["schema"] != "mcc-universal-workload-resource-ref-v1"
+            or type(ref["size_bytes"]) is not int or ref["size_bytes"] < 0):
+        raise RuntimeError("selected universal workload resource reference is invalid")
+    _universal_relative_path(ref["file"])
+    selected = {key: ref[key] for key in ("key", "file", "sha256", "size_bytes")}
+    selected.update(kind="data_only_no_entrypoint", entrypoint=None,
+                    resource={key: ref[key] for key in ("resource_root", "catalog", "files")})
+    _universal_selection_pins(selected)
+    return selected
+
+
+def _universal_selection_pins(selected: dict[str, Any]) -> tuple[str, dict[str, Any], dict[str, Any]]:
+    if (selected.get("kind") != "data_only_no_entrypoint"
+            or selected.get("entrypoint") is not None
+            or selected.get("key") in {".", ".."}
+            or not re.fullmatch(r"[A-Za-z0-9_.-]+", str(selected.get("key", "")))):
+        raise RuntimeError("selected universal resource must be data-only with an exact key")
+    descriptor = selected.get("resource")
+    if not isinstance(descriptor, dict):
+        raise RuntimeError("selected universal resource descriptor is missing")
+    root = _universal_relative_path(descriptor.get("resource_root"))
+    rows = descriptor.get("files")
+    if not isinstance(rows, list) or not rows:
+        raise RuntimeError("selected universal resource member pins are missing")
+    pins: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise RuntimeError("selected universal resource member pin is invalid")
+        name = _universal_relative_path(row.get("path"))
+        if (not name.startswith(root + "/") or name in pins
+                or not re.fullmatch(r"[0-9a-f]{64}", str(row.get("sha256", "")))
+                or type(row.get("size_bytes")) is not int or row["size_bytes"] < 0):
+            raise RuntimeError("selected universal resource member pin is invalid")
+        pins[name] = row
+    catalog_pin = descriptor.get("catalog")
+    if not isinstance(catalog_pin, dict) or pins.get(catalog_pin.get("path")) != catalog_pin:
+        raise RuntimeError("selected universal resource catalog pin is missing or inconsistent")
+    return root, pins, catalog_pin
+
+
+def _universal_verify_archive(raw: bytes, selected: dict[str, Any]) -> dict[str, Any]:
+    """Verify immutable data before a package install or cache preseed mutates state."""
+    root, pins, catalog_pin = _universal_selection_pins(selected)
+    if "size_bytes" in selected and len(raw) != selected["size_bytes"]:
+        raise RuntimeError("selected universal resource archive size mismatch")
+    # Recheck the bytes opened for parsing, rather than trusting a mutable path.
+    if hashlib.sha256(raw).hexdigest() != selected["sha256"]:
+        raise RuntimeError("selected universal resource archive checksum mismatch")
+    members: dict[str, Any] = {}
+    with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as archive:
+        for member in archive:
+            if member.isdir():
+                continue
+            name = _universal_relative_path(member.name)
+            pin = pins.get(name)
+            if not member.isfile() or name in members or pin is None or member.size != pin["size_bytes"]:
+                raise RuntimeError("selected universal resource has an unexpected member")
+            stream = archive.extractfile(member)
+            if stream is None:
+                raise RuntimeError("selected universal resource member is unreadable")
+            data = stream.read()
+            if hashlib.sha256(data).hexdigest() != pin["sha256"]:
+                raise RuntimeError("selected universal resource member checksum mismatch")
+            members[name] = json.loads(data)
+    if set(members) != set(pins):
+        raise RuntimeError("selected universal resource required member is missing")
+    catalog = members[catalog_pin["path"]]
+    if not isinstance(catalog, dict):
+        raise RuntimeError("selected universal resource catalog is invalid")
+    return {"root": root, "catalog": catalog, "members": members, "pins": pins}
+
+
+
 def _validate_manifest(stage: Path) -> dict[str, Any]:
     manifest_path = stage / MANIFEST_NAME
     try:
@@ -162,6 +251,12 @@ def _validate_manifest(stage: Path) -> dict[str, Any]:
         raise BridgeError("runtime manifest points to missing wheel or requirements")
     if not (stage / "mcd_agent" / "__init__.py").is_file():
         raise BridgeError("runtime-only payload is missing mcd_agent package")
+    ref = raw.get("universal_workload_resource_ref")
+    if ref is not None:
+        selected = _universal_selected_resource(ref)
+        if payload.get(ref["file"]) != ref["sha256"]:
+            raise BridgeError("runtime manifest does not bind the selected universal resource payload")
+        _universal_verify_archive(_safe_relative(stage, ref["file"]).read_bytes(), selected)
     return raw
 
 
@@ -374,7 +469,12 @@ def _restore_legacy_runtime_package(install_dir: Path, snapshot: Path) -> None:
             _copy_runtime_entry(entry, site_dir / entry.name)
 
 
-def _install_runtime(install_dir: Path, stage: Path, manifest: dict[str, Any]) -> dict[str, str]:
+def _install_runtime(install_dir: Path, stage: Path, manifest: dict[str, Any], *,
+                     custom_cache_dir: Path | None = None) -> dict[str, str]:
+    if manifest.get("universal_workload_resource_ref") is not None:
+        _validate_manifest(stage)
+        if custom_cache_dir is None:
+            raise BridgeError("selected universal resource requires explicit custom cache directory")
     python = _venv_python(install_dir)
     requirements = stage / str(manifest["requirements"])
     wheel = stage / str(manifest["wheel"])
@@ -432,6 +532,12 @@ def _install_runtime(install_dir: Path, stage: Path, manifest: dict[str, Any]) -
         )
     if Path(imported_path).resolve() != expected_path:
         raise BridgeError(f"installed runtime path mismatch expected={expected_path} imported={imported_path}")
+    if manifest.get("universal_workload_resource_ref") is not None:
+        _run([str(python), "-I", "-c",
+              "import sys;from mcd_agent.universal_workload import preseed_runtime_workload_resources;"
+              "preseed_runtime_workload_resources(runtime_dir=sys.argv[1],cache_dir=sys.argv[2],"
+              "expected_manifest_sha256=sys.argv[3])",
+              str(stage), str(custom_cache_dir), _sha256(stage / MANIFEST_NAME)], cwd=Path("/"))
     return {
         "package_version": package_version,
         "imported_version": imported_version,
@@ -893,7 +999,7 @@ def bridge(args: argparse.Namespace) -> dict[str, Any]:
                 # source directory.  The legacy daemon remains runnable until
                 # every package/staging check succeeds.
                 legacy_runtime_snapshot = _snapshot_legacy_runtime_package(install_dir)
-                package_result = _install_runtime(install_dir, stage, manifest)
+                package_result = _install_runtime(install_dir, stage, manifest, custom_cache_dir=getattr(args, "custom_cache_dir", None))
 
                 if old_src.exists():
                     raise BridgeError(f"rollback source path already exists: {old_src}")
@@ -1034,6 +1140,7 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Read-only pre-bridge profile-selection capture; does not require an archive",
     )
+    parser.add_argument("--custom-cache-dir", type=Path, help="Explicit existing data cache for a selected universal resource")
     parser.add_argument("--json", action="store_true")
     return parser
 

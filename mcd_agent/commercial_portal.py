@@ -783,10 +783,17 @@ def download_external_artifact(uri: str, *, expected_size: int, timeout_sec: int
 class CommercialState:
     """Small durable Portal state store, isolated from corporate MCC state."""
 
-    def __init__(self, path: str):
+    def __init__(self, path: str, *, read_only: bool = False):
         self.path = str(path)
+        self.read_only = bool(read_only)
+        if self.read_only:
+            if not Path(self.path).is_file() or Path(self.path).is_symlink():
+                raise ValueError("commercial_state_read_only_existing_file_required")
+            with self._connect() as db:
+                db.execute("SELECT key, value FROM commercial_meta LIMIT 0")
+            return
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             db.execute("CREATE TABLE IF NOT EXISTS commercial_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS commercial_nonces (nonce TEXT PRIMARY KEY, seen_at REAL NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS commercial_receipts (job_id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
@@ -808,18 +815,23 @@ class CommercialState:
         except OSError:
             pass
 
+    def _connect(self, **kwargs: Any) -> sqlite3.Connection:
+        if self.read_only:
+            return sqlite3.connect(Path(self.path).resolve().as_uri() + "?mode=ro", uri=True, **kwargs)
+        return sqlite3.connect(self.path, **kwargs)
+
     def get(self, key: str) -> Any:
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             row = db.execute("SELECT value FROM commercial_meta WHERE key=?", (key,)).fetchone()
         return json.loads(row[0]) if row else None
 
     def put(self, key: str, value: Any) -> None:
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             db.execute("INSERT INTO commercial_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, json.dumps(value, ensure_ascii=True, sort_keys=True)))
 
     def put_many(self, values: Mapping[str, Any], *, delete_keys: tuple[str, ...] = ()) -> None:
         """Commit a related state transition as one durable transaction."""
-        with sqlite3.connect(self.path, timeout=30) as db:
+        with self._connect(timeout=30) as db:
             db.execute("BEGIN IMMEDIATE")
             for key in delete_keys:
                 db.execute("DELETE FROM commercial_meta WHERE key=?", (str(key),))
@@ -831,7 +843,7 @@ class CommercialState:
                 )
 
     def delete(self, key: str) -> None:
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             db.execute("DELETE FROM commercial_meta WHERE key=?", (str(key),))
 
     def apply_portal_artifact_trust_update(self, command: Mapping[str, Any]) -> dict[str, Any]:
@@ -840,7 +852,7 @@ class CommercialState:
         fingerprint = hashlib.sha256(canonical_json(update)).hexdigest()
         command_id = update["command_id"]
         idempotency_key = update["idempotency_key"]
-        with sqlite3.connect(self.path, timeout=30) as db:
+        with self._connect(timeout=30) as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT value FROM commercial_meta WHERE key=?", ("portal_artifact_trust_updates_v1",)).fetchone()
             history = json.loads(row[0]) if row else {}
@@ -930,7 +942,7 @@ class CommercialState:
     def prepare_inventory_snapshot(self, *, installation_id: str, inventory: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
         """Atomically assign a monotonic revision to changed durable inventory."""
         installation = str(installation_id)
-        with sqlite3.connect(self.path, timeout=30) as db:
+        with self._connect(timeout=30) as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT value FROM commercial_meta WHERE key=?", ("commercial_inventory_state_v1",)).fetchone()
             state = self._inventory_state_record(json.loads(row[0]) if row else None)
@@ -1002,7 +1014,7 @@ class CommercialState:
         except (TypeError, ValueError):
             return False
         rejected_hash = inventory_durable_hash(inventory)
-        with sqlite3.connect(self.path, timeout=30) as db:
+        with self._connect(timeout=30) as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT value FROM commercial_meta WHERE key=?", ("commercial_inventory_state_v1",)).fetchone()
             state = self._inventory_state_record(json.loads(row[0]) if row else None)
@@ -1037,7 +1049,7 @@ class CommercialState:
             revision = int(inventory.get("snapshot_revision") or 0)
         except (TypeError, ValueError):
             return False
-        with sqlite3.connect(self.path, timeout=30) as db:
+        with self._connect(timeout=30) as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT value FROM commercial_meta WHERE key=?", ("commercial_inventory_state_v1",)).fetchone()
             state = self._inventory_state_record(json.loads(row[0]) if row else None)
@@ -1081,7 +1093,7 @@ class CommercialState:
         return self.portal_enrollment_enabled
 
     def remember_nonce(self, nonce: str, now: float) -> bool:
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             try:
                 db.execute("INSERT INTO commercial_nonces(nonce,seen_at) VALUES(?,?)", (nonce, now))
                 return True
@@ -1089,7 +1101,7 @@ class CommercialState:
                 return False
 
     def next_usage_sequence(self, metric: str) -> int:
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             row = db.execute("SELECT value FROM commercial_usage_sequences WHERE metric=?", (metric,)).fetchone()
             value = int(row[0]) + 1 if row else 0
             db.execute("INSERT INTO commercial_usage_sequences(metric,value) VALUES(?,?) ON CONFLICT(metric) DO UPDATE SET value=excluded.value", (metric, value))

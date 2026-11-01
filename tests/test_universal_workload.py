@@ -96,3 +96,66 @@ def test_data_download_reuses_existing_transport_without_executable_permissions(
     assert len(requests) == 1 and stat.S_IMODE(cached.stat().st_mode) == 0o600
     load_universal_workload_resource(cfg, selected, offline_only=False)
     assert len(requests) == 1
+
+
+def runtime_resource_fixture(tmp_path):
+    cfg, selected, cached = resource_fixture(tmp_path)
+    ref = {key: selected[key] for key in ('key', 'file', 'sha256')}
+    ref.update(schema='mcc-universal-workload-resource-ref-v1', size_bytes=len(cached.read_bytes()),
+               **selected['resource'])
+    stage = tmp_path / 'runtime'
+    for name in ('__init__', 'daemon', 'state_push', 'mcd_control'):
+        p = stage / ('mcd_agent/' + name + '.py'); p.parent.mkdir(parents=True, exist_ok=True); p.write_text('# ready test payload\n')
+    resource = stage / ref['file']; resource.parent.mkdir(parents=True); resource.write_bytes(cached.read_bytes())
+    (stage / 'requirements.txt').write_text('')
+    (stage / 'wheel').mkdir(); (stage / 'wheel/fixture.whl').write_bytes(b'package installation is not part of preseed')
+    manifest = {'schema': 'mcd-runtime-package-v1', 'version': '7.0.0', 'wheel': 'wheel/fixture.whl',
+                'requirements': 'requirements.txt', 'universal_workload_resource_ref': ref,
+                'payload_sha256': {p.relative_to(stage).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+                                   for p in stage.rglob('*') if p.is_file()}}
+    (stage / 'mcd-runtime-manifest.json').write_text(json.dumps(manifest))
+    return cfg, ref, cached, stage
+
+
+def test_runtime_preseed_before_configuration_uses_verified_payload_and_existing_cache(tmp_path, monkeypatch):
+    from mcd_agent.universal_workload import preseed_runtime_workload_resources
+    from mcd_agent import config as config_module
+    cfg, ref, cached, stage = runtime_resource_fixture(tmp_path)
+    forbid_network_and_execution(monkeypatch)
+    monkeypatch.setattr(config_module, 'load_config', lambda *a, **kw: pytest.fail('preseed loaded configuration'))
+    cache_dir = tmp_path / 'fresh-cache'
+    digest = hashlib.sha256((stage / 'mcd-runtime-manifest.json').read_bytes()).hexdigest()
+    result = preseed_runtime_workload_resources(runtime_dir=stage, cache_dir=cache_dir, expected_manifest_sha256=digest)
+    assert result['status'] == 'ok' and result['key'] == ref['key']
+    from pathlib import Path
+    target = Path(result['cache_path']); assert target.read_bytes() == cached.read_bytes()
+    before = (target.stat().st_mtime_ns, target.stat().st_mode)
+    preseed_runtime_workload_resources(runtime_dir=stage, cache_dir=cache_dir, expected_manifest_sha256=digest)
+    assert (target.stat().st_mtime_ns, target.stat().st_mode) == before
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+
+def test_corrupt_embedded_required_data_fails_before_cache_mutation(tmp_path, monkeypatch):
+    from mcd_agent.universal_workload import preseed_runtime_workload_resources
+    _, ref, _, stage = runtime_resource_fixture(tmp_path)
+    (stage / ref['file']).write_bytes(b'corrupt required artifact')
+    forbid_network_and_execution(monkeypatch)
+    target = tmp_path / 'fresh-cache'
+    with pytest.raises(RuntimeError):
+        preseed_runtime_workload_resources(runtime_dir=stage, cache_dir=target)
+    assert not target.exists()
+
+
+def test_completed_replay_verifies_only_and_never_repairs_missing_cache(tmp_path, monkeypatch):
+    from mcd_agent.universal_workload import preseed_runtime_workload_resources
+    _, _, _, stage = runtime_resource_fixture(tmp_path)
+    target = tmp_path / 'not-created-cache'
+    forbid_network_and_execution(monkeypatch)
+    with pytest.raises(RuntimeError):
+        preseed_runtime_workload_resources(runtime_dir=stage, cache_dir=target, verify_only=True)
+    assert not target.exists()
+    result = preseed_runtime_workload_resources(runtime_dir=stage, cache_dir=target)
+    from pathlib import Path
+    cached = Path(result['cache_path']); before = (cached.read_bytes(), cached.stat().st_mtime_ns, cached.stat().st_mode)
+    preseed_runtime_workload_resources(runtime_dir=stage, cache_dir=target, verify_only=True)
+    assert (cached.read_bytes(), cached.stat().st_mtime_ns, cached.stat().st_mode) == before

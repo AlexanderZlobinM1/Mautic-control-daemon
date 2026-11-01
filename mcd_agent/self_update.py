@@ -408,6 +408,13 @@ def _runtime_manifest(source_dir: Path) -> dict[str, Any] | None:
     package_root = source_dir / "mcd_agent"
     if not (package_root / "__init__.py").is_file():
         raise RuntimeError("runtime-only payload is missing mcd_agent package")
+    ref = raw.get("universal_workload_resource_ref")
+    if ref is not None:
+        from mcd_agent.universal_workload import selected_universal_resource, verify_universal_workload_archive
+        selected = selected_universal_resource(ref)
+        if payload.get(ref["file"]) != ref["sha256"]:
+            raise RuntimeError("runtime manifest does not bind the selected universal resource payload")
+        verify_universal_workload_archive(safe_path(ref["file"]).read_bytes(), selected)
     return raw
 
 
