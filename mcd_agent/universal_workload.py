@@ -149,6 +149,43 @@ def preseed_runtime_workload_resources(*, runtime_dir: str | Path, cache_dir: st
     return {"status": "ok", "key": ref["key"], "sha256": ref["sha256"], "cache_path": str(cached)}
 
 
+def resolve_universal_workload_reference(*, runtime_settings: dict[str, Any], config: Any,
+                                         runtime_dir: str | Path) -> dict[str, Any] | None:
+    """Resolve explicit durable settings first; the package is initial intake only."""
+    from mcd_agent.custom_scripts import CustomSelectedTaskError
+    key = "universal_workload_resource_ref"
+    runtime = Path(runtime_dir)
+    if key in runtime_settings:
+        ref = runtime_settings[key]
+        if isinstance(ref, str):
+            ref = json.loads(ref) if ref.strip() else {}
+        if ref is None or ref == {}:
+            return {}  # Explicit clearing is never replaced with initial data.
+        selected = selected_universal_resource(ref)
+        try:
+            load_universal_workload_resource(config, selected, offline_only=True)
+        except CustomSelectedTaskError:
+            embedded = runtime / ref["file"]
+            if embedded.is_file() and not embedded.is_symlink() and hashlib.sha256(embedded.read_bytes()).hexdigest() == ref["sha256"]:
+                preseed_universal_workload_resource(config, ref, embedded.read_bytes())
+            else:
+                # Same selected pins only. No manifest/latest/activation lookup.
+                online = bool(config.custom_repo_base_url or config.plugins_repo_base_url or config.mcc_url)
+                load_universal_workload_resource(config, selected, offline_only=not online)
+        return dict(ref)
+    manifest_path = runtime / "mcd-runtime-manifest.json"
+    if not manifest_path.is_file():
+        return None
+    from mcd_agent.self_update import _runtime_manifest
+    manifest = _runtime_manifest(runtime)
+    ref = manifest.get(key) if manifest is not None else None
+    if ref is None:
+        return None
+    selected_universal_resource(ref)
+    preseed_universal_workload_resource(config, ref, (runtime / ref["file"]).read_bytes())
+    return dict(ref)
+
+
 def _catalog_member(resource: dict[str, Any], pin: dict[str, Any]) -> dict[str, Any]:
     name = resource["root"] + "/" + _relative_path(pin.get("path"))
     value = resource["members"].get(name)

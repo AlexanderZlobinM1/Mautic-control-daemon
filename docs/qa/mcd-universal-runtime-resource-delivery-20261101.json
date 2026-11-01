@@ -58,9 +58,32 @@
   "tests": {
     "latest_focused_passed": 24,
     "prior_runtime_distribution_lifecycle_passed": 15,
-    "prior_runtime_bootstrap_passed": 8,
-    "full_regression": "running"
+    "full_regression": "new config/clear-marker checkpoint pending",
+    "mechanism_full_checkpoint": {
+      "passed": 2085,
+      "failed": 61,
+      "exact_baseline_failure_ids": true,
+      "skipped": 57,
+      "subtests": 105
+    },
+    "config_settings_focused_passed": 87
   },
   "profile_tables_removed": false,
-  "native_consumer_acceptance": false
+  "native_consumer_acceptance": false,
+  "cache_exception": {
+    "import": "mcd_agent.custom_scripts.CustomSelectedTaskError",
+    "public_attribute": "code",
+    "missing_or_corrupt": "custom_selected_task_artifact_missing_or_corrupt",
+    "unknown_free_text": "custom_selected_task_failed",
+    "legacy_str_unchanged": true
+  },
+  "initial_config_intake": {
+    "source": "verified runtime manifest under managed venv sibling runtime directory",
+    "before_first_profile_application": true,
+    "matching_manual_explicit_ref": "works without a parent runtime manifest; zero GET/HEAD",
+    "existing_explicit_ref": "wins initial package ref; repairs only same digest when transport available",
+    "configuration_file_rewrite_for_initial_ref": false,
+    "settings_transport": "existing generic runtime map and LWW/reset engine",
+    "winning_tombstone": "empty local config marker suppresses initial bootstrap; projected as absence on runtime wire; no new clock/event"
+  }
 }

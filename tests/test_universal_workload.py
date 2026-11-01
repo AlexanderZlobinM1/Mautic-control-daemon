@@ -13,13 +13,13 @@ from mcd_agent.universal_workload import (
 )
 
 
-def resource_fixture(tmp_path, *, omit=None):
+def resource_fixture(tmp_path, *, omit=None, large_slots=123):
     root = 'profiles/example/7'
     def encode(value):
         return (json.dumps(value, sort_keys=True) + '\n').encode()
     def pin(path, raw):
         return {'path': path, 'sha256': hashlib.sha256(raw).hexdigest(), 'size_bytes': len(raw)}
-    profile = encode({'profile_id': 'large', 'values': {'scheduler_host_max_parallel': 123},
+    profile = encode({'profile_id': 'large', 'values': {'scheduler_host_max_parallel': large_slots},
                       'inherited_global_runtime_defaults': {'jobs_max_workers': 2}})
     hardware = encode({'rows': [{'bounds': {'cpu_count': {'max_inclusive': 2}},
                                 'recommended_profile': 'small', 'recommended_farm_profile': 'farm-small'},
@@ -159,3 +159,82 @@ def test_completed_replay_verifies_only_and_never_repairs_missing_cache(tmp_path
     cached = Path(result['cache_path']); before = (cached.read_bytes(), cached.stat().st_mtime_ns, cached.stat().st_mode)
     preseed_runtime_workload_resources(runtime_dir=stage, cache_dir=target, verify_only=True)
     assert (cached.read_bytes(), cached.stat().st_mtime_ns, cached.stat().st_mode) == before
+
+
+def test_selected_data_resource_survives_existing_cache_gc_when_latest_omits_it(tmp_path):
+    import os
+    cfg, ref, cached, _ = runtime_resource_fixture(tmp_path)
+    cfg.universal_workload_resource_ref = ref
+    cfg.custom_logs_keep_days = 1; cfg.custom_logs_max_files = 1
+    cfg.custom_downloads_keep_days = 1; cfg.custom_downloads_max_entries = 1
+    stale = cached.parent.parent / 'unselected-old'
+    stale.mkdir(); (stale / 'unused').write_bytes(b'old')
+    for path in (cached.parent, stale): os.utime(path, (1, 1))
+    custom_scripts.cleanup_custom_cache(cfg, known_keys={'only-new-remote-script'})
+    assert cached.is_file() and not stale.exists()
+
+
+def configuration(path, *, cache_dir, ref=None, include_ref=False):
+    from mcd_agent.config import _toml_literal
+    path.write_text('[profile]\nname="large"\n[runtime]\nstate_db_path=' + _toml_literal(str(path.parent / 'state/db.sqlite'))
+                    + '\njobs_max_workers=17\n'
+                    + ('universal_workload_resource_ref=' + _toml_literal(ref) + '\n' if include_ref else '')
+                    + '[custom]\ncache_dir=' + _toml_literal(str(cache_dir)) + '\n')
+
+
+def test_initial_runtime_manifest_preseeds_before_named_profile_apply_without_config_rewrite(tmp_path, monkeypatch):
+    from mcd_agent import config as config_module
+    _, ref, _, stage = runtime_resource_fixture(tmp_path)
+    monkeypatch.setattr(config_module, 'DEFAULT_RUNTIME_ARTIFACT_DIR', str(stage))
+    path = tmp_path / 'mcd.toml'; cache = tmp_path / 'new-cache'
+    configuration(path, cache_dir=cache)
+    before = (path.read_bytes(), path.stat().st_mtime_ns)
+    forbid_network_and_execution(monkeypatch)
+    cfg = config_module.load_config(str(path), allow_recover_from_mcc=False)
+    assert cfg.universal_workload_resource_ref == ref
+    assert cfg.scheduler_host_max_parallel == 123
+    assert cfg.jobs_max_workers == 17
+    assert (path.read_bytes(), path.stat().st_mtime_ns) == before
+
+
+def test_explicit_manual_ref_works_without_parent_runtime_manifest_and_is_in_generic_settings(tmp_path, monkeypatch):
+    from mcd_agent import config as config_module
+    cfg_cache, ref, _, _ = runtime_resource_fixture(tmp_path)
+    monkeypatch.setattr(config_module, 'DEFAULT_RUNTIME_ARTIFACT_DIR', str(tmp_path / 'no-runtime-artifact'))
+    path = tmp_path / 'mcd.toml'; configuration(path, cache_dir=cfg_cache.custom_cache_dir, ref=ref, include_ref=True)
+    forbid_network_and_execution(monkeypatch)
+    cfg = config_module.load_config(str(path), allow_recover_from_mcc=False)
+    assert cfg.scheduler_host_max_parallel == 123 and cfg.jobs_max_workers == 17
+    assert config_module.runtime_effective_map(cfg)['universal_workload_resource_ref'] == ref
+    assert config_module.runtime_overrides_from_config_file(str(path))['universal_workload_resource_ref'] == ref
+
+
+def test_newer_selected_ref_rebases_same_profile_and_cannot_fall_back_to_initial_data(tmp_path, monkeypatch):
+    from mcd_agent import config as config_module
+    cfg_cache, ref, _, stage = runtime_resource_fixture(tmp_path)
+    monkeypatch.setattr(config_module, 'DEFAULT_RUNTIME_ARTIFACT_DIR', str(stage))
+    path = tmp_path / 'mcd.toml'; configuration(path, cache_dir=cfg_cache.custom_cache_dir, ref=ref, include_ref=True)
+    cfg = config_module.load_config(str(path), allow_recover_from_mcc=False)
+    from dataclasses import replace
+    cfg = replace(cfg, custom_repo_base_url='', plugins_repo_base_url='')
+    other = tmp_path / 'other'; other.mkdir()
+    _, selected, cached2 = resource_fixture(other, large_slots=257)
+    new_ref = {key: selected[key] for key in ('key', 'file', 'sha256')}
+    new_ref.update(schema='mcc-universal-workload-resource-ref-v1', size_bytes=len(cached2.read_bytes()), **selected['resource'])
+    forbid_network_and_execution(monkeypatch)
+    with pytest.raises(RuntimeError):
+        config_module.apply_runtime_overrides(cfg, {'universal_workload_resource_ref': new_ref})
+    assert cfg.scheduler_host_max_parallel == 123 and cfg.universal_workload_resource_ref == ref
+    from pathlib import Path
+    manual = Path(cfg_cache.custom_cache_dir) / 'downloads' / new_ref['key'] / (new_ref['key'] + '-' + new_ref['sha256'] + '.tar.gz')
+    manual.write_bytes(cached2.read_bytes())
+    updated, applied, unsupported, blocked = config_module.apply_runtime_overrides(cfg, {'universal_workload_resource_ref': new_ref})
+    assert updated.scheduler_host_max_parallel == 257 and updated.jobs_max_workers == 17
+    assert updated.universal_workload_resource_ref == new_ref
+    assert applied == ['universal_workload_resource_ref'] and not unsupported and not blocked
+
+
+def test_selected_cache_error_exposes_stable_public_code_without_arbitrary_message():
+    expected = 'custom_selected_task_artifact_missing_or_corrupt'
+    assert custom_scripts.CustomSelectedTaskError(expected).code == expected
+    assert custom_scripts.CustomSelectedTaskError('untrusted free text / path').code == 'custom_selected_task_failed'

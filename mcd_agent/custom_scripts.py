@@ -161,6 +161,13 @@ def cleanup_custom_cache(config: AgentConfig, *, known_keys: set[str] | None = N
                              if _public_selected_task(record, key, rows)}
     except (OSError, ValueError, TypeError, RuntimeError, AttributeError):
         pass
+    resource_ref = getattr(config, "universal_workload_resource_ref", None)
+    if isinstance(resource_ref, dict) and resource_ref:
+        try:
+            from mcd_agent.universal_workload import selected_universal_resource
+            selected_keys.add(selected_universal_resource(resource_ref)["key"])
+        except (RuntimeError, TypeError, ValueError):
+            pass
     if downloads_dir.exists():
         entries = [p for p in downloads_dir.iterdir() if p.is_dir() or p.is_file()]
         entries.sort(key=_safe_mtime, reverse=True)
@@ -272,6 +279,12 @@ def standalone_custom_cache_config(cache_dir: str | Path | None = None) -> Any:
 
 class CustomSelectedTaskError(RuntimeError):
     """A cached public task is missing, invalid or unavailable for this call."""
+
+    @property
+    def code(self) -> str:
+        """A bounded public code; callers must not expose arbitrary error text."""
+        value = self.args[0] if self.args and isinstance(self.args[0], str) else ""
+        return value if re.fullmatch(r"[a-z][a-z0-9_]{0,127}", value) else "custom_selected_task_failed"
 
 
 def _public_json_digest(value: Any) -> str:

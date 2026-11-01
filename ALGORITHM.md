@@ -2682,3 +2682,30 @@ independent read-only proof98a02fd7 приняты. Настройки bytes/mti
 package file сохранены; никакого bridge substitution/manualrm/fleet prerequisite.
 Это prerequisite updater maintenance, не выпуск nginx/universal/части1.7.
 Evidence docs/qa/mcd-record-maintenance-release-20261101.json.
+
+### Universal data: initial intake и существующий runtime sync
+
+В existing runtime-package manifest явно выбранный MCC resource ref связан
+с payload_sha256 и raw independent DATA archive по ref.file. Builder принимает
+только пару explicit ref/local bytes, проверяет SHA/size/весь member closure
+до staging; данных нет в core wheel. Transported bridge повторяет те же чистые
+stdlib проверки до pip. Installed preseed helper работает до config/profile,
+без network/registration/state DB; совпавший кеш не изменяется. Missing/corrupt
+точная копия восстанавливается из того же verified payload. verify_only replay
+после identity/key binding ничего не чинит и возвращает ограниченный публичный
+CustomSelectedTaskError.code, без traceback/секретов. CommercialState read_only
+открывает существующий DB в mode=ro, не выполняет init/scrub/chmod.
+
+Первое применение cfg при отсутствии explicit runtime setting берёт только
+ref из verified ready manifest рядом с managed venv и предварительно готовит
+existing custom cache. Explicit durable ref всегда важнее initial package ref;
+совпавший ручной кеш не требует manifest/provenance/TTL. При недостающих байтах
+используется только тот же key/file/SHA и existing configured transport.
+Первичное чтение не переписывает конфиг и не объявляет смену DATA version
+пользовательской правкой updated_at. Existing generic host setting
+universal_workload_resource_ref участвует в прежнем LWW/full-loss recovery.
+Winning explicit tombstone сохраняет пустой local marker, подавляющий initial
+ref после restart; marker проецируется в отсутствие на existing wire, без
+второго clock/registry. 87 целевых cfg/settings проверок прошли. Встроенные
+профильные таблицы пока сохранены только для незавершённого legacy-перехода;
+их удаление требует fresh/upgrade/offline installed startup proof.

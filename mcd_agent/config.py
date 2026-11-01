@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import re
 import socket
+import sys
 import time
 from typing import Any, cast
 from urllib import request
@@ -22,6 +23,9 @@ except ModuleNotFoundError:  # pragma: no cover - py3.10 compatibility
 
 
 DEFAULT_CUSTOM_CACHE_DIR = "/opt/mcd/var/custom"
+# Ready runtime cache is a sibling of the managed venv, including standalone
+# installations using an explicit prefix. Never inspect a source checkout.
+DEFAULT_RUNTIME_ARTIFACT_DIR = str(Path(sys.prefix).parent / "runtime")
 CURRENT_CONFIG_SCHEMA_VERSION = 2
 _CAMPAIGN_TRIGGER_AUDIT_INTERVAL_SEC = 60
 DEFAULT_PAGE_HITS_ORPHAN_CLEANUP_GRACE_MIN = 24 * 60
@@ -889,12 +893,19 @@ class AgentConfig:
     # additional-retry count. Values below zero are normalized to zero at
     # load time and become one safe effective start at admission.
     segment_retry_count: int = 2
+    universal_workload_resource_ref: dict[str, Any] | None = None
 
 
 def _apply_profile(cfg: AgentConfig) -> AgentConfig:
     p = (cfg.profile_name or "custom").strip().lower()
     if p in {"", "custom"}:
         return cfg
+    if cfg.universal_workload_resource_ref is not None:
+        from mcd_agent.universal_workload import (
+            load_universal_workload_resource, selected_universal_resource, workload_profile_values,
+        )
+        data = load_universal_workload_resource(cfg, selected_universal_resource(cfg.universal_workload_resource_ref))
+        return replace(cfg, profile_name=p, **workload_profile_values(data, p))
 
     # Shared defaults for named profiles.
     base = replace(
@@ -2166,7 +2177,8 @@ def runtime_overrides_from_config_file(path: str) -> dict[str, Any]:
     """
     def managed(values: dict[str, Any]) -> dict[str, Any]:
         allowed = runtime_remote_allowed_keys()
-        return {key: value for key, value in values.items() if key in allowed}
+        return {key: value for key, value in values.items() if key in allowed
+                and not (key == "universal_workload_resource_ref" and value in (None, "", {}))}
 
     try:
         cfg = _load_toml_with_includes(path)
@@ -2198,6 +2210,8 @@ def runtime_effective_map(cfg: AgentConfig) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, attr in _RUNTIME_TO_ATTR.items():
         if hasattr(cfg, attr):
+            if key == "universal_workload_resource_ref" and not getattr(cfg, attr):
+                continue
             out[key] = getattr(cfg, attr)
     legacy = out.get("segment_whitelist_instance_settings")
     priority = out.get("segment_priority_instance_settings")
@@ -2222,6 +2236,7 @@ def runtime_effective_map(cfg: AgentConfig) -> dict[str, Any]:
 
 
 _RUNTIME_TO_ATTR: dict[str, str] = {
+    "universal_workload_resource_ref": "universal_workload_resource_ref",
     "php_bin": "php_bin",
     "mautic_run_as_user": "mautic_run_as_user",
     "command_timeout_sec": "command_timeout_sec",
@@ -2583,7 +2598,18 @@ _PROFILE_LOCKED_RUNTIME_KEYS = {
 
 def _reapply_manual_runtime_overrides(cfg: AgentConfig, runtime: dict[str, Any]) -> AgentConfig:
     updates: dict[str, Any] = {}
+    resource_key = "universal_workload_resource_ref"
+    if resource_key in runtime:
+        from mcd_agent.universal_workload import resolve_universal_workload_reference
+        selected_ref = resolve_universal_workload_reference(
+            runtime_settings={resource_key: runtime[resource_key]}, config=cfg,
+            runtime_dir=DEFAULT_RUNTIME_ARTIFACT_DIR)
+        if selected_ref != cfg.universal_workload_resource_ref:
+            cfg = _apply_profile(replace(cfg, universal_workload_resource_ref=selected_ref))
+        updates[resource_key] = selected_ref
     for raw_key, raw_value in runtime.items():
+        if raw_key == resource_key:
+            continue
         if (
             raw_key in _PROFILE_LOCKED_RUNTIME_KEYS
             and str(getattr(cfg, "profile_name", "") or "").strip().lower() not in {"", "custom"}
@@ -2814,6 +2840,26 @@ def _record_config_history(cfg: AgentConfig) -> None:
 
 def _load_config_inner(path: str) -> AgentConfig:
     data = _load_toml_with_includes(path)
+    # Read transport/cache metadata only. Required data is ready before the
+    # first profile application; this does not register or run the daemon.
+    from mcd_agent.custom_scripts import standalone_custom_cache_config
+    from mcd_agent.universal_workload import resolve_universal_workload_reference
+    custom_data = data.get("custom", {})
+    custom_data = custom_data if isinstance(custom_data, dict) else {}
+    mcc_data = data.get("mcc", {})
+    mcc_data = mcc_data if isinstance(mcc_data, dict) else {}
+    plugins_data = data.get("plugins", {})
+    plugins_data = plugins_data if isinstance(plugins_data, dict) else {}
+    cache_config = standalone_custom_cache_config(custom_data.get("cache_dir", DEFAULT_CUSTOM_CACHE_DIR))
+    cache_config.custom_repo_base_url = custom_data.get("repo_base_url", "") or ""
+    cache_config.custom_manifest_path = custom_data.get("manifest_path", "/mauticctl/custom/manifest.json")
+    cache_config.plugins_repo_base_url = plugins_data.get("repo_base_url", "") or ""
+    cache_config.mcc_url = mcc_data.get("url") or None
+    cache_config.mcc_token = mcc_data.get("token") or None
+    raw_runtime = data.get("runtime", {})
+    universal_ref = resolve_universal_workload_reference(
+        runtime_settings=raw_runtime if isinstance(raw_runtime, dict) else {}, config=cache_config,
+        runtime_dir=DEFAULT_RUNTIME_ARTIFACT_DIR)
     raw_text = Path(path).read_text(encoding="utf-8")
     cfg_sha = hashlib.sha256(raw_text.encode("utf-8")).hexdigest()
     config_sec = data.get("config", {})
@@ -3026,6 +3072,7 @@ def _load_config_inner(path: str) -> AgentConfig:
         profile_guard_enabled = True
 
     cfg = AgentConfig(
+        universal_workload_resource_ref=universal_ref,
         config_file_path=str(Path(path).resolve()),
         config_schema_version=schema_version,
         config_customized=bool(isinstance(runtime, dict) and len(runtime.keys()) > 0),

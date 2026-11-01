@@ -1992,6 +1992,14 @@ def _persist_resolved_runtime_to_config(
         for key in stable_keys
         if key in resolved and previous.get(key) != resolved.get(key)
     }
+    # A cleared optional data reference must suppress the package's initial
+    # intake on restart. The empty local marker projects to absence on the
+    # existing runtime wire; it does not create a new setting clock/event.
+    resource_key = "universal_workload_resource_ref"
+    resource_stamp = _runtime_metadata_get(resolved_metadata, "host", resource_key)
+    resource_cleared = bool(resource_key not in resolved and resource_stamp and resource_stamp.get("tombstone"))
+    if resource_cleared:
+        updates[resource_key] = {}
     if updates:
         try:
             path, changed = upsert_runtime_values(config.config_file_path, updates)
@@ -2010,6 +2018,8 @@ def _persist_resolved_runtime_to_config(
         and key not in resolved
         and _runtime_metadata_has_remote_tombstone(resolved_metadata, str(key))
     }
+    if resource_cleared:
+        removals.discard(resource_key)
     if removals:
         try:
             path, changed = remove_runtime_values(config.config_file_path, removals)
