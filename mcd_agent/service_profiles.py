@@ -60,6 +60,16 @@ def fetch_service_profile(cfg: AgentConfig, component: str) -> dict[str, Any]:
         "configured_host_name": str(ident.get("configured_host_name") or ""),
         "agent_version": __version__,
     }
+    if comp == "wazuh":
+        identity_fields = {
+            "mcc_host_name": "effective_mcc_host_name",
+            "configured_host_name": "configured_host_name",
+            "agent_hostname": "local_hostname",
+        }
+        if any(source not in ident for source in identity_fields.values()):
+            return {"status": "error", "reason": "wazuh_identity_context_unavailable"}
+        # Preserve explicit null facts; the legacy string envelope loses them.
+        payload.update({target: ident[source] for target, source in identity_fields.items()})
     if comp in {"php_fpm", "mysql", "docker", "wazuh"}:
         payload["external_handler_capabilities"] = sorted(CUSTOM_RUNTIME_CAPABILITIES)
     url = base + f"/api/v1/agent/service-profile/{comp.replace('_', '-')}"

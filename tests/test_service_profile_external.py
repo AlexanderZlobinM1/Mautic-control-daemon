@@ -94,7 +94,7 @@ def test_missing_descriptor_cannot_silently_use_legacy(fetched,monkeypatch):
 @pytest.mark.parametrize('component',['php_fpm','mysql','docker','wazuh'])
 def test_existing_post_advertises_actual_capabilities_without_candidate_opt_in(monkeypatch,component):
     cfg=SimpleNamespace(mcc_url='https://controller.invalid',mcc_token='test')
-    monkeypatch.setattr(profiles,'resolve_agent_identity',lambda cfg:{'effective_hostname':'disposable'})
+    monkeypatch.setattr(profiles,'resolve_agent_identity',lambda cfg:{'effective_hostname':'disposable','effective_mcc_host_name':'','configured_host_name':None,'local_hostname':'disposable'})
     calls=[]
     monkeypatch.setattr(profiles,'_post_json',lambda url,payload,*a,**kw:calls.append((url,payload)) or {'status':'ok'})
     profiles.fetch_service_profile(cfg,component)
@@ -287,3 +287,25 @@ def test_wazuh_external_dispatch_preserves_failed_public_dictionary_without_buil
     monkeypatch.setattr(ext,'run_custom_script_by_key',lambda *a,**kw:(1,json.dumps(failed_terminal(raw))))
     result=profiles.service_profiles_apply_once(SimpleNamespace(cluster_id=None),component='wazuh')
     assert result['status']=='error' and result['reason']=='manager_unreachable' and result['apply']==raw
+
+
+@pytest.mark.parametrize('component,expected',[('php_fpm',''),('wazuh',None)])
+def test_wazuh_fetch_preserves_null_identity_without_changing_legacy_envelopes(monkeypatch,component,expected):
+    cfg=SimpleNamespace(mcc_url='https://controller.invalid',mcc_token='test')
+    identity={'effective_hostname':'observed-local','effective_mcc_host_name':'','configured_host_name':None,'local_hostname':'observed-local'}
+    monkeypatch.setattr(profiles,'resolve_agent_identity',lambda cfg:identity)
+    calls=[]
+    monkeypatch.setattr(profiles,'_post_json',lambda url,payload,*a,**kw:calls.append(payload) or {'status':'ok'})
+    assert profiles.fetch_service_profile(cfg,component)['status']=='ok'
+    assert calls[0]['configured_host_name']==expected
+    assert calls[0]['agent_hostname']=='observed-local' and calls[0]['mcc_host_name']==''
+
+
+@pytest.mark.parametrize('missing',['effective_mcc_host_name','configured_host_name','local_hostname'])
+def test_wazuh_fetch_does_not_guess_missing_core_facts(monkeypatch,missing):
+    cfg=SimpleNamespace(mcc_url='https://controller.invalid',mcc_token='test')
+    identity={'effective_hostname':'effective-is-not-local','effective_mcc_host_name':'','configured_host_name':None,'local_hostname':'observed-local'}
+    del identity[missing]
+    monkeypatch.setattr(profiles,'resolve_agent_identity',lambda cfg:identity)
+    monkeypatch.setattr(profiles,'_post_json',lambda *a,**kw:pytest.fail('missing fact must not be invented for request'))
+    assert profiles.fetch_service_profile(cfg,'wazuh')=={'status':'error','reason':'wazuh_identity_context_unavailable'}

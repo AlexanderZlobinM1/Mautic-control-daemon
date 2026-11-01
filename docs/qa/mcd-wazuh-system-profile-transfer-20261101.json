@@ -121,9 +121,9 @@
     "source_commit": "48bd82a"
   },
   "consumer_checks": {
-    "focused_passed": 77,
+    "focused_passed": 82,
     "release_regression": "PASS",
-    "full_passed": 2026,
+    "full_passed": 2031,
     "full_failed": 61,
     "full_skipped": 57,
     "subtests_passed": 105,
@@ -131,6 +131,34 @@
     "missing_baseline_failure_ids": [],
     "mcc_draft_fixture_sha256": "614b4c5b9d8681ac752db78af278c6db67fd0dbf4174a94a496f63c54cc7a969",
     "draft_candidate_rejected_inactive": true,
-    "local_in_memory_active_copy_admission": "PASS with mocked execution only; no catalog/native mutation"
+    "local_in_memory_active_copy_admission": "PASS with mocked execution only; no catalog/native mutation",
+    "wazuh_null_identity_roundtrip_preserved": true,
+    "missing_request_facts_rejected": true,
+    "legacy_other_component_request_envelopes_unchanged": true
+  },
+  "public_downloader_readback": {
+    "status": "PASS",
+    "receipt_sha256": "7764bd2007de5e46c339c5326c834de3c72e805f0dabef6f649a9e7b9ff2aa5d",
+    "actual_user_agent": "mcd-agent/1.6.38",
+    "http_status": 200,
+    "archive_sha256": "806d180575e06a63b10ab10d79a5f4445ae6eef581158a30997326a0387dd153",
+    "size_bytes": 8860,
+    "additional_cache_hit_gets": 0,
+    "execution_performed": false,
+    "cloudflare_policy_changed": false
+  },
+  "controlled_qa": {
+    "profile_raw_sha256": "97bf6230bfdd35458f3216bbabf40dc1fbb4d8fd7c6cfb8b99dd0225105beeb1",
+    "profile_canonical_sha256": "968babf86b90f8acd55df141bfd1e7bf7e6e72a02c5e24399380143b3224eed1",
+    "differences_from_live_apply_profile": [
+      "manager_address=127.0.0.1",
+      "registration_server=127.0.0.1",
+      "start_service=false"
+    ],
+    "secret_fields_absent": true,
+    "fresh_identity_receipt_sha256": "5f60c056337bb0a1de0e7e4b8a736cf4dddcfaff9a1d652270d7d8b3d72ddb78",
+    "actual_context_sha256": "fbbc317e73e34be28710df0fc9f88eacc2791263a7e860278a85006bd7b4a704",
+    "old_native_phase": "RUNNING, not acceptance yet",
+    "production_enrollment": false
   }
 }

@@ -2338,8 +2338,20 @@ or a mixed response/handler context fail before execution. This changes no
 existing agent-name selection policy: all25old recipe bodies and fallbacks stay.
 Old read-only native defaults pass (planned/disabled, before==after), receipt
 fb70b48a8d68a1eaf58b42fac52084913c950b004807a7fe7c28e47ba2bd7f8b.
-77focused tests and release-regression pass; full2026PASS/61exactbaselinefail/
+82focused tests and release-regression pass; full2031PASS/61exactbaselinefail/
 57skip. Portal source06d68… has25exact bodies/16pure tests; synthetic executable
 9ad697… is authoring-only and MUST be recomposed with controlled loopback QA
 profile and actual current identity before native execution. Original inactive
 MCC draft remains rejected; a local active-copy mocked probe is not acceptance.
+
+
+Wazuh capability-aware requests preserve actual nullable identity fields rather
+than applying the legacy string envelope's null-to-empty conversion; requests
+with unavailable core fields fail without inventing them. Other components keep
+their legacy envelope. Existing generic downloader UA mcd-agent/1.6.38 returned
+HTTP200/exact806d…/8860B and zero additional GET on cache hit; no artifact was
+executed or Cloudflare policy changed (receipt7764bd20…). Controlled native OLD
+phase uses MCC-owned QA profile968bab… differing only by loopback manager and
+registration addresses plus start_service=false. Current core identity fbbc317e…
+was collected from the actual loaded test config; source604d… remains old code.
+This actor is running, not accepted yet; no production manager/enrollment.
