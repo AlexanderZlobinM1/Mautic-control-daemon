@@ -19,7 +19,7 @@ def digest(value):
 @pytest.fixture
 def manual_cache(tmp_path,monkeypatch):
     root=tmp_path/'cache';root.mkdir()
-    body=b'#!/usr/bin/env python3\nimport json,sys\nprint(json.dumps({"schema":"mcd-self-hosted-executable-output-v1","contract_version":"1.0","frame_type":"result","status":"succeeded","exit_code":0,"completed":1,"total":1,"rollback":"not_attempted","result":json.loads(sys.argv[1])}))\n'
+    body=b'#!/usr/bin/env python3\nimport json,sys\nr=json.loads(sys.argv[1]);code=1 if "error" in r else 0\nprint(json.dumps({"schema":"mcd-self-hosted-executable-output-v1","contract_version":"1.0","frame_type":"result","status":"failed" if code else "succeeded","exit_code":code,"completed":1,"total":1,"rollback":"not_attempted","result":r,**({"error_code":"operation_failed"} if code else {})}))\nsys.exit(code)\n'
     stream=BytesIO()
     with tarfile.open(fileobj=stream,mode='w:gz') as archive:
         member=tarfile.TarInfo('entry.py');member.size=len(body);archive.addfile(member,BytesIO(body))
@@ -62,3 +62,66 @@ def test_actual_cli_missing_or_changed_required_input_is_typed_before_any_writer
     expected={'selection':'custom_selected_task_missing','artifact':'custom_selected_task_artifact_missing_or_corrupt','fact':'custom_selected_task_input_mismatch'}[problem]
     assert result['reason']==expected
     assert {str(p) for p in root.rglob('*')}==before
+
+
+def select_vhost(root,operation,parameters,result):
+    import copy
+    manifest=json.loads((root/'manifest.json').read_text())
+    response=copy.deepcopy(next(iter(manifest['selected_tasks'].values()))['response'])
+    response.update(operation=operation,operation_input=parameters,profile=None,resolved_plan_key='nginx:'+operation)
+    handler=response['external_handler']
+    handler.update(operation=operation,operation_input=parameters,resolved_plan_key=response['resolved_plan_key'])
+    handler['profile_input']={'source':'response.profile','fields':[],'sha256':digest(None)}
+    handler['operation_input_input']={'sha256':digest(parameters)}
+    handler['command']['argv'][-1]=json.dumps(result)
+    custom.cache_selected_task(SimpleNamespace(custom_cache_dir=str(root)),response)
+
+
+@pytest.mark.parametrize('component,operation', [('migration-vhost','write_nginx_vhost'),('composer-vhost','write_switched_vhost')])
+def test_complete_vhost_stage_runs_from_manual_cache_and_preserves_legacy_return(manual_cache,tmp_path,capsys,component,operation):
+    from mcd_agent import nginx_external
+    root,_=manual_cache
+    if component=='migration-vhost':
+        parameters={'root':str(tmp_path/'app'),'domains':['qa.example.invalid'],'php_version':'8.5'}
+        result={'site':str(tmp_path/'site.conf')}
+    else:
+        parameters={'source_root':str(tmp_path/'old'),'nginx_root':str(tmp_path/'new'/'docroot'),'php_version':'8.5','site_available':str(tmp_path/'site.conf'),'site_enabled':None}
+        result={'active':str(tmp_path/'site.conf'),'backup':str(tmp_path/'backup.conf')}
+    select_vhost(root,operation,parameters,result)
+    with patch.object(sys,'argv',['mcd-cli','nginx-baseline',component,'apply','--operation-input',json.dumps(parameters),'--json']):
+        assert cli.main()==0
+    assert json.loads(capsys.readouterr().out)=={'status':'ok',**result}
+    if component=='migration-vhost':
+        assert nginx_external.write_nginx_vhost(root=Path(parameters['root']),domains=parameters['domains'],php_version=parameters['php_version'])==result['site']
+    else:
+        assert nginx_external.write_switched_vhost(SimpleNamespace(**{key:(Path(value) if key!='php_version' and value is not None else value) for key,value in parameters.items()}))==result
+
+
+def test_failed_vhost_terminal_preserves_exact_legacy_error_without_fallback(manual_cache,tmp_path,capsys):
+    from mcd_agent import nginx_external
+    root,_=manual_cache
+    parameters={'root':str(tmp_path/'app'),'domains':['qa.example.invalid'],'php_version':'99.99'}
+    error='target PHP-FPM socket is missing: /run/php/php99.99-fpm.sock'
+    select_vhost(root,'write_nginx_vhost',parameters,{'error':error})
+    with pytest.raises(RuntimeError,match='target PHP-FPM socket is missing') as caught:
+        nginx_external.write_nginx_vhost(root=Path(parameters['root']),domains=parameters['domains'],php_version=parameters['php_version'])
+    assert str(caught.value)==error
+    with patch.object(sys,'argv',['mcd-cli','nginx-baseline','migration-vhost','apply','--operation-input',json.dumps(parameters),'--json']):assert cli.main()==1
+    assert json.loads(capsys.readouterr().out)=={'status':'error','reason':error}
+
+
+@pytest.mark.parametrize('problem',['input-changed','extra-flag','wrong-type','status','no-reload'])
+def test_vhost_unselected_inputs_or_invented_modes_never_start_recipe(manual_cache,tmp_path,monkeypatch,capsys,problem):
+    from mcd_agent.commercial_self_hosted import ExternalProcessPolicy
+    root,_=manual_cache
+    parameters={'root':str(tmp_path/'app'),'domains':['qa.example.invalid'],'php_version':'8.5'}
+    select_vhost(root,'write_nginx_vhost',parameters,{'site':str(tmp_path/'site.conf')})
+    monkeypatch.setattr(ExternalProcessPolicy,'_run_bounded',lambda *a,**kw:pytest.fail('invalid input must not start recipe'))
+    operation='status' if problem=='status' else 'apply';extra=['--no-reload'] if problem=='no-reload' else []
+    if problem=='input-changed':parameters['root']=str(tmp_path/'different-app')
+    if problem=='extra-flag':parameters['reload_service']=False
+    if problem=='wrong-type':parameters['domains']=[True]
+    with patch.object(sys,'argv',['mcd-cli','nginx-baseline','migration-vhost',operation,'--operation-input',json.dumps(parameters),'--json',*extra]):assert cli.main()==1
+    result=json.loads(capsys.readouterr().out)
+    assert result['reason']==('custom_selected_task_missing' if problem=='input-changed' else 'nginx_operation_input_invalid')
+    assert not (tmp_path/'site.conf').exists()

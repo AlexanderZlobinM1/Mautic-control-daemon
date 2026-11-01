@@ -162,7 +162,7 @@ from mcd_agent.mode import (
 )
 from mcd_agent.nginx_external import (
     default_stub_operation, ensure_nginx_baseline, ensure_cloudflare_real_ip,
-    cloudflare_real_ip_state, nginx_baseline_satisfied,
+    cloudflare_real_ip_state, nginx_baseline_satisfied, nginx_vhost_operation,
 )
 from mcd_agent.plugins import run_plugins_interactive
 from mcd_agent.plugin_operations import (
@@ -1684,10 +1684,11 @@ def _build_parser() -> argparse.ArgumentParser:
     default_cfg = _default_config_path()
 
     nginx_baseline = sub.add_parser("nginx-baseline", help="Manage nginx host baseline and Cloudflare client IP")
-    nginx_baseline.add_argument("component", choices=["default-stub", "host", "cloudflare-real-ip"])
+    nginx_baseline.add_argument("component", choices=["default-stub", "host", "cloudflare-real-ip", "migration-vhost", "composer-vhost"])
     nginx_baseline.add_argument("op", choices=["status", "apply"], nargs="?", default="status")
     nginx_baseline.add_argument("--json", action="store_true")
     nginx_baseline.add_argument("--cache-dir")
+    nginx_baseline.add_argument("--operation-input", help="Public JSON parameters for a complete vhost operation")
     nginx_baseline.add_argument("--profile", help="Explicit public profile JSON for Cloudflare observation/application")
     nginx_baseline.add_argument("--no-reload", action="store_true")
 
@@ -2469,6 +2470,20 @@ def main() -> int:
 
     if args.cmd == "nginx-baseline":
         options = {"cache_dir": args.cache_dir} if args.cache_dir else {}
+        if args.component in {"migration-vhost", "composer-vhost"}:
+            try:
+                if args.op != "apply" or args.no_reload or args.profile:
+                    raise ValueError("nginx_operation_input_invalid")
+                try:
+                    parameters = json.loads(args.operation_input or "null")
+                except ValueError:
+                    raise ValueError("nginx_operation_input_invalid") from None
+                operation = "write_nginx_vhost" if args.component == "migration-vhost" else "write_switched_vhost"
+                payload = {"status": "ok", **nginx_vhost_operation(operation, parameters, **options)}
+            except (ValueError, RuntimeError) as error:
+                payload = {"status": "error", "reason": str(error)}
+            print(json.dumps(payload, ensure_ascii=True, indent=2))
+            return 0 if payload.get("status") == "ok" else 1
         if args.component == "default-stub":
             payload = default_stub_operation(apply=args.op == "apply", **options)
             successful = payload.get("status") in {"ok", "drift"}

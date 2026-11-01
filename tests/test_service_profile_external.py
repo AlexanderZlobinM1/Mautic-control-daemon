@@ -382,9 +382,14 @@ def nginx_fetched(fetched,monkeypatch):
 @pytest.mark.parametrize('operation,flags',[
     ('default_stub_operation',{'apply':False}),('default_stub_operation',{'apply':True}),
     ('ensure_nginx_baseline',{'reload_service':False}),('ensure_cloudflare_real_ip',{'reload_service':True}),
-    ('nginx_baseline_satisfied',{}),('cloudflare_real_ip_state',{})])
+    ('nginx_baseline_satisfied',{}),('cloudflare_real_ip_state',{}),
+    ('write_nginx_vhost',{'root':'/explicit-qa-root','domains':['qa.example.invalid'],'php_version':'8.5'}),
+    ('write_switched_vhost',{'source_root':'/explicit-old','nginx_root':'/explicit-new/docroot','php_version':'8.5','site_available':'/explicit-site.conf','site_enabled':None})])
 def test_nginx_operation_and_input_are_bound_before_same_offline_runner(nginx_fetched,monkeypatch,operation,flags):
     nginx_fetched.update(operation=operation,operation_input=flags)
+    if operation in {'write_nginx_vhost','write_switched_vhost'}:
+        nginx_fetched['profile']=None
+        nginx_fetched['external_handler']['profile_input']['sha256']=hashlib.sha256(b'null').hexdigest()
     nginx_fetched['external_handler'].update(operation=operation,operation_input=copy.deepcopy(flags))
     nginx_fetched['external_handler']['operation_input_input']['sha256']=hashlib.sha256(canonical_json(flags)).hexdigest()
     calls=[]

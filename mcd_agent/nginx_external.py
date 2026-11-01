@@ -12,7 +12,7 @@ from mcd_agent.custom_scripts import (
     standalone_custom_cache_config,
 )
 from mcd_agent.service_profile_external import (
-    ExternalProfileOperationError, apply_external_service_profile,
+    ExternalProfileOperationError, apply_external_service_profile, nginx_operation_input_valid,
 )
 
 
@@ -81,3 +81,30 @@ def nginx_baseline_satisfied(*, cfg: Any = None, cache_dir: str | None = None) -
     if type(result.get("satisfied")) is not bool:
         raise CustomSelectedTaskError("custom_selected_task_observation_invalid")
     return result["satisfied"]
+
+
+def nginx_vhost_operation(operation: str, parameters: dict[str, Any], *,
+                          cfg: Any = None, cache_dir: str | None = None) -> dict[str, Any]:
+    if operation not in {'write_nginx_vhost', 'write_switched_vhost'} or not nginx_operation_input_valid(operation, parameters):
+        raise CustomSelectedTaskError('nginx_operation_input_invalid')
+    if operation == 'write_nginx_vhost' and not parameters['domains']:
+        raise RuntimeError('at least one domain is required for nginx vhost')
+    result = _invoke(operation, parameters, profile=None, cfg=cfg, cache_dir=cache_dir)
+    if isinstance(result.get('error'), str):
+        raise RuntimeError(result['error'])
+    expected = {'site'} if operation == 'write_nginx_vhost' else {'active', 'backup'}
+    if set(result) != expected or any(not isinstance(value, str) for value in result.values()):
+        raise CustomSelectedTaskError('custom_selected_task_result_invalid')
+    return result
+
+
+def write_nginx_vhost(*, root: Path, domains: list[str], php_version: str, cfg: Any = None,
+                       cache_dir: str | None = None) -> str:
+    return nginx_vhost_operation('write_nginx_vhost', {'root': str(root), 'domains': domains,
+        'php_version': php_version}, cfg=cfg, cache_dir=cache_dir)['site']
+
+
+def write_switched_vhost(plan: Any, *, cfg: Any = None, cache_dir: str | None = None) -> dict[str, str]:
+    parameters = {key: str(getattr(plan, key)) for key in ('source_root', 'nginx_root', 'php_version', 'site_available')}
+    parameters['site_enabled'] = str(plan.site_enabled) if plan.site_enabled is not None else None
+    return nginx_vhost_operation('write_switched_vhost', parameters, cfg=cfg, cache_dir=cache_dir)

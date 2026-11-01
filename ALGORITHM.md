@@ -2614,3 +2614,31 @@ composer available-alias и regular-enabled, затем реальная nginx-t
 и HTTPS200. Полный Mautic migration/composer lifecycle этим прогоном не
 проверяется. До standalone DIRECT и обычного CLI перенесённые функции
 остаются в MCD; после OLD запрошен обязательный полный reset.
+
+### Подготовленный consumer двух полных vhost-операций
+
+Новые входы существующего nginx-baseline CLI: migration-vhost apply и
+composer-vhost apply с явным --operation-input JSON. Общий мост принимает
+write_nginx_vhost {root,domains,php_version} либо write_switched_vhost
+{source_root,nginx_root,php_version,site_available,site_enabled}; site_enabled
+может быть None. Проверяются только согласованная форма и типы публичных
+аргументов, точные SHA и текущий контекст. Все значения поступают от caller,
+OS-путей/формул и fallback writer в мосте нет. Status/dry-run/no-reload режимы
+для этих операций отсутствуют в legacy и не добавляются.
+
+Внешний migration carrier {site:str} разворачивается в прежнюю строку для
+Python-caller; composer сохраняет {active,backup}. Failed terminal с
+{error:точный legacy RuntimeError text} поднимает ту же ошибку, без выдуманного
+rollback. CLI показывает отдельный status и прежние публичные значения.
+Standalone использует тот же manual/pinned cache без config/registration/URL.
+Изменённый root или иной набор аргументов требует своего выбранного профиля,
+а не запуска старой selection. Неизвестные поля/режимы отвергаются до процесса.
+
+126 целевых проверок потребителя/кеша/CLI прошли, включая реальный запуск
+синтетического bundle и failed terminal с прежним текстом ошибки. Это unit
+приёмка механизма; замороженный внешний артефакт, DIRECT и installed CLI ещё
+обязательны. До них старые vhost callers и их source definitions не удаляются.
+
+Полная регрессия подготовленного vhost consumer:2057PASS, те же61 baseline
+failure IDs,57skip/105subtests. Новых падений нет. Это source checkpoint
+до нативной приёмки внешнего аналога и переключения старых callers.

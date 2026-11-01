@@ -69,5 +69,42 @@
     "full_reset_requested": true,
     "full_Mautic_migration_claimed": false,
     "public_fixture_sha256": "509f9affa06d39c8e79a4d3a45db61bc18b292002abb8cd874a38621c871207f"
+  },
+  "renderer_supplement_sha256": "2ed4c6d04c68cd4f07bef71ef91b0bfab2457b4ccd3f3778c0c2ff8fd47b31c5",
+  "prepared_consumer": {
+    "status": "unit mechanism PASS; immutable external artifact/native DIRECT/installed CLI still required",
+    "focused_passed": 126,
+    "whole_operations": {
+      "write_nginx_vhost": [
+        "root",
+        "domains",
+        "php_version"
+      ],
+      "write_switched_vhost": [
+        "source_root",
+        "nginx_root",
+        "php_version",
+        "site_available",
+        "site_enabled"
+      ]
+    },
+    "CLI": [
+      "nginx-baseline migration-vhost apply --operation-input JSON",
+      "nginx-baseline composer-vhost apply --operation-input JSON"
+    ],
+    "unsupported_modes_not_invented": [
+      "status",
+      "dry-run",
+      "no-reload"
+    ],
+    "existing_cache_and_runner_only": true,
+    "failed_terminal_preserves_legacy_error": true,
+    "legacy_callers_still_unmodified": true,
+    "full_passed": 2057,
+    "full_failed": 61,
+    "full_failures_exact_baseline_ids": true,
+    "full_skipped": 57,
+    "full_subtests": 105,
+    "full_log_sha256": "77b38888e49489ceb7c700445f352af5de976465931832c640e80e0af8b3e4f8"
   }
 }

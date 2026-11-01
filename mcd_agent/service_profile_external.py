@@ -21,7 +21,23 @@ NGINX_OPERATION_INPUT_KEYS = {
     'ensure_cloudflare_real_ip': {'reload_service'},
     'nginx_baseline_satisfied': set(),
     'cloudflare_real_ip_state': set(),
+    'write_nginx_vhost': {'root', 'domains', 'php_version'},
+    'write_switched_vhost': {'source_root', 'nginx_root', 'php_version', 'site_available', 'site_enabled'},
 }
+
+def nginx_operation_input_valid(operation: Any, values: Any) -> bool:
+    required = NGINX_OPERATION_INPUT_KEYS.get(operation) if isinstance(operation, str) else None
+    if required is None or not isinstance(values, dict) or set(values) != required:
+        return False
+    if operation == 'write_nginx_vhost':
+        return (isinstance(values['root'], str) and isinstance(values['php_version'], str)
+                and isinstance(values['domains'], list)
+                and all(isinstance(domain, str) for domain in values['domains']))
+    if operation == 'write_switched_vhost':
+        return (all(isinstance(values[key], str) for key in required - {'site_enabled'})
+                and (values['site_enabled'] is None or isinstance(values['site_enabled'], str)))
+    return all(type(value) is bool for value in values.values())
+
 
 
 class ExternalProfileOperationError(RuntimeError):
@@ -112,9 +128,7 @@ def _admit_external_service_profile(cfg: Any, fetched: Mapping[str, Any], *,
     elif component == "nginx":
         operation = fetched.get("operation")
         flags = fetched.get("operation_input")
-        required_flags = NGINX_OPERATION_INPUT_KEYS.get(operation) if isinstance(operation, str) else None
-        if (required_flags is None or not isinstance(flags, dict) or set(flags) != required_flags
-                or any(type(value) is not bool for value in flags.values())
+        if (not nginx_operation_input_valid(operation, flags)
                 or handler.get("operation") != operation or canonical_json(handler.get("operation_input")) != canonical_json(flags)):
             raise ValueError("external_handler_operation_input_invalid")
         context = handler.get("runtime_context")

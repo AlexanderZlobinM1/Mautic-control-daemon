@@ -14,7 +14,7 @@ from mcd_agent import __version__
 from mcd_agent.config import AgentConfig
 from mcd_agent.host_identity import resolve_agent_identity
 from mcd_agent.service_profile_external import (
-    CUSTOM_RUNTIME_CAPABILITIES, NGINX_OPERATION_INPUT_KEYS, ExternalProfileOperationError, apply_external_service_profile,
+    CUSTOM_RUNTIME_CAPABILITIES, nginx_operation_input_valid, ExternalProfileOperationError, apply_external_service_profile,
     validate_external_service_profile,
 )
 from mcd_agent.mautic_db_indexes import apply_mautic_db_indexes
@@ -55,9 +55,7 @@ def fetch_service_profile(cfg: AgentConfig, component: str, *, include_runtime_i
     if comp not in {"php_fpm", "mysql", "docker", "apt", "wazuh", "nginx", "mautic_db_indexes", "db_indexes"}:
         return {"status": "error", "reason": f"unsupported component: {component}"}
     if comp == "nginx":
-        required = NGINX_OPERATION_INPUT_KEYS.get(operation) if isinstance(operation, str) else None
-        if (required is None or not isinstance(operation_input, dict) or set(operation_input) != required
-                or any(type(value) is not bool for value in operation_input.values())
+        if (not nginx_operation_input_valid(operation, operation_input)
                 or (operation == "cloudflare_real_ip_state" and type(profile_present) is not bool)
                 or (operation != "cloudflare_real_ip_state" and profile_present is not None)):
             return {"status": "error", "reason": "nginx_operation_input_invalid"}
