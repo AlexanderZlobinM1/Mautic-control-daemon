@@ -74,5 +74,13 @@
     ],
     "retained": "non-secret receipts and exact public archive only in MCC framed-runtime-input-evidence",
     "production_candidate_active": false
+  },
+  "portal_final_owner_checkpoint": {
+    "source_commit": "545887184de7e78ff3c8a53b717706830b99910f",
+    "handoff_sha256": "5f09511f3bc838909e0f8c3ccdc4164736a4e50f5c4e154a0ff1a7d0a9f09e21",
+    "standalone_proof_sha256": "8293d1146f1596ca05710325a86642b8c5df69ca7de7f03ffcb1288f6de98fa0",
+    "owner_private_tests_passed": 7,
+    "artifact_pins_unchanged": true,
+    "attribution": "Final seven-case proof supplied by Portal owner; no native execution claim"
   }
 }
