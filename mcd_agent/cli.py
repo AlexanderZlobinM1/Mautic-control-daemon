@@ -2290,7 +2290,7 @@ def _build_parser() -> argparse.ArgumentParser:
     inst_runtime.add_argument("--no-reload", action="store_true", help="Do not reload php-fpm/nginx after a successful apply")
     inst_runtime.add_argument("--json", action="store_true")
 
-    upd = sub.add_parser("self-update", help="MCD self-update via MCC approved/test/lts/cluster channels")
+    upd = sub.add_parser("self-update", help="MCD self-update via MCC approved/test/dev/lts/cluster channels")
     upd.add_argument("--config", default=default_cfg)
     upd.add_argument("op", choices=["check", "apply", "status"], nargs="?", default="status")
     upd.add_argument("--yes", action="store_true", help="Do not ask for confirmation")

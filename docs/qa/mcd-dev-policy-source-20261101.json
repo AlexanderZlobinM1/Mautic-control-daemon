@@ -1,0 +1,23 @@
+{
+  "status": "PASS",
+  "scope": "source-only Dev policy compatibility; no Dev artifact or assignment",
+  "development_version": "1.7.0.dev0",
+  "branch": "codex/mcd-1.7",
+  "empty_handler_response": {
+    "policy": "dev",
+    "reason": "no_build_for_policy",
+    "status": "up_to_date"
+  },
+  "focused_passed": 17,
+  "full_regression": {
+    "passed": 2171,
+    "failed": 61,
+    "exact_baseline_failure_ids": true,
+    "skipped": 57,
+    "subtests_passed": 105,
+    "log_sha256": "2524d2272a3d4663a8d6e1220816bf0f19cbe3f1dce1fb8a24153b37cebf33de"
+  },
+  "stable_counterpart": "pending minimal paired hotfix; shared cycle must remain open",
+  "publication": false,
+  "host_assignments_changed": false
+}

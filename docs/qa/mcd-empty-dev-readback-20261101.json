@@ -1,0 +1,28 @@
+{
+  "scope": "empty Dev integration; no release or host rollout",
+  "catalog_url": "https://servercontrol.sales-snap.com/mauticctl/mcd/manifest.json",
+  "catalog_sha256": "1b9b951fd1038548f2db0aec628a1d5f311ccfd0797dca03f34d696a5dfbef38",
+  "publisher_independent_readback": {
+    "dev": null,
+    "approved": "1.6.39",
+    "test": "1.6.39",
+    "latest": "1.6.39",
+    "build_count": 17,
+    "dev_flagged_builds": 0
+  },
+  "mcc_owner_confirmed": {
+    "source_commit": "e88b35ef8f588cbf5ba79880e518f404fe65e301",
+    "version": "1.2.300",
+    "production_policy_counts": {"approved": 63, "cluster": 5, "test": 4, "dev": 0},
+    "desired_dev_hosts": 0,
+    "active_fence_jobs": 0,
+    "empty_channel_assignment": "API/CLI reject; UI disabled; agent no target",
+    "fallback_latest_default_autoenroll": false,
+    "evidence_directory": "/opt/mcc/control-plane/.deploy-backups/pre-e88b35ef-20261101T093000Z"
+  },
+  "host_counts_scope": "MCC owner production DB readback, not inferred from catalog",
+  "publisher_host_assignment_mutations": 0,
+  "unlisted_R31_promoted": false,
+  "development_branch_is_accepted_artifact": false,
+  "whole_1_7_acceptance": "HOLD"
+}

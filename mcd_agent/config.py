@@ -2828,14 +2828,17 @@ def _load_config_inner(path: str) -> AgentConfig:
             mcd_update_policy = "lts"
         elif ch in {"rc", "test"}:
             mcd_update_policy = "test"
+        elif ch == "dev":
+            mcd_update_policy = "dev"
         elif ch == "cluster":
             mcd_update_policy = "cluster"
         elif ch == "off":
             mcd_update_policy = "off"
         else:
             mcd_update_policy = "approved"
-    if mcd_update_policy not in {"off", "lts", "approved", "test", "cluster"}:
-        mcd_update_policy = "approved"
+    if mcd_update_policy not in {"off", "lts", "approved", "test", "cluster", "dev"}:
+        mcd_update_policy = ("dev" if str(runtime.get("mcd_update_channel", "")).strip().lower() == "dev"
+                             else "approved")
     cluster_id = str(runtime.get("cluster_id", cluster_cfg.get("id", "")) or "").strip() or None
     cluster_name = str(runtime.get("cluster_name", cluster_cfg.get("name", "")) or "").strip() or None
     cluster_node_role = str(runtime.get("cluster_node_role", cluster_cfg.get("node_role", "")) or "").strip().lower()
