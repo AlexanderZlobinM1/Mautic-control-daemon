@@ -33,5 +33,20 @@
     "harness_change": "bounded real HTTP readiness polling10sec; retain every failed attempt; recipe unchanged"
   },
   "channel_publication": false,
-  "production_actor": false
+  "production_actor": false,
+  "old_attempt2": {
+    "status": "pre-existing long-domain nginx hash bucket limit; not PASS",
+    "receipt_sha256": "ed75c8e17634727e4cbcb3a672b1e435ea3f0e81379b51270f8094fc3a8ee905",
+    "completed": [
+      "empty domains/missing PHP preflight",
+      "real current SAN TLS write/repeat",
+      "HTTP docroot with bounded readiness proof"
+    ],
+    "failure": "nginx-t1: server_names_hash_bucket_size64 with long composer fixture domain",
+    "reload_after_failure": false,
+    "canonical_https": "200 verifiedTLS",
+    "recipe_fix": false,
+    "next_positive_fixtures": "shorter cmp-a/cmp-r names; same source operation",
+    "reset": "full reset requested; no manual file cleanup"
+  }
 }

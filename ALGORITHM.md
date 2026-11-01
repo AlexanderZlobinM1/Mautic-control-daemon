@@ -2578,3 +2578,31 @@ recipe ожидания готовности не добавляет. Первы
 успешные TLS/preflight результаты и неудачную немедленную HTTP assertion;
 read-only повтор дал правильный ответ, nginx-t0 и HTTPS200. До повторного
 mutable actor требуется полный reset; этот attempt не объявляется PASS.
+
+Второй OLD attempt ed75c8e прошёл preflight/TLS/HTTP, затем nginx-t выявил
+существующий hash bucket limit на длинном QA-имени composer-vhost. Reload после
+этой ошибки не выполнялся, основной HTTPS сохранил200. Ошибка сохранена;
+положительный сценарий использует короткое QA-имя после полного reset.
+Размер hash bucket и legacy-политика при переносе не меняются.
+
+### Pending: универсальные workload-профили и authority настроек
+
+MCC подтвердил22 существующие hardware recommendation записи (объект30b3b568),
+но полного опубликованного universal HOST-workload catalog пока нет. Один
+proposed farm-midi example не задаёт остальные профили. Freeze текущего MCD
+74df87d1 содержит13 named presets, legacy farm,31 реально назначаемое поле и
+11 унаследованных runtime default значений; это эталон для внешнего authoring,
+а не вторая authority. Custom остаётся операторскими настройками. Поля
+ring_count/max_segment_retries/segment_priority_stale_age_sec из proposed schema
+не приравниваются молча к другим AgentConfig-полям и не заполняются догадками.
+
+Внешние workload-объекты универсальны для OS/provider; hardware metadata только
+рекомендует профиль. Явный выбор оператора применяется буквально без clamp по
+железу. Текущие profile formulas остаются pending до готового replacement и
+приёмки consumer/standalone; источник значений при переносе не меняется.
+Полная потеря/обнуление после обновления восстанавливает все durable настройки
+из MCC. Reset/отсутствие не считаются пользовательской правкой. Для настоящих
+правок updated_at определяет направление в обе стороны; явный новый tombstone
+отличается от reset. Восемь текущих MCD-проверок этих правил прошли, live
+межкомпонентная приёмка universal profiles ещё обязательна. Evidence:
+docs/qa/mcd-universal-profile-authority-transfer-20261101.json.

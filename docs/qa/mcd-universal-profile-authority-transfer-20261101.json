@@ -1,0 +1,44 @@
+{
+  "status": "current behavior frozen; universal object authoring and consumer acceptance pending",
+  "runtime_source_commit": "3adea1f3be62e7ba38a547f6b93400a408076762",
+  "MCC_public_handoff_sha256": "6fad0749de160dc8e6c1f28d2db4eec190c9f79e1f3f0199769048e1ebbdb010",
+  "MCC_hardware_object_sha256": "30b3b5684c831af8a78cac44d85e100a0b99108acc7a3c1e990e7313a6663ea3",
+  "hardware_rows": 22,
+  "hardware_authority": "existing MCC persisted catalog; advisory recommendation only",
+  "complete_existing_live_HOST_workload_catalog": false,
+  "current_MCD_reference_sha256": "893d7f3eb94cb35ec57459cef6edb1e8f1ee6835802535aecde322d2c9610709",
+  "current_complete_reference_sha256": "74df87d1566f0f1a919c930b6f8802de4591b970064aae781d9b8a5314d18797",
+  "named_presets": 13,
+  "legacy_compatibility_presets": [
+    "farm"
+  ],
+  "actual_profile_owned_fields": 31,
+  "explicit_inherited_runtime_fields": 11,
+  "custom": "operator-owned current settings; no fixed preset invented",
+  "proposed_schema_fields_not_in_AgentConfig": [
+    "ring_count",
+    "max_segment_retries",
+    "segment_priority_stale_age_sec"
+  ],
+  "implicit_aliases_invented": false,
+  "operator_semantics": [
+    "universal workload objects independent of OS/provider; no per-family copies",
+    "hardware recommendation advisory; explicitly selected profile values apply literally without hardware clamp",
+    "all durable settings restored after loss/update reset; absence/reset not a user edit",
+    "newer legitimate updated_at wins in either direction; explicit newer tombstone distinct from reset"
+  ],
+  "MCD_existing_settings_authority_verification": {
+    "focused_passed": 8,
+    "log_sha256": "23e550fb98ecf9009d9e35cd965253aa56f2e2b4f5a216b0504aa1524c06714f",
+    "scope": "selected existing MCD update/reset/all-settings/LWW/tombstone tests; no new live host or MCC-server acceptance claimed"
+  },
+  "remaining": [
+    "Portal frozen complete universal objects/schema from current MCD behavior",
+    "MCC immutable object refs/catalog publication by owner",
+    "MCD generic consumer and removal of replaced profile formulas after acceptance",
+    "standalone offline exact-cache and manual high-profile literal application",
+    "complete settings recovery and bidirectional authority consumer acceptance",
+    "whole 1.7 Publish MCD release"
+  ],
+  "channel_publication": false
+}
