@@ -30,7 +30,13 @@
     "release_regression": "PASS",
     "expanded_focused": 45,
     "parallel_runtime_rollback": 4,
-    "expanded_full": "pending"
+    "expanded_full": {
+      "passed": 1922,
+      "failed": 61,
+      "failed_ids_exact_baseline": true,
+      "skipped": 57,
+      "subtests_passed": 105
+    }
   },
   "proof": {
     "local_installed_public38_package_phase": "PASS",
