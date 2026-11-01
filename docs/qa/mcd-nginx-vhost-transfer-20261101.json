@@ -1,5 +1,5 @@
 {
-  "status": "OLD scoped vhost OS-stage native PASS; external authoring/direct/CLI/cleanup pending",
+  "status": "OLD and standalone DIRECT native PASS; installed CLI/caller routing acceptance pending",
   "owner_source_commit": "3adea1f3be62e7ba38a547f6b93400a408076762",
   "owner_freeze_sha256": "d68566787dea9c3908a9fd3463df46acec2c6faf6636f6b3d9b63a88c2f16d5b",
   "caller_run_supplement_sha256": "4950f91f90a0daecee1675e73c1895cc6f0c8ee93403e57d0ca5b454ba5119ce",
@@ -73,7 +73,7 @@
   "renderer_supplement_sha256": "2ed4c6d04c68cd4f07bef71ef91b0bfab2457b4ccd3f3778c0c2ff8fd47b31c5",
   "prepared_consumer": {
     "status": "unit mechanism PASS; immutable external artifact/native DIRECT/installed CLI still required",
-    "focused_passed": 126,
+    "focused_passed": 128,
     "whole_operations": {
       "write_nginx_vhost": [
         "root",
@@ -100,11 +100,36 @@
     "existing_cache_and_runner_only": true,
     "failed_terminal_preserves_legacy_error": true,
     "legacy_callers_still_unmodified": true,
-    "full_passed": 2057,
+    "full_passed": 2059,
     "full_failed": 61,
     "full_failures_exact_baseline_ids": true,
     "full_skipped": 57,
     "full_subtests": 105,
-    "full_log_sha256": "77b38888e49489ceb7c700445f352af5de976465931832c640e80e0af8b3e4f8"
+    "full_log_sha256": "58f05616c4dbe4459c0aaa962810569294ed0a834a41509d9fecd3622b775989",
+    "exact_selected_artifact_online_repair": "unit PASS: missing/corrupt exact GET1, repeat0; no latest query or operation replay"
+  },
+  "external_frozen": {
+    "handoff_sha256": "70ccf56ad47a0e164f23990d5d9f64ceabb986c55b224a6cd3650dd8f3082b61",
+    "source_commit": "fa4a2c7a4622e8d82b5176c204eadfdf5d3c1ac9",
+    "source_archive_sha256": "e08baa9ab4ad8a13f2817a6f61ebbe48a3f064a7ad8a8d02411cd02ba10c6a9c",
+    "executable_sha256": "e3143074242c4de4cc5a0f672db6e588e9d836c337e8c0b3c7f52376e81002aa",
+    "generator_sha256": "dc34fe2aad4dcdc80408085e94d990d995a265c62b7f93dbe4464a45896f70a0",
+    "member_pins_verified": 22,
+    "baseline_dependency_unchanged_sha256": "abcd65aadd0ef408b150acf6c080fb0ee52bf84d7a9915677cadf92ba59066fb"
+  },
+  "DIRECT_native": {
+    "status": "PASS",
+    "receipt_sha256": "0e84bfbfffbc8fec21e39374b637a4e9474211bdacdd9df10a607776e56b6d1f",
+    "current_core_fact_proof_sha256": "b7e2ac21f4c3c974b43b81e0d7048fd626c805028966db7658f04f26f1b3010a",
+    "all_8_business_results_equal_OLD": true,
+    "normalized": [
+      "generated composer backup timestamp only; raw retained"
+    ],
+    "actual_standalone_argv_stdout_stderr_terminals_saved": true,
+    "external_MCD_imports": false,
+    "old_legacy_no_vhost_rollback_preserved": true,
+    "neighbors_certificates_bytes_mtime_unchanged": true,
+    "canonical_HTTPS": "200 verifiedTLS",
+    "full_reset_requested": true
   }
 }

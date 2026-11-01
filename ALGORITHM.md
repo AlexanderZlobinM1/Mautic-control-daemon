@@ -2642,3 +2642,23 @@ Standalone использует тот же manual/pinned cache без config/re
 Полная регрессия подготовленного vhost consumer:2057PASS, те же61 baseline
 failure IDs,57skip/105subtests. Новых падений нет. Это source checkpoint
 до нативной приёмки внешнего аналога и переключения старых callers.
+
+### Восстановление выбранного артефакта при доступном транспорте
+
+При наличии cfg с настроенным существующим artifact transport и сохранённых
+точных selection pins отсутствующий/повреждённый архив догружается через
+существующий fetch-only downloader. Запрос latest/service-profile для ремонта
+не выполняется: сохраняется прежний key/SHA/entrypoint. Затем тот же выбранный
+recipe запускается offline_only. Полный совпавший кеш не делает GET/HEAD.
+Без транспорта возвращается прежняя точная missing/corrupt ошибка. Повтор
+после начавшейся recipe-мутации не выполняется; ремонт возможен только по
+типизированному отказу до процесса. Две проверки missing/corrupt подтверждают
+один exact artifact GET, затем0GET при повторе и сохранение local selection.
+
+Standalone DIRECT vhost принят PASS: receipt0e84bfbf, фактический core-факт
+b7e2ac21, все22 member pins e3143074 и неизменённый baseline307 проверены.
+Все восемь публичных business результатов равны OLD, включая настоящий
+nginx-t failure без vhost rollback; raw argv/stdout/stderr/terminal сохранены.
+После DIRECT запрошен полный reset. Текущий consumer checkpoint с exact
+artifact repair:128focusedPASS/2059fullPASS, те же61baseline IDs/57skip/105subtests.
+Обычный installed CLI и реальные caller aliases остаются следующим этапом.

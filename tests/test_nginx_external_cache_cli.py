@@ -125,3 +125,26 @@ def test_vhost_unselected_inputs_or_invented_modes_never_start_recipe(manual_cac
     result=json.loads(capsys.readouterr().out)
     assert result['reason']==('custom_selected_task_missing' if problem=='input-changed' else 'nginx_operation_input_invalid')
     assert not (tmp_path/'site.conf').exists()
+
+
+@pytest.mark.parametrize('corrupt',[False,True])
+def test_available_transport_repairs_only_selected_pinned_artifact_then_stays_offline(manual_cache,tmp_path,monkeypatch,corrupt):
+    from mcd_agent import nginx_external,service_profiles
+    root,artifact=manual_cache
+    parameters={'root':str(tmp_path/'app'),'domains':['qa.example.invalid'],'php_version':'8.5'}
+    expected={'site':str(tmp_path/'site.conf')}
+    select_vhost(root,'write_nginx_vhost',parameters,expected)
+    data=artifact.read_bytes()
+    if corrupt:artifact.write_bytes(b'corrupt required archive')
+    else:artifact.unlink()
+    cfg=custom.standalone_custom_cache_config(root);cfg.mcc_url='https://explicit-artifact-transport.invalid'
+    calls=[]
+    def download(request,**kwargs):
+        calls.append(request.full_url)
+        assert request.full_url=='https://explicit-artifact-transport.invalid/wire-fixture.tar.gz'
+        return BytesIO(data)
+    monkeypatch.setattr(custom.urllib.request,'urlopen',download)
+    monkeypatch.setattr(service_profiles,'fetch_service_profile',lambda *a,**kw:pytest.fail('repair must preserve local selection, not query latest'))
+    for _ in range(2):
+        assert nginx_external.write_nginx_vhost(root=Path(parameters['root']),domains=parameters['domains'],php_version=parameters['php_version'],cfg=cfg)==expected['site']
+    assert len(calls)==1 and artifact.read_bytes()==data

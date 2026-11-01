@@ -41,7 +41,23 @@ def _invoke(operation: str, operation_input: dict[str, Any], *,
             raise CustomSelectedTaskError(str(response.get("reason") or "custom_selected_task_fetch_failed"))
         fetched = cached_selected_task(config, **options)
     try:
-        return apply_external_service_profile(config, fetched, component="nginx", offline_only=True)
+        try:
+            return apply_external_service_profile(config, fetched, component="nginx", offline_only=True)
+        except CustomSelectedTaskError as error:
+            transport = cfg is not None and any(getattr(config, key, None) for key in
+                ("custom_repo_base_url", "plugins_repo_base_url", "mcc_url"))
+            if str(error) != "custom_selected_task_artifact_missing_or_corrupt" or not transport:
+                raise
+            # Admission already succeeded; repair only these selected pins,
+            # never query latest or retry an operation that started mutating.
+            from mcd_agent.custom_scripts import run_custom_script_by_key
+            artifact = fetched["external_handler"]["artifact"]
+            code, _output = run_custom_script_by_key(config, script_key=artifact["key"],
+                expected_sha256=artifact["sha256"], expected_entrypoint=artifact.get("entrypoint"),
+                fetch_only=True, detach=False)
+            if code != 0:
+                raise CustomSelectedTaskError("custom_selected_task_artifact_repair_failed")
+            return apply_external_service_profile(config, fetched, component="nginx", offline_only=True)
     except ExternalProfileOperationError as error:
         return error.public_result
 
