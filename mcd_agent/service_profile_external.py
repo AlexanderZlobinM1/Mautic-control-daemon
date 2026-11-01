@@ -7,7 +7,7 @@ import re
 import struct
 from typing import Any, Mapping
 
-from mcd_agent.custom_scripts import run_custom_script_by_key
+from mcd_agent.custom_scripts import CustomSelectedTaskError, run_custom_script_by_key
 from mcd_agent.commercial_portal import canonical_json
 from mcd_agent.commercial_self_hosted import ExternalProcessPolicy
 from mcd_agent.host_identity import resolve_agent_identity
@@ -15,6 +15,13 @@ from mcd_agent.scenario_launcher import MAX_CONTEXT_BYTES
 
 BASE_RUNTIME_CAPABILITIES = frozenset({'custom-gzip-entrypoint', 'raw-jsonline-terminal-result'})
 CUSTOM_RUNTIME_CAPABILITIES = BASE_RUNTIME_CAPABILITIES | {'framed-runtime-input'}
+NGINX_OPERATION_INPUT_KEYS = {
+    'default_stub_operation': {'apply'},
+    'ensure_nginx_baseline': {'reload_service'},
+    'ensure_cloudflare_real_ip': {'reload_service'},
+    'nginx_baseline_satisfied': set(),
+    'cloudflare_real_ip_state': set(),
+}
 
 
 class ExternalProfileOperationError(RuntimeError):
@@ -33,7 +40,7 @@ def external_handler_selected(handler: Mapping[str, Any]) -> bool:
     raise ValueError('external_handler_activation_invalid')
 
 
-def apply_external_service_profile(cfg: Any, fetched: Mapping[str, Any], *,
+def _admit_external_service_profile(cfg: Any, fetched: Mapping[str, Any], *,
                                    component: str, dry_run: bool = False) -> dict[str, Any]:
     handler = fetched.get('external_handler')
     if not isinstance(handler, Mapping):
@@ -71,7 +78,7 @@ def apply_external_service_profile(cfg: Any, fetched: Mapping[str, Any], *,
             raise ValueError("external_handler_runtime_input_unsupported")
     profile_input = handler.get('profile_input')
     profile = fetched.get('profile')
-    if not isinstance(profile_input, Mapping) or profile_input.get('source') != 'response.profile' or not isinstance(profile, Mapping):
+    if not isinstance(profile_input, Mapping) or profile_input.get('source') != 'response.profile' or not (isinstance(profile, Mapping) or (component == 'nginx' and profile is None)):
         raise ValueError('external_handler_profile_input_invalid')
     if component == "wazuh" and profile.get("registration_password"):
         raise ValueError("external_handler_private_profile_rejected")
@@ -102,6 +109,31 @@ def apply_external_service_profile(cfg: Any, fetched: Mapping[str, Any], *,
         actual = {key: identity[key] for key in identity_keys}
         if dict(context) != actual:
             raise ValueError("external_handler_runtime_context_mismatch")
+    elif component == "nginx":
+        operation = fetched.get("operation")
+        flags = fetched.get("operation_input")
+        required_flags = NGINX_OPERATION_INPUT_KEYS.get(operation) if isinstance(operation, str) else None
+        if (required_flags is None or not isinstance(flags, dict) or set(flags) != required_flags
+                or any(type(value) is not bool for value in flags.values())
+                or handler.get("operation") != operation or canonical_json(handler.get("operation_input")) != canonical_json(flags)):
+            raise ValueError("external_handler_operation_input_invalid")
+        context = handler.get("runtime_context")
+        if (not isinstance(context, Mapping) or set(context) != {"ipv6_listen_forbidden"}
+                or type(context["ipv6_listen_forbidden"]) is not bool):
+            raise ValueError("external_handler_runtime_context_invalid")
+        if fetched.get("runtime_context") != context:
+            raise ValueError("external_handler_runtime_context_response_mismatch")
+        from mcd_agent.nginx_baseline import _ipv6_listen_forbidden
+        if context["ipv6_listen_forbidden"] is not _ipv6_listen_forbidden():
+            raise ValueError("external_handler_runtime_context_mismatch")
+        for field, value in (("runtime_context_input", context), ("operation_input_input", flags)):
+            pin = handler.get(field)
+            if not isinstance(pin, Mapping) or pin.get("sha256") != hashlib.sha256(canonical_json(value)).hexdigest():
+                raise ValueError("external_handler_operation_pin_mismatch")
+        fields = profile_input.get("fields")
+        if (not isinstance(fields, list) or any(not isinstance(k, str) or not k for k in fields)
+                or len(set(fields)) != len(fields) or (profile is not None and not set(profile) <= set(fields))):
+            raise ValueError("external_handler_profile_projection_invalid")
     elif component == "mysql" or "runtime_context" in handler:
         context = handler.get("runtime_context")
         if not isinstance(context, Mapping) or set(context) != {"cluster_id"}:
@@ -129,11 +161,28 @@ def apply_external_service_profile(cfg: Any, fetched: Mapping[str, Any], *,
         raise ValueError('external_handler_dry_run_unavailable' if dry_run else 'external_handler_command_invalid')
     if (runtime_input is not None) != ("--runtime-input-stdin" in argv[len(prefix):]):
         raise ValueError("external_handler_runtime_input_command_mismatch")
-    options = {"runtime_input": runtime_input} if runtime_input is not None else {}
-    rc, output = run_custom_script_by_key(cfg, script_key=key, expected_sha256=digest,
-        expected_entrypoint=entrypoint, args=argv[len(prefix):], detach=False,
+    return {"key": key, "digest": digest, "entrypoint": entrypoint,
+            "args": argv[len(prefix):], "runtime_input": runtime_input}
+
+
+def validate_external_service_profile(cfg: Any, fetched: Mapping[str, Any], *, component: str) -> None:
+    """Admit public coordinates/facts before caching, without downloads or writes."""
+    _admit_external_service_profile(cfg, fetched, component=component)
+
+
+def apply_external_service_profile(cfg: Any, fetched: Mapping[str, Any], *,
+                                   component: str, dry_run: bool = False,
+                                   offline_only: bool = False) -> dict[str, Any]:
+    admitted = _admit_external_service_profile(cfg, fetched, component=component, dry_run=dry_run)
+    options = {"runtime_input": admitted["runtime_input"]} if admitted["runtime_input"] is not None else {}
+    if offline_only:
+        options["offline_only"] = True
+    rc, output = run_custom_script_by_key(cfg, script_key=admitted["key"], expected_sha256=admitted["digest"],
+        expected_entrypoint=admitted["entrypoint"], args=admitted["args"], detach=False,
         live_output=False, capture_result=True, **options)
     if rc != 0:
+        if offline_only and output in {"custom_selected_task_catalog_item_missing", "custom_selected_task_artifact_missing_or_corrupt"}:
+            raise CustomSelectedTaskError(output)
         # Reuse the existing frame validator; no component business statuses are
         # interpreted by the generic decoder or this failure carrier.
         try:

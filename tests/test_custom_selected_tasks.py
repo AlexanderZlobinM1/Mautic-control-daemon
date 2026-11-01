@@ -18,13 +18,18 @@ def cached(tmp_path):
     (root/'manifest.json').write_text(json.dumps({'items':[row]}))
     file=root/'downloads'/row['key']/(row['key']+'-'+digest+'.sh');file.parent.mkdir(parents=True);file.write_bytes(body)
     response={'status':'ok','component':'nginx','operation':'default_stub_operation','operation_input':{'apply':False},'profile':{},'external_handler':{'active':True,'state':'active','artifact':{'key':row['key'],'sha256':digest,'entrypoint':None}}}
+    response['resolved_plan_key']='nginx:fixture'
+    response['external_handler'].update(schema='mcc-service-profile-external-handler-v1',transport='mcd-custom-v1',component='nginx',operation=response['operation'],operation_input=copy.deepcopy(response['operation_input']),resolved_plan_key=response['resolved_plan_key'])
+    context={'ipv6_listen_forbidden':False}
+    response['runtime_context']=context
+    response['external_handler'].update(runtime_context=context,profile_input={'source':'response.profile','sha256':custom._public_json_digest({}),'fields':[]},runtime_context_input={'sha256':custom._public_json_digest(context)},operation_input_input={'sha256':custom._public_json_digest(response['operation_input'])})
     return cfg,root,row,file,response
 
 
 def test_manual_selected_task_and_verified_cache_need_no_config_registration_url_or_get(cached,monkeypatch):
     cfg,root,row,file,response=cached
     record={'schema':'mcd-custom-selected-task-v1','component':'nginx','operation':response['operation'],'operation_input':response['operation_input'],'response':response}
-    key=custom.selected_task_key('nginx',response['operation'],response['operation_input'])
+    key=custom.selected_task_key('nginx',response['operation'],response['operation_input'],profile_sha256=response['external_handler']['profile_input']['sha256'],runtime_context_sha256=response['external_handler']['runtime_context_input']['sha256'])
     (root/'manifest.json').write_text(json.dumps({'items':[row],'selected_tasks':{key:record}}))
     monkeypatch.setattr(custom.urllib.request,'urlopen',lambda *a,**kw:pytest.fail('complete selected cache must not request HTTP'))
     selected=custom.cached_selected_task(cfg,component='nginx',operation='default_stub_operation',operation_input={'apply':False})
@@ -35,7 +40,7 @@ def test_manual_selected_task_and_verified_cache_need_no_config_registration_url
 def test_status_apply_variants_survive_remote_catalog_refresh_without_remote_selection_authority(cached,monkeypatch):
     cfg,root,row,file,response=cached
     for value in [False,True]:
-        current=copy.deepcopy(response);current['operation_input']={'apply':value};custom.cache_selected_task(cfg,current)
+        current=copy.deepcopy(response);current['operation_input']={'apply':value};current['external_handler']['operation_input']=copy.deepcopy(current['operation_input']);current['external_handler']['operation_input_input']['sha256']=custom._public_json_digest(current['operation_input']);custom.cache_selected_task(cfg,current)
     cfg.custom_repo_base_url='https://fixture.invalid'
     # A global response cannot replace local operator/MCC-selected coordinates.
     remote={'items':[row],'selected_tasks':{'remote-malicious':{'runtime_input':'must-not-persist'}}}
@@ -55,13 +60,17 @@ def test_private_data_is_rejected_without_cache_mutation(cached,field):
     assert (root/'manifest.json').read_bytes()==before and not list(root.glob('.manifest-*'))
 
 
-def test_catalog_revision_removing_required_item_drops_only_unresolvable_selection(cached,monkeypatch):
+def test_remote_catalog_removal_preserves_selected_pins_and_offline_execution(cached,monkeypatch):
     cfg,root,row,file,response=cached;custom.cache_selected_task(cfg,response)
     cfg.custom_repo_base_url='https://fixture.invalid'
-    monkeypatch.setattr(custom.urllib.request,'urlopen',lambda *a,**kw:BytesIO(b'{"items":[]}'))
-    custom.fetch_custom_manifest(cfg)
-    with pytest.raises(custom.CustomSelectedTaskError,match='missing'):custom.cached_selected_task(cfg,component='nginx',operation='default_stub_operation',operation_input={'apply':False})
-    assert file.exists()  # Selection invalidation does not delete another actor's bytes.
+    calls=[]
+    monkeypatch.setattr(custom.urllib.request,'urlopen',lambda *a,**kw:calls.append('explicit-refresh') or BytesIO(b'{"items":[]}'))
+    rows,source=custom.fetch_custom_manifest(cfg)
+    assert source=='remote' and any(item['key']==row['key'] and item['sha256']==row['sha256'] for item in rows)
+    assert custom.cached_selected_task(cfg,component='nginx',operation='default_stub_operation',operation_input={'apply':False})==response
+    monkeypatch.setattr(custom.urllib.request,'urlopen',lambda *a,**kw:pytest.fail('remote latest must not gate cached execution'))
+    assert custom.run_custom_script_by_key(cfg,script_key=row['key'],expected_sha256=row['sha256'],detach=False,live_output=False,offline_only=True)==(0,'verified-cache')
+    assert calls==['explicit-refresh'] and file.exists()
 
 
 def test_missing_selection_is_read_only_without_even_creating_cache(tmp_path):
@@ -81,3 +90,35 @@ def test_missing_or_corrupt_selected_artifact_fails_before_process_or_network(ca
     code,out=custom.run_custom_script_by_key(cfg,script_key=row['key'],expected_sha256=row['sha256'],detach=False,offline_only=True)
     assert code!=0 and 'custom_selected_task_artifact_missing_or_corrupt' in out
     assert {str(p) for p in root.rglob('*')}==before
+
+
+def test_observer_none_and_configured_profile_selections_coexist_offline(cached):
+    cfg,root,row,file,response=cached
+    response['operation']='cloudflare_real_ip_state';response['operation_input']={}
+    response['external_handler'].update(operation=response['operation'],operation_input={})
+    response['external_handler']['operation_input_input']['sha256']=custom._public_json_digest({})
+    for profile in [None,{'setting':True}]:
+        current=copy.deepcopy(response);current['profile']=profile
+        current['external_handler']['profile_input']={'source':'response.profile','sha256':custom._public_json_digest(profile),'fields':['setting']}
+        custom.cache_selected_task(cfg,current)
+    empty=custom.cached_selected_task(cfg,component='nginx',operation='cloudflare_real_ip_state',operation_input={},profile=None)
+    configured=custom.cached_selected_task(cfg,component='nginx',operation='cloudflare_real_ip_state',operation_input={},profile={'setting':True,'unrelated':42})
+    assert empty['profile'] is None and configured['profile']=={'setting':True}
+    assert len(json.loads((root/'manifest.json').read_text())['selected_tasks'])==2
+
+
+def test_full_projection_field_list_detects_newly_present_caller_field(cached):
+    cfg,root,row,file,response=cached
+    response['external_handler']['profile_input']['fields']=['setting']
+    custom.cache_selected_task(cfg,response)
+    with pytest.raises(custom.CustomSelectedTaskError,match='input_mismatch'):
+        custom.cached_selected_task(cfg,component='nginx',operation='default_stub_operation',operation_input={'apply':False},profile={'setting':True})
+
+
+def test_changed_current_fact_is_typed_without_fetch_or_any_write(cached,monkeypatch):
+    cfg,root,row,file,response=cached;custom.cache_selected_task(cfg,response)
+    before=(root/'manifest.json').read_bytes()
+    monkeypatch.setattr(custom.urllib.request,'urlopen',lambda *a,**kw:pytest.fail('fact mismatch must not guess/fetch another selection'))
+    with pytest.raises(custom.CustomSelectedTaskError,match='input_mismatch'):
+        custom.cached_selected_task(cfg,component='nginx',operation='default_stub_operation',operation_input={'apply':False},runtime_context={'ipv6_listen_forbidden':True})
+    assert (root/'manifest.json').read_bytes()==before

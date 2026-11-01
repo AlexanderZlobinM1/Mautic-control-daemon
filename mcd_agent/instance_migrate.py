@@ -29,9 +29,9 @@ from mcd_agent.models import MauticInstall
 from mcd_agent.nginx_baseline import (
     _nginx_supports_http2_directive,
     ensure_mautic_public_app_asset_locations,
-    ensure_nginx_baseline,
     normalize_legacy_http2_listen,
 )
+from mcd_agent.nginx_external import ensure_nginx_baseline
 from mcd_agent.nginx_templates import render_nginx_template
 from mcd_agent.runtime_adapters import run_runtime_adapter, runtime_adapter_path
 from mcd_agent.runtime_descriptor import descriptor_for_root
@@ -850,7 +850,7 @@ def finalize_target_relay(
     print("progress: 88 target web config")
     _patch_local_php_db(target, target_db)
     _patch_local_php_instance_paths(target)
-    site = _write_nginx_vhost(root=target, domains=domains, php_version=php_version or "")
+    site = _write_nginx_vhost(root=target, domains=domains, php_version=php_version or "", cfg=config)
     _run_checked(["chown", "-R", "www-data:www-data", str(target)], timeout_sec=1800)
     print("progress: 94 target healthcheck")
     health = _target_healthcheck(target)
@@ -924,8 +924,8 @@ def _nginx_web_root(root: Path) -> Path:
     return root
 
 
-def _ensure_nginx_sites_layout() -> None:
-    baseline = ensure_nginx_baseline(reload_service=False)
+def _ensure_nginx_sites_layout(*, cfg: Any | None = None) -> None:
+    baseline = ensure_nginx_baseline(reload_service=False, **({"cfg": cfg} if cfg is not None else {}))
     if str(baseline.get("status") or "").strip().lower() == "error":
         raise RuntimeError("nginx baseline failed: " + str(baseline.get("error") or baseline))
     for path in (NGINX_SITES_AVAILABLE, NGINX_SITES_ENABLED):
@@ -934,10 +934,10 @@ def _ensure_nginx_sites_layout() -> None:
         path.mkdir(parents=True, exist_ok=True)
 
 
-def _write_nginx_vhost(*, root: Path, domains: list[str], php_version: str) -> str:
+def _write_nginx_vhost(*, root: Path, domains: list[str], php_version: str, cfg: Any | None = None) -> str:
     if not domains:
         raise RuntimeError("at least one domain is required for nginx vhost")
-    _ensure_nginx_sites_layout()
+    _ensure_nginx_sites_layout(cfg=cfg)
     php = _detect_php_version(php_version)
     if not php:
         raise RuntimeError("target PHP-FPM version is not available")
@@ -1174,7 +1174,7 @@ def run_target_pull_migration(
             source_ssh_port=source_ssh_port,
             source_ssh_key_file=source_ssh_key_file,
         )
-        site = _write_nginx_vhost(root=target, domains=domains, php_version=php_version or "")
+        site = _write_nginx_vhost(root=target, domains=domains, php_version=php_version or "", cfg=config)
         _run_checked(["chown", "-R", "www-data:www-data", str(target)], timeout_sec=1800)
 
         print("progress: 94 target healthcheck")

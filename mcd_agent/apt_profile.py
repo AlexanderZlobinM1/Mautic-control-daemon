@@ -14,8 +14,8 @@ import tempfile
 from typing import Any
 from urllib import request as urlrequest
 
-from mcd_agent.nginx_baseline import (
-    cloudflare_real_ip_profile_present,
+from mcd_agent.nginx_baseline import cloudflare_real_ip_profile_present
+from mcd_agent.nginx_external import (
     cloudflare_real_ip_state,
     ensure_cloudflare_real_ip,
     ensure_nginx_baseline,
@@ -228,7 +228,7 @@ def _service_enable_and_start(service: str, *, timeout_sec: int = 45) -> tuple[b
     return True, actions
 
 
-def _apt_upgrade_service_postcheck(*, timeout_sec: int = 90) -> tuple[list[str], list[str]]:
+def _apt_upgrade_service_postcheck(*, timeout_sec: int = 90, cfg: Any | None = None) -> tuple[list[str], list[str]]:
     actions: list[str] = []
     errors: list[str] = []
 
@@ -238,7 +238,7 @@ def _apt_upgrade_service_postcheck(*, timeout_sec: int = 90) -> tuple[list[str],
         if not ok:
             errors.extend(service_actions)
         else:
-            baseline = ensure_nginx_baseline(reload_service=True)
+            baseline = ensure_nginx_baseline(reload_service=True, **({"cfg": cfg} if cfg is not None else {}))
             baseline_actions = baseline.get("actions") if isinstance(baseline, dict) else []
             if isinstance(baseline_actions, list):
                 actions.extend(f"nginx_baseline:{str(x)}" for x in baseline_actions)
@@ -1065,7 +1065,7 @@ def _ondrej_nginx_disabled_leftovers_present() -> bool:
         return False
 
 
-def _nginx_official_profile_satisfied(*, remove_ondrej: bool) -> bool:
+def _nginx_official_profile_satisfied(*, remove_ondrej: bool, cfg: Any | None = None) -> bool:
     if not _gpg_keyring_has_fingerprint(_NGINX_OFFICIAL_KEYRING, _NGINX_OFFICIAL_FINGERPRINT):
         return False
     if not _nginx_official_repo_present():
@@ -1074,7 +1074,7 @@ def _nginx_official_profile_satisfied(*, remove_ondrej: bool) -> bool:
         return False
     if remove_ondrej and _active_ondrej_nginx_source_present():
         return False
-    if not nginx_baseline_satisfied():
+    if not nginx_baseline_satisfied(**({"cfg": cfg} if cfg is not None else {})):
         return False
     return True
 
@@ -1587,7 +1587,7 @@ def _apply_repo_profiles(
         nginx_official_once
         and bool(nginx_official_row.get("applied", False))
         and nginx_official_same_profile
-        and _nginx_official_profile_satisfied(remove_ondrej=bool(nginx_official_remove_ondrej))
+        and _nginx_official_profile_satisfied(remove_ondrej=bool(nginx_official_remove_ondrej), **({"cfg": cfg} if cfg is not None else {}))
         and not force_rescan
     ):
         actions.append("nginx_official_stable_profile:skip_once")
@@ -1598,7 +1598,7 @@ def _apply_repo_profiles(
         )
         actions.extend(repo_actions)
         if ok:
-            baseline = ensure_nginx_baseline(reload_service=True)
+            baseline = ensure_nginx_baseline(reload_service=True, **({"cfg": cfg} if cfg is not None else {}))
             baseline_actions = baseline.get("actions") if isinstance(baseline, dict) else []
             if isinstance(baseline_actions, list):
                 actions.extend(f"nginx_runtime_baseline:{x}" for x in baseline_actions)
@@ -2706,7 +2706,7 @@ def collect_apt_state(
         "checked_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "zabbix_agent": zbx_agent_payload,
         "zabbix_mysql_monitor": zbx_payload,
-        "cloudflare_real_ip": cloudflare_real_ip_state(profile),
+        "cloudflare_real_ip": cloudflare_real_ip_state(profile, **({"cfg": cfg} if cfg is not None else {})),
         "wazuh_agent": _collect_wazuh_agent_state_for_push(),
         "repo_profiles": collect_apt_repo_profiles_state(cfg=cfg),
         "unattended_upgrade": collect_unattended_upgrade_state(),
@@ -2982,7 +2982,7 @@ def apply_apt_profile(
         actions.append("var_www:disabled")
 
     if cloudflare_real_ip_profile_present(profile):
-        cf_result = ensure_cloudflare_real_ip(profile, reload_service=True)
+        cf_result = ensure_cloudflare_real_ip(profile, reload_service=True, **({"cfg": cfg} if cfg is not None else {}))
         cf_status = str(cf_result.get("status", "") or "").strip().lower()
         for act in list(cf_result.get("actions", []) or []):
             actions.append(str(act))
@@ -3008,7 +3008,7 @@ def apply_apt_profile(
         if p.returncode == 0:
             actions.append("upgrade:upgrade")
             if ensure_package_services_started:
-                svc_actions, svc_errors = _apt_upgrade_service_postcheck(timeout_sec=max(45, min(int(refresh_timeout_sec), 180)))
+                svc_actions, svc_errors = _apt_upgrade_service_postcheck(timeout_sec=max(45, min(int(refresh_timeout_sec), 180)), cfg=cfg)
                 actions.extend(svc_actions)
                 errors.extend(svc_errors)
             else:
@@ -3020,7 +3020,7 @@ def apply_apt_profile(
         if p.returncode == 0:
             actions.append("upgrade:dist-upgrade")
             if ensure_package_services_started:
-                svc_actions, svc_errors = _apt_upgrade_service_postcheck(timeout_sec=max(45, min(int(refresh_timeout_sec), 180)))
+                svc_actions, svc_errors = _apt_upgrade_service_postcheck(timeout_sec=max(45, min(int(refresh_timeout_sec), 180)), cfg=cfg)
                 actions.extend(svc_actions)
                 errors.extend(svc_errors)
             else:

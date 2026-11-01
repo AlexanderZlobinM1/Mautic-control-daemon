@@ -1,0 +1,281 @@
+{
+  "schema": "mcc-nginx-live-inactive-observer-responses-v1",
+  "mcc_commit": "8ddef9b7de58859dabba466bae765e5035b63900",
+  "generated_at": "2026-11-01T03:07:55.508438+00:00",
+  "host_execution": false,
+  "candidate_activation": false,
+  "responses": {
+    "profile_present_false": {
+      "status": "ok",
+      "component": "nginx",
+      "hostname": "alex-personal",
+      "resolved_plan_key": "nginx:cloudflare_real_ip_state",
+      "hw_plan_name": "Cloud MSK 80",
+      "hw_vcpu": 4,
+      "hw_ram_gb": 8,
+      "profile": null,
+      "operation": "cloudflare_real_ip_state",
+      "operation_input": {},
+      "runtime_context": {
+        "ipv6_listen_forbidden": false
+      },
+      "external_handler": {
+        "schema": "mcc-service-profile-external-handler-v1",
+        "component": "nginx",
+        "resolved_plan_key": "nginx:cloudflare_real_ip_state",
+        "state": "candidate",
+        "active": false,
+        "activation_required": true,
+        "transport": "mcd-custom-v1",
+        "artifact": {
+          "key": "nginx-host-baseline-005a00bd54be7e882f76c75017067cee437c12cfba66f615311b2d7e088a5f8e",
+          "file": "bundles/exact-profiles/nginx-host-baseline-005a00bd54be7e882f76c75017067cee437c12cfba66f615311b2d7e088a5f8e.tar.gz",
+          "uri": "https://servercontrol.sales-snap.com/mauticctl/custom/bundles/exact-profiles/nginx-host-baseline-005a00bd54be7e882f76c75017067cee437c12cfba66f615311b2d7e088a5f8e.tar.gz",
+          "sha256": "005a00bd54be7e882f76c75017067cee437c12cfba66f615311b2d7e088a5f8e",
+          "size_bytes": 16278,
+          "media_type": "application/gzip",
+          "entrypoint": "scenarios/debian-family/skeleton.py",
+          "task_data": "profiles/task.json",
+          "default_selection": "nginx-host-baseline-ddae6eadef95288a45ed1704445b2172fbf97305ab33c3e44713b8414fa0e019"
+        },
+        "command": {
+          "argv": [
+            "custom",
+            "--no-detach",
+            "--expected-sha256",
+            "005a00bd54be7e882f76c75017067cee437c12cfba66f615311b2d7e088a5f8e",
+            "nginx-host-baseline-005a00bd54be7e882f76c75017067cee437c12cfba66f615311b2d7e088a5f8e",
+            "--",
+            "--composition",
+            "profiles/task.json",
+            "--selection",
+            "nginx-host-baseline-ddae6eadef95288a45ed1704445b2172fbf97305ab33c3e44713b8414fa0e019"
+          ]
+        },
+        "profile_input": {
+          "source": "response.profile",
+          "sha256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+          "expected_sha256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+          "matches_expected": true,
+          "fields": [
+            "cloudflare_real_ip_enabled",
+            "cloudflare_real_ip_target_file",
+            "cloudflare_real_ip_header",
+            "cloudflare_real_ip_cidrs",
+            "cloudflare_real_ip_set_real_ip_from",
+            "cloudflare_real_ip_recursive",
+            "cloudflare_real_ip_remove_when_disabled"
+          ]
+        },
+        "operation": "cloudflare_real_ip_state",
+        "operation_input": {},
+        "operation_input_input": {
+          "source": "response.operation_input",
+          "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "expected_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "matches_expected": true
+        },
+        "selection": "nginx-host-baseline-ddae6eadef95288a45ed1704445b2172fbf97305ab33c3e44713b8414fa0e019",
+        "validation_profile": {
+          "path": "profiles/universal/0a10564c2470eeffc5695f2802ed512fa1cc8bf106c89f4471a11d0c9cd180bc.json",
+          "sha256": "0a10564c2470eeffc5695f2802ed512fa1cc8bf106c89f4471a11d0c9cd180bc",
+          "size_bytes": 17
+        },
+        "exact_profile_bundle": {
+          "schema": "mcc-exact-nginx-host-baseline-bundle-v1",
+          "component": "nginx_host_baseline",
+          "generated": true,
+          "template_key": "nginx-host-baseline-3075055662a2c4f6b87402b54ddeac9f0bf3662bde04212da965946ddfcabec2",
+          "files": [
+            {
+              "path": "profiles/task.json",
+              "sha256": "df8657fee2f2f705cd98a8a8ad50d0139899e282c2f56697388f0b86a4039672",
+              "size_bytes": 719
+            },
+            {
+              "path": "profiles/universal/0a10564c2470eeffc5695f2802ed512fa1cc8bf106c89f4471a11d0c9cd180bc.json",
+              "sha256": "0a10564c2470eeffc5695f2802ed512fa1cc8bf106c89f4471a11d0c9cd180bc",
+              "size_bytes": 17
+            },
+            {
+              "path": "scenarios/debian-family/common/blocks/nginx-host-baseline/1.0.0/block.py",
+              "sha256": "abcd65aadd0ef408b150acf6c080fb0ee52bf84d7a9915677cadf92ba59066fb",
+              "size_bytes": 53338
+            },
+            {
+              "path": "scenarios/debian-family/skeleton.py",
+              "sha256": "bcc9d651060f3c1e29314109fc98afd55c2c9083009c6bf15648a5d0c21740a6",
+              "size_bytes": 16167
+            }
+          ]
+        },
+        "runtime_context": {
+          "ipv6_listen_forbidden": false
+        },
+        "runtime_context_input": {
+          "source": "response.runtime_context",
+          "sha256": "7a6d92a6ee03ce72a6d85502b4aaf6fb28dff56483ea44ff2b89fd06f017332a",
+          "expected_sha256": "7a6d92a6ee03ce72a6d85502b4aaf6fb28dff56483ea44ff2b89fd06f017332a",
+          "matches_expected": true,
+          "consumer_check": "MCD current ipv6_runtime_disabled(ipv6_status()) exact match before apply"
+        },
+        "minimum_runtime": {
+          "target": "complete MCD 1.7 result-aware custom runtime with strict local selected_tasks variants; activation remains owner-gated",
+          "version_is_sufficient": false,
+          "required_capabilities": [
+            "custom-gzip-entrypoint",
+            "raw-jsonline-terminal-result"
+          ]
+        },
+        "terminal_result_contract": {
+          "schema": "mcd-self-hosted-executable-output-v1",
+          "contract_version": "1.0",
+          "result": "exact public nginx writer or observer result dictionary",
+          "public_result_component": "nginx_host_baseline"
+        },
+        "source_ref": "Portal executable SHA3075055662a2c4f6b87402b54ddeac9f0bf3662bde04212da965946ddfcabec2; Portal source SHA61c0e58698ea93015b9473f8500c38b2e64f9716be87e186fe89200f790ba998; MCD reference a6f1f1ed8110be35536568d1a9de0373083adaf6",
+        "source_catalog": {
+          "authority": "live MCC persisted APT service-profile projection",
+          "fixture_path": "backend/tests/fixtures/nginx_cloudflare_public_projection_v1.json",
+          "fixture_sha256": "dd4e6d0bb4644ac99496821adbe1d383df60db6e38007b0efaf12de9b58e297a"
+        }
+      }
+    },
+    "profile_present_true": {
+      "status": "ok",
+      "component": "nginx",
+      "hostname": "alex-personal",
+      "resolved_plan_key": "nginx:cloudflare_real_ip_state",
+      "hw_plan_name": "Cloud MSK 80",
+      "hw_vcpu": 4,
+      "hw_ram_gb": 8,
+      "profile": {},
+      "operation": "cloudflare_real_ip_state",
+      "operation_input": {},
+      "runtime_context": {
+        "ipv6_listen_forbidden": false
+      },
+      "external_handler": {
+        "schema": "mcc-service-profile-external-handler-v1",
+        "component": "nginx",
+        "resolved_plan_key": "nginx:cloudflare_real_ip_state",
+        "state": "candidate",
+        "active": false,
+        "activation_required": true,
+        "transport": "mcd-custom-v1",
+        "artifact": {
+          "key": "nginx-host-baseline-5926e8ca7aebae6d0594965a02285d3befbe004b387a29b3f37b0c474f898a02",
+          "file": "bundles/exact-profiles/nginx-host-baseline-5926e8ca7aebae6d0594965a02285d3befbe004b387a29b3f37b0c474f898a02.tar.gz",
+          "uri": "https://servercontrol.sales-snap.com/mauticctl/custom/bundles/exact-profiles/nginx-host-baseline-5926e8ca7aebae6d0594965a02285d3befbe004b387a29b3f37b0c474f898a02.tar.gz",
+          "sha256": "5926e8ca7aebae6d0594965a02285d3befbe004b387a29b3f37b0c474f898a02",
+          "size_bytes": 16274,
+          "media_type": "application/gzip",
+          "entrypoint": "scenarios/debian-family/skeleton.py",
+          "task_data": "profiles/task.json",
+          "default_selection": "nginx-host-baseline-f8f3e58702b15231fda9d310d5bc25e9bb3e67527ebbd107ef4b18e4c660e33a"
+        },
+        "command": {
+          "argv": [
+            "custom",
+            "--no-detach",
+            "--expected-sha256",
+            "5926e8ca7aebae6d0594965a02285d3befbe004b387a29b3f37b0c474f898a02",
+            "nginx-host-baseline-5926e8ca7aebae6d0594965a02285d3befbe004b387a29b3f37b0c474f898a02",
+            "--",
+            "--composition",
+            "profiles/task.json",
+            "--selection",
+            "nginx-host-baseline-f8f3e58702b15231fda9d310d5bc25e9bb3e67527ebbd107ef4b18e4c660e33a"
+          ]
+        },
+        "profile_input": {
+          "source": "response.profile",
+          "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "expected_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "matches_expected": true,
+          "fields": [
+            "cloudflare_real_ip_enabled",
+            "cloudflare_real_ip_target_file",
+            "cloudflare_real_ip_header",
+            "cloudflare_real_ip_cidrs",
+            "cloudflare_real_ip_set_real_ip_from",
+            "cloudflare_real_ip_recursive",
+            "cloudflare_real_ip_remove_when_disabled"
+          ]
+        },
+        "operation": "cloudflare_real_ip_state",
+        "operation_input": {},
+        "operation_input_input": {
+          "source": "response.operation_input",
+          "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "expected_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "matches_expected": true
+        },
+        "selection": "nginx-host-baseline-f8f3e58702b15231fda9d310d5bc25e9bb3e67527ebbd107ef4b18e4c660e33a",
+        "validation_profile": {
+          "path": "profiles/universal/a93c4e8a2c7a98c2156c98128b096a5a3c6fa2c6f5fcc70e4c22b4f6de88b425.json",
+          "sha256": "a93c4e8a2c7a98c2156c98128b096a5a3c6fa2c6f5fcc70e4c22b4f6de88b425",
+          "size_bytes": 15
+        },
+        "exact_profile_bundle": {
+          "schema": "mcc-exact-nginx-host-baseline-bundle-v1",
+          "component": "nginx_host_baseline",
+          "generated": true,
+          "template_key": "nginx-host-baseline-3075055662a2c4f6b87402b54ddeac9f0bf3662bde04212da965946ddfcabec2",
+          "files": [
+            {
+              "path": "profiles/task.json",
+              "sha256": "bd864c9dea8a797466d0bd98be75b517969a2fb77cfbf0781021bd7c7d783a50",
+              "size_bytes": 719
+            },
+            {
+              "path": "profiles/universal/a93c4e8a2c7a98c2156c98128b096a5a3c6fa2c6f5fcc70e4c22b4f6de88b425.json",
+              "sha256": "a93c4e8a2c7a98c2156c98128b096a5a3c6fa2c6f5fcc70e4c22b4f6de88b425",
+              "size_bytes": 15
+            },
+            {
+              "path": "scenarios/debian-family/common/blocks/nginx-host-baseline/1.0.0/block.py",
+              "sha256": "abcd65aadd0ef408b150acf6c080fb0ee52bf84d7a9915677cadf92ba59066fb",
+              "size_bytes": 53338
+            },
+            {
+              "path": "scenarios/debian-family/skeleton.py",
+              "sha256": "bcc9d651060f3c1e29314109fc98afd55c2c9083009c6bf15648a5d0c21740a6",
+              "size_bytes": 16167
+            }
+          ]
+        },
+        "runtime_context": {
+          "ipv6_listen_forbidden": false
+        },
+        "runtime_context_input": {
+          "source": "response.runtime_context",
+          "sha256": "7a6d92a6ee03ce72a6d85502b4aaf6fb28dff56483ea44ff2b89fd06f017332a",
+          "expected_sha256": "7a6d92a6ee03ce72a6d85502b4aaf6fb28dff56483ea44ff2b89fd06f017332a",
+          "matches_expected": true,
+          "consumer_check": "MCD current ipv6_runtime_disabled(ipv6_status()) exact match before apply"
+        },
+        "minimum_runtime": {
+          "target": "complete MCD 1.7 result-aware custom runtime with strict local selected_tasks variants; activation remains owner-gated",
+          "version_is_sufficient": false,
+          "required_capabilities": [
+            "custom-gzip-entrypoint",
+            "raw-jsonline-terminal-result"
+          ]
+        },
+        "terminal_result_contract": {
+          "schema": "mcd-self-hosted-executable-output-v1",
+          "contract_version": "1.0",
+          "result": "exact public nginx writer or observer result dictionary",
+          "public_result_component": "nginx_host_baseline"
+        },
+        "source_ref": "Portal executable SHA3075055662a2c4f6b87402b54ddeac9f0bf3662bde04212da965946ddfcabec2; Portal source SHA61c0e58698ea93015b9473f8500c38b2e64f9716be87e186fe89200f790ba998; MCD reference a6f1f1ed8110be35536568d1a9de0373083adaf6",
+        "source_catalog": {
+          "authority": "live MCC persisted APT service-profile projection",
+          "fixture_path": "backend/tests/fixtures/nginx_cloudflare_public_projection_v1.json",
+          "fixture_sha256": "dd4e6d0bb4644ac99496821adbe1d383df60db6e38007b0efaf12de9b58e297a"
+        }
+      }
+    }
+  }
+}

@@ -14,7 +14,8 @@ from mcd_agent import __version__
 from mcd_agent.config import AgentConfig
 from mcd_agent.host_identity import resolve_agent_identity
 from mcd_agent.service_profile_external import (
-    CUSTOM_RUNTIME_CAPABILITIES, ExternalProfileOperationError, apply_external_service_profile,
+    CUSTOM_RUNTIME_CAPABILITIES, NGINX_OPERATION_INPUT_KEYS, ExternalProfileOperationError, apply_external_service_profile,
+    validate_external_service_profile,
 )
 from mcd_agent.mautic_db_indexes import apply_mautic_db_indexes
 
@@ -44,13 +45,22 @@ def _api_base(cfg: AgentConfig) -> str | None:
     return cfg.mcc_url.rstrip("/")
 
 
-def fetch_service_profile(cfg: AgentConfig, component: str, *, include_runtime_input: bool = False) -> dict[str, Any]:
+def fetch_service_profile(cfg: AgentConfig, component: str, *, include_runtime_input: bool = False,
+                          operation: str | None = None, operation_input: dict[str, Any] | None = None,
+                          profile_present: bool | None = None) -> dict[str, Any]:
     base = _api_base(cfg)
     if not base:
         return {"status": "disabled", "reason": "mcc_url_not_set"}
     comp = (component or "").strip().lower().replace("-", "_")
-    if comp not in {"php_fpm", "mysql", "docker", "apt", "wazuh", "mautic_db_indexes", "db_indexes"}:
+    if comp not in {"php_fpm", "mysql", "docker", "apt", "wazuh", "nginx", "mautic_db_indexes", "db_indexes"}:
         return {"status": "error", "reason": f"unsupported component: {component}"}
+    if comp == "nginx":
+        required = NGINX_OPERATION_INPUT_KEYS.get(operation) if isinstance(operation, str) else None
+        if (required is None or not isinstance(operation_input, dict) or set(operation_input) != required
+                or any(type(value) is not bool for value in operation_input.values())
+                or (operation == "cloudflare_real_ip_state" and type(profile_present) is not bool)
+                or (operation != "cloudflare_real_ip_state" and profile_present is not None)):
+            return {"status": "error", "reason": "nginx_operation_input_invalid"}
     ident = resolve_agent_identity(cfg)
     payload = {
         "hostname": str(ident.get("effective_hostname") or ""),
@@ -69,12 +79,33 @@ def fetch_service_profile(cfg: AgentConfig, component: str, *, include_runtime_i
             return {"status": "error", "reason": "wazuh_identity_context_unavailable"}
         # Preserve explicit null facts; the legacy string envelope loses them.
         payload.update({target: ident[source] for target, source in identity_fields.items()})
-    if comp in {"php_fpm", "mysql", "docker", "wazuh"}:
+    if comp == "nginx":
+        from mcd_agent.nginx_baseline import _ipv6_listen_forbidden
+        payload.update(operation=operation, operation_input=operation_input,
+                       ipv6_listen_forbidden=_ipv6_listen_forbidden())
+        if operation == "cloudflare_real_ip_state":
+            payload["profile_present"] = profile_present
+    if comp in {"php_fpm", "mysql", "docker", "wazuh", "nginx"}:
         payload["external_handler_capabilities"] = sorted(CUSTOM_RUNTIME_CAPABILITIES)
     url = base + f"/api/v1/agent/service-profile/{comp.replace('_', '-')}"
     try:
         out = _post_json(url, payload, cfg.mcc_token, timeout_sec=12)
         out.setdefault("status", "error")
+        if comp == "nginx" and out["status"] == "ok":
+            if (out.get("operation") != operation or json.dumps(out.get("operation_input"), sort_keys=True) != json.dumps(operation_input, sort_keys=True)
+                    or "runtime_input" in out
+                    or (operation == "cloudflare_real_ip_state" and (out.get("profile") is not None) != profile_present)):
+                raise ValueError("nginx_response_input_mismatch")
+            handler = out.get("external_handler")
+            if isinstance(handler, dict) and handler.get("active") is True and handler.get("state") == "active":
+                validate_external_service_profile(cfg, out, component="nginx")
+                from mcd_agent.custom_scripts import cache_selected_task, run_custom_script_by_key
+                artifact = handler["artifact"]
+                code, _output = run_custom_script_by_key(cfg, script_key=artifact["key"],
+                    expected_sha256=artifact["sha256"], expected_entrypoint=artifact["entrypoint"], fetch_only=True)
+                if code != 0:
+                    raise ValueError("nginx_selected_task_prefetch_failed")
+                cache_selected_task(cfg, out)
         return out if include_runtime_input else public_service_profile_response(out)
     except HTTPError as e:
         return {"status": "error", "reason": f"http_{e.code}"}
@@ -178,9 +209,11 @@ def service_profiles_apply_once(
     dry_run: bool = False,
     force_apt_repo_rescan: bool = False,
     allow_cluster_db_maintenance: bool = False,
+    operation: str | None = None, operation_input: dict[str, Any] | None = None,
+    profile_present: bool | None = None,
 ) -> dict[str, Any]:
     comp = (component or "php_fpm").strip().lower().replace("-", "_")
-    if comp not in {"php_fpm", "mysql", "apt", "wazuh", "docker", "mautic_db_indexes", "db_indexes"}:
+    if comp not in {"php_fpm", "mysql", "apt", "wazuh", "docker", "nginx", "mautic_db_indexes", "db_indexes"}:
         return {"status": "skipped", "reason": f"unsupported component: {component}"}
     guard = _cluster_db_maintenance_guard(
         cfg,
@@ -197,16 +230,17 @@ def service_profiles_apply_once(
         if status == "deferred":
             return {"status": "skipped", "reason": applied.get("reason", "deferred"), "apply": applied}
         return {"status": "error", "reason": applied.get("reason", status or "apply_failed"), "apply": applied}
-    fetched = fetch_service_profile(cfg, comp, include_runtime_input=True)
+    operation_options = dict(operation=operation, operation_input=operation_input, profile_present=profile_present) if comp == "nginx" else {}
+    fetched = fetch_service_profile(cfg, comp, include_runtime_input=True, **operation_options)
     public_fetch = public_service_profile_response(fetched)
     status = str(fetched.get("status", "")).strip().lower()
     if status != "ok":
         return {"status": "error", "reason": fetched.get("reason", status or "fetch_failed"), "fetch": public_fetch}
     profile = fetched.get("profile")
-    if not isinstance(profile, dict):
+    if not isinstance(profile, dict) and not (comp == "nginx" and profile is None):
         return {"status": "error", "reason": "invalid profile payload", "fetch": public_fetch}
     external_failed = False
-    if comp in {"php_fpm", "mysql", "docker", "wazuh"}:
+    if comp in {"php_fpm", "mysql", "docker", "wazuh", "nginx"}:
         # Only delivery/admission lives here; the artifact owns the algorithm.
         # No builtin writer or fallback exists after external selection.
         try:
@@ -214,6 +248,10 @@ def service_profiles_apply_once(
         except ExternalProfileOperationError as exc:
             applied = exc.public_result
             external_failed = True
+        except (ValueError, RuntimeError) as error:
+            if comp != "nginx":
+                raise
+            return {"status": "error", "reason": str(error), "fetch": public_fetch}
     else:
         if os.geteuid() != 0:
             raise RuntimeError("service-profile apply requires root")
@@ -224,7 +262,13 @@ def service_profiles_apply_once(
             force_zabbix_bootstrap=not bool(dry_run),
             force_repo_rescan=bool(force_apt_repo_rescan),
         )
-    result_status, reason = _service_profile_apply_outcome(applied)
+    if comp == "nginx":
+        # The external wrapper owns writer/observer outcome semantics, including
+        # successful drift observations. Reuse its validated terminal decision.
+        result_status = "error" if external_failed else "ok"
+        reason = str(applied.get("reason") or applied.get("error") or "apply_failed") if external_failed else None
+    else:
+        result_status, reason = _service_profile_apply_outcome(applied)
     if external_failed and result_status == "ok":
         result_status, reason = "error", "external_handler_execution_failed"
     out = {"status": result_status, "fetch": public_fetch, "apply": applied}

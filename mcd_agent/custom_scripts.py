@@ -205,12 +205,14 @@ def _flatten_items(items: list[Any], parent: list[str], out: list[dict[str, Any]
         )
 
 
-def _parse_manifest(payload: dict[str, Any]) -> list[dict[str, Any]]:
+def _parse_manifest(payload: dict[str, Any], *, deduplicate: bool = True) -> list[dict[str, Any]]:
     items = payload.get("items")
     if not isinstance(items, list):
         raise RuntimeError("custom manifest: items must be a list")
     out: list[dict[str, Any]] = []
     _flatten_items(items, [], out)
+    if not deduplicate:
+        return out
     dedup: dict[str, dict[str, Any]] = {}
     for row in out:
         key = str(row.get("key", "")).strip()
@@ -228,23 +230,70 @@ def _parse_manifest(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
+def standalone_custom_cache_config(cache_dir: str | Path | None = None) -> Any:
+    """Read only optional custom-cache settings; no registration/config recovery."""
+    from types import SimpleNamespace
+    from mcd_agent.config import DEFAULT_CUSTOM_CACHE_DIR, _load_toml_with_includes
+    selected = str(cache_dir or os.getenv("MCD_CUSTOM_CACHE_DIR", "")).strip()
+    if not selected:
+        explicit = os.getenv("MCD_CONFIG", "").strip()
+        candidates = [Path(explicit)] if explicit else [Path("/opt/mcd/etc/mcd.toml"), Path("/etc/mcd/mcd.toml")]
+        selected = DEFAULT_CUSTOM_CACHE_DIR
+        for path in candidates:
+            if path.is_file():
+                try:
+                    custom = _load_toml_with_includes(str(path)).get("custom", {})
+                    selected = custom.get("cache_dir", DEFAULT_CUSTOM_CACHE_DIR)
+                    if not isinstance(selected, str) or not selected.strip():
+                        raise ValueError()
+                except (OSError, ValueError, TypeError, AttributeError):
+                    raise CustomSelectedTaskError("custom_cache_settings_invalid") from None
+                break
+    return SimpleNamespace(custom_cache_dir=selected, custom_manifest_path="manifest.json",
+        custom_repo_base_url="", plugins_repo_base_url="", mcc_url="", mcc_token=None,
+        mcc_host_name=None, host_template=False, template_autopromote_on_clone=False,
+        custom_run_mode_default="direct")
+
+
 class CustomSelectedTaskError(RuntimeError):
     """A cached public task is missing, invalid or unavailable for this call."""
 
 
-def selected_task_key(component: str, operation: str, operation_input: dict[str, Any]) -> str:
-    if not isinstance(component, str) or not component or not isinstance(operation, str) or not operation or not isinstance(operation_input, dict):
+def _public_json_digest(value: Any) -> str:
+    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,
+                                    separators=(",", ":"), allow_nan=False).encode("utf-8")).hexdigest()
+
+
+def selected_task_key(component: str, operation: str, operation_input: dict[str, Any], *,
+                      profile_sha256: str, runtime_context_sha256: str) -> str:
+    if (not isinstance(component, str) or not component or not isinstance(operation, str) or not operation
+            or not isinstance(operation_input, dict)
+            or any(not isinstance(pin, str) or re.fullmatch("[0-9a-f]{64}", pin) is None
+                   for pin in (profile_sha256, runtime_context_sha256))):
         raise CustomSelectedTaskError("custom_selected_task_invalid")
-    return component + ":" + operation + ":" + json.dumps(operation_input, ensure_ascii=True, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return ":".join((component, operation, _public_json_digest(operation_input),
+                     profile_sha256, runtime_context_sha256))
+
+
+def _selected_record_key(record: dict[str, Any]) -> str:
+    response = record["response"]
+    handler = response["external_handler"]
+    pins = {name: handler[name]["sha256"] for name in ("profile_input", "runtime_context_input", "operation_input_input")}
+    if (pins["profile_input"] != _public_json_digest(response["profile"])
+            or pins["runtime_context_input"] != _public_json_digest(handler["runtime_context"])
+            or pins["operation_input_input"] != _public_json_digest(record["operation_input"])):
+        raise CustomSelectedTaskError("custom_selected_task_invalid")
+    return selected_task_key(record["component"], record["operation"], record["operation_input"],
+                             profile_sha256=pins["profile_input"], runtime_context_sha256=pins["runtime_context_input"])
 
 
 def _public_selected_task(record: Any, key: str, rows: list[dict[str, Any]]) -> bool:
     if not isinstance(record, dict) or set(record) != {"schema", "component", "operation", "operation_input", "response"} or record.get("schema") != "mcd-custom-selected-task-v1":
         return False
     try:
-        if selected_task_key(record["component"], record["operation"], record["operation_input"]) != key:
+        if _selected_record_key(record) != key:
             return False
-    except (ValueError, TypeError, CustomSelectedTaskError):
+    except (ValueError, TypeError, KeyError, CustomSelectedTaskError):
         return False
     def private(value: Any) -> bool:
         if isinstance(value, dict):
@@ -253,10 +302,22 @@ def _public_selected_task(record: Any, key: str, rows: list[dict[str, Any]]) -> 
     if private(record):
         return False
     response = record["response"]
-    if not isinstance(response, dict) or response.get("status") != "ok" or any(response.get(name) != record[name] for name in ("component", "operation", "operation_input")):
+    if not isinstance(response, dict) or response.get("status") != "ok" or any(_public_json_digest(response.get(name)) != _public_json_digest(record[name]) for name in ("component", "operation", "operation_input")):
         return False
     handler = response.get("external_handler")
     if not isinstance(handler, dict) or handler.get("active") is not True or handler.get("state") != "active":
+        return False
+    if (handler.get("schema") != "mcc-service-profile-external-handler-v1" or handler.get("transport") != "mcd-custom-v1"
+            or any(_public_json_digest(handler.get(name)) != _public_json_digest(record[name])
+                   for name in ("component", "operation", "operation_input"))
+            or handler.get("resolved_plan_key") != response.get("resolved_plan_key")):
+        return False
+    fields = handler["profile_input"].get("fields")
+    profile = response.get("profile")
+    if (handler["profile_input"].get("source") != "response.profile" or not isinstance(fields, list)
+            or any(not isinstance(name, str) or not name for name in fields) or len(set(fields)) != len(fields)
+            or not (profile is None or isinstance(profile, dict))
+            or (isinstance(profile, dict) and not set(profile) <= set(fields))):
         return False
     artifact = handler.get("artifact")
     if not isinstance(artifact, dict) or not isinstance(artifact.get("sha256"), str) or re.fullmatch("[0-9a-f]{64}", artifact["sha256"]) is None:
@@ -264,8 +325,12 @@ def _public_selected_task(record: Any, key: str, rows: list[dict[str, Any]]) -> 
     return any(all(row.get(k) == artifact.get(k) for k in ("key", "sha256", "entrypoint")) for row in rows)
 
 
+_PROFILE_NOT_SUPPLIED = object()
+
+
 def cached_selected_task(config: AgentConfig, *, component: str, operation: str,
-                         operation_input: dict[str, Any]) -> dict[str, Any]:
+                         operation_input: dict[str, Any], runtime_context: dict[str, Any] | None = None,
+                         profile: Any = _PROFILE_NOT_SUPPLIED) -> dict[str, Any]:
     # Read without mkdir or any network/current-pointer/provenance gate.
     path = Path(config.custom_cache_dir) / "manifest.json"
     try:
@@ -274,21 +339,49 @@ def cached_selected_task(config: AgentConfig, *, component: str, operation: str,
         raise CustomSelectedTaskError("custom_selected_task_missing") from None
     except (OSError, ValueError):
         raise CustomSelectedTaskError("custom_selected_task_invalid") from None
-    key = selected_task_key(component, operation, operation_input)
-    selections = payload.get("selected_tasks", {}) if isinstance(payload, dict) else {}
-    if not isinstance(selections, dict) or key not in selections:
-        raise CustomSelectedTaskError("custom_selected_task_missing")
-    try:
-        valid = _public_selected_task(selections[key], key, _parse_manifest(payload))
-    except (ValueError, RuntimeError):
-        valid = False
-    if not valid:
+    if not isinstance(payload, dict) or not isinstance(payload.get("selected_tasks", {}), dict):
         raise CustomSelectedTaskError("custom_selected_task_invalid")
-    return selections[key]["response"]
+    found = []
+    seen = False
+    try:
+        rows = _parse_manifest(payload, deduplicate=False)
+        for key, record in payload.get("selected_tasks", {}).items():
+            if not isinstance(record, dict) or any(record.get(k) != v for k, v in
+                    (("component", component), ("operation", operation))):
+                continue
+            if _public_json_digest(record.get("operation_input")) != _public_json_digest(operation_input):
+                continue
+            seen = True
+            if not _public_selected_task(record, key, rows):
+                raise CustomSelectedTaskError("custom_selected_task_invalid")
+            response = record["response"]
+            handler = response["external_handler"]
+            if runtime_context is not None and _public_json_digest(handler.get("runtime_context")) != _public_json_digest(runtime_context):
+                continue
+            if profile is not _PROFILE_NOT_SUPPLIED:
+                fields = handler.get("profile_input", {}).get("fields")
+                if not isinstance(fields, list) or any(not isinstance(k, str) for k in fields):
+                    raise CustomSelectedTaskError("custom_selected_task_invalid")
+                if profile is None:
+                    projected = None
+                elif isinstance(profile, dict):
+                    projected = {key: profile[key] for key in fields if key in profile}
+                else:
+                    raise CustomSelectedTaskError("custom_selected_task_input_mismatch")
+                if _public_json_digest(projected) != handler["profile_input"]["sha256"]:
+                    continue
+            found.append(response)
+    except (ValueError, KeyError, TypeError):
+        raise CustomSelectedTaskError("custom_selected_task_invalid") from None
+    if not found:
+        raise CustomSelectedTaskError("custom_selected_task_input_mismatch" if seen else "custom_selected_task_missing")
+    if len(found) != 1:
+        raise CustomSelectedTaskError("custom_selected_task_ambiguous")
+    return found[0]
 
 
 def _merge_cached_manifest(config: AgentConfig, payload: dict[str, Any], *,
-                           selected: dict[str, Any] | None = None) -> None:
+                           selected: dict[str, Any] | None = None) -> dict[str, Any]:
     """Serialize updates on the existing cache directory, then replace atomically.
 
     Remote catalogs contribute items, never host-local selected-task authority.
@@ -309,10 +402,32 @@ def _merge_cached_manifest(config: AgentConfig, payload: dict[str, Any], *,
             payload = previous
             if not isinstance(payload, dict):
                 raise CustomSelectedTaskError("custom_selected_task_invalid")
-        rows = _parse_manifest(payload)
+        rows = _parse_manifest(payload, deduplicate=False)
+        # Remote latest is not revocation of an already selected local task.
+        # Retain its exact earlier item coordinates, including older revisions
+        # with a reused script key. Byte integrity is still checked at launch;
+        # missing/corrupt bytes stay typed and retain their pins for repair.
+        if selected is None and isinstance(old, dict):
+            try:
+                earlier_rows = _parse_manifest(previous, deduplicate=False)
+            except (ValueError, RuntimeError):
+                earlier_rows = []
+            extras = []
+            for key, record in old.items():
+                if not _public_selected_task(record, key, earlier_rows):
+                    continue
+                reference = record["response"]["external_handler"]["artifact"]
+                matches = lambda row: all(row.get(k) == reference.get(k) for k in ("key", "sha256", "entrypoint"))
+                if not any(matches(row) for row in rows):
+                    saved = next(row for row in earlier_rows if matches(row))
+                    if saved not in extras:
+                        extras.append(saved)
+            if extras:
+                payload = {**payload, "items": [*extras, *payload["items"]]}
+                rows = _parse_manifest(payload, deduplicate=False)
         kept = {key: record for key, record in old.items() if _public_selected_task(record, key, rows)} if isinstance(old, dict) else {}
         if selected is not None:
-            key = selected_task_key(selected["component"], selected["operation"], selected["operation_input"])
+            key = _selected_record_key(selected)
             if not _public_selected_task(selected, key, rows):
                 raise CustomSelectedTaskError("custom_selected_task_invalid")
             kept[key] = selected
@@ -327,6 +442,7 @@ def _merge_cached_manifest(config: AgentConfig, payload: dict[str, Any], *,
             os.fsync(stream.fileno())
         os.chmod(temporary, path.stat().st_mode & 0o777 if path.exists() else 0o644)
         os.replace(temporary, path)
+        return merged
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
@@ -340,8 +456,8 @@ def cache_selected_task(config: AgentConfig, response: dict[str, Any]) -> None:
               "response": response}
     try:
         payload = json.loads((Path(config.custom_cache_dir) / "manifest.json").read_text())
-        key = selected_task_key(record["component"], record["operation"], record["operation_input"])
-        valid = _public_selected_task(record, key, _parse_manifest(payload))
+        key = _selected_record_key(record)
+        valid = _public_selected_task(record, key, _parse_manifest(payload, deduplicate=False))
     except (OSError, ValueError, TypeError, RuntimeError):
         valid = False
     if not valid:
@@ -360,8 +476,8 @@ def fetch_custom_manifest(config: AgentConfig, *, use_cache_on_error: bool = Tru
         if not isinstance(payload, dict):
             raise RuntimeError("custom manifest is not a JSON object")
         rows = _parse_manifest(payload)
-        _merge_cached_manifest(config, payload)
-        return rows, "remote"
+        merged = _merge_cached_manifest(config, payload)
+        return _parse_manifest(merged), "remote"
     except urllib.error.HTTPError as e:
         # Treat missing manifest as an empty custom scripts catalog.
         # This keeps interactive UX stable on fresh MCC installs before first custom publish.
@@ -633,7 +749,7 @@ def run_custom_script_by_key(
         cache_manifest = Path(config.custom_cache_dir) / "manifest.json"
         if cache_manifest.is_file():
             try:
-                cached_rows = _parse_manifest(json.loads(cache_manifest.read_text()))
+                cached_rows = _parse_manifest(json.loads(cache_manifest.read_text()), deduplicate=False)
                 if any(row.get("key") == key and row.get("sha256") == expected for row in cached_rows):
                     manifest = cached_rows
             except (OSError, ValueError, RuntimeError):
@@ -644,10 +760,17 @@ def run_custom_script_by_key(
         manifest, _src = fetch_custom_manifest(config, use_cache_on_error=True)
     found = None
     for item in manifest:
-        if str(item.get("key", "")).strip() == key:
+        if (str(item.get("key", "")).strip() == key
+                and (not expected or item.get("sha256") == expected)
+                and (expected_entrypoint is None or item.get("entrypoint") == expected_entrypoint)):
             found = item
             break
     if found is None:
+        same_key = [item for item in manifest if str(item.get("key", "")).strip() == key]
+        if expected and same_key and all(item.get("sha256") != expected for item in same_key):
+            return 1, "custom script manifest checksum does not match the requested pin"
+        if expected_entrypoint is not None and same_key:
+            return 1, "custom script entrypoint does not match the requested descriptor"
         return 2, f"custom script not found in manifest: {key}"
 
     if expected and str(found.get("sha256", "")).strip().lower() != expected:
@@ -658,6 +781,8 @@ def run_custom_script_by_key(
         return 2, "custom result capture does not support interactive artifacts"
     try:
         script_path = _fetch_script_to_cache(config, found, offline_only=True) if offline_only else _fetch_script_to_cache(config, found)
+    except CustomSelectedTaskError as e:
+        return 2, str(e)
     except Exception as e:
         return 1, f"custom script download failed: {e}"
 

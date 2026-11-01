@@ -11,7 +11,7 @@ from typing import Any
 
 from mcd_agent.apt_profile import collect_zabbix_agent_state
 from mcd_agent.env import ipv6_runtime_disabled, ipv6_status, reconcile_ipv6_runtime_from_intent
-from mcd_agent.nginx_baseline import cloudflare_real_ip_state
+from mcd_agent.nginx_external import cloudflare_real_ip_state
 from mcd_agent.runtime_adapters import installed_runtime_adapters
 
 

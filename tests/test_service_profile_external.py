@@ -363,3 +363,107 @@ def test_no_secret_descriptor_keeps_original_two_capabilities(wazuh_fetched,monk
         return 0,'{"status":"noop"}'
     monkeypatch.setattr(ext,'run_custom_script_by_key',run)
     assert ext.apply_external_service_profile(None,wazuh_fetched,component='wazuh')=={'status':'noop'}
+
+
+@pytest.fixture
+def nginx_fetched(fetched,monkeypatch):
+    from mcd_agent import nginx_baseline
+    monkeypatch.setattr(nginx_baseline,'_ipv6_listen_forbidden',lambda:False)
+    fetched.update(component='nginx',operation='default_stub_operation',operation_input={'apply':False},resolved_plan_key='nginx:test',profile={},runtime_context={'ipv6_listen_forbidden':False})
+    h=fetched['external_handler'];h.update(component='nginx',operation=fetched['operation'],operation_input=copy.deepcopy(fetched['operation_input']),resolved_plan_key='nginx:test',runtime_context=copy.deepcopy(fetched['runtime_context']))
+    h['minimum_runtime']['required_capabilities']=sorted(ext.BASE_RUNTIME_CAPABILITIES)
+    h['runtime_context_input']={'sha256':hashlib.sha256(canonical_json(h['runtime_context'])).hexdigest()}
+    h['operation_input_input']={'sha256':hashlib.sha256(canonical_json(h['operation_input'])).hexdigest()}
+    h['profile_input']={'source':'response.profile','sha256':hashlib.sha256(b'{}').hexdigest(),'fields':[]}
+    del h['dry_run_command']
+    return fetched
+
+
+@pytest.mark.parametrize('operation,flags',[
+    ('default_stub_operation',{'apply':False}),('default_stub_operation',{'apply':True}),
+    ('ensure_nginx_baseline',{'reload_service':False}),('ensure_cloudflare_real_ip',{'reload_service':True}),
+    ('nginx_baseline_satisfied',{}),('cloudflare_real_ip_state',{})])
+def test_nginx_operation_and_input_are_bound_before_same_offline_runner(nginx_fetched,monkeypatch,operation,flags):
+    nginx_fetched.update(operation=operation,operation_input=flags)
+    nginx_fetched['external_handler'].update(operation=operation,operation_input=copy.deepcopy(flags))
+    nginx_fetched['external_handler']['operation_input_input']['sha256']=hashlib.sha256(canonical_json(flags)).hexdigest()
+    calls=[]
+    monkeypatch.setattr(ext,'run_custom_script_by_key',lambda *a,**kw:calls.append(kw) or (0,'{"status":"ok"}'))
+    assert ext.apply_external_service_profile(None,nginx_fetched,component='nginx',offline_only=True)=={'status':'ok'}
+    assert calls[0]['offline_only'] is True and 'runtime_input' not in calls[0]
+
+
+@pytest.mark.parametrize('problem',['operation','extra_flag','wrong_flag_type','handler_bool_coercion','fact','projection','profile_pin','private'])
+def test_nginx_mismatch_rejected_before_artifact_or_any_process(nginx_fetched,monkeypatch,problem):
+    if problem=='operation':nginx_fetched['operation']='unknown'
+    elif problem=='extra_flag':nginx_fetched['operation_input']['other']=True
+    elif problem=='wrong_flag_type':nginx_fetched['operation_input']['apply']=0
+    elif problem=='handler_bool_coercion':nginx_fetched['external_handler']['operation_input']['apply']=0
+    elif problem=='fact':nginx_fetched['external_handler']['runtime_context']['ipv6_listen_forbidden']=True
+    elif problem=='projection':nginx_fetched['external_handler']['profile_input']['fields']=None
+    elif problem=='profile_pin':nginx_fetched['profile']['unexpected']=1
+    elif problem=='private':nginx_fetched['runtime_input']={'registration_password':'synthetic-only'}
+    monkeypatch.setattr(ext,'run_custom_script_by_key',lambda *a,**kw:pytest.fail('must reject before process/cache/download'))
+    with pytest.raises(ValueError):ext.apply_external_service_profile(None,nginx_fetched,component='nginx')
+
+
+def test_nginx_none_observer_profile_is_distinct_from_empty_mapping(nginx_fetched,monkeypatch):
+    nginx_fetched.update(operation='cloudflare_real_ip_state',operation_input={},profile=None)
+    h=nginx_fetched['external_handler'];h.update(operation='cloudflare_real_ip_state',operation_input={})
+    h['operation_input_input']['sha256']=hashlib.sha256(b'{}').hexdigest()
+    h['profile_input']['sha256']=hashlib.sha256(b'null').hexdigest()
+    monkeypatch.setattr(ext,'run_custom_script_by_key',lambda *a,**kw:(0,'{"status":"absent"}'))
+    assert ext.apply_external_service_profile(None,nginx_fetched,component='nginx')=={'status':'absent'}
+    nginx_fetched['profile']={}
+    with pytest.raises(ValueError,match='profile_pin_mismatch'):ext.apply_external_service_profile(None,nginx_fetched,component='nginx')
+
+
+def test_nginx_validation_only_and_unsupported_dry_run_never_execute(nginx_fetched,monkeypatch):
+    monkeypatch.setattr(ext,'run_custom_script_by_key',lambda *a,**kw:pytest.fail('admission has no recipe action'))
+    ext.validate_external_service_profile(None,nginx_fetched,component='nginx')
+    with pytest.raises(ValueError,match='dry_run_unavailable'):ext.apply_external_service_profile(None,nginx_fetched,component='nginx',dry_run=True)
+
+
+@pytest.mark.parametrize('present',[False,True])
+def test_nginx_online_first_sync_preserves_actual_null_mapping_contract_and_prefetches_before_selection(tmp_path,monkeypatch,present):
+    from pathlib import Path
+    from mcd_agent import custom_scripts as custom,nginx_baseline
+    fixture=json.loads((Path(__file__).parent/'fixtures/nginx-inactive-observer-responses-v1.json').read_text())
+    responses=fixture['responses'];response=copy.deepcopy(responses['profile_present_true' if present else 'profile_present_false'])
+    response['external_handler'].update(active=True,state='active',activation_required=False)  # unit-only operator fixture, not live activation
+    root=tmp_path/'cache';root.mkdir()
+    rows=[{**r['external_handler']['artifact'],'interactive':False,'run_mode':'direct'} for r in responses.values()]
+    (root/'manifest.json').write_text(json.dumps({'items':rows}))
+    cfg=SimpleNamespace(mcc_url='https://synthetic.invalid',mcc_token='synthetic-test-token',custom_cache_dir=str(root))
+    monkeypatch.setattr(profiles,'resolve_agent_identity',lambda cfg:{'local_hostname':'synthetic-local'})
+    monkeypatch.setattr(nginx_baseline,'_ipv6_listen_forbidden',lambda:False)
+    events=[]
+    def api(url,payload,token,**kwargs):
+        assert payload['profile_present'] is present and payload['operation_input']=={}
+        assert payload['ipv6_listen_forbidden'] is False and token==cfg.mcc_token
+        events.append('authenticated-response-fixture')
+        return copy.deepcopy(response)
+    def prefetch(*a,**kwargs):
+        assert kwargs['fetch_only'] is True
+        assert 'selected_tasks' not in json.loads((root/'manifest.json').read_text())
+        events.append('verified-artifact-prefetch')
+        return 0,'{"status":"cached"}'
+    monkeypatch.setattr(profiles,'_post_json',api);monkeypatch.setattr(custom,'run_custom_script_by_key',prefetch)
+    fetched=profiles.fetch_service_profile(cfg,'nginx',operation='cloudflare_real_ip_state',operation_input={},profile_present=present)
+    assert fetched['status']=='ok' and (fetched['profile'] is not None) is present
+    selected=custom.cached_selected_task(cfg,component='nginx',operation='cloudflare_real_ip_state',operation_input={},profile={} if present else None,runtime_context={'ipv6_listen_forbidden':False})
+    assert selected==fetched and events==['authenticated-response-fixture','verified-artifact-prefetch']
+
+
+def test_nginx_inactive_api_response_does_not_prefetch_or_create_selection_cache(tmp_path,monkeypatch):
+    from pathlib import Path
+    from mcd_agent import custom_scripts as custom,nginx_baseline
+    fixture=json.loads((Path(__file__).parent/'fixtures/nginx-inactive-observer-responses-v1.json').read_text())
+    response=fixture['responses']['profile_present_false']
+    cfg=SimpleNamespace(mcc_url='https://synthetic.invalid',mcc_token='synthetic',custom_cache_dir=str(tmp_path/'absent'))
+    monkeypatch.setattr(profiles,'resolve_agent_identity',lambda cfg:{'local_hostname':'synthetic-local'})
+    monkeypatch.setattr(nginx_baseline,'_ipv6_listen_forbidden',lambda:False)
+    monkeypatch.setattr(profiles,'_post_json',lambda *a,**kw:response)
+    monkeypatch.setattr(custom,'run_custom_script_by_key',lambda *a,**kw:pytest.fail('inactive must not prefetch/execute'))
+    assert profiles.fetch_service_profile(cfg,'nginx',operation='cloudflare_real_ip_state',operation_input={},profile_present=False)['external_handler']['active'] is False
+    assert not (tmp_path/'absent').exists()

@@ -160,7 +160,10 @@ from mcd_agent.mode import (
     profile_status,
     reconcile_managed_cron,
 )
-from mcd_agent.nginx_baseline import default_stub_operation, ensure_nginx_baseline
+from mcd_agent.nginx_external import (
+    default_stub_operation, ensure_nginx_baseline, ensure_cloudflare_real_ip,
+    cloudflare_real_ip_state, nginx_baseline_satisfied,
+)
 from mcd_agent.plugins import run_plugins_interactive
 from mcd_agent.plugin_operations import (
     effective_values,
@@ -278,14 +281,14 @@ def _service_enable_and_start(service: str, lines: list[str]) -> bool:
     return True
 
 
-def _apt_service_postcheck() -> tuple[bool, list[str]]:
+def _apt_service_postcheck(cfg=None) -> tuple[bool, list[str]]:
     lines: list[str] = []
     ok = True
 
     if _unit_exists("nginx"):
         if not _service_enable_and_start("nginx", lines):
             return False, lines
-        baseline = ensure_nginx_baseline(reload_service=True)
+        baseline = ensure_nginx_baseline(reload_service=True, **({"cfg": cfg} if cfg is not None else {}))
         baseline_actions = baseline.get("actions") if isinstance(baseline, dict) else []
         if isinstance(baseline_actions, list):
             for action in baseline_actions:
@@ -1680,10 +1683,13 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="cmd", required=False)
     default_cfg = _default_config_path()
 
-    nginx_baseline = sub.add_parser("nginx-baseline", help="Manage only the MCD-owned nginx default stub")
-    nginx_baseline.add_argument("component", choices=["default-stub"])
+    nginx_baseline = sub.add_parser("nginx-baseline", help="Manage nginx host baseline and Cloudflare client IP")
+    nginx_baseline.add_argument("component", choices=["default-stub", "host", "cloudflare-real-ip"])
     nginx_baseline.add_argument("op", choices=["status", "apply"], nargs="?", default="status")
     nginx_baseline.add_argument("--json", action="store_true")
+    nginx_baseline.add_argument("--cache-dir")
+    nginx_baseline.add_argument("--profile", help="Explicit public profile JSON for Cloudflare observation/application")
+    nginx_baseline.add_argument("--no-reload", action="store_true")
 
     health = sub.add_parser("health", help="Print agent health")
     health.add_argument("--json", action="store_true")
@@ -2097,6 +2103,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "apt",
             "wazuh",
             "docker",
+            "nginx",
             "mautic_db_indexes",
             "mautic-db-indexes",
             "db_indexes",
@@ -2105,6 +2112,9 @@ def _build_parser() -> argparse.ArgumentParser:
         default="php_fpm",
     )
     svc.add_argument("--dry-run", action="store_true")
+    svc.add_argument("--operation", dest="task_operation")
+    svc.add_argument("--operation-input", dest="task_operation_input", help="Explicit JSON operation arguments")
+    svc.add_argument("--profile-present", choices=["true", "false"])
     svc.add_argument(
         "--allow-cluster-db-maintenance",
         action="store_true",
@@ -2458,9 +2468,32 @@ def main() -> int:
         return _run_interactive_hub(cfg, None, False)
 
     if args.cmd == "nginx-baseline":
-        payload = default_stub_operation(apply=args.op == "apply")
+        options = {"cache_dir": args.cache_dir} if args.cache_dir else {}
+        if args.component == "default-stub":
+            payload = default_stub_operation(apply=args.op == "apply", **options)
+            successful = payload.get("status") in {"ok", "drift"}
+        elif args.component == "host":
+            if args.op == "status":
+                try:
+                    payload = {"status": "ok", "satisfied": nginx_baseline_satisfied(**options)}
+                except RuntimeError as error:
+                    payload = {"status": "error", "reason": str(error)}
+            else:
+                payload = ensure_nginx_baseline(reload_service=not args.no_reload, **options)
+            successful = payload.get("status") in {"ok", "skipped"}
+        else:
+            try:
+                profile = json.loads(Path(args.profile).read_text()) if args.profile else None
+                if profile is not None and not isinstance(profile, dict):
+                    raise ValueError()
+            except (OSError, ValueError):
+                print(json.dumps({"status": "error", "reason": "nginx_profile_input_invalid"}))
+                return 1
+            payload = (cloudflare_real_ip_state(profile, **options) if args.op == "status"
+                       else ensure_cloudflare_real_ip(profile, reload_service=not args.no_reload, **options))
+            successful = payload.get("status") != "error"
         print(json.dumps(payload, ensure_ascii=True, indent=2))
-        return 0 if payload.get("status") in {"ok", "drift"} else 1
+        return 0 if successful else 1
 
     if args.cmd == "health":
         versions = agent_version_payload()
@@ -3725,6 +3758,15 @@ def main() -> int:
         if note:
             print(f"NOTICE: {note}")
         comp = str(args.component or "php_fpm")
+        operation_options = {}
+        if comp == "nginx" and args.op != "status":
+            try:
+                operation_options = {"operation": args.task_operation,
+                    "operation_input": json.loads(args.task_operation_input) if args.task_operation_input is not None else None,
+                    "profile_present": None if args.profile_present is None else args.profile_present == "true"}
+            except ValueError:
+                print(json.dumps({"status": "error", "reason": "nginx_operation_input_invalid"}))
+                return 2
         if args.op == "status":
             payload = {
                 "enabled": bool(cfg.service_profiles_enabled),
@@ -3735,7 +3777,7 @@ def main() -> int:
             print(json.dumps(payload, ensure_ascii=True, indent=2))
             return 0
         if args.op == "fetch":
-            if comp not in {"php_fpm", "php-fpm", "mysql", "apt", "wazuh", "docker", "mautic_db_indexes", "mautic-db-indexes", "db_indexes", "db-indexes"}:
+            if comp not in {"php_fpm", "php-fpm", "mysql", "apt", "wazuh", "docker", "nginx", "mautic_db_indexes", "mautic-db-indexes", "db_indexes", "db-indexes"}:
                 print(json.dumps({"status": "error", "reason": f"unsupported component: {comp}"}, ensure_ascii=True))
                 return 2
             if comp.replace("-", "_") in {"docker", "mautic_db_indexes", "db_indexes"}:
@@ -3747,7 +3789,7 @@ def main() -> int:
                 )
                 print(json.dumps(res, ensure_ascii=True, indent=2))
                 return 0 if str(res.get("status", "")).strip().lower() in {"ok", "skipped"} else 1
-            res = fetch_service_profile(cfg, comp)
+            res = fetch_service_profile(cfg, comp, **operation_options)
             print(json.dumps(res, ensure_ascii=True, indent=2))
             return 0 if str(res.get("status", "")).strip().lower() == "ok" else 1
         if args.op == "rescan":
@@ -3773,6 +3815,7 @@ def main() -> int:
             component=comp,
             dry_run=bool(args.dry_run),
             allow_cluster_db_maintenance=bool(args.allow_cluster_db_maintenance),
+            **operation_options,
         )
         print(json.dumps(res, ensure_ascii=True, indent=2))
         ok = str(res.get("status", "")).strip().lower() == "ok"
@@ -4010,7 +4053,7 @@ def main() -> int:
         ok = update_rc == 0 and (upgrade_rc in {0, None})
         postcheck_lines: list[str] = []
         if ok:
-            post_ok, postcheck_lines = _apt_service_postcheck()
+            post_ok, postcheck_lines = _apt_service_postcheck(cfg)
             for line in postcheck_lines:
                 print(line)
             ok = ok and post_ok

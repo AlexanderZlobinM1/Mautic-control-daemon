@@ -37,7 +37,7 @@
     "cross_reset_config_bytes_equal": true,
     "mtime": "checked for within-actor neighbor nonmutation, not equalized across runs"
   },
-  "lifecycle": "full reset completed between OLD and DIRECT; full reset requested after DIRECT; no manual fault cleanup",
+  "lifecycle": "full reset completed between OLD and DIRECT and after DIRECT; current clean disposable QA lease ready for R17",
   "native_external_agent_generator_imports": false,
   "channel_publication": false,
   "production_activation": false,
@@ -47,5 +47,50 @@
     "remove only proven replaced writers; preserve pending shared Mautic/delete callers",
     "cleaned runtime proof and final reset",
     "whole 1.7 acceptance and Publish MCD Test/Approved release"
-  ]
+  ],
+  "consumer_bridge": {
+    "status": "source implemented; installed R17 native acceptance pending",
+    "entrypoints": [
+      "nginx-baseline default-stub status|apply",
+      "nginx-baseline host status|apply",
+      "nginx-baseline cloudflare-real-ip status|apply",
+      "same APT/readiness/migration synchronous compatibility functions"
+    ],
+    "no_registration_no_load_config_no_URL_required": true,
+    "local_selection_key": "component:operation:operation_input_sha256:profile_input_sha256:runtime_context_sha256",
+    "none_mapping_variants_distinct": true,
+    "current_fact_profile_input_binding_before_process": true,
+    "no_builtin_writer_fallback": true,
+    "existing_cache_only": true,
+    "public_only": true,
+    "focused_passed": 145,
+    "full_passed": 2082,
+    "full_failed": 61,
+    "full_failures_exact_baseline_ids": true,
+    "full_skipped": 57,
+    "subtests_passed": 105,
+    "full_log_sha256": "8564e6c2de28ad4759650a194aa42fe73fd5fd11818e107b10bd6922e74afc9c",
+    "release_regression": "PASS",
+    "cold_cli_health": "PASS",
+    "old_definitions_retained_until_native_acceptance": true,
+    "refresh_removal_preserves_local_pins_and_executes_offline": true,
+    "refresh_cache_cli_focused_passed": 45
+  },
+  "MCC_live_inactive_consumer_review": {
+    "receipt_sha256": "83daac04e69dec9d33119e0cec00dd358f5784d5eb042ca9c02c26f305df5f37",
+    "response_handoff_sha256": "3869e6f720a65916ff51821d6e3b200c967904e5cd99f183a4f2d914f19762de",
+    "both_inactive_rejected_before_process": true,
+    "null_and_mapping_and_all_seven_fields_validated": true,
+    "initial_public_artifact_GET_each": 1,
+    "repeat_GET_HEAD": 0,
+    "script_execution": false,
+    "activation": false
+  },
+  "r17_manual_QA_snapshot": {
+    "scope": "explicit manual/operator-selected cache data, not authenticated live-active MCC response",
+    "manifest_records": 34,
+    "snapshot_receipt_sha256": "7867c6bd76eb1a716e42761f9b1ceecfa68215c742736de9e8c76544da719c35",
+    "public_only": true,
+    "artifact_sha256": "3075055662a2c4f6b87402b54ddeac9f0bf3662bde04212da965946ddfcabec2"
+  }
 }

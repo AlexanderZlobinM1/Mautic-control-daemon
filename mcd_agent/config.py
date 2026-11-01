@@ -21,6 +21,7 @@ except ModuleNotFoundError:  # pragma: no cover - py3.10 compatibility
     import tomli as tomllib  # type: ignore[no-redef]
 
 
+DEFAULT_CUSTOM_CACHE_DIR = "/opt/mcd/var/custom"
 CURRENT_CONFIG_SCHEMA_VERSION = 2
 _CAMPAIGN_TRIGGER_AUDIT_INTERVAL_SEC = 60
 DEFAULT_PAGE_HITS_ORPHAN_CLEANUP_GRACE_MIN = 24 * 60
@@ -3571,7 +3572,7 @@ def _load_config_inner(path: str) -> AgentConfig:
             str(mcc.get("url")).rstrip("/") if mcc.get("url") else None
         ),
         custom_manifest_path=str(custom.get("manifest_path", "/mauticctl/custom/manifest.json")),
-        custom_cache_dir=str(custom.get("cache_dir", "/opt/mcd/var/custom")),
+        custom_cache_dir=str(custom.get("cache_dir", DEFAULT_CUSTOM_CACHE_DIR)),
         custom_run_mode_default=str(custom.get("run_mode_default", "auto")).strip().lower() or "auto",
         custom_prefer_tmux=bool(custom.get("prefer_tmux", True)),
         custom_prefer_screen=bool(custom.get("prefer_screen", True)),
