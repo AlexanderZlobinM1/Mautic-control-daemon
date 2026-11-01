@@ -1,0 +1,37 @@
+{
+  "status": "pending OLD repeat and external authoring; no source deletion or release acceptance",
+  "owner_source_commit": "3adea1f3be62e7ba38a547f6b93400a408076762",
+  "owner_freeze_sha256": "d68566787dea9c3908a9fd3463df46acec2c6faf6636f6b3d9b63a88c2f16d5b",
+  "caller_run_supplement_sha256": "4950f91f90a0daecee1675e73c1895cc6f0c8ee93403e57d0ca5b454ba5119ce",
+  "scope": [
+    "migration existing vhost OS stage",
+    "composer vhost switch plus existing caller nginx-t/reload stage"
+  ],
+  "preserve": [
+    "MCD stable UID/selection/direct Mautic/queues/leases/receipts",
+    "surrounding Mautic/form setting authority/cron lifecycle",
+    "exact legacy return and exception semantics",
+    "existing current SAN certificate references; no DNS mutation/issuance"
+  ],
+  "legacy_limitations": [
+    "no migration vhost snapshot rollback",
+    "composer caller tests nginx but ignores reload rc; surrounding exception does not restore vhost",
+    "reload command completion does not imply HTTP worker readiness"
+  ],
+  "old_attempt1": {
+    "status": "harness immediate HTTP readiness assertion failed; not PASS",
+    "receipt_sha256": "457edcfc0972d26bc0fc9d8d667e16f80949b66e2f7d00fa42cc298ee33864e2",
+    "source_proof_sha256": "5bf95da58ad2c8d0a7160174184687130711904f2047c829a50688643b07122b",
+    "completed": [
+      "empty domains rejection",
+      "missing PHP socket rejection",
+      "real current SAN TLS vhost write/repeat",
+      "HTTP docroot vhost write and nginx reload"
+    ],
+    "read_only_post_observation": "HTTP expected body, nginx-t0, canonical HTTPS200 verifiedTLS",
+    "reset": "full reset requested before any repeat; no manual drift cleanup",
+    "harness_change": "bounded real HTTP readiness polling10sec; retain every failed attempt; recipe unchanged"
+  },
+  "channel_publication": false,
+  "production_actor": false
+}

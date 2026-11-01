@@ -2549,3 +2549,32 @@ HTTPS200; Docker, Wazuh, /opt/mcd/src и actor-файлы отсутствуют
 pending vhost/OS lifecycle, APT/security/local-mail и прочие принятые границы.
 Частичная публикация Test/Approved не выполняется. После их общей приёмки
 публикация MCD проходит через Publish MCD по штатному процессу.
+
+### Pending: существующие nginx vhost этапы migration и composer move
+
+Замороженная граница следующего переноса: handoff d6856678 и supplement4950f91f
+(nginx-vhost-caller-20261101). Текущий migration._write_nginx_vhost принимает
+root/domains/php_version, требует непустые domains, применяет baseline без reload,
+проверяет текущий PHP-FPM socket, выбирает существующий актуальный SAN-сертификат,
+рендерит vhost/form location/assets/http2, пишет site и alias, выполняет nginx-t
+и reload, возвращает str(site). При ошибке записи/валидации отдельного vhost
+rollback здесь нет; это сохранённое ограничение текущего legacy. DNS не меняется.
+
+Текущий composer._write_switched_vhost читает source_root/nginx_root/php_version/
+site_available/site_enabled. Он сохраняет backup, заменяет root/socket и
+совместимые assets/http2, пишет site/alias и возвращает {active,backup}. Следом
+существующий caller выполняет nginx-t: ненулевой rc поднимает RuntimeError;
+затем reload, чей rc legacy не проверяет. Внешняя граница включает весь этот
+vhost-этап. После её приёмки caller должен вызывать его один раз, сохраняя
+окружающую Mautic/cron/source-retire логику и прежний результат/ошибку.
+Внешний блок не добавляет отсутствующее восстановление vhost при exception.
+
+Выбор инстанса и его stable UID, прямые Mautic-команды, очереди, leases/receipts
+и настройки форм остаются в MCD. Текущие общие OS/vhost helpers ещё pending
+до OLD/DIRECT/ordinary CLI проверки именно этого этапа; предыдущий host-baseline
+receipt не закрывает этот перенос. Тестовый HTTP после reload проверяется
+ограниченным ожиданием реального ответа с сохранением всех попыток; сам legacy
+recipe ожидания готовности не добавляет. Первый OLD attempt457edcfc сохранил
+успешные TLS/preflight результаты и неудачную немедленную HTTP assertion;
+read-only повтор дал правильный ответ, nginx-t0 и HTTPS200. До повторного
+mutable actor требуется полный reset; этот attempt не объявляется PASS.
