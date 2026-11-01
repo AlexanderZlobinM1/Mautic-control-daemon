@@ -2381,3 +2381,12 @@ transferred writer tests are retired, core routing/inventory tests retained.
 79focused checks/release-regression pass; cleaned R15 native proof/final reset
 remain pending. Nonempty legacy private-input gap is still explicit; no secret
 ref/key layer has been added and no full1.7 release/activation is claimed.
+
+Cleaned installed R15 ordinary Wazuh CLI also passed fetch, planned, first and
+repeat against the unchanged isolated MCC QA endpoint. Source b8619b99 and wheel
+de74b83d are bound to the installed-module proof and normalized parity receipt
+6416b23f by private producer receipt a05663d5. Normalized facts equal R14; this
+is a separate execution of the cleaned installed runtime. Raw logs were checked
+for token absence before saving. Final full reset is underway; independent
+verification and MCC endpoint cleanup remain pending. No public channel changed,
+no production enrollment occurred, and full 1.7 acceptance is not claimed.

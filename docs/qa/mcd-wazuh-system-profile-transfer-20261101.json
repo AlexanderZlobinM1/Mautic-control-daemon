@@ -1,5 +1,5 @@
 {
-  "status": "R14-ORDINARY-CLI-PASS; source-cleaned; R15 native proof and final reset pending",
+  "status": "R15-CLEANED-ORDINARY-CLI-PASS; final full reset in progress",
   "scope": "entire existing apply_wazuh_profile recipe, not isolated helper extraction",
   "source_commit": "62941290ecbc8c70b801b56b4a7db130be48ae23",
   "source_module_sha256": "604d81a8ca7e4c91dc7b32286d878242ae9e81752d607a7f6b70eeb3e5df6f5b",
@@ -79,7 +79,7 @@
     "mcc": "profile authority, identity/secret delivery contract and distribution",
     "canonical_infra": "disposable lease lifecycle"
   },
-  "native_baseline": "read-only defaults passed; enabled controlled loopback profile and fresh actual identity still pending",
+  "native_baseline": "old, standalone external and cleaned installed ordinary CLI planned/first/repeat parity PASS on controlled loopback profile",
   "old_writer_removed": true,
   "production_activation": "HOLD until complete 1.7 acceptance",
   "identity_contract": {
@@ -214,7 +214,7 @@
   },
   "source_cleanup": {
     "component": "wazuh_system_profile",
-    "status": "source-cleaned after R14 native; cleaned R15 proof and final reset pending",
+    "status": "cleaned R15 native PASS; independent final reset pending",
     "scope": "no-secret loopback profile native parity; no production enrollment",
     "removed_recipe_functions": [
       "_apt_update",
@@ -269,5 +269,18 @@
     "refresh_timeout_sec": "MCC current production sanitizer and builder preserve explicit value unchanged; no default added",
     "nullable_first_two_context_fields": "MCC backend4PASS; direct raw projection unchanged",
     "current_profile968_unchanged": true
+  },
+  "ordinary_cli_r15": {
+    "status": "PASS",
+    "source_commit": "b8619b99cc3cdcc6206676f3a9c4459e2e50370a",
+    "wheel_sha256": "de74b83d9d81b4c318e1a50597aa6ee7f1eb6eefb80e263cb779d8edf110ef49",
+    "receipt": "/Users/azlobin/.codex/admin/host-diagnostics/mcd-wazuh-profile-native-20261101/r15-ordinary-cli-loopback-positive.json",
+    "sha256": "6416b23fadd1cc985a6189034d78cb58f2a40250be0d50d1d59735984c994e67",
+    "installed_source_proof_sha256": "b2c4b59996919b7800a3e24a2028b810e681c3c384d336004c23544a17a138d4",
+    "producer_binding_sha256": "a05663d53dfa1a298a49aa8a4fc6751c35d8fd4feb97e8d4d6507ae713e7cce0",
+    "all_public_apply_results_files_state_match_old": true,
+    "token_absence_checked_before_copy": true,
+    "production_enrollment": false,
+    "channel_publication": false
   }
 }
