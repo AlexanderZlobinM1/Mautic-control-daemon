@@ -202,5 +202,27 @@
     "full_skipped": 57,
     "full_subtests": 105,
     "full_log_sha256": "222362e70824220f38b8b9b3be6aae13c78708720ff2c23a1adfa81ba8a1f09f"
+  },
+  "R21_preflight": {
+    "status": "FAILED_BEFORE_NGINX_ACTOR",
+    "reason": "old updater deleted prior RECORD before pip uninstall; obsolete template remained outside new RECORD",
+    "receipt_sha256": "f97cfe3928ae8af6a11bec652687cfd34b1b748adfedd5b59dc8baae9d891487",
+    "manual_cleanup": false,
+    "full_reset_after_attempt": true
+  },
+  "package_lifecycle_fix": {
+    "maintenance_pr": "https://github.com/AlexanderZlobinM1/Mautic-control-daemon/pull/33",
+    "maintenance_source": "c6bcc5938840caac41a3ae96f1f6331884d3c584",
+    "native_package_phase_sha256": "b9675e8771ed0d4c93c452c770404441bf11d696c35eeaea52ec44f8aa71a5ab",
+    "native_package_phase_is_full_channel_proof": false,
+    "feature_full_passed": 2067,
+    "feature_full_failed": 61,
+    "feature_full_failure_ids_exact_baseline": true
+  },
+  "R22_native": {
+    "status": "RUNNING",
+    "strict_installed_template_absent_preflight": "PASS",
+    "runtime_archive_sha256": "8bc8d5980b84dbd6277797941e944c0b25b70817c99619b2d98a59d67940ec44",
+    "installer": "transported corrected bootstrap package install; no manual package deletion"
   }
 }

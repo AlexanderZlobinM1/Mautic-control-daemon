@@ -2680,3 +2680,27 @@ HTTP0 и девять реальных external child PID. После этого
 _nginx_web_root нужен прямой Mautic media логике; cert preflight и остальные
 lifecycle callers сохраняются для своих отдельных границ.150 focused PASS;
 очищенный R21 ещё требует installed native proof после полного reset.
+
+
+### Runtime wheel ownership and ordinary update migration
+
+До pip force-reinstall сохраняется прежний ownership RECORD; после установки
+остаётся dist-info целевого wheel. Удалённые owned ресурсы убирает обычный pip
+uninstall, посторонние файлы пакета и настройки сохраняются. Source checkout
+установка запрещена: требуются verified manifest и detached wheel.
+Ordinary updater использует /opt/mcd/runtime и installed package identity.
+Исторический immutable1.6.38 first hop может оставить ready artifact в src;
+maintenance1.6.39 не использует его для imports/version/source installation.
+Перед следующим обновлением legacy cache проверяется по существующему receipt,
+manifest/wheel SHA и установленной версии. Только после проверки successor
+package/import path он переносится в existing update rollback artifacts.
+Чужой/непроверенный legacy каталог сохраняется с конкретным отказом до мутаций.
+Ошибка восстанавливает прежний verified package и расположение кешей.
+Package-phase proof и полный HTTPS channel/restart proof учитываются отдельно;
+maintenance-релиз не снимает global1.7 HOLD.
+
+R21 nginx actor не стартовал: preflight нашёл obsolete template вне нового
+RECORD. Ручной зачистки не было, выполнен полный reset. Native package-phase
+с исправленным lifecycle принят отдельно (b9675e87); R22 проверяет очищенный
+installed CLI с прежним строгим template-absence gate. Текущая полная регрессия:
+2067PASS/61 прежних failure IDs/57skip/105subtests.

@@ -42,6 +42,7 @@ import sys
 import tarfile
 import tempfile
 import time
+import zipfile
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
@@ -276,15 +277,27 @@ def _remove_agent_shadow_hooks(site_dir: Path, source_dir: Path) -> list[str]:
     return removed
 
 
-def _remove_agent_distribution_metadata(site_dir: Path) -> list[str]:
-    """Remove only stale MCD distribution metadata before the bridge install."""
+def _remove_agent_distribution_metadata(site_dir: Path, *, preserve_records: bool = False,
+                                        keep: str = "") -> list[str]:
+    """Keep pip's ownership RECORD until uninstall; clear stale metadata after."""
     removed: list[str] = []
     for candidate in sorted(site_dir.glob("mcd_agent-*.dist-info")):
-        if not candidate.is_dir():
+        if not candidate.is_dir() or candidate.name == keep:
+            continue
+        if preserve_records and (candidate / "RECORD").is_file():
             continue
         shutil.rmtree(candidate)
         removed.append(candidate.name)
     return removed
+
+
+def _wheel_distribution_metadata_name(wheel_path: Path) -> str:
+    with zipfile.ZipFile(wheel_path) as wheel:
+        names = {name.split("/", 1)[0] for name in wheel.namelist()
+                 if name.startswith("mcd_agent-") and name.endswith(".dist-info/RECORD")}
+    if len(names) != 1:
+        raise RuntimeError("runtime wheel must contain exactly one MCD ownership RECORD")
+    return names.pop()
 
 
 def _is_agent_runtime_entry(path: Path) -> bool:
@@ -365,6 +378,7 @@ def _install_runtime(install_dir: Path, stage: Path, manifest: dict[str, Any]) -
     python = _venv_python(install_dir)
     requirements = stage / str(manifest["requirements"])
     wheel = stage / str(manifest["wheel"])
+    metadata_name = _wheel_distribution_metadata_name(wheel)
     _run([str(python), "-m", "pip", "--version"])
     _run(
         [
@@ -380,7 +394,7 @@ def _install_runtime(install_dir: Path, stage: Path, manifest: dict[str, Any]) -
         cwd=Path("/"),
     )
     site_dir = _site_dir(python)
-    removed_metadata = _remove_agent_distribution_metadata(site_dir)
+    removed_metadata = _remove_agent_distribution_metadata(site_dir, preserve_records=True)
     removed_hooks = _remove_agent_shadow_hooks(site_dir, install_dir / "src")
     _run(
         [
@@ -397,6 +411,7 @@ def _install_runtime(install_dir: Path, stage: Path, manifest: dict[str, Any]) -
         ],
         cwd=Path("/"),
     )
+    removed_metadata.extend(_remove_agent_distribution_metadata(site_dir, keep=metadata_name))
     version_probe = _run(
         [
             str(python),
