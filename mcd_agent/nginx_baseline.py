@@ -200,18 +200,6 @@ def _desired_default_deny_config(
                 "",
             ]
         )
-    if 443 not in occupied_ports:
-        lines.extend(
-            [
-                "server {",
-                "    listen 443 ssl default_server;",
-                "    server_name _;",
-                "    ssl_reject_handshake on;",
-                "    return 444;",
-                "}",
-                "",
-            ]
-        )
     return "\n".join(lines)
 
 

@@ -10,7 +10,7 @@ from pathlib import Path
 import re
 import socket
 import time
-from typing import Any, cast
+from typing import Any, cast, get_args, get_type_hints
 from urllib import request
 from urllib.error import HTTPError, URLError
 from mcd_agent.fs_permissions import default_guard_paths, normalize_guard_paths
@@ -2165,7 +2165,8 @@ def runtime_overrides_from_config_file(path: str) -> dict[str, Any]:
     """
     def managed(values: dict[str, Any]) -> dict[str, Any]:
         allowed = runtime_remote_allowed_keys()
-        return {key: value for key, value in values.items() if key in allowed}
+        return {key: (None if value == "" and _RUNTIME_TO_ATTR[key] in _RUNTIME_NULLABLE_ATTRS else value)
+                for key, value in values.items() if key in allowed}
 
     try:
         cfg = _load_toml_with_includes(path)
@@ -2530,6 +2531,11 @@ _RUNTIME_TO_ATTR: dict[str, str] = {
     "segment_throttle_kill_non_whitelist": "segment_throttle_kill_non_whitelist",
 }
 
+_RUNTIME_NULLABLE_ATTRS = frozenset(
+    name for name, annotation in get_type_hints(AgentConfig).items()
+    if type(None) in get_args(annotation)
+)
+
 _RUNTIME_REMOTE_BLOCKED_KEYS: set[str] = {
     # Changing runtime DB path mid-process is unsafe because stores are
     # opened at daemon startup and should stay stable.
@@ -2599,6 +2605,9 @@ def _reapply_manual_runtime_overrides(cfg: AgentConfig, runtime: dict[str, Any])
             # empty value. Do not erase a working local socket in-memory: the
             # daemon would fall back to PyMySQL's default localhost socket and
             # lose the Galera-backed MCD state backend until restart.
+            continue
+        if attr in _RUNTIME_NULLABLE_ATTRS and (raw_value is None or raw_value == ""):
+            updates[attr] = None
             continue
         if isinstance(current, bool):
             updates[attr] = bool(raw_value)
@@ -2916,14 +2925,17 @@ def _load_config_inner(path: str) -> AgentConfig:
             mcd_update_policy = "lts"
         elif ch in {"rc", "test"}:
             mcd_update_policy = "test"
+        elif ch == "dev":
+            mcd_update_policy = "dev"
         elif ch == "cluster":
             mcd_update_policy = "cluster"
         elif ch == "off":
             mcd_update_policy = "off"
         else:
             mcd_update_policy = "approved"
-    if mcd_update_policy not in {"off", "lts", "approved", "test", "cluster"}:
-        mcd_update_policy = "approved"
+    if mcd_update_policy not in {"off", "lts", "approved", "test", "cluster", "dev"}:
+        mcd_update_policy = ("dev" if str(runtime.get("mcd_update_channel", "")).strip().lower() == "dev"
+                             else "approved")
     cluster_id = str(runtime.get("cluster_id", cluster_cfg.get("id", "")) or "").strip() or None
     cluster_name = str(runtime.get("cluster_name", cluster_cfg.get("name", "")) or "").strip() or None
     cluster_node_role = str(runtime.get("cluster_node_role", cluster_cfg.get("node_role", "")) or "").strip().lower()

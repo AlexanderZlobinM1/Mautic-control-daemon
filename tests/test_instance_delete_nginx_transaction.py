@@ -125,7 +125,9 @@ def test_default_stub_has_no_certificates_domains_or_generation(layout):
     with patch.object(baseline, '_active_default_server_ports', return_value=set()), patch.object(baseline.subprocess, 'run') as process:
         baseline._ensure_default_deny_config(layout[2] / 'backups', {})
     content = baseline.DEFAULT_DENY_FILE.read_text()
-    assert 'ssl_reject_handshake on;' in content
+    assert 'listen 80 default_server;' in content
+    assert '443' not in content
+    assert 'ssl_' not in content
     assert 'ssl_certificate' not in content
     assert '/letsencrypt/' not in content
     assert delete._nginx_server_names(content) == {'_'}
