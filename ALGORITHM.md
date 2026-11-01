@@ -1912,3 +1912,38 @@ configuration must consume existing MCC data through the applicable approved
 transport. Corporate managed hosts remain on their corporate lane; they are
 not silently re-enrolled into the separate Portal OWH lane. Tests exercise real
 runtime override preservation and CLI startup/auto/manual selection effects.
+
+
+## Package lifecycle maintenance: ownership RECORD
+
+During runtime wheel replacement, retain the installed MCD distribution RECORD
+until pip performs its normal uninstall. Remove only stale metadata without a
+RECORD before installation; after successful installation retain the exact
+dist-info directory declared by the target wheel. Do not manually delete
+package files or operator data. Package verification and existing rollback
+remain mandatory.
+
+The prerequisite maintenance release is based on published 1.6.38 and retains
+its entire previous owned package layout. It changes only updater ownership
+handling (including the independently transported bootstrap). This allows the
+old updater to install the maintenance package without retiring any files; the
+corrected updater can subsequently uninstall retired owned files normally.
+The externalization candidate and its global 1.7 release hold are separate.
+
+Validation: tests/test_runtime_distribution_lifecycle.py runs real pip for
+clean install, upgrade/repeat, package rollback and verification-failure
+recovery, preserving untracked package data and configuration. Synthetic
+fixtures are not proof of the published-version channel transition.
+
+The maintenance updater also requires verified detached runtime packages and
+activates successors in /opt/mcd/runtime; checkout installation is rejected.
+The immutable 1.6.38 first hop can transiently activate its ready artifact in
+the legacy src cache. The 1.6.39 second hop validates that cache against the
+existing package receipt, manifest, wheel and installed version before any
+update mutation. After successor package/import verification, it moves the
+verified legacy cache to the existing update rollback artifacts. Unverified
+or foreign legacy content is preserved and blocks this retirement. Failure
+restores cache locations and the previous verified package. Imports always
+come from installed site-packages; the legacy directory is never a source
+installation, import or version fallback. The historical first hop, package
+phase, and full HTTPS/restart acceptance are recorded separately.

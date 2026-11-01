@@ -12,7 +12,11 @@ _VERSION_RE = re.compile(r"__version__\s*=\s*['\"]([^'\"]+)['\"]")
 
 
 def source_version(source_dir: Path | str | None = None) -> str | None:
-    src = Path(source_dir) if source_dir is not None else Path("/opt/mcd/src")
+    # Source inspection is an explicit development/diagnostic operation only.
+    # Installed runtime identity must never discover a parallel project checkout.
+    if source_dir is None:
+        return None
+    src = Path(source_dir)
     init_py = src / "mcd_agent" / "__init__.py"
     try:
         text = init_py.read_text(encoding="utf-8", errors="ignore")
@@ -38,7 +42,8 @@ def source_version(source_dir: Path | str | None = None) -> str | None:
 
 
 def installed_agent_version(source_dir: Path | str | None = None) -> str:
-    return source_version(source_dir) or __version__
+    # The imported runtime is authoritative, including when an old checkout exists.
+    return __version__
 
 
 def package_agent_version(distribution: str = "mcd-agent") -> str:
@@ -63,6 +68,6 @@ def agent_version_payload(source_dir: Path | str | None = None) -> dict[str, Any
         "agent_installed_version": installed,
         "agent_source_version": source,
         "agent_package_version": package,
-        "agent_package_mismatch": bool(source and package and source != package),
-        "agent_version_mismatch": bool((source and source != running) or (source and package and source != package)),
+        "agent_package_mismatch": bool(package and package != running),
+        "agent_version_mismatch": bool((source and source != running) or (package and package != running)),
     }
