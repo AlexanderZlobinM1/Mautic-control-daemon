@@ -58,3 +58,33 @@ Each affected line needs its own exact source commit, tests, artifact hashes,
 channel decision and receipt. A PASS on one line is not acceptance of the other.
 Whole-1.7 acceptance remains on HOLD independently of Dev availability and ongoing
 unlisted/native QA. Channel administration must not interrupt those QA actors.
+
+## Operator exception: this MCD 1.7 development campaign
+
+The operator explicitly authorizes direct 1.7 development on exactly
+`135.181.110.14` and `46.225.78.247`. This narrow campaign exception supersedes
+the earlier zero-Dev-host development restriction; it is not a general policy for
+other projects, production or fleet hosts. `46.224.209.196` is forbidden.
+Channel assignment is a separate owner-controlled operation, not inferred from
+this development authorization.
+
+MCD code remains owned by MCD Inbox; Portal code/scenarios by Portal owner.
+Serialize shared host mutations and restarts through MCD and Infra leases.
+Before changes, capture baseline services/instance facts and exact owned backups.
+Keep local diffs/evidence while iterating directly, debugging and testing on these
+hosts. Commit only the final proven result, not every experiment. Coordinate DNS
+and shared infrastructure changes separately.
+
+Publish must not produce another unlisted Rxx artifact, VM package cycle,
+Test/Approved release or reinstall for each 1.7 experiment. Receive the final
+publication handoff after the owners demonstrate working behavior and regression
+checks. Do not auto-update live Dev source or deploy automatically from Dev;
+never overwrite in-progress changes or add unrelated host assignments.
+
+Preserve terminal/evidence from any already-running QA actor without interrupting
+it, then transition development to the two-host workflow rather than initiating
+new package/VM cycles. Existing immutable 39/40/QA bytes remain unchanged.
+The separately authorized stable40 Test hotfix lane may reach terminal acceptance
+using its owner proofs. It is not the template for Dev iteration. Shared hotfixes
+still require the synchronous paired stable/Dev source-and-test cycle above;
+stable publication occurs only in its separately agreed stable release cycle.
