@@ -2854,3 +2854,18 @@ Portalproducer1.4.3 7aca8216, после build-stage targetemptyvenvofflineproof
 Старые39/R29/210/f799 bytes immutable; oldfailedattempts не переименованыPASS.
 Actualtargetidentity Linuxx86_64CPython3.12.3 Ubuntu24.04 glibc2.39 фиксируется
 в prepared/build proofreceipt; инаяархитектура не заявляется.1.7HOLD.
+
+
+## Shared 1.6 / 1.7 hotfix invariants (2026-11-01)
+
+An explicitly selected Dev policy stays Dev, including an empty-channel response;
+no package is selected or downloaded through an Approved/latest fallback.
+Nullable runtime settings clear to their declared optional type through apply,
+TOML persistence, reload and runtime-wire projection. Empty remote local-MySQL
+socket data preserves an existing working socket. Shared regression coverage is
+`tests/test_shared_nullable_runtime.py` and `tests/test_dev_update_policy.py`.
+The managed default deny vhost emits HTTP port 80 only, with no domain, TLS or
+certificate dependency. Removal remains restricted to the instance-owned vhost;
+neighbor vhosts and certificates remain protected. Dev uses the externally
+verified baseline recipe; stable uses its minimal existing leaf generator fix.
+A paired source/test fix does not authorize channel promotion or host rollout.
