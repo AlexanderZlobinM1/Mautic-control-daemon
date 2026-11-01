@@ -2720,3 +2720,10 @@ normal mode восстанавливает тот же SHA. Это не full Por
 Actual MCC v3 fixture также выявил nullable cluster_node_index: clear после
 числового значения теперь остаётся None вместо int(None). Прочие типы и
 existing LWW clocks не меняются.88 целевых config/settings проверок PASS.
+
+Nullable runtime values определяются существующей AgentConfig schema, а не
+текущим Python-значением: Optional int/str после установленного значения
+корректно очищаются в None. Existing TOML writer представляет null пустой
+строкой; runtime projection восстанавливает declared None, чтобы roundtrip
+не стал ложной пользовательской правкой. Защита рабочего local MySQL socket
+сохранена.91 целевая проверка config/settings PASS; aliases не добавлялись.

@@ -11,7 +11,7 @@ import re
 import socket
 import sys
 import time
-from typing import Any, cast
+from typing import Any, cast, get_args, get_type_hints
 from urllib import request
 from urllib.error import HTTPError, URLError
 from mcd_agent.fs_permissions import default_guard_paths, normalize_guard_paths
@@ -2177,8 +2177,14 @@ def runtime_overrides_from_config_file(path: str) -> dict[str, Any]:
     """
     def managed(values: dict[str, Any]) -> dict[str, Any]:
         allowed = runtime_remote_allowed_keys()
-        return {key: value for key, value in values.items() if key in allowed
-                and not (key == "universal_workload_resource_ref" and value in (None, "", {}))}
+        out: dict[str, Any] = {}
+        for key, value in values.items():
+            if key not in allowed or (key == "universal_workload_resource_ref" and value in (None, "", {})):
+                continue
+            # TOML has no null literal; the existing writer emits an empty
+            # string. Restore the declared optional type on the runtime wire.
+            out[key] = None if value == "" and _RUNTIME_TO_ATTR[key] in _RUNTIME_NULLABLE_ATTRS else value
+        return out
 
     try:
         cfg = _load_toml_with_includes(path)
@@ -2546,6 +2552,11 @@ _RUNTIME_TO_ATTR: dict[str, str] = {
     "segment_throttle_kill_non_whitelist": "segment_throttle_kill_non_whitelist",
 }
 
+_RUNTIME_NULLABLE_ATTRS = frozenset(
+    name for name, annotation in get_type_hints(AgentConfig).items()
+    if type(None) in get_args(annotation)
+)
+
 _RUNTIME_REMOTE_BLOCKED_KEYS: set[str] = {
     # Changing runtime DB path mid-process is unsafe because stores are
     # opened at daemon startup and should stay stable.
@@ -2621,14 +2632,14 @@ def _reapply_manual_runtime_overrides(cfg: AgentConfig, runtime: dict[str, Any])
         if not hasattr(cfg, attr):
             continue
         current = getattr(cfg, attr)
-        if attr == "cluster_node_index" and (raw_value is None or raw_value == ""):
-            updates[attr] = None
-            continue
         if attr in {"state_mysql_unix_socket"} and str(raw_value or "").strip() == "" and str(current or "").strip():
             # Remote runtime payloads may omit local socket details or send an
             # empty value. Do not erase a working local socket in-memory: the
             # daemon would fall back to PyMySQL's default localhost socket and
             # lose the Galera-backed MCD state backend until restart.
+            continue
+        if attr in _RUNTIME_NULLABLE_ATTRS and (raw_value is None or raw_value == ""):
+            updates[attr] = None
             continue
         if isinstance(current, bool):
             updates[attr] = bool(raw_value)

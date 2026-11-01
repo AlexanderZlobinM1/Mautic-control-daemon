@@ -95,3 +95,22 @@ def test_existing_nullable_cluster_index_can_clear_after_a_real_integer_value(tm
     cleared, applied, unsupported, blocked = config.apply_runtime_overrides(cfg, {'cluster_node_index': None})
     assert cleared.cluster_node_index is None and applied == ['cluster_node_index']
     assert not unsupported and not blocked
+
+
+@pytest.mark.parametrize('key,value', [('cluster_node_index', 1), ('backup_cluster_authority_host', 'qa-backup.invalid'),
+                                     ('mautic6_core_patch_version_min', '6.0.0')])
+def test_nullable_settings_round_trip_clear_through_existing_toml_and_runtime_wire(tmp_path, monkeypatch, key, value):
+    from test_universal_workload import configuration
+    cfg_cache, ref, _, stage = runtime_resource_fixture(tmp_path)
+    monkeypatch.setattr(config, 'DEFAULT_RUNTIME_ARTIFACT_DIR', str(stage))
+    path = tmp_path / 'mcd.toml'; configuration(path, cache_dir=cfg_cache.custom_cache_dir, ref=ref, include_ref=True)
+    path.write_text(path.read_text().replace('name="large"', 'name="custom"'))
+    cfg = config.load_config(str(path), allow_recover_from_mcc=False)
+    cfg, _, _, _ = config.apply_runtime_overrides(cfg, {key: value})
+    cfg, _, _, _ = config.apply_runtime_overrides(cfg, {key: None})
+    assert getattr(cfg, config._RUNTIME_TO_ATTR[key]) is None
+    config.upsert_runtime_values(str(path), {key: None})
+    restored = config.load_config(str(path), allow_recover_from_mcc=False)
+    assert getattr(restored, config._RUNTIME_TO_ATTR[key]) is None
+    assert config.runtime_overrides_from_config_file(str(path))[key] is None
+    assert config.runtime_effective_map(restored)[key] is None
