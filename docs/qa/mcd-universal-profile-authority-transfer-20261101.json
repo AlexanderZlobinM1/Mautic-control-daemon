@@ -1,5 +1,5 @@
 {
-  "status": "current behavior frozen; universal object authoring and consumer acceptance pending",
+  "status": "external data authoring and inactive MCC resource published; MCD generic reader verified; selected-ref first-sync/config/native integration and source-table cleanup pending",
   "runtime_source_commit": "3adea1f3be62e7ba38a547f6b93400a408076762",
   "MCC_public_handoff_sha256": "6fad0749de160dc8e6c1f28d2db4eec190c9f79e1f3f0199769048e1ebbdb010",
   "MCC_hardware_object_sha256": "30b3b5684c831af8a78cac44d85e100a0b99108acc7a3c1e990e7313a6663ea3",
@@ -33,12 +33,47 @@
     "scope": "selected existing MCD update/reset/all-settings/LWW/tombstone tests; no new live host or MCC-server acceptance claimed"
   },
   "remaining": [
-    "Portal frozen complete universal objects/schema from current MCD behavior",
-    "MCC immutable object refs/catalog publication by owner",
-    "MCD generic consumer and removal of replaced profile formulas after acceptance",
-    "standalone offline exact-cache and manual high-profile literal application",
-    "complete settings recovery and bidirectional authority consumer acceptance",
-    "whole 1.7 Publish MCD release"
+    "selected exact ref delivery through existing first sync and durable settings transport before profile application",
+    "MCD configuration/ordinary CLI integration and removal of replaced profile formulas after acceptance",
+    "standalone and installed offline exact-cache/native manual high-profile literal application",
+    "complete settings recovery and bidirectional authority native consumer acceptance"
   ],
-  "channel_publication": false
+  "channel_publication": false,
+  "complete_universal_resource_published_inactive": true,
+  "published_resource": {
+    "archive_sha256": "210ac92079dc9b8b3aba17fdcb3dc1ae7426e4e4f719e7754f8fc8b835f93e96",
+    "archive_size_bytes": 6171,
+    "catalog_sha256": "d8bcdfde85e80fbbe5968adf79add70cb82bd4a43b2df82b176efb290440c3e4",
+    "handoff_sha256": "c1b49715935d42ed65d5515f6bb590b0d6a3a399f8151d00e50d379b572f3aca",
+    "manifest_location": "resources in existing custom manifest; not executable items",
+    "active": false,
+    "entrypoint": null,
+    "member_count": 21,
+    "literal_profiles": 14,
+    "MCC_publication_ref": "eb471361635d026a674de4ff8c07ee32ffce73f7"
+  },
+  "generic_reader": {
+    "unit_tests_passed": 7,
+    "owner_data_review_sha256": "3f38f9fd40d15d4a7e0842a4b5ee1e7605c9621c7ec966053d2309104d5e0424",
+    "owner_frozen_member_pins_verified": 21,
+    "literal_profiles_equal_current_frozen_values": 14,
+    "hardware_boundary_pairs_equal_actual_core_normal_and_farm": 204,
+    "artifact_GET_HEAD": 0,
+    "executed_processes": 0,
+    "cache_bytes_mtime_mode_preserved": true,
+    "data_download_permissions": "0600; no entrypoint or executable runner",
+    "existing_settings_engine_changed": false,
+    "profile_tables_removed": false,
+    "native_config_integration_claimed": false,
+    "full_passed": 2074,
+    "full_failed": 61,
+    "full_failed_ids_exact_baseline": true,
+    "full_skipped": 57,
+    "full_subtests_passed": 105
+  },
+  "selected_ref_coordination": {
+    "key": "universal_workload_resource_ref",
+    "transport": "existing generic host runtime_overrides v2/v3 map; no endpoint/table/protocol",
+    "first_sync_before_profile_application": "pending cross-owner agreement; no latest/candidate autoselection/hardcoded pins/fallback formulas"
+  }
 }

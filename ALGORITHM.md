@@ -2602,6 +2602,21 @@ ring_count/max_segment_retries/segment_priority_stale_age_sec из proposed sche
 межкомпонентная приёмка universal profiles ещё обязательна. Evidence:
 docs/qa/mcd-universal-profile-authority-transfer-20261101.json.
 
+Generic universal reader проверен отдельно от cfg integration: существующий
+cache/downloader принимает data_only без entrypoint/execute/chmod-x. Весь
+явно выбранный resource проверяется по archive SHA и21 member pins без
+извлечения/запуска. Literal values14 профилей равны owner-freeze,204 CPU/RAM
+boundary pairs normal/farm равны текущим core-функциям; custom не назначает
+fixed preset. Inherited global defaults не превращаются в profile-owned edits.
+Ровно совпавший manual cache работает при inactive distribution metadata,
+без GET/HEAD/процессов/изменения bytes/mtime/mode. Механизм не выбирает latest
+и не меняет settings clocks/reset engine. Семь unit tests и owner-data review
+приняты; legacy tables/actual cfg callers ещё НЕ заменены. До удаления таблиц
+обязателен согласованный existing first-sync intake явного
+universal_workload_resource_ref в existing generic runtime settings map:
+startup старого named-profile config не должен зависеть от недоставленного
+ref или выбирать inactive candidate сам. Native cfg/LWW acceptance pending.
+
 ### Consumer двух полных vhost-операций
 
 nginx-baseline migration-vhost apply и composer-vhost apply принимают явный

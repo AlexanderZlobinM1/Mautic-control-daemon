@@ -539,7 +539,8 @@ def _activate_bundle(archive_path: Path, cache_dir: Path, digest: str, entrypoin
             shutil.rmtree(staged)
 
 
-def _fetch_script_to_cache(config: AgentConfig, script: dict[str, Any], *, offline_only: bool = False) -> Path:
+def _fetch_script_to_cache(config: AgentConfig, script: dict[str, Any], *, offline_only: bool = False,
+                           data_only: bool = False) -> Path:
     file_rel = str(script.get("file", "")).strip()
     if not file_rel:
         raise RuntimeError("custom script entry has empty file field")
@@ -552,6 +553,8 @@ def _fetch_script_to_cache(config: AgentConfig, script: dict[str, Any], *, offli
         raise RuntimeError("custom artifact requires an expected SHA-256")
 
     entrypoint = script.get("entrypoint")
+    if data_only and entrypoint is not None:
+        raise RuntimeError("data-only resource cannot have an executable entrypoint")
     if entrypoint is not None:
         if (not isinstance(entrypoint, str) or not entrypoint.strip()
                 or "\x00" in entrypoint or Path(entrypoint).is_absolute()
@@ -561,12 +564,13 @@ def _fetch_script_to_cache(config: AgentConfig, script: dict[str, Any], *, offli
             raise RuntimeError("custom bundle requires tar.gz and a manifest SHA-256")
 
     dl_dir = Path(config.custom_cache_dir) / "downloads" / key
-    suffix = ".tar.gz" if entrypoint is not None else (Path(file_rel).suffix or ".sh")
+    suffix = ".tar.gz" if entrypoint is not None or (data_only and file_rel.endswith(".tar.gz")) else (Path(file_rel).suffix or ".sh")
     cached = dl_dir / f"{key}-{expected_sha}{suffix}"
     if cached.is_file() and not cached.is_symlink() and hashlib.sha256(cached.read_bytes()).hexdigest() == expected_sha:
         if entrypoint is not None:
             return _activate_bundle(cached, dl_dir, expected_sha, entrypoint)
-        cached.chmod(cached.stat().st_mode | 0o500)
+        if not data_only:
+            cached.chmod(cached.stat().st_mode | 0o500)
         return cached
     if offline_only:
         raise CustomSelectedTaskError("custom_selected_task_artifact_missing_or_corrupt")
@@ -589,7 +593,7 @@ def _fetch_script_to_cache(config: AgentConfig, script: dict[str, Any], *, offli
             )
         # A revision cannot overwrite the pathname of a different running script.
         dst = dl_dir / f"{key}-{got_sha}{suffix}"
-        os.chmod(staged, 0o755)
+        os.chmod(staged, 0o600 if data_only else 0o755)
         os.replace(staged, dst)
         if entrypoint is not None:
             return _activate_bundle(dst, dl_dir, got_sha, entrypoint)
