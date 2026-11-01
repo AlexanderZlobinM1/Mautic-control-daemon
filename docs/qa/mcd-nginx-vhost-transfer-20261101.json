@@ -99,14 +99,25 @@
     ],
     "existing_cache_and_runner_only": true,
     "failed_terminal_preserves_legacy_error": true,
-    "legacy_callers_still_unmodified": true,
+    "legacy_callers_still_unmodified": false,
     "full_passed": 2059,
     "full_failed": 61,
     "full_failures_exact_baseline_ids": true,
     "full_skipped": 57,
     "full_subtests": 105,
     "full_log_sha256": "58f05616c4dbe4459c0aaa962810569294ed0a834a41509d9fecd3622b775989",
-    "exact_selected_artifact_online_repair": "unit PASS: missing/corrupt exact GET1, repeat0; no latest query or operation replay"
+    "exact_selected_artifact_online_repair": "unit PASS: missing/corrupt exact GET1, repeat0; no latest query or operation replay",
+    "legacy_writer_definitions_retained_pending_R20": true,
+    "caller_focused_passed": 145,
+    "caller_full_passed": 2059,
+    "caller_full_failed": 61,
+    "caller_full_failures_exact_baseline_ids": true,
+    "caller_full_log_sha256": "98d5bb86a54830371d11d4ab63240b77fb711afca10424ea7c6023280f131ba0",
+    "active_caller_aliases": {
+      "instance_migrate": 2,
+      "mautic_composer_move": 1
+    },
+    "duplicate_nginx_test_reload_removed_from_composer_caller": true
   },
   "external_frozen": {
     "handoff_sha256": "70ccf56ad47a0e164f23990d5d9f64ceabb986c55b224a6cd3650dd8f3082b61",
@@ -131,5 +142,13 @@
     "neighbors_certificates_bytes_mtime_unchanged": true,
     "canonical_HTTPS": "200 verifiedTLS",
     "full_reset_requested": true
+  },
+  "r20_manual_cache": {
+    "authority": "explicit operator QA cache; not live-active MCC",
+    "selected_records": 46,
+    "baseline_records": 34,
+    "vhost_records": 12,
+    "snapshot_receipt_sha256": "4fb0e6922eba01aad963f17641fd6bcd5fb04587d44c38b626df7fa6e00f73ef",
+    "standalone_no_config_registration_URL": true
   }
 }

@@ -19,6 +19,7 @@ from mcd_agent.nginx_baseline import (
     normalize_legacy_http2_listen,
 )
 from mcd_agent.mode import _read_crontab, _write_crontab
+from mcd_agent.nginx_external import write_switched_vhost as _external_write_switched_vhost
 
 RETIRED_INSTANCE_MARKER = ".mcd-retired-after-composer-move"
 NGINX_SITES_AVAILABLE = Path("/etc/nginx/sites-available")
@@ -521,11 +522,7 @@ def move_zip_to_composer(
             print("Migrating crontabs to Composer root")
             cron_migration = _migrate_composer_move_crontabs(plan, int(mautic_major or 0))
             print("Switching nginx vhost")
-            vhost = _write_switched_vhost(plan)
-            rc, out = _run(["nginx", "-t"], timeout_sec=30)
-            if rc != 0:
-                raise RuntimeError("nginx -t failed: " + out)
-            _run(["systemctl", "reload", "nginx"], timeout_sec=30)
+            vhost = _external_write_switched_vhost(plan, cfg=cfg)
             retired_marker = _mark_source_root_retired(plan)
         except Exception:
             if cron_migration:

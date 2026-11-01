@@ -2662,3 +2662,10 @@ nginx-t failure без vhost rollback; raw argv/stdout/stderr/terminal сохр�
 После DIRECT запрошен полный reset. Текущий consumer checkpoint с exact
 artifact repair:128focusedPASS/2059fullPASS, те же61baseline IDs/57skip/105subtests.
 Обычный installed CLI и реальные caller aliases остаются следующим этапом.
+
+После DIRECT actual migration callers направлены в _external_write_nginx_vhost;
+composer caller использует _external_write_switched_vhost один раз вместо
+старых write→nginx-t→reload строк. Целый внешний этап сохраняет их порядок и
+ошибки; окружающая Mautic/cron логика не меняется. Старые writer definitions
+пока остаются только эталоном до R20 installed CLI/caller parity, без fallback
+из нового пути. После приёмки они и ненужные shared helpers удаляются.

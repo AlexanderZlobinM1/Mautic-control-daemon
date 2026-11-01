@@ -420,7 +420,7 @@ class InstanceMigrateProbeTests(unittest.TestCase):
                 patch.object(instance_migrate, "_patch_local_php_db", side_effect=lambda *_args: events.append("patch_db")),
                 patch.object(instance_migrate, "_patch_local_php_instance_paths", side_effect=lambda *_args: events.append("patch_paths") or []),
                 patch.object(instance_migrate, "_copy_letsencrypt", return_value=False),
-                patch.object(instance_migrate, "_write_nginx_vhost", return_value="/etc/nginx/sites-available/example.conf"),
+                patch.object(instance_migrate, "_external_write_nginx_vhost", return_value="/etc/nginx/sites-available/example.conf"),
                 patch.object(instance_migrate, "_target_healthcheck", return_value=[]),
                 patch.object(instance_migrate, "InstanceInventory", FakeInventory),
             ):

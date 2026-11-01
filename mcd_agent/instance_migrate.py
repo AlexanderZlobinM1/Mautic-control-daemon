@@ -31,7 +31,7 @@ from mcd_agent.nginx_baseline import (
     ensure_mautic_public_app_asset_locations,
     normalize_legacy_http2_listen,
 )
-from mcd_agent.nginx_external import ensure_nginx_baseline
+from mcd_agent.nginx_external import ensure_nginx_baseline, write_nginx_vhost as _external_write_nginx_vhost
 from mcd_agent.nginx_templates import render_nginx_template
 from mcd_agent.runtime_adapters import run_runtime_adapter, runtime_adapter_path
 from mcd_agent.runtime_descriptor import descriptor_for_root
@@ -850,7 +850,7 @@ def finalize_target_relay(
     print("progress: 88 target web config")
     _patch_local_php_db(target, target_db)
     _patch_local_php_instance_paths(target)
-    site = _write_nginx_vhost(root=target, domains=domains, php_version=php_version or "", cfg=config)
+    site = _external_write_nginx_vhost(root=target, domains=domains, php_version=php_version or "", cfg=config)
     _run_checked(["chown", "-R", "www-data:www-data", str(target)], timeout_sec=1800)
     print("progress: 94 target healthcheck")
     health = _target_healthcheck(target)
@@ -1174,7 +1174,7 @@ def run_target_pull_migration(
             source_ssh_port=source_ssh_port,
             source_ssh_key_file=source_ssh_key_file,
         )
-        site = _write_nginx_vhost(root=target, domains=domains, php_version=php_version or "", cfg=config)
+        site = _external_write_nginx_vhost(root=target, domains=domains, php_version=php_version or "", cfg=config)
         _run_checked(["chown", "-R", "www-data:www-data", str(target)], timeout_sec=1800)
 
         print("progress: 94 target healthcheck")
