@@ -39,7 +39,9 @@ def test_apply_changes_only_stub_and_replay_does_not_reload(stub):
     events = []
     def validate():
         events.append('test')
-        assert 'ssl_reject_handshake on;' in stub.read_text()
+        assert 'listen 80 default_server;' in stub.read_text()
+        assert '443' not in stub.read_text()
+        assert 'ssl_' not in stub.read_text()
         assert 'ssl_certificate' not in stub.read_text()
         return True, 'nginx_test:ok'
     def reload():

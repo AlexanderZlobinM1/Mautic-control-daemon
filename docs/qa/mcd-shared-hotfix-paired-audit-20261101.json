@@ -1,0 +1,66 @@
+{
+  "schema": "mcd-paired-hotfix-audit-v1",
+  "status": "source_tests_ready_publication_pending",
+  "stable_source": "005a93720ca460d4125866c9b5163b69b9321bac",
+  "dev_source": "e1bb6bd3568f456782062cacdf3cac2a06541fa7",
+  "shared_fixes": [
+    {
+      "name": "nullable runtime clear round trip and local MySQL socket preservation",
+      "stable": "005a93720ca460d4125866c9b5163b69b9321bac",
+      "dev_fix": "777f5e4b1359e407b8c06d9d9724f73d9fd315e9",
+      "paired_test": "tests/test_shared_nullable_runtime.py",
+      "dev_test_commit": "e1bb6bd3568f456782062cacdf3cac2a06541fa7"
+    },
+    {
+      "name": "HTTP80-only managed default deny stub",
+      "stable": "005a93720ca460d4125866c9b5163b69b9321bac",
+      "dev_fix": "a6f1f1ed8110be35536568d1a9de0373083adaf6",
+      "dev_external_recipe_sha256": "3075055662a2c4f6b87402b54ddeac9f0bf3662bde04212da965946ddfcabec2",
+      "dev_evidence": "docs/qa/mcd-nginx-host-baseline-transfer-20261101.json"
+    },
+    {
+      "name": "explicit Dev policy and empty channel no package fallback",
+      "stable": "005a93720ca460d4125866c9b5163b69b9321bac",
+      "dev_fix": "4420902e0f7e85c190967f0fbaa47fbacd3c27d3",
+      "paired_test": "tests/test_dev_update_policy.py"
+    },
+    {
+      "name": "preserve RECORD until pip uninstall and rollback/cache retirement",
+      "stable_already_approved": "d0c52a4982788c1ebdcdf490894119ddbe4960b2",
+      "dev_fix": "058e72d33917b65386c38e1fe29cca26a70fba5e"
+    }
+  ],
+  "validation": {
+    "stable_focused_passed": 77,
+    "stable_full_passed": 1940,
+    "dev_full_passed": 2171,
+    "dev_additional_shared_tests_passed": 4,
+    "both_full_failure_ids": "exact same 61 baseline IDs",
+    "both_skipped": 57,
+    "both_subtests_passed": 105,
+    "required_release_regression": "PASS on both lines",
+    "stable_full_log_sha256": "aeec48c5f2052d69eb23d642be88396e4fde45a5af3787c77a9883a23bdbe384",
+    "dev_full_log_sha256": "2524d2272a3d4663a8d6e1220816bf0f19cbe3f1dce1fb8a24153b37cebf33de"
+  },
+  "branch_specific": [
+    {
+      "scope": "universal resource reference/catalog/default resume/atomic new reference with new profile",
+      "stable_not_applicable": "Stable AgentConfig has no universal_workload_resource_ref or external catalog; no new reference/name binding callsite. Existing stable profile matrices retained."
+    },
+    {
+      "scope": "new preseed helper code/read-only commercial replay",
+      "stable_not_applicable": "Approved39 passive installer has no universal preseed/verify-only bootstrap callsite."
+    },
+    {
+      "scope": "full ready wheelhouse requirement",
+      "stable_not_applicable": "Future Portal1.4.2 used only-binary against incomplete QA R29. Immutable Approved39 installer uses plain pip -r plus wheel; the identical failure path does not exist. No 1.7 architecture backport."
+    }
+  ],
+  "publication": {
+    "owner": "Publish MCD",
+    "pending": true,
+    "artifacts": null,
+    "channels_unchanged": true,
+    "whole_1_7_hold": true
+  }
+}
