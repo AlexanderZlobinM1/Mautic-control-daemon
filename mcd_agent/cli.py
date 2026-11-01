@@ -3503,6 +3503,17 @@ def main() -> int:
         ensure_seeded(inv, cfg)
         if args.op == "list":
             rows = inv.list_instances()
+            if args.instance_uid:
+                rows = [row for row in rows if row.instance_uid == args.instance_uid]
+                if len(rows) != 1:
+                    if args.json:
+                        print("[]")
+                    else:
+                        print("Mautic instance identity is unknown or ambiguous", file=sys.stderr)
+                    return 2
+            if args.json:
+                print(json.dumps([row.safe_dict() for row in rows], ensure_ascii=True, indent=2))
+                return 0
             if not rows:
                 print("No instances")
                 return 0

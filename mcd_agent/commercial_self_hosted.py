@@ -46,6 +46,7 @@ from mcd_agent.commercial_portal import (
     SELF_HOSTED_MCD_ROLLBACK_STATUSES,
     PORTAL_ARTIFACT_TRUST_UPDATE_SCHEMA,
     CommercialState,
+    portal_state_identity,
     CommercialPortalError,
     INVENTORY_REVISION_ERRORS,
     STANDALONE_SETTINGS_SNAPSHOT_SCHEMA,
@@ -64,6 +65,7 @@ from mcd_agent.commercial_generic import (
     TERMINAL_RECEIPT_SCHEMA as GENERIC_TERMINAL_RECEIPT_SCHEMA,
     validate_capability_inventory,
     validate_generic_command_job,
+    validate_managed_installation_tenant,
     validate_generic_stage_receipt,
     validate_generic_terminal_receipt,
 )
@@ -73,6 +75,7 @@ _RUNS_TABLE = "commercial_self_hosted_runs"
 _PENDING_KEY = "commercial_self_hosted_pending_receipts"
 _PENDING_DELIVERY_KEY = "commercial_self_hosted_pending_delivery_v1"
 _TRANSPORT_KEY = "commercial_portal_transport_v1"
+_CURSORS_KEY = "commercial_portal_cursors_v1"
 _ADOPTED_KEY = "commercial_portal_adopted_installations_v1"
 _MAX_RECEIPT_RESULT_BYTES = 16 * 1024
 _MAX_PROCESS_OUTPUT_BYTES = 64 * 1024
@@ -1016,13 +1019,13 @@ class SelfHostedPortalWorker:
             raise ValueError("self_hosted_mcd_identity_missing")
         self.portal_keys = dict(portal_keys)
         self.publisher_keys = dict(publisher_keys)
-        self.context = dict(context)
+        self._context = dict(context)
         self.commercial_key_id = commercial_key_id
         self.agent_id = agent_id
         self.host_fingerprint = host_fingerprint
         if context.get("identity_kind") == "dns" and host_fingerprint:
             raise ValueError("self_hosted_mcd_dns_fingerprint_forbidden")
-        self.identity_coordinate = identity_coordinate(context) if context.get("identity_kind") == "dns" else {"host_fingerprint": host_fingerprint}
+        self._identity_coordinate = identity_coordinate(context) if context.get("identity_kind") == "dns" else {"host_fingerprint": host_fingerprint}
         self.poll_wait_seconds = max(0, min(30, int(poll_wait_seconds)))
         self.backoff_base_seconds = max(0.1, float(backoff_base_seconds))
         self.backoff_max_seconds = max(self.backoff_base_seconds, float(backoff_max_seconds))
@@ -1038,8 +1041,21 @@ class SelfHostedPortalWorker:
         # subsequent cycles remain hash/idempotency gated.
         self._publish_inventory_on_startup = True
 
+    @property
+    def identity_coordinate(self) -> dict[str, str]:
+        if self.executor.state.get("ownership") == "sales_snap_managed":
+            return portal_state_identity(self.executor.state, installation_id=self._active_installation_id)
+        return self._identity_coordinate
+
+    @property
+    def context(self) -> dict[str, Any]:
+        if self.executor.state.get("ownership") == "sales_snap_managed":
+            return {**self._context, **self.identity_coordinate}
+        return self._context
+
     def _channel_binding(self, installation_id: str) -> dict[str, str]:
-        return {"agent_id": self.agent_id, "installation_id": installation_id, "commercial_key_id": self.commercial_key_id, **self.identity_coordinate}
+        coordinate = portal_state_identity(self.executor.state, installation_id=installation_id) if self.executor.state.get("ownership") == "sales_snap_managed" else self.identity_coordinate
+        return {"agent_id": self.agent_id, "installation_id": installation_id, "commercial_key_id": self.commercial_key_id, **coordinate}
 
     def _pending(self) -> list[dict[str, Any]]:
         raw = self.executor.state.get(_PENDING_KEY)
@@ -1186,7 +1202,7 @@ class SelfHostedPortalWorker:
             if binding.get("agent_id") != self.agent_id or binding.get("installation_id") != installation or not binding.get("account_id"):
                 return False
             account = self.executor.state.get("account_id")
-            if account and account != binding.get("account_id"):
+            if self.executor.state.get("ownership") != "sales_snap_managed" and account and account != binding.get("account_id"):
                 return False
             if any(proof.get(key) != job.get(key) for key in ("job_id", "command_id")):
                 return False
@@ -1308,8 +1324,25 @@ class SelfHostedPortalWorker:
     def _remember_delivery(self, *, installation_id: str, cursor: str, cursor_next: str, job: Mapping[str, Any]) -> None:
         self.executor.state.put(_PENDING_DELIVERY_KEY, {"installation_id": installation_id, "cursor": cursor, "cursor_next": cursor_next, "job": dict(job)})
 
+    def _cursor_for(self, installation_id: str) -> str:
+        cursors = self.executor.state.get(_CURSORS_KEY)
+        if isinstance(cursors, Mapping) and installation_id in cursors:
+            return str(cursors[installation_id] or "")
+        # The old scalar cursor is safe only for the legacy single-installation
+        # lane. A managed host may have several Portal connections, so never
+        # carry that scalar into a new managed installation.
+        if self.executor.state.get("ownership") != "sales_snap_managed" and len(self.installation_ids) == 1:
+            return str(self.executor.state.get("commercial_portal_cursor") or "")
+        return ""
+
     def _finish_delivery(self, *, cursor_next: str) -> None:
-        self.executor.state.put("commercial_portal_cursor", cursor_next)
+        installation_id = str(self._active_installation_id)
+        cursors = self.executor.state.get(_CURSORS_KEY)
+        cursors = dict(cursors) if isinstance(cursors, Mapping) else {}
+        cursors[installation_id] = str(cursor_next)
+        self.executor.state.put(_CURSORS_KEY, cursors)
+        if self.executor.state.get("ownership") != "sales_snap_managed" and len(self.installation_ids) == 1:
+            self.executor.state.put("commercial_portal_cursor", cursor_next)
         self.executor.state.put(_PENDING_DELIVERY_KEY, None)
 
     def _finish_command(self, *, cursor_next: str) -> None:
@@ -1410,7 +1443,23 @@ class SelfHostedPortalWorker:
         sent = self.executor.state.get(_GENERIC_INVENTORY_KEY)
         sent = dict(sent) if isinstance(sent, Mapping) else {}
         prior = sent.get(str(installation_id))
+        if isinstance(prior, Mapping) and prior.get("request_id") and prior.get("observed_at"):
+            # Reuse exactly the acknowledged snapshot while its capabilities
+            # remain unchanged. Time/request metadata must not race queued jobs.
+            from mcd_agent.commercial_generic import capability_inventory_digest
+            acknowledged = dict(inventory)
+            acknowledged.update(request_id=prior["request_id"], observed_at=prior["observed_at"])
+            acknowledged.pop("inventory_sha256", None)
+            digest = capability_inventory_digest(acknowledged)
+            if digest == prior.get("inventory_sha256"):
+                acknowledged["inventory_sha256"] = digest
+                inventory = validate_capability_inventory(acknowledged)
         if isinstance(prior, Mapping) and prior.get("inventory_sha256") == inventory["inventory_sha256"]:
+            cached = self.executor.state.get("commercial_portal_generic_capabilities_v1")
+            cached = dict(cached) if isinstance(cached, Mapping) else {}
+            if not isinstance(cached.get(str(installation_id)), Mapping):
+                cached[str(installation_id)] = inventory
+                self.executor.state.put("commercial_portal_generic_capabilities_v1", cached)
             return True
         try:
             self._outbound("capability_inventory", lambda: self.client.send_capability_inventory(installation_id=installation_id, inventory=inventory))
@@ -1418,7 +1467,10 @@ class SelfHostedPortalWorker:
             return False
         sent[str(installation_id)] = {"inventory_sha256": inventory["inventory_sha256"], "request_id": inventory["request_id"], "observed_at": inventory["observed_at"]}
         self.executor.state.put(_GENERIC_INVENTORY_KEY, sent)
-        self.executor.state.put("commercial_portal_generic_capabilities_v1", {str(installation_id): inventory})
+        cached = self.executor.state.get("commercial_portal_generic_capabilities_v1")
+        cached = dict(cached) if isinstance(cached, Mapping) else {}
+        cached[str(installation_id)] = inventory
+        self.executor.state.put("commercial_portal_generic_capabilities_v1", cached)
         return True
 
     def _publish_inventory(self, installation_id: str) -> bool:
@@ -1637,6 +1689,15 @@ class SelfHostedPortalWorker:
             job = validate_generic_command_job(command, inventory=inventory)
         except Exception as exc:
             return self._terminalize_generic_failure(job, cursor_next=cursor_next, reason=str(exc)[:120])
+        if self.executor.state.get("ownership") == "sales_snap_managed":
+            try:
+                validate_managed_installation_tenant(
+                    job["installation"],
+                    installation_ids=self.executor.state.get("installation_ids") if isinstance(self.executor.state.get("installation_ids"), Mapping) else {},
+                    managed_instances=self.executor.state.get("managed_instances") if isinstance(self.executor.state.get("managed_instances"), Mapping) else {},
+                )
+            except Exception as exc:
+                return self._terminalize_generic_failure(job, cursor_next=cursor_next, reason=str(exc)[:120])
 
         job_id = str(job["job_id"])
         digest = hashlib.sha256(canonical_json(job)).hexdigest()
@@ -1793,12 +1854,12 @@ class SelfHostedPortalWorker:
             if self._backoff_active():
                 state = self._transport_state()
                 return {"status": "backoff", "retry_after": float(state.get("retry_after") or 0.0)}
-            cursor = str(self.executor.state.get("commercial_portal_cursor") or "")
             delivery = None
             active_installation_id = self.installation_ids[0]
             try:
                 for active_installation_id in self.installation_ids:
                     self._active_installation_id = active_installation_id
+                    cursor = self._cursor_for(active_installation_id)
                     if not self._ensure_adopted(active_installation_id) or not self._publish_inventory(active_installation_id):
                         return {"status": "backoff", "retry_after": float(self._transport_state().get("retry_after") or 0.0)}
                     if not self._publish_capabilities(active_installation_id):

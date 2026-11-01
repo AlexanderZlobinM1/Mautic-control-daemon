@@ -204,7 +204,22 @@ def canonical_standalone_settings(values: Mapping[str, Any]) -> dict[str, Any]:
     """Return the one canonical, secret-free settings value set used by MCD."""
     if not isinstance(values, Mapping):
         raise ValueError("commercial_standalone_settings_invalid")
-    return dict(values)
+    def wire_value(value: Any) -> Any:
+        # JSON has one number type; integral floats use the same wire value
+        # as Portal JSON.stringify. Never mutate the source configuration.
+        if isinstance(value, float):
+            import math
+            if not math.isfinite(value):
+                raise ValueError("commercial_standalone_settings_invalid_number")
+            if value.is_integer() and abs(value) < 1e21:
+                return int(value)
+        if isinstance(value, Mapping):
+            return {key: wire_value(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [wire_value(item) for item in value]
+        return value
+
+    return {key: wire_value(value) for key, value in values.items()}
 
 
 def standalone_settings_etag(values: Mapping[str, Any]) -> str:
@@ -252,8 +267,18 @@ def _host_fingerprint() -> str:
     return "sha256:" + hashlib.sha256(socket.gethostname().encode()).hexdigest()
 
 
-def portal_state_identity(state: Any) -> dict[str, str]:
+def portal_state_identity(state: Any, installation_id: str | None = None) -> dict[str, str]:
     if state.get("identity_kind") == "dns":
+        if installation_id is not None and state.get("ownership") == "sales_snap_managed":
+            installations = state.get("installation_ids")
+            matches = [uid for uid, value in installations.items() if str(value) == str(installation_id)] if isinstance(installations, Mapping) else []
+            if len(matches) != 1:
+                raise ValueError("commercial_managed_installation_identity_ambiguous")
+            records = state.get("managed_instances")
+            record = records.get(matches[0]) if isinstance(records, Mapping) else None
+            if not isinstance(record, Mapping) or record.get("instance_uid") != matches[0] or record.get("installation_id") != str(installation_id):
+                raise ValueError("commercial_managed_installation_identity_invalid")
+            return identity_coordinate({"identity_kind": "dns", "local_identity": record.get("dns_name")})
         return identity_coordinate({"identity_kind": "dns", "local_identity": state.get("local_identity")})
     return {"host_fingerprint": str(state.get("host_fingerprint") or _host_fingerprint())}
 
@@ -1084,7 +1109,10 @@ class CommercialState:
             except ValueError:
                 return False
             installations = self.get("installation_ids")
-            return bool(self.get("portal_agent_credential") and self.get("agent_id") and self.get("commercial_key_id") and isinstance(installations, dict) and installations.get(coordinate["local_identity"])) and not self.get("host_fingerprint")
+            bound = isinstance(installations, dict) and bool(installations)
+            if self.get("ownership") != "sales_snap_managed":
+                bound = bound and bool(installations.get(coordinate["local_identity"]))
+            return bool(self.get("portal_agent_credential") and self.get("agent_id") and self.get("commercial_key_id") and bound) and not self.get("host_fingerprint")
         return bool(self.get("portal_agent_credential")) and self.get("host_fingerprint") == _host_fingerprint()
 
     @property
@@ -1163,7 +1191,7 @@ class PortalClient:
         binding = {
             "agent_id": agent_id,
             "installation_id": str(installation_id),
-            **portal_state_identity(self.state),
+            **portal_state_identity(self.state, installation_id=str(installation_id)),
             "commercial_key_id": str(self.state.get("commercial_key_id") or ""),
         }
         transport = self.state.get("commercial_portal_transport_v1")
@@ -1296,7 +1324,7 @@ class PortalClient:
         return {
             "agent_id": str(self.state.get("agent_id") or ""),
             "installation_id": str(installation_id),
-            **portal_state_identity(self.state),
+            **portal_state_identity(self.state, installation_id=str(installation_id)),
             "commercial_key_id": str(self.state.get("commercial_key_id") or ""),
         }
 

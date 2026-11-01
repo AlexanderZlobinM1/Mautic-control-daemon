@@ -1516,15 +1516,15 @@ Subscription/entitlement expiry never changes this connection state; only the
 explicit operator `disconnect` does so. Expiry may affect feature admission,
 but it is not an implicit revoke or cancellation.
 
-The Portal registration identity is durable installation metadata. During
-inventory publication, the explicit registered `local_identity`,
-`display_name`, and Mautic version take precedence over a locally derived
-`instance_uid`, hostname, or cloned-host identity. The internal MCD
-`instance_uid` is retained as `source_instance_id` and is not rewritten.
-For a host with multiple Mautic instances, MCD does not guess which local row
-the registration refers to; it keeps native per-instance identities until an
-unambiguous binding is available. Restart, host rename, and template clone
-therefore cannot silently change the Portal installation identity.
+The Portal registration identity is durable installation metadata. The
+registered `local_identity` is the DNS routing coordinate and remains separate
+from the native MCD `instance_uid`; inventory rows never rename the native UID
+to DNS. MCD carries the native UID as `source_instance_id`, resolves commands
+through the exact installation-to-UID map, and keeps per-instance tenant
+metadata in the managed carrier. For a host with multiple Mautic instances,
+MCD does not guess a row from a hostname or first match. Restart, host rename,
+and template clone therefore cannot silently change the Portal installation,
+instance, or tenant binding.
 
 ### Managed-cloud versus self-hosted commercial boundary
 
@@ -1636,6 +1636,16 @@ and records an exponential, durable retry deadline. The next outbound cycle
 drains receipts first, then resumes the saved batch or polls with the last
 cursor; no scheduler or standalone work is blocked. Backoff is applied only
 to transport failures, not to local validation/applicability rejection.
+
+Poll cursors are durable per Portal installation, in
+`commercial_portal_cursors_v1`, and are never shared between managed
+installations on one physical MCD agent. The legacy scalar
+`commercial_portal_cursor` remains only for the single-installation Own lane.
+When a managed installation has no local cursor, MCD sends `cursor=null` and
+accepts that installation's server cursor; it does not import a stale scalar
+cursor from another connection. A saved delivery still retains its own
+installation binding and cursor, so restart/replay cannot cross-ack another
+tenant or installation.
 
 Inventory publication has its own durable revision ledger per installation.
 MCD canonicalizes the complete inventory and removes only transport-volatility
@@ -1763,6 +1773,19 @@ advertisement, binding, TTL, lease, durable started/terminal и replay gates.
 Установка Mautic из архива пока не публикуется как generic capability: для неё
 нужен отдельный artifact-bound typed contract; Portal не может прислать такой
 шаг под видом произвольной generic-команды.
+
+Managed generic jobs carry the tenant `account_id` inside the installation
+binding. MCD admits that value only when it exactly matches the
+`managed_instances[instance_uid].account_id` material imported from the
+server-issued carrier, the installation ID resolves to that same native UID,
+and the published capability inventory carries the same value. This check is
+performed before any generic handler or typed Mautic command runs. Own jobs
+remain backward-compatible with the existing host account binding. The
+server-side Portal flow owns provider account references and injects the
+tenant account into the job; the customer response never contains the
+provider credential. Evidence: `tests/test_managed_tenant_contract.py`,
+`tests/test_managed_portal_identity.py`, and the redacted live managed
+`mautic_version` receipt.
 
 Перед admission generic job MCD проверяет TTL также для сохранённого poll delivery.
 Просроченный job получает durable typed terminal receipt

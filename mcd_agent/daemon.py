@@ -276,6 +276,17 @@ def _commercial_registration_descriptor(
     just-staged identity cannot be replaced by a stale metadata projection.
     """
     target = str(installation_id or "").strip()
+    if state.get("ownership") == "sales_snap_managed":
+        matches = [uid for uid, bound in installation_ids.items() if str(bound) == target]
+        if len(matches) != 1:
+            raise ValueError("commercial_managed_installation_identity_ambiguous")
+        coordinate = portal_state_identity(state, installation_id=target)
+        record = state.get("managed_instances")
+        row = record.get(matches[0]) if isinstance(record, Mapping) else None
+        result = {"local_identity": coordinate["local_identity"], "source_instance_id": matches[0]}
+        if isinstance(row, Mapping) and row.get("account_id"):
+            result["account_id"] = str(row["account_id"])
+        return result
     identity = ""
     for candidate, bound in (installation_ids or {}).items():
         if str(bound or "").strip() == target:
@@ -529,7 +540,6 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
                     # installation case is unambiguous; retain native IDs in
                     # a multi-instance host rather than guessing a mapping.
                     if registration and len(instances) == 1:
-                        row_identity = registration.get("local_identity") or row_identity
                         row_display_name = registration.get("display_name") or row_display_name
                         row_mautic_version = observed_version or registration.get("mautic_version") or row_mautic_version
                     row = {
@@ -542,7 +552,7 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
                         "settings": settings(scoped.get(uid, {})),
                     }
                     if registration and len(instances) == 1:
-                        row["local_identity"] = row_identity
+                        row["local_identity"] = registration.get("local_identity") or row_identity
                         row["identity_source"] = "portal_registration"
                         row["source_instance_id"] = uid
                     rows.append(row)
@@ -554,7 +564,7 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
                     "binding": {
                         "agent_id": agent_id,
                         "installation_id": _installation_id,
-                        **portal_state_identity(state),
+                        **portal_state_identity(state, installation_id=_installation_id),
                         "commercial_key_id": commercial_key_id,
                     },
                     "snapshot_revision": str(host_revision),
@@ -581,7 +591,26 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
                 dns_name = str(registration.get("local_identity") or "").strip().lower()
                 if "." not in dns_name:
                     raise ValueError("commercial_generic_identity_unavailable")
-                return build_capability_inventory(installation_id=_installation_id, dns_name=dns_name)
+                from mcd_agent.commercial_capabilities import mautic_version_capability
+                from mcd_agent.commercial_generic import capability_inventory_digest
+                inventory = build_capability_inventory(installation_id=_installation_id, dns_name=dns_name)
+                if state.get("ownership") == "sales_snap_managed":
+                    account_id = str(registration.get("account_id") or "").strip()
+                    if not account_id:
+                        raise ValueError("commercial_managed_tenant_binding_missing")
+                    inventory["installation"]["account_id"] = account_id
+                inventory["capabilities"].append(mautic_version_capability())
+                inventory["capabilities"].sort(key=lambda item: item["capability_id"])
+                inventory.pop("inventory_sha256", None)
+                inventory["inventory_sha256"] = capability_inventory_digest(inventory)
+                return inventory
+
+            def execute_portal_core_command(job):
+                if (job.get("command") or {}).get("command_id") == "mautic_version":
+                    from mcd_agent.commercial_capabilities import execute_mautic_version
+                    local_cfg = load_config(config.config_file_path, allow_recover_from_mcc=False)
+                    return execute_mautic_version(job, config=local_cfg)
+                return execute_generic_primitive(job, inventory_rescan=rescan_inventory)
 
             def rescan_inventory() -> int:
                 local_cfg = load_config(config.config_file_path, allow_recover_from_mcc=False)
@@ -604,7 +633,7 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
                 inventory_provider=inventory_snapshot,
                 runtime_command_handler=handle_runtime_command,
                 capability_inventory_provider=capability_inventory,
-                generic_command_handler=lambda job: execute_generic_primitive(job, inventory_rescan=rescan_inventory),
+                generic_command_handler=execute_portal_core_command,
             )
         except Exception:
             disabled("commercial_worker_material_invalid")

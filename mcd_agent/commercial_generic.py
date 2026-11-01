@@ -56,13 +56,36 @@ def _sha(value: object, code: str) -> str:
     return result
 
 
-def _identity(value: object, code: str) -> dict[str, str]:
+def _identity(value: object, code: str) -> dict[str, Any]:
     item = _obj(value, code)
     installation_id = _identifier(item.get("installation_id"), code)
     dns_name = _text(item.get("dns_name"), code, 253).lower()
     if not re.fullmatch(r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}", dns_name):
         raise _error(code)
-    return {"installation_id": installation_id, "dns_name": dns_name}
+    result: dict[str, Any] = {"installation_id": installation_id, "dns_name": dns_name}
+    if "account_id" in item:
+        result["account_id"] = _identifier(item.get("account_id"), code)
+    return result
+
+
+def validate_managed_installation_tenant(
+    installation: Mapping[str, Any],
+    *,
+    installation_ids: Mapping[str, Any],
+    managed_instances: Mapping[str, Any],
+) -> str:
+    """Require the job tenant to match the admitted managed instance."""
+    installation_id = _identifier(installation.get("installation_id"), "portal_mcd_managed_tenant_binding_invalid")
+    matches = [str(uid) for uid, bound in installation_ids.items() if str(bound) == installation_id]
+    if len(matches) != 1:
+        raise _error("portal_mcd_managed_tenant_binding_invalid")
+    record = managed_instances.get(matches[0])
+    if not isinstance(record, Mapping):
+        raise _error("portal_mcd_managed_tenant_binding_invalid")
+    expected = _identifier(record.get("account_id"), "portal_mcd_managed_tenant_binding_invalid")
+    if installation.get("account_id") != expected:
+        raise _error("portal_mcd_managed_tenant_binding_invalid")
+    return expected
 
 
 def _secret_free(value: object) -> None:
@@ -162,6 +185,9 @@ def validate_generic_command_job(value: object, inventory: Mapping[str, Any] | N
         advertised = next((entry for entry in (match or {}).get("commands", []) if entry["command_id"] == result["command"]["command_id"] and entry["version"] == result["command"]["version"]), None)
         if advertised is None or advertised["mutates_state"] != result["command"]["mutates_state"]:
             raise _error("portal_mcd_generic_command_not_advertised")
+        advertised_installation = inventory.get("installation")
+        if isinstance(advertised_installation, Mapping) and advertised_installation.get("account_id") != result["installation"].get("account_id"):
+            raise _error("portal_mcd_managed_tenant_binding_invalid")
     return result
 
 

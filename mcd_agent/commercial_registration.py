@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sqlite3
 import sys
 from typing import Any, Mapping
@@ -228,21 +229,69 @@ def _import_dns_enrollment(state: CommercialState, source: Mapping[str, Any]) ->
     if not all(values.values()):
         raise _error("portal_registration_binding_incomplete")
     installations = _installation_ids(source)
-    if set(installations) != {coordinate["local_identity"]}:
+    managed = source.get("ownership") == "sales_snap_managed"
+    managed_instances = source.get("managed_instances")
+    if managed:
+        if not installations or not isinstance(managed_instances, Mapping) or set(managed_instances) != set(installations) or len(set(installations.values())) != len(installations):
+            raise _error("portal_registration_managed_binding_invalid")
+        try:
+            db_path = Path(state.path)
+            with sqlite3.connect(db_path.as_uri() + "?mode=ro", uri=True) as db:
+                registered = {uid: (root, primary, domains) for uid, root, primary, domains in db.execute("SELECT instance_uid, root, primary_domain, domains_json FROM instances")}
+        except (sqlite3.Error, ValueError):
+            raise _error("portal_registration_managed_inventory_required") from None
+        for uid, installation_id in installations.items():
+            item = managed_instances[uid]
+            if not isinstance(item, Mapping):
+                raise _error("portal_registration_managed_identity_invalid")
+            try:
+                dns = dns_identity(item.get("dns_name"))
+            except ValueError:
+                raise _error("portal_registration_managed_identity_invalid") from None
+            local = registered.get(uid)
+            try:
+                domains = json.loads(local[2]) if local and local[2] else []
+            except (ValueError, TypeError):
+                raise _error("portal_registration_managed_inventory_mismatch") from None
+            if not isinstance(domains, list) or not local or dns not in {str(value).strip().lower() for value in [local[1], *domains] if value}:
+                raise _error("portal_registration_managed_inventory_mismatch")
+            if not isinstance(item, Mapping) or item.get("instance_uid") != uid or item.get("installation_id") != installation_id or local[0] != item.get("root") or not Path(str(item.get("root") or "")).is_absolute() or item.get("mcc_host_name") != coordinate["local_identity"] or not _text(item.get("mcc_job_id")) or not _text(item.get("order_id")):
+                raise _error("portal_registration_managed_inventory_mismatch")
+            account_id = _text(item.get("account_id"))
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,191}", account_id):
+                raise _error("portal_registration_managed_tenant_invalid")
+    elif set(installations) != {coordinate["local_identity"]}:
         raise _error("portal_registration_installation_mismatch")
     old_agent = state.get("agent_id")
     if old_agent and state.get("identity_kind") != "dns":
         raise _error("portal_registration_legacy_binding_preserved")
+    retire_unenrolled_fingerprint = False
     if state.get("host_fingerprint"):
-        raise _error("portal_registration_dns_fingerprint_forbidden")
+        if managed and not old_agent and not state.get("portal_agent_credential") and not state.get("installation_ids"):
+            retire_unenrolled_fingerprint = True
+        else:
+            raise _error("portal_registration_dns_fingerprint_forbidden")
     updates = {**values, **coordinate, "portal_api_base": base, "installation_ids": installations}
-    if old_agent and any(state.get(key) != value for key, value in updates.items()):
+    if old_agent and managed != (state.get("ownership") == "sales_snap_managed"):
         raise _error("portal_registration_binding_mismatch")
+    immutable = {key: value for key, value in updates.items() if not (managed and key == "installation_ids")}
+    if old_agent and any(state.get(key) != value for key, value in immutable.items()):
+        raise _error("portal_registration_binding_mismatch")
+    if managed:
+        updates["ownership"] = "sales_snap_managed"
+        updates["managed_instances"] = dict(managed_instances)
+        if "connection_state" in source:
+            if source["connection_state"] != "active":
+                raise _error("portal_registration_managed_connection_state_invalid")
+            updates.update(commercial_portal_connection_state="active", commercial_activation_state="active", commercial_revoked=False, commercial_detached=False)
     updates["agent_version"] = __version__
     updates["portal_registration_material_schema"] = "mcd-portal-enrollment-material-v1"
     if state.get("commercial_portal_connection_state") in (None, ""):
         updates["commercial_portal_connection_state"] = "passive"
-    _atomic_put(state, updates)
+    if retire_unenrolled_fingerprint:
+        state.put_many(updates, delete_keys=("host_fingerprint",))
+    else:
+        _atomic_put(state, updates)
     return {"schema": "mcd-portal-registration-receipt-v1", "contract_version": "1.0", "status": "configured", "idempotent": bool(old_agent), **coordinate, "account_id": values["account_id"], "agent_id": values["agent_id"], "commercial_key_id": values["commercial_key_id"], "installation_ids": installations}
 
 
