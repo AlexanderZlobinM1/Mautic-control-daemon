@@ -1,5 +1,5 @@
 {
-  "status": "numerical legacy retirement verified R28 fresh/ordinary upgrade/offline; catalog identity retirement source/tests ready, installed proof and Portal full fresh pending; whole1.7 HOLD",
+  "status": "R28 numerical and R29 catalog identity/null installed gates PASS with independent final resets; resume metadata and Portal1.4.2 full fresh pending; whole1.7 HOLD",
   "scope": "future1.7 only; immutable approved1.6.39 unchanged",
   "manifest": "existing mcd-runtime-package-v1 optional universal_workload_resource_ref plus same ref.file in payload_sha256",
   "builder": {
@@ -143,7 +143,7 @@
     "public_channels_changed": false
   },
   "catalog_identity_retirement": {
-    "status": "source/regression complete; new installed proof pending",
+    "status": "installed ordinary39→R29/new catalog pair PASS; final reset independently PASS; remaining resume default metadata and Portal full fresh pending",
     "selection_authority": "verified catalog profiles/legacy_compatibility_only; core parses syntax only",
     "old_legacy_profile_readable": true,
     "new_legacy_public_choice_still_excluded": true,
@@ -151,5 +151,42 @@
     "literal_null": "retained as None on existing wire, distinct from absent/tombstone marker {}; neither resurrects initial package data",
     "tests": "18 authority tests plus null roundtrip and existing suite",
     "no_new_registry_runner_or_wire_protocol": true
+  },
+  "R29_native": {
+    "source_commit": "c732f3983793c685a4ff2e6204cfabc2f0430ba7",
+    "archive_sha256": "0023bcd82da600dd4633203480f08e30c6cae70fe08eac678676e3a263a7aeec",
+    "full_receipt_sha256": "34f556129087442969d8ee6ec5a867ec84fa559a3c67d7d4eca56f95fca8cf47",
+    "public_receipt_sha256": "c324eb2544cf21243787e29d1e829261deabe9ac52f8c79264fa0533661eebdf",
+    "status": "PASS",
+    "ordinary_approved39_real_updater_systemd_restart": true,
+    "canonical_profiles_checked": 14,
+    "frozen_MCC_handler_exports_consumer": "PASS",
+    "new_ref_new_name_single_sync": "PASS; actual installed consumer/SQLite via synthetic loopback QA frame, not an MCC-owner/live-handler acceptance",
+    "new_ref_sha256": "bd91a18d07227018ac4b5e052c2f88166d557baa5020ce8eb283030135030d40",
+    "new_data_sha256": "aff87de9c8940b8451ef40a30dc598c682aafc0eae0c3ff7b179a73cec4b1e55",
+    "legacy_read_public_exclusion_and_null_tombstone_custom_roundtrip": "PASS",
+    "reset": {
+      "independent_readonly": "PASS",
+      "receipt_sha256": "d4cfc8ea5cb119a07bb0b2042cf3cd712fa8f595b3ab0eebe3ffdf2211fbe381",
+      "boot_id": "5e64b4b7-9226-41cd-a7a9-8017d2ee3d88"
+    },
+    "public_channels_changed": false
+  },
+  "resume_policy_metadata": {
+    "status": "owner freeze delivered to Portal for additive DATA1.0.1; consumer/proofs pending",
+    "source_freeze_sha256": "de2c69a453a52fae56f9a9416057dba8effac954c581769105b3a2082d6304a3",
+    "field": "catalog.defaults.resume_profile",
+    "existing_value": "tiny",
+    "saved_nonempty_precedence": "preserve including legacy name",
+    "core_tiny_scheduler_and_legacy_guards": "KEEP"
+  },
+  "Portal_fresh": {
+    "producer_version": "1.4.2",
+    "archive_sha256": "f799383304cca68925f98ac3ce2aaedb9d774fb66ee11980407d469dad1b8c64",
+    "source_sha256": "04b72b770fb7c448ceaca6f40cc989748d94a6e78bb9c1099036a46cd0f42f31",
+    "status": "actual native pending; 1.4.1 source defect fixed by Portal before native; no old acceptance inferred",
+    "target": "R29/data210; frozen separately, no silent advance",
+    "fixture_scope": "limited fake Portal HTTPS registration peer; no production enrollment or live Portal handler claim",
+    "network_gate": "actual independent observer, zero MCC attempts/connections required"
   }
 }

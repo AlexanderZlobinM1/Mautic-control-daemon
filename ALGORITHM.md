@@ -2787,3 +2787,21 @@ Custom supplied values и status работают без matrix; advisory auto a
 105subtestsPASS, required release-regression PASS. Identifier/null checkpoint
 ещё требует installed proof; Portal1.4.1fullfresh/zeroMCC egress pending,
 universal whole scope не CLOSED, общий1.7 HOLD.
+
+R29 installed checkpoint теперь PASS (receipt34f55612): ordinaryApproved39→
+unlisted46actualupdate/PIDrestart/preseed/14profiles/frozenMCCconsumer плюс
+syntheticQAnewcatalog pair в одном actualHTTPsync/SQLite, newname отсутствует
+в oldcatalog. Atomicpair/reload, unknownprofile refusal, legacy read/exclusion,
+literalnull/tombstone/custom проверки пройдены. Полный canonical reset и
+independentread-only proof d4cfc8ea завершены, originalQAlease освобождён.
+Это не production MCC/Portal acceptance. Static profile numeric/name tables
+удалены; tiny-specific directMautic/queue/fullscan/drift core guards KEEP.
+Оставшийся mode_activate resume fallback literaltiny классифицирован как
+profilepolicy DATA: exact owner freeze de2c69a4 передан Portal для минимального
+additivecatalog.defaults.resume_profile в independentDATA1.0.1; saved nonempty
+(включая legacy) сохраняет приоритет. Этот пункт ещё pending.
+Portal1.4.1nativefresh не принят: ownerдоnativeвыявилnestedcachevarmkdirbug.
+Исправленный immutableproducer1.4.2 f7993833/source04b72b77 проверен поpins;
+actualfreshgatepending на explicitR29/data210 (не автоматическийnewDATA).
+FixturefakePortalpeer ограниченregistration/archive, zeroMCC проверяет
+отдельный networkobserver. Новых publicchannels/fleetactions нет;1.7HOLD.
