@@ -1,5 +1,5 @@
 {
-  "status": "MCD implementation and focused proof PASS; cross-owner integration pending",
+  "status": "SCOPED PRIVATE-INPUT COMPATIBILITY PASS: authenticated-owner fixture, exact pinned consumer and standalone; whole 1.7 pending",
   "contract": {
     "authenticated_response_field": "runtime_input",
     "shape": {
@@ -21,7 +21,7 @@
   "prototype_receipt_sha256": "74d99e86500fa73ee6191752f41ed6cd474d36493c661450143480632dbde43b",
   "prototype_scope": "mechanism only; initial prototype used 64KiB and ASCII JSON, final wire uses existing 256KiB/UTF8",
   "validation": {
-    "focused_passed": 104,
+    "focused_passed": 105,
     "full_passed_before_final_utf8_limit_alignment": 2042,
     "full_failed": 61,
     "full_failures_exact_baseline_ids": true,
@@ -38,10 +38,41 @@
     "full_wire": "final UTF8/256KiB contract"
   },
   "remaining": [
-    "Portal-owned standalone private-input success/failure and no-secret regression",
-    "MCC-owned authenticated response and capability proof",
-    "MCD real pinned external artifact integrated success/failure proof",
     "complete whole 1.7 acceptance before Publish MCD promotion"
   ],
-  "mcd_source_commit": "9bc29e4300"
+  "mcd_source_commit": "4b093206a8",
+  "integrated_proof": {
+    "status": "PASS",
+    "receipt": "/Users/azlobin/.codex/admin/host-diagnostics/mcd-wazuh-profile-native-20261101/private-input-integrated-chain.json",
+    "sha256": "11a345a87029fdb89d4fb96fbdd4603be8e62cbd495260bdb863f1edf171b007",
+    "artifact_verification_sha256": "ea45847d2e19b07d18e98d59c61d06a2a83ab2ecbf14162d2539907c30a30756",
+    "portal_source_sha256": "e2211ba39bf03ac1d1bf5f7e7e63bc6fdbc4a989f83dbc31e0b0105d8cb0a758",
+    "portal_skeleton_sha256": "bcc9d651060f3c1e29314109fc98afd55c2c9083009c6bf15648a5d0c21740a6",
+    "exact_artifact_sha256": "69273b52e6e08d1bafd0a7c366f86148437f6f0e59196183a333489feb0838b5",
+    "mcc_candidate": "796265b2ff657f719090189ae00dab977d10f0f7",
+    "mcc_inactive_fixture_receipt_sha256": "7aded20950d4d53078dd0c8104244e778e6e4aa68ae0e41ffd903c737c455904",
+    "mcc_active_fixture_receipt_sha256": "02b57f3f5627c7e9acb6a1f4d6c1eb61199c6cceeba3f88dcc0adf3ad9559ed9",
+    "inactive_rejected_without_start": true,
+    "active_fixture_only": true,
+    "success_safe_failure_and_leaky_failure": true,
+    "same_standalone_public_outcomes": true,
+    "old_function_bodies_exact": 25,
+    "portal_standalone_tests_independently_passed": 6,
+    "old_env_authd_normalization_0600_and_repeat_semantics": true,
+    "public_private_value_and_digest_absence": true,
+    "artifact_http_requests": 0,
+    "api_transport": "MCC owner authenticated factory response injected in consumer; not live HTTP",
+    "host_commands": "OS helper boundaries mocked; archived code unchanged",
+    "native_proof": false,
+    "production_activation": false
+  },
+  "mcc_synthetic_fixture_cleanup": {
+    "status": "ACK",
+    "removed_roots": [
+      "/Users/azlobin/.codex/admin/host-diagnostics/mcc-wazuh-external-20261101/framed-runtime-input-fixture-25cec9a0",
+      "/Users/azlobin/.codex/admin/host-diagnostics/mcc-wazuh-external-20261101/framed-runtime-input-active-fixture-796265b2"
+    ],
+    "retained": "non-secret receipts and exact public archive only in MCC framed-runtime-input-evidence",
+    "production_candidate_active": false
+  }
 }

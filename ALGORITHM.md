@@ -2424,3 +2424,27 @@ standalone success/failure proof still pending; see private-runtime-input QA JSO
 
 Final private-input UTF8/256KiB source snapshot:2044PASS, same exact61baseline
 failure IDs,57skip and105subtests; no new failures after final wire alignment.
+
+Private-input integrated synthetic acceptance passed (receipt11a345a8): the MCC
+owner's authenticated API factory produced the response for exact archive69273b52
+(sourcee2211ba3/skeletonbcc9d651, unchanged25Wazuh bodies). The inactive descriptor
+was rejected without starting; a separate MCC-owned isolated active fixture
+passed real MCD admission, verified offline cache, stdin process execution and
+terminal decoding. Success and controlled failure exactly match the same manual
+standalone invocation; leaky failure produces no private public payload. Old
+package-child environment receives the exact string; authd.pass normalization,
+0600 and original repeat semantics are preserved. All host-command helpers were
+mocked, authenticated response transport was fixture-injected, and artifact HTTP
+requests were zero: this is synthetic integration, not native enrollment or a
+live-HTTP claim. Public cache/task/argv/stdout/stderr/receipt contain neither
+value nor digest. Independent Portal6standalone cases pass; MCD105focused pass.
+The compatibility gap is scoped accepted; MCC synthetic private-fixture cleanup
+ACK and complete whole1.7 acceptance remain pending. No channel was published.
+
+MCC synthetic fixture cleanup ACK received: both inactive/active private fixture
+roots (including mode0600 responses and temporary public/custom trees) removed.
+Only non-secret factory receipts, integrated receipt11a345a8 and public exact
+archive69273b52 remain in its framed-runtime-input-evidence directory. Production
+Wazuh stays inactive. No further private fixture is used. Wazuh native no-secret
+and scoped synthetic private-input compatibility are complete; whole1.7 remains
+on hold for all other required recipes and their preservation acceptance.

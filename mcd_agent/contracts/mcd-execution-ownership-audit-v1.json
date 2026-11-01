@@ -317,8 +317,7 @@
       "native_evidence": "docs/qa/mcd-wazuh-system-profile-transfer-20261101.json",
       "ordinary_cli_receipt_sha256": "6416b23fadd1cc985a6189034d78cb58f2a40250be0d50d1d59735984c994e67",
       "remaining_release_gates": [
-        "complete 1.7 overall acceptance and owner activation",
-        "nonempty legacy registration password existing runtime-input gap remains explicit; no new encrypted refs/keys authorized"
+        "complete 1.7 overall acceptance and owner activation"
       ],
       "final_reset": {
         "status": "PASS",
@@ -326,6 +325,12 @@
         "sha256": "066149fa0feba8de077f5991b2d97baba16ea18ad793a47c965178a92e7ea8be",
         "ssh_port": 65011,
         "mutable_actor_after_reset": false
+      },
+      "private_input_compatibility": {
+        "status": "synthetic integrated and same standalone PASS",
+        "evidence": "docs/qa/mcd-wazuh-private-runtime-input-20261101.json",
+        "receipt_sha256": "11a345a87029fdb89d4fb96fbdd4603be8e62cbd495260bdb863f1edf171b007",
+        "native_proof": false
       }
     }
   }

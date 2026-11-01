@@ -1,5 +1,5 @@
 {
-  "status": "NO-SECRET-SCOPED-TRANSFER-CLOSED; full 1.7 acceptance and private-input compatibility remain pending",
+  "status": "SCOPED TRANSFER CLOSED: no-secret native and synthetic private-input compatibility; full 1.7 acceptance pending",
   "scope": "entire existing apply_wazuh_profile recipe, not isolated helper extraction",
   "source_commit": "62941290ecbc8c70b801b56b4a7db130be48ae23",
   "source_module_sha256": "604d81a8ca7e4c91dc7b32286d878242ae9e81752d607a7f6b70eeb3e5df6f5b",
@@ -72,7 +72,7 @@
   "secret_field_names_only": [
     "registration_password"
   ],
-  "profile_secret_policy": "No real secrets in public immutable archive/catalog; current live registration_password is empty. No new encrypted refs/keys/transport. Existing nonempty legacy runtime-input gap is recorded separately; original body branch remains.",
+  "profile_secret_policy": "No real secrets in public immutable archive/catalog; observed live registration_password was empty. Existing authenticated response and existing stdin now preserve nonempty legacy input; synthetic integrated/standalone proof is in the companion QA receipt. No new refs/keys/store/engine.",
   "owners": {
     "mcd": "adapter, current identity facts, baseline, native proof and cleanup",
     "portal": "exact recipe authoring and pure tests only",
@@ -250,8 +250,7 @@
     "native_evidence": "docs/qa/mcd-wazuh-system-profile-transfer-20261101.json",
     "ordinary_cli_receipt_sha256": "6416b23fadd1cc985a6189034d78cb58f2a40250be0d50d1d59735984c994e67",
     "remaining_release_gates": [
-      "complete 1.7 overall acceptance and owner activation",
-      "nonempty legacy registration password existing runtime-input gap remains explicit; no new encrypted refs/keys authorized"
+      "complete 1.7 overall acceptance and owner activation"
     ],
     "focused_tests_passed": 79,
     "full_regression": {
@@ -269,6 +268,12 @@
       "sha256": "066149fa0feba8de077f5991b2d97baba16ea18ad793a47c965178a92e7ea8be",
       "ssh_port": 65011,
       "mutable_actor_after_reset": false
+    },
+    "private_input_compatibility": {
+      "status": "synthetic integrated and same standalone PASS",
+      "evidence": "docs/qa/mcd-wazuh-private-runtime-input-20261101.json",
+      "receipt_sha256": "11a345a87029fdb89d4fb96fbdd4603be8e62cbd495260bdb863f1edf171b007",
+      "native_proof": false
     }
   },
   "optional_profile_field_audit": {
@@ -306,5 +311,6 @@
     "production_apis_healthy": true,
     "production_candidate_activated": false,
     "nonsecret_endpoint_receipt_sha256": "3419adf3a7862601c13fa4cd453982a98dfdb89d5ab337d1f005d22962c04c40"
-  }
+  },
+  "private_input_compatibility_evidence": "docs/qa/mcd-wazuh-private-runtime-input-20261101.json"
 }
