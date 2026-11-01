@@ -2355,3 +2355,17 @@ phase uses MCC-owned QA profile968bab… differing only by loopback manager and
 registration addresses plus start_service=false. Current core identity fbbc317e…
 was collected from the actual loaded test config; source604d… remains old code.
 This actor is running, not accepted yet; no production manager/enrollment.
+
+
+Wazuh old native loopback path passed with actual agent4.14.9-1: planned,
+firstapplied and repeatapplied, config/keys/repo files captured, service remains
+inactive as explicit QAstart_service=false, Mautic health verified. Receipt
+5a5fcb3e4d2b9fb2f7b230c25ce7b8f0092daea7bb115c6fe2fa2699e02aa630.
+After full reset/newboot, current core identity was reproven from the same
+loaded operator config; exactQAarchiveaf44…/8869B passed standalone execution
+without MCD generator imports. Planned/first/repeat dictionaries, file hashes
+and state exactly equal old native; receipt
+306736e791af79f7914f93510ff9ca04c1bb1c4035db0d4877f76a9b50cff4c9.
+Neither synthetic9ad nor production-target806d artifact was executed. A new
+full reset and normal unlisted R14 install are requested for ordinary CLI QA.
+The16recipe-only bodies remain until that acceptance;9inventory helpers stay.

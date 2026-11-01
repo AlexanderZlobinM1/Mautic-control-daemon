@@ -1,5 +1,5 @@
 {
-  "status": "CONSUMER-SOURCE-PASS; no-secret authoring frozen; enabled native parity pending",
+  "status": "OLD-AND-DIRECT-NATIVE-LOOPBACK-PASS; ordinary installed CLI and source cleanup pending",
   "scope": "entire existing apply_wazuh_profile recipe, not isolated helper extraction",
   "source_commit": "62941290ecbc8c70b801b56b4a7db130be48ae23",
   "source_module_sha256": "604d81a8ca7e4c91dc7b32286d878242ae9e81752d607a7f6b70eeb3e5df6f5b",
@@ -158,7 +158,46 @@
     "secret_fields_absent": true,
     "fresh_identity_receipt_sha256": "5f60c056337bb0a1de0e7e4b8a736cf4dddcfaff9a1d652270d7d8b3d72ddb78",
     "actual_context_sha256": "fbbc317e73e34be28710df0fc9f88eacc2791263a7e860278a85006bd7b4a704",
-    "old_native_phase": "RUNNING, not acceptance yet",
+    "old_native_phase": "PASS",
     "production_enrollment": false
+  },
+  "old_native_loopback": {
+    "status": "PASS",
+    "receipt_sha256": "5a5fcb3e4d2b9fb2f7b230c25ce7b8f0092daea7bb115c6fe2fa2699e02aa630",
+    "receipt": "/Users/azlobin/.codex/admin/host-diagnostics/mcd-wazuh-profile-native-20261101/old-native-loopback-positive.json",
+    "agent_version": "4.14.9-1",
+    "first_status": "applied",
+    "repeat_status": "applied",
+    "service_enabled": false,
+    "service_active": false,
+    "health": "PASS"
+  },
+  "external_direct_loopback": {
+    "status": "PASS",
+    "receipt_sha256": "306736e791af79f7914f93510ff9ca04c1bb1c4035db0d4877f76a9b50cff4c9",
+    "receipt": "/Users/azlobin/.codex/admin/host-diagnostics/mcd-wazuh-profile-native-20261101/external-direct-loopback-positive.json",
+    "artifact_sha256": "af44f59e0fc676d40ed44bf52461ad245272a4263e09b17f1f93dfd65bb77bc5",
+    "artifact_size_bytes": 8869,
+    "mcc_receipt_sha256": "ef0fc1f70ff44567dbd5b77b5961e20381407bca3de3061f460662044a9f36f1",
+    "fresh_actual_identity_proof_sha256": "10f1706fd0f20c1f3de696340577a8de1e561c11b5725c1189be6cae86e04e02",
+    "guest_boot_changed_after_old_reset": true,
+    "all_selected_member_pins_compile_and25body_parity": "PASS",
+    "planned_first_repeat_files_state_equal_old": true,
+    "actual_old_results_accepted_by_skeleton_and_mcd_validator": true,
+    "mcd_generator_imports": false,
+    "production_enrollment": false,
+    "health": "PASS"
+  },
+  "r14_candidate": {
+    "scope": "UNLISTED feature-source runtime-only test fixture; NOT canonical release or 1.7.0 acceptance",
+    "wheel": "/tmp/mcd-unlisted-core-20261101-r14/mcd_agent-1.6.38-py3-none-any.whl",
+    "wheel_sha256": "16c0481d32ece1c2df2fdbeb065bebd3fa2489d195da26f10c1c5ca36d02f3bf",
+    "wheel_size": 1029080,
+    "archive": "/tmp/mcd-unlisted-core-20261101-r14/mcd-runtime-only-unlisted-r14.tar.gz",
+    "archive_sha256": "241f626b5e2fc42f8853f389a34ac36432e0ee26c3b5dd740ccca11a0fdcc901",
+    "manifest_sha256": "8478aeae2dbf4845db00cd1022279f6180dbffd7a96f22415df539f823f7924e",
+    "canonical_release": false,
+    "channel_publication": false,
+    "source_commit": "d3537e2167a7d84ede2f639819d1ce79be0c000f"
   }
 }
