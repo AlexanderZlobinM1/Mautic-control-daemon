@@ -1,0 +1,54 @@
+{
+  "schema": "mcd-maintenance-record-evidence-v1",
+  "scope": "narrow prerequisite maintenance 1.6.39; global 1.7 externalization hold unchanged",
+  "base_commit": "3d7869dc169ccc7cfa3271c69b25e277774693ae",
+  "base_public_wheel_sha256": "9ef568505bffa89cc944a0baee359c4756611d78d6e512651f825f56a2aaf48a",
+  "retains_all_previous_owned_package_paths": true,
+  "production_behavior_delta": [
+    "preserve ownership RECORD until pip uninstall",
+    "remove stale extra MCD metadata after successful pip install",
+    "same change in transported runtime bootstrap",
+    "require detached runtime manifest and wheel; reject project checkout installation",
+    "ordinary successor activation uses runtime cache and installed version identity",
+    "verify legacy runtime ownership before mutation; preserve foreign/unverified data",
+    "retire verified legacy cache only after successor verification; restore previous verified package on failure"
+  ],
+  "excluded": [
+    "nginx externalization/default writer changes",
+    "universal profile consumer",
+    "other 1.7 changes"
+  ],
+  "tests": {
+    "focused": 33,
+    "real_pip_lifecycle": 6,
+    "final_focused": 26,
+    "full_passed": 1912,
+    "full_failed": 61,
+    "full_failed_ids_exact_baseline": true,
+    "full_skipped": 57,
+    "subtests_passed": 105,
+    "release_regression": "PASS",
+    "expanded_focused": 45,
+    "parallel_runtime_rollback": 4,
+    "expanded_full": {
+      "passed": 1922,
+      "failed": 61,
+      "failed_ids_exact_baseline": true,
+      "skipped": 57,
+      "subtests_passed": 105
+    }
+  },
+  "proof": {
+    "local_installed_public38_package_phase": "PASS",
+    "native_package_phase": {
+      "status": "PASS",
+      "receipt_sha256": "b9675e8771ed0d4c93c452c770404441bf11d696c35eeaea52ec44f8aa71a5ab",
+      "limitation": "earlier RECORD-only fixture; not expanded maintenance channel proof"
+    },
+    "full_https_channel_restart_rollback": "pending"
+  },
+  "channels_mutated": false,
+  "bridge_source_sha256": "15da1283a10e64ad64a22c988b4bab548302a106895b39e12c187d7c702ff87a",
+  "historical_first_hop": "immutable 1.6.38 ordinary updater transiently activates ready artifact in legacy src cache; maintenance successor never uses source imports/install/version fallback",
+  "base_package_paths_removed": []
+}

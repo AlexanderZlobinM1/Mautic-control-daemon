@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -407,7 +409,7 @@ class SelfUpdateVersionReportingTests(unittest.TestCase):
             cfg.mcd_update_cleanup_enabled = True
             cfg.mcd_update_cleanup_interval_sec = 86400
             install_dir = Path(cfg.mcd_install_dir)
-            (install_dir / "src").mkdir(parents=True)
+            (install_dir / "runtime").mkdir(parents=True)
             state_path = Path(tmp) / "mcd-self-update.json"
             state_path.write_text(
                 json.dumps(
@@ -494,7 +496,7 @@ class SelfUpdateVersionReportingTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             cfg = _cfg(tmp)
             cfg.mcd_install_dir = str(Path(tmp) / "mcd")
-            src = Path(cfg.mcd_install_dir) / "src"
+            src = Path(cfg.mcd_install_dir) / "runtime"
             src.mkdir(parents=True)
             old_installed = self_update.installed_agent_version
             old_pkg_sync = self_update._agent_package_sync_needed
@@ -533,77 +535,20 @@ class SelfUpdateVersionReportingTests(unittest.TestCase):
         self.assertEqual(restarts, [True])
         self.assertEqual(releases[0]["result_status"], "success")
 
-    def test_package_sync_clears_editable_source_shadow_and_isolates_venv_probe(self) -> None:
+    def test_package_sync_rejects_source_checkout_without_executing_pip(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
-            install_dir = root / "mcd"
-            source_dir = install_dir / "src"
-            venv_python = install_dir / "venv" / "bin" / "python"
-            site_dir = install_dir / "venv" / "lib" / "python3.12" / "site-packages"
-            source_dir.mkdir(parents=True)
-            (source_dir / "mcd_agent").mkdir()
-            (source_dir / "pyproject.toml").write_text(
-                "[project]\nname='mcd-agent'\nversion='1.5.78'\n",
-                encoding="utf-8",
-            )
-            (source_dir / "mcd_agent" / "__init__.py").write_text(
-                '__version__ = "1.5.78"\n',
-                encoding="utf-8",
-            )
-            venv_python.parent.mkdir(parents=True)
-            venv_python.touch()
-            site_dir.mkdir(parents=True)
+            (root / "pyproject.toml").write_text("[project]\nname='mcd-agent'\n")
+            with patch.object(self_update.subprocess, "run") as run:
+                with self.assertRaisesRegex(RuntimeError, "source checkout installation is forbidden"):
+                    self_update._install_agent_package_for_source(root / "install", root)
+            run.assert_not_called()
 
-            (site_dir / "__editable__.mcd_agent-1.5.77.pth").write_text(
-                "import __editable___mcd_agent_1_5_77_finder; __editable___mcd_agent_1_5_77_finder.install()\n",
-                encoding="utf-8",
-            )
-            (site_dir / "__editable___mcd_agent_1_5_77_finder.py").write_text(
-                "# stale finder\n",
-                encoding="utf-8",
-            )
-            (site_dir / "mcd_agent.egg-link").write_text(str(source_dir) + "\n", encoding="utf-8")
-            (site_dir / "easy-install.pth").write_text(
-                f"{source_dir}\n/other/package\n",
-                encoding="utf-8",
-            )
-
-            calls: list[tuple[list[str], dict[str, object]]] = []
-
-            def run(cmd: list[str], **kwargs: object) -> SimpleNamespace:
-                calls.append((cmd, kwargs))
-                code = cmd[-1] if "-c" in cmd else ""
-                if "site.getsitepackages" in code:
-                    return SimpleNamespace(returncode=0, stdout=f"{site_dir}\n", stderr="")
-                if "import importlib.metadata" in code:
-                    return SimpleNamespace(
-                        returncode=0,
-                        stdout=f"1.5.78\n1.5.78\n{site_dir / 'mcd_agent' / '__init__.py'}\n",
-                        stderr="",
-                    )
-                return SimpleNamespace(returncode=0, stdout="", stderr="")
-
-            with patch.dict(
-                self_update.os.environ,
-                {"PYTHONPATH": str(source_dir), "PYTHONHOME": str(root / "wrong-python")},
-                clear=False,
-            ), patch.object(self_update, "_ensure_venv_pip"), patch.object(
-                self_update.subprocess, "run", side_effect=run
-            ):
-                self_update._install_agent_package_for_source(install_dir, source_dir)
-
-            self.assertFalse((site_dir / "__editable__.mcd_agent-1.5.77.pth").exists())
-            self.assertFalse((site_dir / "__editable___mcd_agent_1_5_77_finder.py").exists())
-            self.assertFalse((site_dir / "mcd_agent.egg-link").exists())
-            self.assertEqual(
-                (site_dir / "easy-install.pth").read_text(encoding="utf-8"),
-                "/other/package\n",
-            )
-            self.assertTrue((site_dir / "mcd_agent" / "__init__.py").exists())
-            for _cmd, kwargs in calls:
-                env = kwargs["env"]
-                self.assertNotIn("PYTHONPATH", env)
-                self.assertNotIn("PYTHONHOME", env)
+    def test_venv_probe_environment_excludes_source_overrides(self) -> None:
+        with patch.dict(os.environ, {"PYTHONPATH": "/old/project", "PYTHONHOME": "/old/home"}):
+            env = self_update._isolated_venv_env()
+        self.assertNotIn("PYTHONPATH", env)
+        self.assertNotIn("PYTHONHOME", env)
 
     def test_apply_update_rolls_back_and_resynchronizes_package_after_path_mismatch(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -613,7 +558,7 @@ class SelfUpdateVersionReportingTests(unittest.TestCase):
             cfg.config_file_path = ""
             cfg.mcd_update_cleanup_enabled = False
             install_dir = Path(cfg.mcd_install_dir)
-            src_dir = install_dir / "src"
+            src_dir = install_dir / "runtime"
             (src_dir / "mcd_agent").mkdir(parents=True)
             (src_dir / "old-marker").write_text("old\n", encoding="utf-8")
             archive = root / "mcd-agent-1.5.78.tar.gz"

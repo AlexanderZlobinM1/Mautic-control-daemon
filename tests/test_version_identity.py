@@ -31,7 +31,7 @@ class VersionIdentityTests(unittest.TestCase):
             (pkg / "__init__.py").write_text('__version__ = "0.9.37"\n', encoding="utf-8")
 
             self.assertEqual(source_version(root), "0.9.37")
-            self.assertEqual(installed_agent_version(root), "0.9.37")
+            self.assertEqual(installed_agent_version(root), __version__)
 
     def test_payload_keeps_running_source_and_package_versions_separate(self) -> None:
         with (
@@ -48,7 +48,7 @@ class VersionIdentityTests(unittest.TestCase):
 
         self.assertEqual(payload["agent_version"], "0.9.75")
         self.assertEqual(payload["agent_running_version"], "0.9.75")
-        self.assertEqual(payload["agent_installed_version"], "0.9.37")
+        self.assertEqual(payload["agent_installed_version"], "0.9.75")
         self.assertEqual(payload["agent_source_version"], "0.9.37")
         self.assertEqual(payload["agent_package_version"], "0.9.39")
         self.assertTrue(payload["agent_package_mismatch"])
@@ -57,3 +57,24 @@ class VersionIdentityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_default_runtime_identity_never_reads_parallel_source(monkeypatch):
+    import mcd_agent.version_identity as identity
+    def forbidden(*args, **kwargs):
+        raise AssertionError("runtime identity must not read a project tree")
+    monkeypatch.setattr(Path, "read_text", forbidden)
+    assert identity.source_version() is None
+    assert identity.installed_agent_version() == identity.__version__
+    assert identity.agent_version_payload()["agent_source_version"] == ""
+
+
+def test_runtime_flags_detect_stale_package_metadata_without_source(monkeypatch):
+    import mcd_agent.version_identity as identity
+    monkeypatch.setattr(identity, '__version__', '1.7.0')
+    monkeypatch.setattr(identity, 'package_agent_version', lambda: '1.6.38')
+    payload = identity.agent_version_payload()
+    assert payload['agent_source_version'] == ''
+    assert payload['agent_installed_version'] == '1.7.0'
+    assert payload['agent_package_mismatch'] is True
+    assert payload['agent_version_mismatch'] is True
