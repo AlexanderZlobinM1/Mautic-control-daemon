@@ -18,7 +18,6 @@ from mcd_agent.mautic_composer_move import (
     _rewrite_composer_move_cron_wrapper,
     _rewrite_composer_move_crontab,
     _short,
-    _write_switched_vhost,
 )
 
 
@@ -216,112 +215,7 @@ class ComposerMoveHelpersTest(unittest.TestCase):
                 self.assertTrue(path.is_dir())
                 self.assertTrue(path.stat().st_mode & 0o200)
 
-    def test_switched_vhost_preserves_public_app_assets(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            base = Path(td)
-            source = base / "zip"
-            target = base / "composer"
-            nginx_root = target / "docroot"
-            site = base / "site.conf"
-            source.mkdir()
-            nginx_root.mkdir(parents=True)
-            site.write_text(
-                """server {
-    listen 443 ssl http2;
-    server_name example.com;
-    root SOURCE_ROOT;
-    fastcgi_pass unix:/var/run/php/php8.2-fpm.sock;
 
-    location ~ /app/ {
-        deny all;
-    }
-}
-""".replace("SOURCE_ROOT", str(source)),
-                encoding="utf-8",
-            )
-            plan = ComposerMovePlan(
-                source_root=source,
-                target_root=target,
-                nginx_root=nginx_root,
-                domain="example.com",
-                image_ref="composer6-skeleton",
-                php_version="8.3",
-                site_available=site,
-                site_enabled=None,
-            )
-
-            old_http2 = mautic_composer_move._nginx_supports_http2_directive
-            try:
-                mautic_composer_move._nginx_supports_http2_directive = lambda: True
-                _write_switched_vhost(plan)
-            finally:
-                mautic_composer_move._nginx_supports_http2_directive = old_http2
-
-            text = site.read_text(encoding="utf-8")
-            self.assertIn(f"root {nginx_root};", text)
-            self.assertIn("fastcgi_pass unix:/var/run/php/php8.3-fpm.sock;", text)
-            self.assertNotIn("php8.2-fpm.sock", text)
-            self.assertIn("^/app/bundles/.*/Assets/", text)
-            self.assertIn("^/app/assets/", text)
-            self.assertLess(text.index("^/app/assets/"), text.index("location ~ /app/"))
-            self.assertIn("http2 on;", text)
-
-    def test_switched_vhost_converts_regular_enabled_file_to_available_symlink(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            base = Path(td)
-            sites_available = base / "sites-available"
-            sites_enabled = base / "sites-enabled"
-            source = base / "zip"
-            target = base / "composer"
-            nginx_root = target / "docroot"
-            sites_available.mkdir()
-            sites_enabled.mkdir()
-            source.mkdir()
-            nginx_root.mkdir(parents=True)
-            enabled_site = sites_enabled / "default.sales-snap.com.conf"
-            available_site = sites_available / enabled_site.name
-            enabled_site.write_text(
-                """server {
-    listen 443 ssl;
-    server_name example.com;
-    root SOURCE_ROOT;
-    fastcgi_pass unix:/var/run/php/php8.2-fpm.sock;
-}
-""".replace("SOURCE_ROOT", str(source)),
-                encoding="utf-8",
-            )
-            available_site.write_text("server { root /old/available; }\n", encoding="utf-8")
-            plan = ComposerMovePlan(
-                source_root=source,
-                target_root=target,
-                nginx_root=nginx_root,
-                domain="example.com",
-                image_ref="composer6-skeleton",
-                php_version="8.3",
-                site_available=enabled_site,
-                site_enabled=enabled_site,
-            )
-
-            old_available = mautic_composer_move.NGINX_SITES_AVAILABLE
-            old_enabled = mautic_composer_move.NGINX_SITES_ENABLED
-            try:
-                mautic_composer_move.NGINX_SITES_AVAILABLE = sites_available
-                mautic_composer_move.NGINX_SITES_ENABLED = sites_enabled
-                result = _write_switched_vhost(plan)
-            finally:
-                mautic_composer_move.NGINX_SITES_AVAILABLE = old_available
-                mautic_composer_move.NGINX_SITES_ENABLED = old_enabled
-
-            self.assertTrue(enabled_site.is_symlink())
-            self.assertEqual(enabled_site.resolve(), available_site.resolve())
-            self.assertFalse(list(sites_enabled.glob("zip-backup-*")))
-            self.assertTrue(list(sites_available.glob("zip-backup-*-default.sales-snap.com.conf")))
-            self.assertTrue(list(sites_available.glob("pre-composer-*-default.sales-snap.com.conf")))
-            text = available_site.read_text(encoding="utf-8")
-            self.assertIn(f"root {nginx_root};", text)
-            self.assertIn("fastcgi_pass unix:/var/run/php/php8.3-fpm.sock;", text)
-            self.assertEqual(result["active"], str(available_site))
-            self.assertTrue(result["backup"].startswith(str(sites_available)))
 
     def test_composer_move_retired_marker_hides_source_root(self) -> None:
         with tempfile.TemporaryDirectory() as td:

@@ -7,7 +7,6 @@ import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
-from importlib import resources
 
 from mcd_agent.models import DBConfig, MauticInstall
 import mcd_agent.instance_migrate as instance_migrate
@@ -257,54 +256,6 @@ class InstanceMigrateProbeTests(unittest.TestCase):
 
         self.assertEqual(paths, [live, archive, renewal])
 
-    def test_write_nginx_vhost_uses_current_san_matched_certificate(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            app_root = root / "app" / "public_html"
-            (app_root / "docroot").mkdir(parents=True)
-            (app_root / "docroot" / "index.php").write_text("<?php\n", encoding="utf-8")
-            cert_live = root / "letsencrypt" / "live" / "shared-certificate"
-            cert_live.mkdir(parents=True)
-            (cert_live / "fullchain.pem").write_text("cert", encoding="utf-8")
-            (cert_live / "privkey.pem").write_text("key", encoding="utf-8")
-            php_socket = root / "php8.3-fpm.sock"
-            php_socket.touch()
-            available = root / "sites-available"
-            enabled = root / "sites-enabled"
-            available.mkdir()
-            enabled.mkdir()
-
-            old_available = instance_migrate.NGINX_SITES_AVAILABLE
-            old_enabled = instance_migrate.NGINX_SITES_ENABLED
-            try:
-                instance_migrate.NGINX_SITES_AVAILABLE = available
-                instance_migrate.NGINX_SITES_ENABLED = enabled
-                with (
-                    patch.object(instance_migrate, "LETSENCRYPT_ROOT", root / "letsencrypt"),
-                    patch.object(instance_migrate, "_certificate_dns_names", return_value={"winwin.sales-snap.com"}),
-                    patch.object(instance_migrate, "_certificate_is_current", return_value=True),
-                    patch.object(instance_migrate, "_ensure_nginx_sites_layout"),
-                    patch.object(instance_migrate, "_detect_php_version", return_value="8.3"),
-                    patch.object(instance_migrate, "_php_fpm_socket", return_value=php_socket),
-                    patch.object(instance_migrate, "_run_checked", return_value=""),
-                    patch.object(instance_migrate, "_nginx_supports_http2_directive", return_value=False),
-                ):
-                    site = instance_migrate._write_nginx_vhost(
-                        root=app_root,
-                        domains=["winwin.sales-snap.com"],
-                        php_version="8.3",
-                    )
-            finally:
-                instance_migrate.NGINX_SITES_AVAILABLE = old_available
-                instance_migrate.NGINX_SITES_ENABLED = old_enabled
-
-            content = Path(site).read_text(encoding="utf-8")
-
-        self.assertIn("listen 443 ssl", content)
-        self.assertIn(f"ssl_certificate {cert_live / 'fullchain.pem'};", content)
-        self.assertIn(f"ssl_certificate_key {cert_live / 'privkey.pem'};", content)
-        self.assertIn("# BEGIN MCD managed form embed", content)
-        self.assertIn("frame-ancestors 'self'", content)
 
     def test_target_finalize_blocks_dns_cutover_without_current_certificate(self) -> None:
         db = DBConfig(
@@ -447,31 +398,7 @@ class InstanceMigrateProbeTests(unittest.TestCase):
         self.assertLess(events.index("db_import:single"), events.index("patch_db"))
         self.assertLess(events.index("patch_db"), events.index("maintenance_off"))
 
-    def test_nginx_sites_layout_is_created_for_target_finalize(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            available = root / "sites-available"
-            enabled = root / "sites-enabled"
 
-            old_available = instance_migrate.NGINX_SITES_AVAILABLE
-            old_enabled = instance_migrate.NGINX_SITES_ENABLED
-            try:
-                instance_migrate.NGINX_SITES_AVAILABLE = available
-                instance_migrate.NGINX_SITES_ENABLED = enabled
-                with patch.object(instance_migrate, "ensure_nginx_baseline", return_value={"status": "ok"}):
-                    instance_migrate._ensure_nginx_sites_layout()
-
-                self.assertTrue(available.is_dir())
-                self.assertTrue(enabled.is_dir())
-            finally:
-                instance_migrate.NGINX_SITES_AVAILABLE = old_available
-                instance_migrate.NGINX_SITES_ENABLED = old_enabled
-
-    def test_generated_target_nginx_vhost_is_ipv4_only(self) -> None:
-        template = resources.files("mcd_agent.templates.nginx").joinpath("instance_migrate_vhost.conf").read_text(encoding="utf-8")
-
-        self.assertIn("{{LISTEN_DIRECTIVES}}", template)
-        self.assertNotIn("listen [::]", template)
 
     def test_source_db_stream_prefers_mariadb_dump_without_events(self) -> None:
         class FakeInventory:

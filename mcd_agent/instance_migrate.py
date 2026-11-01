@@ -23,16 +23,11 @@ from mcd_agent.install_readiness import collect_mautic_install_readiness
 from mcd_agent.inventory import InstanceInventory, ensure_seeded
 from mcd_agent.localphp import parse_local_php
 from mcd_agent.mautic_image_install import _mysql_admin_base, _mysql_exec, _quote_ident, _quote_sql
-from mcd_agent.form_embed import render_form_embed_location
 from mcd_agent.models import DBConfig
 from mcd_agent.models import MauticInstall
-from mcd_agent.nginx_baseline import (
-    _nginx_supports_http2_directive,
-    ensure_mautic_public_app_asset_locations,
-    normalize_legacy_http2_listen,
-)
-from mcd_agent.nginx_external import ensure_nginx_baseline, write_nginx_vhost as _external_write_nginx_vhost
-from mcd_agent.nginx_templates import render_nginx_template
+from mcd_agent.nginx_external import write_nginx_vhost as _external_write_nginx_vhost
+
+_write_nginx_vhost = _external_write_nginx_vhost
 from mcd_agent.runtime_adapters import run_runtime_adapter, runtime_adapter_path
 from mcd_agent.runtime_descriptor import descriptor_for_root
 from mcd_agent.runtime_matrix import build_runtime_profile
@@ -46,8 +41,6 @@ _MYSQL_DATE_FORMAT_GENERATED_RE = re.compile(
     r"GENERATED\s+ALWAYS\s+AS\s*\(\s*date_format\s*\(\s*`(?P<column>[^`]+)`\s*,\s*(?:_[A-Za-z0-9]+)?'(?P<fmt>[^']+)'\s*\)\s*\)",
     re.IGNORECASE,
 )
-NGINX_SITES_AVAILABLE = Path("/etc/nginx/sites-available")
-NGINX_SITES_ENABLED = Path("/etc/nginx/sites-enabled")
 LETSENCRYPT_ROOT = Path("/etc/letsencrypt")
 
 
@@ -901,19 +894,8 @@ def _dump_source_into_target(
         return {"label": label, "dump_bytes": int(bytes_written)}
 
 
-def _detect_php_version(raw: str | None = None) -> str:
-    if raw and re.fullmatch(r"\d+\.\d+", str(raw).strip()):
-        return str(raw).strip()
-    sockets = sorted(Path("/run/php").glob("php*-fpm.sock")) if Path("/run/php").exists() else []
-    for sock in sockets:
-        m = re.search(r"php(\d+\.\d+)-fpm\.sock", sock.name)
-        if m:
-            return m.group(1)
-    return ""
 
 
-def _php_fpm_socket(php_version: str) -> Path:
-    return Path(f"/run/php/php{php_version}-fpm.sock")
 
 
 def _nginx_web_root(root: Path) -> Path:
@@ -924,62 +906,8 @@ def _nginx_web_root(root: Path) -> Path:
     return root
 
 
-def _ensure_nginx_sites_layout(*, cfg: Any | None = None) -> None:
-    baseline = ensure_nginx_baseline(reload_service=False, **({"cfg": cfg} if cfg is not None else {}))
-    if str(baseline.get("status") or "").strip().lower() == "error":
-        raise RuntimeError("nginx baseline failed: " + str(baseline.get("error") or baseline))
-    for path in (NGINX_SITES_AVAILABLE, NGINX_SITES_ENABLED):
-        if path.exists() and not path.is_dir():
-            raise RuntimeError(f"nginx sites path is not a directory: {path}")
-        path.mkdir(parents=True, exist_ok=True)
 
 
-def _write_nginx_vhost(*, root: Path, domains: list[str], php_version: str, cfg: Any | None = None) -> str:
-    if not domains:
-        raise RuntimeError("at least one domain is required for nginx vhost")
-    _ensure_nginx_sites_layout(cfg=cfg)
-    php = _detect_php_version(php_version)
-    if not php:
-        raise RuntimeError("target PHP-FPM version is not available")
-    sock = _php_fpm_socket(php)
-    if not sock.exists():
-        raise RuntimeError(f"target PHP-FPM socket is missing: {sock}")
-    primary = domains[0]
-    web_root = _nginx_web_root(root)
-    site = NGINX_SITES_AVAILABLE / f"{primary}.conf"
-    enabled = NGINX_SITES_ENABLED / f"{primary}.conf"
-    server_names = " ".join(domains)
-    cert_live = _matching_live_certificate(domains, require_current=True)
-    ssl_block = ""
-    listen = "listen 80;"
-    if cert_live is not None:
-        listen = "listen 80;\n    listen 443 ssl http2;"
-        ssl_block = f"""
-    ssl_certificate {cert_live / "fullchain.pem"};
-    ssl_certificate_key {cert_live / "privkey.pem"};
-"""
-    content = render_nginx_template(
-        "instance_migrate_vhost.conf",
-        LISTEN_DIRECTIVES=listen,
-        SERVER_NAMES=server_names,
-        WEB_ROOT=web_root,
-        SSL_BLOCK=ssl_block,
-        FASTCGI_SOCKET=sock,
-        FORM_EMBED_LOCATION="\n".join(
-            ("    " + line) if line else ""
-            for line in render_form_embed_location(fastcgi_pass=f"unix:{sock}").splitlines()
-        ),
-    )
-    content = ensure_mautic_public_app_asset_locations(content)
-    content = normalize_legacy_http2_listen(content, modern_http2=_nginx_supports_http2_directive())
-    site.write_text(content, encoding="utf-8")
-    enabled.parent.mkdir(parents=True, exist_ok=True)
-    if enabled.exists() or enabled.is_symlink():
-        enabled.unlink()
-    enabled.symlink_to(site)
-    _run_checked(["nginx", "-t"], timeout_sec=30)
-    _run_checked(["systemctl", "reload", "nginx"], timeout_sec=30)
-    return str(site)
 
 
 def _copy_letsencrypt(

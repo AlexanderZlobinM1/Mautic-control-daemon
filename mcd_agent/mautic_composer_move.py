@@ -13,13 +13,10 @@ from typing import Any
 
 from mcd_agent.config import AgentConfig
 from mcd_agent.mautic_image_install import _artifact_url, _download, _run, _safe_extract
-from mcd_agent.nginx_baseline import (
-    _nginx_supports_http2_directive,
-    ensure_mautic_public_app_asset_locations,
-    normalize_legacy_http2_listen,
-)
 from mcd_agent.mode import _read_crontab, _write_crontab
 from mcd_agent.nginx_external import write_switched_vhost as _external_write_switched_vhost
+
+_write_switched_vhost = _external_write_switched_vhost
 
 RETIRED_INSTANCE_MARKER = ".mcd-retired-after-composer-move"
 NGINX_SITES_AVAILABLE = Path("/etc/nginx/sites-available")
@@ -218,56 +215,6 @@ def _ensure_runtime_dirs(target_root: Path) -> list[str]:
     return created
 
 
-def _write_switched_vhost(plan: ComposerMovePlan) -> dict[str, str]:
-    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
-    source_site = plan.site_available
-    target_site = plan.site_available
-    enabled_site = plan.site_enabled
-    source_parent = source_site.parent.resolve(strict=False)
-    enabled_dir = NGINX_SITES_ENABLED.resolve(strict=False)
-    available_dir = NGINX_SITES_AVAILABLE.resolve(strict=False)
-    managed_nginx_site = source_parent in {enabled_dir, available_dir}
-    if source_parent == enabled_dir:
-        target_site = NGINX_SITES_AVAILABLE / source_site.name
-        enabled_site = source_site
-
-    backup_dir = NGINX_SITES_AVAILABLE if managed_nginx_site else target_site.parent
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    backup = backup_dir / f"zip-backup-{ts}-{target_site.name}"
-    shutil.copy2(source_site, backup)
-    if target_site.exists() and target_site.resolve(strict=False) != source_site.resolve(strict=False):
-        existing_backup = backup_dir / f"pre-composer-{ts}-{target_site.name}"
-        shutil.copy2(target_site, existing_backup)
-
-    text = source_site.read_text(encoding="utf-8", errors="replace")
-    old = str(plan.source_root)
-    new = str(plan.nginx_root)
-    if old not in text:
-        root_re = re.compile(r"(^\s*root\s+)([^;]+)(;)", re.MULTILINE)
-        text, count = root_re.subn(lambda m: m.group(1) + new + m.group(3), text, count=1)
-        if count <= 0:
-            raise RuntimeError(f"no nginx root directive found in {plan.site_available}")
-    else:
-        text = text.replace(old, new)
-    target_sock = f"unix:/var/run/php/php{plan.php_version}-fpm.sock"
-    text = re.sub(
-        r"unix:/(?:var/)?run/php/php[0-9]+\.[0-9]+-fpm\.sock",
-        target_sock,
-        text,
-    )
-    text = ensure_mautic_public_app_asset_locations(text)
-    text = normalize_legacy_http2_listen(text, modern_http2=_nginx_supports_http2_directive())
-    target_site.parent.mkdir(parents=True, exist_ok=True)
-    target_site.write_text(text, encoding="utf-8")
-    if enabled_site is not None:
-        enabled_site.parent.mkdir(parents=True, exist_ok=True)
-        if enabled_site.exists() or enabled_site.is_symlink():
-            same_target = enabled_site.is_symlink() and enabled_site.resolve(strict=False) == target_site.resolve(strict=False)
-            if not same_target:
-                enabled_site.unlink()
-        if not enabled_site.exists() and not enabled_site.is_symlink():
-            enabled_site.symlink_to(os.path.relpath(target_site, enabled_site.parent))
-    return {"active": str(target_site), "backup": str(backup)}
 
 
 def _mark_source_root_retired(plan: ComposerMovePlan) -> str:

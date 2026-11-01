@@ -2669,3 +2669,14 @@ composer caller использует _external_write_switched_vhost один р�
 ошибки; окружающая Mautic/cron логика не меняется. Старые writer definitions
 пока остаются только эталоном до R20 installed CLI/caller parity, без fallback
 из нового пути. После приёмки они и ненужные shared helpers удаляются.
+
+R20 ordinary installed CLI/caller aliases принят PASS (receipt85164bde):
+восемь OLD business результатов равны DIRECT, шесть отрицательных сценариев,
+HTTP0 и девять реальных external child PID. После этого удалены12 доказанно
+заменённых определений, migration template и семь перенесённых recipe-тестов.
+Прежние private имена writer сохранены как aliases внешнего моста, без
+встроенных тел. В nginx_baseline остаются пять core/shared определений.
+Все остальные определения в изменённых модулях сохранили AST.
+_nginx_web_root нужен прямой Mautic media логике; cert preflight и остальные
+lifecycle callers сохраняются для своих отдельных границ.150 focused PASS;
+очищенный R21 ещё требует installed native proof после полного reset.

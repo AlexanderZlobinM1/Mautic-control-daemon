@@ -1,5 +1,5 @@
 {
-  "status": "OLD and standalone DIRECT native PASS; installed CLI/caller routing acceptance pending",
+  "status": "OLD/DIRECT/R20 ordinary CLI and caller parity PASS; cleaned R21 proof pending",
   "owner_source_commit": "3adea1f3be62e7ba38a547f6b93400a408076762",
   "owner_freeze_sha256": "d68566787dea9c3908a9fd3463df46acec2c6faf6636f6b3d9b63a88c2f16d5b",
   "caller_run_supplement_sha256": "4950f91f90a0daecee1675e73c1895cc6f0c8ee93403e57d0ca5b454ba5119ce",
@@ -150,5 +150,57 @@
     "vhost_records": 12,
     "snapshot_receipt_sha256": "4fb0e6922eba01aad963f17641fd6bcd5fb04587d44c38b626df7fa6e00f73ef",
     "standalone_no_config_registration_URL": true
+  },
+  "R20_native": {
+    "status": "PASS",
+    "receipt_sha256": "85164bde39473542e0c9a03143a6b64f25f4ce439d335c32f848e57284c53514",
+    "installed_source_sha256": "ef033873dd93270996db54a0bb2de25b6512b635584ac0373eac0fe836593b63",
+    "positive_business_cases": 8,
+    "negative_cases": 6,
+    "artifact_HTTP": 0,
+    "actual_child_processes": 9,
+    "actual_caller_aliases_exercised": true,
+    "all_business_results_equal_OLD_and_DIRECT": true,
+    "full_Mautic_lifecycle_claimed": false,
+    "full_reset_after_actor": "READY49827"
+  },
+  "source_cleanup": {
+    "native_gate_receipt_sha256": "85164bde39473542e0c9a03143a6b64f25f4ce439d335c32f848e57284c53514",
+    "removed_definitions": {
+      "mcd_agent/instance_migrate.py": [
+        "_detect_php_version",
+        "_ensure_nginx_sites_layout",
+        "_php_fpm_socket",
+        "_write_nginx_vhost"
+      ],
+      "mcd_agent/mautic_composer_move.py": [
+        "_write_switched_vhost"
+      ],
+      "mcd_agent/nginx_baseline.py": [
+        "_find_location_block_end",
+        "_mautic_public_app_asset_locations",
+        "_nginx_supports_http2_directive",
+        "_nginx_version_tuple",
+        "_normalize_server_blocks",
+        "ensure_mautic_public_app_asset_locations",
+        "normalize_legacy_http2_listen"
+      ]
+    },
+    "retained_definition_AST_unchanged": true,
+    "removed_template": "mcd_agent/templates/nginx/instance_migrate_vhost.conf",
+    "retired_transferred_recipe_tests": 7,
+    "removed_definition_count": 12,
+    "retained_shared_pending": {
+      "instance_migrate": "_nginx_web_root still serves actual Mautic media paths; existing certificate read-only preflight remains; lifecycle pending",
+      "nginx_baseline": "five core/read-only/transaction definitions only; instance-delete and APT presence helper pending",
+      "mautic_composer_move": "existing source selection/read-only vhost discovery and surrounding Mautic/cron lifecycle retained"
+    },
+    "focused_passed": 150,
+    "full_passed": 2052,
+    "full_failed": 61,
+    "full_failures_exact_baseline_ids": true,
+    "full_skipped": 57,
+    "full_subtests": 105,
+    "full_log_sha256": "222362e70824220f38b8b9b3be6aae13c78708720ff2c23a1adfa81ba8a1f09f"
   }
 }
