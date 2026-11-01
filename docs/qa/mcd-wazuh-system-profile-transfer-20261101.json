@@ -1,0 +1,85 @@
+{
+  "status": "BOUNDARY-FROZEN; pure baseline PASS; native/transport integration pending",
+  "scope": "entire existing apply_wazuh_profile recipe, not isolated helper extraction",
+  "source_commit": "62941290ecbc8c70b801b56b4a7db130be48ae23",
+  "source_module_sha256": "604d81a8ca7e4c91dc7b32286d878242ae9e81752d607a7f6b70eeb3e5df6f5b",
+  "recipe_functions": [
+    "_apt_update",
+    "_bool",
+    "_desired_client_settings",
+    "_ensure_agent_config",
+    "_ensure_prerequisites",
+    "_ensure_wazuh_keyring",
+    "_ensure_wazuh_repo",
+    "_install_wazuh_agent",
+    "_int",
+    "_parsed_agent_config",
+    "_pkg_state",
+    "_read_xml_root",
+    "_resolved_agent_name",
+    "_run",
+    "_serialize_wrapped_root",
+    "_service_state",
+    "_set_package_hold",
+    "_string_child",
+    "_systemctl_value",
+    "_upgrade_wazuh_agent",
+    "_wazuh_package_env",
+    "_wazuh_upgrade_available",
+    "_write_text",
+    "apply_wazuh_profile",
+    "collect_wazuh_agent_state"
+  ],
+  "retained_core_inventory_observer_closure": [
+    "_bool",
+    "_parsed_agent_config",
+    "_pkg_state",
+    "_read_xml_root",
+    "_run",
+    "_service_state",
+    "_string_child",
+    "_systemctl_value",
+    "collect_wazuh_agent_state"
+  ],
+  "removable_recipe_only_functions_after_proof": [
+    "_apt_update",
+    "_desired_client_settings",
+    "_ensure_agent_config",
+    "_ensure_prerequisites",
+    "_ensure_wazuh_keyring",
+    "_ensure_wazuh_repo",
+    "_install_wazuh_agent",
+    "_int",
+    "_resolved_agent_name",
+    "_serialize_wrapped_root",
+    "_set_package_hold",
+    "_upgrade_wazuh_agent",
+    "_wazuh_package_env",
+    "_wazuh_upgrade_available",
+    "_write_text",
+    "apply_wazuh_profile"
+  ],
+  "baseline_tests": {
+    "test_path": "tests/test_wazuh_service_profile.py",
+    "passed": 7
+  },
+  "core_identity_resolution_retained": true,
+  "identity_fields_read": [
+    "effective_mcc_host_name",
+    "configured_host_name",
+    "local_hostname"
+  ],
+  "secret_field_names_only": [
+    "registration_password"
+  ],
+  "profile_secret_policy": "Never place real secrets in public immutable archive/catalog; existing protected transport/ref contract must be confirmed by MCC owner before integration. Synthetic pure fixtures only.",
+  "owners": {
+    "mcd": "adapter, current identity facts, baseline, native proof and cleanup",
+    "portal": "exact recipe authoring and pure tests only",
+    "mcc": "profile authority, identity/secret delivery contract and distribution",
+    "canonical_infra": "disposable lease lifecycle"
+  },
+  "native_baseline": "pending read-only phase; no Wazuh writes/enrollment authorized in this checkpoint",
+  "old_writer_removed": false,
+  "production_activation": "HOLD until complete 1.7 acceptance"
+}

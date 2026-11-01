@@ -2313,3 +2313,17 @@ TLS/private credentials removed and port18444 closed; evidence commitc834abf8.
 Production APIs are healthy and the exact803d/4885 catalog row remains
 candidate/active=false. Local owned QA credential bundle is removed.
 This closes scoped Docker cleanup; complete1.7 activation remains held.
+
+
+Next whole working recipe: Wazuh apply_wazuh_profile, frozen source module
+604d81a8ca7e4c91dc7b32286d878242ae9e81752d607a7f6b70eeb3e5df6f5b.
+The25-function closure includes9helpers used by core inventory observation;
+those remain in MCD, with16recipe-only functions removable only after proof.
+Existing local seven-test baseline passes. Core host identity resolution stays
+in MCD; the recipe consumes effective_mcc_host_name/configured_host_name/
+local_hostname. Existing registration_password is a supported secret input:
+real secrets must never enter public immutable profile artifacts. MCC owner
+must confirm existing protected delivery/ref and identity bindings; Portal
+authoring is synthetic/pure-only pending that integration. No Wazuh host write
+or production enrollment is part of this checkpoint, and old bodies remain.
+See docs/qa/mcd-wazuh-system-profile-transfer-20261101.json.
