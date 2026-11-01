@@ -2369,3 +2369,15 @@ and state exactly equal old native; receipt
 Neither synthetic9ad nor production-target806d artifact was executed. A new
 full reset and normal unlisted R14 install are requested for ordinary CLI QA.
 The16recipe-only bodies remain until that acceptance;9inventory helpers stay.
+
+
+Ordinary installed R14 Wazuh CLI passed real isolated MCC HTTPS/catalog with
+active descriptor/no opt-in: fetch-only, planned, first and repeat raw results,
+file hashes and observed state match old native; actualaf44cache and health
+verified. Receipt6416b23fadd1cc985a6189034d78cb58f2a40250be0d50d1d59735984c994e67.
+Following that proof,16recipe-only functions and unused imports/constant were
+removed;9unchanged core inventory observers remain in wazuh_profile.py. Three
+transferred writer tests are retired, core routing/inventory tests retained.
+79focused checks/release-regression pass; cleaned R15 native proof/final reset
+remain pending. Nonempty legacy private-input gap is still explicit; no secret
+ref/key layer has been added and no full1.7 release/activation is claimed.

@@ -283,7 +283,7 @@ def test_wazuh_external_dispatch_preserves_failed_public_dictionary_without_buil
     raw={'status':'error','reason':'manager_unreachable','actions':['wazuh_repo:ok']}
     monkeypatch.setattr(ext,'resolve_agent_identity',lambda cfg:wazuh_fetched['runtime_context'])
     monkeypatch.setattr(profiles,'fetch_service_profile',lambda *a,**kw:wazuh_fetched)
-    monkeypatch.setattr(profiles,'apply_wazuh_profile',lambda *a,**kw:pytest.fail('builtin fallback forbidden'))
+    assert not hasattr(profiles,'apply_wazuh_profile')
     monkeypatch.setattr(ext,'run_custom_script_by_key',lambda *a,**kw:(1,json.dumps(failed_terminal(raw))))
     result=profiles.service_profiles_apply_once(SimpleNamespace(cluster_id=None),component='wazuh')
     assert result['status']=='error' and result['reason']=='manager_unreachable' and result['apply']==raw

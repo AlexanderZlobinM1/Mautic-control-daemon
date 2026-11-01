@@ -195,7 +195,6 @@
     "mcd_agent/service_profiles.py",
     "mcd_agent/local_mail.py",
     "mcd_agent/mail_config.py",
-    "mcd_agent/wazuh_profile.py",
     "mcd_agent/security_blocklist.py",
     "mcd_agent/amazon_mailer_dep.py",
     "mcd_agent/self_update.py",
@@ -279,6 +278,49 @@
       "daemon_installation": false,
       "cleaned_native_receipt_sha256": "aea391cbfb822f990285b7d22c2fd24e134bee5f57a69858e4586a4c8c52667c",
       "final_reset_receipt_sha256": "3868d9f1106a1668c79972c470d3861027328912560c691ddf8e25539add03d3"
+    },
+    "wazuh_system_profile": {
+      "component": "wazuh_system_profile",
+      "status": "source-cleaned after R14 native; cleaned R15 proof and final reset pending",
+      "scope": "no-secret loopback profile native parity; no production enrollment",
+      "removed_recipe_functions": [
+        "_apt_update",
+        "_desired_client_settings",
+        "_ensure_agent_config",
+        "_ensure_prerequisites",
+        "_ensure_wazuh_keyring",
+        "_ensure_wazuh_repo",
+        "_install_wazuh_agent",
+        "_int",
+        "_resolved_agent_name",
+        "_serialize_wrapped_root",
+        "_set_package_hold",
+        "_upgrade_wazuh_agent",
+        "_wazuh_package_env",
+        "_wazuh_upgrade_available",
+        "_write_text",
+        "apply_wazuh_profile"
+      ],
+      "retained_core_inventory_functions": [
+        "_bool",
+        "_parsed_agent_config",
+        "_pkg_state",
+        "_read_xml_root",
+        "_run",
+        "_service_state",
+        "_string_child",
+        "_systemctl_value",
+        "collect_wazuh_agent_state"
+      ],
+      "retired_transferred_tests": 3,
+      "generic_adapter": "mcd_agent/service_profile_external.py",
+      "native_evidence": "docs/qa/mcd-wazuh-system-profile-transfer-20261101.json",
+      "ordinary_cli_receipt_sha256": "6416b23fadd1cc985a6189034d78cb58f2a40250be0d50d1d59735984c994e67",
+      "remaining_release_gates": [
+        "cleaned installed runtime proof and independent final reset",
+        "complete 1.7 overall acceptance and owner activation",
+        "nonempty legacy registration password existing runtime-input gap remains explicit; no new encrypted refs/keys authorized"
+      ]
     }
   }
 }

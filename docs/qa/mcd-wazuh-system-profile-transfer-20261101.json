@@ -1,5 +1,5 @@
 {
-  "status": "OLD-AND-DIRECT-NATIVE-LOOPBACK-PASS; ordinary installed CLI and source cleanup pending",
+  "status": "R14-ORDINARY-CLI-PASS; source-cleaned; R15 native proof and final reset pending",
   "scope": "entire existing apply_wazuh_profile recipe, not isolated helper extraction",
   "source_commit": "62941290ecbc8c70b801b56b4a7db130be48ae23",
   "source_module_sha256": "604d81a8ca7e4c91dc7b32286d878242ae9e81752d607a7f6b70eeb3e5df6f5b",
@@ -80,7 +80,7 @@
     "canonical_infra": "disposable lease lifecycle"
   },
   "native_baseline": "read-only defaults passed; enabled controlled loopback profile and fresh actual identity still pending",
-  "old_writer_removed": false,
+  "old_writer_removed": true,
   "production_activation": "HOLD until complete 1.7 acceptance",
   "identity_contract": {
     "shape": "flat-three-fields",
@@ -199,5 +199,75 @@
     "canonical_release": false,
     "channel_publication": false,
     "source_commit": "d3537e2167a7d84ede2f639819d1ce79be0c000f"
+  },
+  "ordinary_cli_r14": {
+    "status": "PASS",
+    "receipt": "/Users/azlobin/.codex/admin/host-diagnostics/mcd-wazuh-profile-native-20261101/r14-ordinary-cli-loopback-positive.json",
+    "sha256": "6416b23fadd1cc985a6189034d78cb58f2a40250be0d50d1d59735984c994e67",
+    "installed_source_proof_sha256": "89c924195d74f595a7658f1acdd2588b54a73e2ea8984e2944a98d4010b2a593",
+    "real_qa_endpoint_receipt_sha256": "3419adf3a7862601c13fa4cd453982a98dfdb89d5ab337d1f005d22962c04c40",
+    "active_without_candidate_opt_in": true,
+    "actual_archive_cache_verified": true,
+    "all_public_apply_results_files_state_match_old": true,
+    "health": "PASS",
+    "token_absence_checked_before_copy": true
+  },
+  "source_cleanup": {
+    "component": "wazuh_system_profile",
+    "status": "source-cleaned after R14 native; cleaned R15 proof and final reset pending",
+    "scope": "no-secret loopback profile native parity; no production enrollment",
+    "removed_recipe_functions": [
+      "_apt_update",
+      "_desired_client_settings",
+      "_ensure_agent_config",
+      "_ensure_prerequisites",
+      "_ensure_wazuh_keyring",
+      "_ensure_wazuh_repo",
+      "_install_wazuh_agent",
+      "_int",
+      "_resolved_agent_name",
+      "_serialize_wrapped_root",
+      "_set_package_hold",
+      "_upgrade_wazuh_agent",
+      "_wazuh_package_env",
+      "_wazuh_upgrade_available",
+      "_write_text",
+      "apply_wazuh_profile"
+    ],
+    "retained_core_inventory_functions": [
+      "_bool",
+      "_parsed_agent_config",
+      "_pkg_state",
+      "_read_xml_root",
+      "_run",
+      "_service_state",
+      "_string_child",
+      "_systemctl_value",
+      "collect_wazuh_agent_state"
+    ],
+    "retired_transferred_tests": 3,
+    "generic_adapter": "mcd_agent/service_profile_external.py",
+    "native_evidence": "docs/qa/mcd-wazuh-system-profile-transfer-20261101.json",
+    "ordinary_cli_receipt_sha256": "6416b23fadd1cc985a6189034d78cb58f2a40250be0d50d1d59735984c994e67",
+    "remaining_release_gates": [
+      "cleaned installed runtime proof and independent final reset",
+      "complete 1.7 overall acceptance and owner activation",
+      "nonempty legacy registration password existing runtime-input gap remains explicit; no new encrypted refs/keys authorized"
+    ],
+    "focused_tests_passed": 79,
+    "full_regression": {
+      "passed": 2028,
+      "failed": 61,
+      "skipped": 57,
+      "subtests_passed": 105,
+      "new_failure_ids": [],
+      "missing_baseline_failure_ids": []
+    },
+    "retained_nine_observer_functions_ast_exact": true
+  },
+  "optional_profile_field_audit": {
+    "refresh_timeout_sec": "MCC current production sanitizer and builder preserve explicit value unchanged; no default added",
+    "nullable_first_two_context_fields": "MCC backend4PASS; direct raw projection unchanged",
+    "current_profile968_unchanged": true
   }
 }

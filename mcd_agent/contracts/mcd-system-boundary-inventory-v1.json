@@ -71,7 +71,7 @@
     {
       "path": "mcd_agent/service_profiles.py",
       "function": "fetch_service_profile",
-      "line": 48,
+      "line": 47,
       "classification": "KEEP",
       "lexical_name_callers": [
         {
@@ -84,23 +84,23 @@
         },
         {
           "path": "mcd_agent/service_profiles.py",
-          "line": 79
+          "line": 88
         },
         {
           "path": "mcd_agent/service_profiles.py",
-          "line": 83
+          "line": 92
         },
         {
           "path": "mcd_agent/service_profiles.py",
-          "line": 87
+          "line": 96
         },
         {
           "path": "mcd_agent/service_profiles.py",
-          "line": 91
+          "line": 100
         },
         {
           "path": "mcd_agent/service_profiles.py",
-          "line": 186
+          "line": 195
         }
       ],
       "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive"
@@ -108,7 +108,7 @@
     {
       "path": "mcd_agent/service_profiles.py",
       "function": "service_profiles_apply_once",
-      "line": 160,
+      "line": 169,
       "classification": "SPLIT",
       "lexical_name_callers": [
         {
@@ -388,7 +388,7 @@
       "lexical_name_callers": [
         {
           "path": "mcd_agent/service_profile_external.py",
-          "line": 92
+          "line": 111
         },
         {
           "path": "mcd_agent/cli.py",
@@ -418,15 +418,39 @@
     {
       "path": "mcd_agent/service_profile_external.py",
       "function": "apply_external_service_profile",
-      "line": 33,
+      "line": 34,
       "classification": "KEEP",
       "lexical_name_callers": [
         {
           "path": "mcd_agent/service_profiles.py",
-          "line": 198
+          "line": 207
         }
       ],
-      "caller_resolution": "explicit PHP/MySQL/Docker generic dispatch; no builtin writer/fallback"
+      "caller_resolution": "explicit PHP/MySQL/Docker/Wazuh generic dispatch; no builtin recipe/fallback"
+    },
+    {
+      "path": "mcd_agent/wazuh_profile.py",
+      "function": "collect_wazuh_agent_state",
+      "classification": "KEEP",
+      "line": 115,
+      "lexical_name_callers": [
+        {
+          "path": "mcd_agent/apt_profile.py",
+          "line": 2638
+        }
+      ],
+      "caller_resolution": "core inventory observer; nine retained helpers perform read-only package/service/config observation",
+      "retained_dependency_closure": [
+        "_bool",
+        "_parsed_agent_config",
+        "_pkg_state",
+        "_read_xml_root",
+        "_run",
+        "_service_state",
+        "_string_child",
+        "_systemctl_value",
+        "collect_wazuh_agent_state"
+      ]
     }
   ],
   "native_before_after_evidence": null,
@@ -472,6 +496,49 @@
       "daemon_installation": false,
       "cleaned_native_receipt_sha256": "aea391cbfb822f990285b7d22c2fd24e134bee5f57a69858e4586a4c8c52667c",
       "final_reset_receipt_sha256": "3868d9f1106a1668c79972c470d3861027328912560c691ddf8e25539add03d3"
+    },
+    {
+      "component": "wazuh_system_profile",
+      "status": "source-cleaned after R14 native; cleaned R15 proof and final reset pending",
+      "scope": "no-secret loopback profile native parity; no production enrollment",
+      "removed_recipe_functions": [
+        "_apt_update",
+        "_desired_client_settings",
+        "_ensure_agent_config",
+        "_ensure_prerequisites",
+        "_ensure_wazuh_keyring",
+        "_ensure_wazuh_repo",
+        "_install_wazuh_agent",
+        "_int",
+        "_resolved_agent_name",
+        "_serialize_wrapped_root",
+        "_set_package_hold",
+        "_upgrade_wazuh_agent",
+        "_wazuh_package_env",
+        "_wazuh_upgrade_available",
+        "_write_text",
+        "apply_wazuh_profile"
+      ],
+      "retained_core_inventory_functions": [
+        "_bool",
+        "_parsed_agent_config",
+        "_pkg_state",
+        "_read_xml_root",
+        "_run",
+        "_service_state",
+        "_string_child",
+        "_systemctl_value",
+        "collect_wazuh_agent_state"
+      ],
+      "retired_transferred_tests": 3,
+      "generic_adapter": "mcd_agent/service_profile_external.py",
+      "native_evidence": "docs/qa/mcd-wazuh-system-profile-transfer-20261101.json",
+      "ordinary_cli_receipt_sha256": "6416b23fadd1cc985a6189034d78cb58f2a40250be0d50d1d59735984c994e67",
+      "remaining_release_gates": [
+        "cleaned installed runtime proof and independent final reset",
+        "complete 1.7 overall acceptance and owner activation",
+        "nonempty legacy registration password existing runtime-input gap remains explicit; no new encrypted refs/keys authorized"
+      ]
     }
   ]
 }

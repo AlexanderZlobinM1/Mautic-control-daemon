@@ -17,7 +17,6 @@ from mcd_agent.service_profile_external import (
     CUSTOM_RUNTIME_CAPABILITIES, ExternalProfileOperationError, apply_external_service_profile,
 )
 from mcd_agent.mautic_db_indexes import apply_mautic_db_indexes
-from mcd_agent.wazuh_profile import apply_wazuh_profile
 
 
 _MYSQL_GALERA_MARKERS = (
