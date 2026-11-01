@@ -1,5 +1,5 @@
 {
-  "status": "OLD/DIRECT/ordinary CLI/cleaned R18 native PASS; cache-retention edge proof pending",
+  "status": "nginx host baseline scoped transfer CLOSED: source/native/cleaned-runtime/cache-retention/final-reset PASS",
   "authorized_delta": "docs/qa/mcd-nginx-default-stub-http-only-20261101.json",
   "reference_commit": "a6f1f1ed8110be35536568d1a9de0373083adaf6",
   "reference_module_sha256": "b824aea0532c06486cf2687e6072a72765625bf4719e92b871342e85db562b26",
@@ -22,7 +22,9 @@
     "r17_ordinary_cli": "4de857105280413eb4c84e87912604410dd39a911bb7800cd9c4e8701f1bd765",
     "r17_installed_source": "c87d39162609655e5f91487f257adcdda6ee5d6ee9aef403bb73dccc37f1dd62",
     "r18_cleaned_ordinary_cli": "fad3b5d42f7cf39f72f0ce576ae201f55adb1870439583c8b466b3df725c27d3",
-    "r18_installed_source": "46fb21c7f65822bc845b4b303106743225a44f3d5c6830b31790dec207745a43"
+    "r18_installed_source": "46fb21c7f65822bc845b4b303106743225a44f3d5c6830b31790dec207745a43",
+    "r19_cache_retention": "0536be967d1239a4bcc59522ce06b179e2668510211352d4e00ad75042680472",
+    "r19_installed_source": "073c964260137504d97829c38a250da7a8e228d1c5f936519bceac59824cf7ba"
   },
   "native_scenarios": [
     "own managed legacy443/missing certificate reference repair by actual CLI",
@@ -41,14 +43,13 @@
     "cross_reset_config_bytes_equal": true,
     "mtime": "checked for within-actor neighbor nonmutation, not equalized across runs"
   },
-  "lifecycle": "full reset completed between OLD and DIRECT and after DIRECT; current clean disposable QA lease ready for R17",
+  "lifecycle": "full canonical reset between OLD, DIRECT, R17, R18, R19; independent final reset verification PASS; no manual fault cleanup",
   "native_external_agent_generator_imports": false,
   "channel_publication": false,
   "production_activation": false,
   "remaining": [
-    "installed 404-refresh and scheduled-cache-retention edge proof after additional source fix",
-    "final full sandbox reset",
-    "remaining whole 1.7 blocks and Publish MCD Test/Approved release"
+    "separate pending vhost/delete/APT and other whole 1.7 scopes",
+    "complete whole 1.7 acceptance and Publish MCD Test/Approved release"
   ],
   "consumer_bridge": {
     "status": "source implemented; installed R17 native acceptance pending",
@@ -199,12 +200,29 @@
     "HTTP404_merge_preserves_local_selected_tasks": true,
     "scheduled_cleanup_preserves_selected_artifact_directory": true,
     "focused_passed": 47,
-    "installed_proof": "R19 pending",
+    "installed_proof": {
+      "status": "PASS",
+      "source_commit": "3adea1f3be62e7ba38a547f6b93400a408076762",
+      "explicit_404_refresh_GET": 1,
+      "retained_selections": 34,
+      "expired_selected_archive_preserved": true,
+      "unselected_expired_neighbor_removed": true,
+      "ordinary_CLI_calls": 5,
+      "ordinary_CLI_HTTP": 0,
+      "nginx_certificates_bytes_mtime_unchanged": true
+    },
     "full_passed": 2047,
     "full_failed": 61,
     "full_failures_exact_baseline_ids": true,
     "full_skipped": 57,
     "full_subtests": 105,
     "full_log_sha256": "40246314aaf23e3db6a71b25d1161a1082bd71e5460620b5481ff9d89834a13c"
+  },
+  "final_reset": {
+    "status": "PASS",
+    "receipt_sha256": "51615d3450ad537028456bae569e8af3be66d5bee44847f48fa845682c234a62",
+    "ssh_port": 60587,
+    "mutable_actor_after_checkpoint": false,
+    "independent_read_only_verification": true
   }
 }

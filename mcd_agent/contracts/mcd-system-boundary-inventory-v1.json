@@ -553,7 +553,7 @@
     },
     {
       "component": "nginx_host_baseline",
-      "status": "ordinary-cli-native-accepted; source cleanup complete; cleaned-runtime proof pending",
+      "status": "scoped transfer CLOSED: cleaned runtime, cache retention and final reset PASS",
       "evidence": "docs/qa/mcd-nginx-host-baseline-transfer-20261101.json",
       "removed_definitions": [
         "_active_add_header_present",
@@ -621,7 +621,16 @@
         "normalize_legacy_http2_listen"
       ],
       "retired_transferred_tests": 36,
-      "native_gate_receipt_sha256": "4de857105280413eb4c84e87912604410dd39a911bb7800cd9c4e8701f1bd765"
+      "native_gate_receipt_sha256": "4de857105280413eb4c84e87912604410dd39a911bb7800cd9c4e8701f1bd765",
+      "cleaned_native_receipt_sha256": "fad3b5d42f7cf39f72f0ce576ae201f55adb1870439583c8b466b3df725c27d3",
+      "cache_retention_receipt_sha256": "0536be967d1239a4bcc59522ce06b179e2668510211352d4e00ad75042680472",
+      "final_reset": {
+        "status": "PASS",
+        "receipt_sha256": "51615d3450ad537028456bae569e8af3be66d5bee44847f48fa845682c234a62",
+        "ssh_port": 60587,
+        "mutable_actor_after_checkpoint": false,
+        "independent_read_only_verification": true
+      }
     }
   ]
 }
