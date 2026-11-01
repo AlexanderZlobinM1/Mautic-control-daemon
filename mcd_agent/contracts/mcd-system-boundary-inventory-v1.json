@@ -499,7 +499,7 @@
     },
     {
       "component": "wazuh_system_profile",
-      "status": "source-cleaned after R14 native; cleaned R15 proof and final reset pending",
+      "status": "cleaned R15 ordinary CLI and independent final reset PASS; MCC QA cleanup pending",
       "scope": "no-secret loopback profile native parity; no production enrollment",
       "removed_recipe_functions": [
         "_apt_update",
@@ -535,10 +535,16 @@
       "native_evidence": "docs/qa/mcd-wazuh-system-profile-transfer-20261101.json",
       "ordinary_cli_receipt_sha256": "6416b23fadd1cc985a6189034d78cb58f2a40250be0d50d1d59735984c994e67",
       "remaining_release_gates": [
-        "cleaned installed runtime proof and independent final reset",
         "complete 1.7 overall acceptance and owner activation",
         "nonempty legacy registration password existing runtime-input gap remains explicit; no new encrypted refs/keys authorized"
-      ]
+      ],
+      "final_reset": {
+        "status": "PASS",
+        "receipt": "/Users/azlobin/.codex/admin/host-diagnostics/mcd-wazuh-profile-native-20261101/final-reset-verification.json",
+        "sha256": "066149fa0feba8de077f5991b2d97baba16ea18ad793a47c965178a92e7ea8be",
+        "ssh_port": 65011,
+        "mutable_actor_after_reset": false
+      }
     }
   ]
 }

@@ -2390,3 +2390,10 @@ is a separate execution of the cleaned installed runtime. Raw logs were checked
 for token absence before saving. Final full reset is underway; independent
 verification and MCC endpoint cleanup remain pending. No public channel changed,
 no production enrollment occurred, and full 1.7 acceptance is not claimed.
+
+The final R15 sandbox was fully recreated by its infrastructure owner. Independent
+read-only verification passed (receipt066149fa): Wazuh/Docker not installed,
+/var/ossec, /opt/mcd/src and all three actor directories absent; MCD inactive,
+MariaDB/PHP-FPM/nginx active, canonical HTTPS200 with verified TLS. No mutable
+actor followed this reset. MCC received CLEANUPREADY for its isolated18443 QA
+endpoint and owned credential bundle; cleanup acknowledgment remains pending.
