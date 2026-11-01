@@ -1,5 +1,5 @@
 {
-  "status": "R15-CLEANED-ORDINARY-CLI-AND-FINAL-RESET-PASS; MCC QA cleanup pending",
+  "status": "NO-SECRET-SCOPED-TRANSFER-CLOSED; full 1.7 acceptance and private-input compatibility remain pending",
   "scope": "entire existing apply_wazuh_profile recipe, not isolated helper extraction",
   "source_commit": "62941290ecbc8c70b801b56b4a7db130be48ae23",
   "source_module_sha256": "604d81a8ca7e4c91dc7b32286d878242ae9e81752d607a7f6b70eeb3e5df6f5b",
@@ -214,7 +214,7 @@
   },
   "source_cleanup": {
     "component": "wazuh_system_profile",
-    "status": "cleaned R15 ordinary CLI and independent final reset PASS; MCC QA cleanup pending",
+    "status": "no-secret scoped transfer CLOSED: cleaned R15 native, final reset and MCC cleanup ACK",
     "scope": "no-secret loopback profile native parity; no production enrollment",
     "removed_recipe_functions": [
       "_apt_update",
@@ -295,5 +295,16 @@
     "sha256": "066149fa0feba8de077f5991b2d97baba16ea18ad793a47c965178a92e7ea8be",
     "ssh_port": 65011,
     "mutable_actor_after_reset": false
+  },
+  "mcc_qa_cleanup": {
+    "status": "ACK",
+    "port_18443_closed": true,
+    "service_unit_removed": true,
+    "server_db_catalog_tls_token_removed": true,
+    "local_owned_credential_bundle_removed": true,
+    "production_qa_host_rows": 0,
+    "production_apis_healthy": true,
+    "production_candidate_activated": false,
+    "nonsecret_endpoint_receipt_sha256": "3419adf3a7862601c13fa4cd453982a98dfdb89d5ab337d1f005d22962c04c40"
   }
 }

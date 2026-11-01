@@ -499,7 +499,7 @@
     },
     {
       "component": "wazuh_system_profile",
-      "status": "cleaned R15 ordinary CLI and independent final reset PASS; MCC QA cleanup pending",
+      "status": "no-secret scoped transfer CLOSED: cleaned R15 native, final reset and MCC cleanup ACK",
       "scope": "no-secret loopback profile native parity; no production enrollment",
       "removed_recipe_functions": [
         "_apt_update",

@@ -2397,3 +2397,9 @@ read-only verification passed (receipt066149fa): Wazuh/Docker not installed,
 MariaDB/PHP-FPM/nginx active, canonical HTTPS200 with verified TLS. No mutable
 actor followed this reset. MCC received CLEANUPREADY for its isolated18443 QA
 endpoint and owned credential bundle; cleanup acknowledgment remains pending.
+
+MCC cleanup ACK received: isolated18443 service/unit, server QA database/catalog/
+TLS/private keys/token and its local credential bundle removed; port closed,
+production QA host rows zero, production APIs healthy and candidate inactive.
+The no-secret Wazuh transfer is scoped CLOSED. Nonempty legacy runtime-input
+compatibility and complete cross-component 1.7 acceptance remain release gates.
