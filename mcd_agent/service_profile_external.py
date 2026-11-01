@@ -11,8 +11,10 @@ from mcd_agent.custom_scripts import run_custom_script_by_key
 from mcd_agent.commercial_portal import canonical_json
 from mcd_agent.commercial_self_hosted import ExternalProcessPolicy
 from mcd_agent.host_identity import resolve_agent_identity
+from mcd_agent.scenario_launcher import MAX_CONTEXT_BYTES
 
-CUSTOM_RUNTIME_CAPABILITIES = frozenset({'custom-gzip-entrypoint', 'raw-jsonline-terminal-result'})
+BASE_RUNTIME_CAPABILITIES = frozenset({'custom-gzip-entrypoint', 'raw-jsonline-terminal-result'})
+CUSTOM_RUNTIME_CAPABILITIES = BASE_RUNTIME_CAPABILITIES | {'framed-runtime-input'}
 
 
 class ExternalProfileOperationError(RuntimeError):
@@ -50,12 +52,25 @@ def apply_external_service_profile(cfg: Any, fetched: Mapping[str, Any], *,
     required = runtime.get('required_capabilities') if isinstance(runtime, Mapping) else None
     if (not isinstance(required, list) or not required or
             any(not isinstance(c, str) or c not in CUSTOM_RUNTIME_CAPABILITIES for c in required) or
-            set(required) != CUSTOM_RUNTIME_CAPABILITIES):
+            not BASE_RUNTIME_CAPABILITIES <= set(required)):
         raise ValueError('external_handler_capability_unavailable')
+    runtime_input = fetched.get("runtime_input")
+    if "runtime_input" in fetched:
+        if (component != "wazuh" or not isinstance(runtime_input, dict)
+                or set(runtime_input) != {"registration_password"}
+                or not isinstance(runtime_input["registration_password"], str)):
+            raise ValueError("external_handler_runtime_input_invalid")
+        if len(json.dumps(runtime_input, ensure_ascii=False, sort_keys=True,
+                          separators=(",", ":"), allow_nan=False).encode("utf-8")) > MAX_CONTEXT_BYTES:
+            raise ValueError("external_handler_runtime_input_invalid")
+        if "framed-runtime-input" not in required:
+            raise ValueError("external_handler_runtime_input_unsupported")
     profile_input = handler.get('profile_input')
     profile = fetched.get('profile')
     if not isinstance(profile_input, Mapping) or profile_input.get('source') != 'response.profile' or not isinstance(profile, Mapping):
         raise ValueError('external_handler_profile_input_invalid')
+    if component == "wazuh" and profile.get("registration_password"):
+        raise ValueError("external_handler_private_profile_rejected")
     expected_profile = profile_input.get('sha256')
     if not isinstance(expected_profile, str) or re.fullmatch('[0-9a-f]{64}', expected_profile) is None:
         raise ValueError('external_handler_profile_pin_invalid')
@@ -108,9 +123,12 @@ def apply_external_service_profile(cfg: Any, fetched: Mapping[str, Any], *,
     prefix = ['custom', '--no-detach', '--expected-sha256', digest, key, '--']
     if not isinstance(argv, list) or len(argv) <= len(prefix) or argv[:len(prefix)] != prefix or any(not isinstance(v, str) or '\x00' in v for v in argv):
         raise ValueError('external_handler_dry_run_unavailable' if dry_run else 'external_handler_command_invalid')
+    if (runtime_input is not None) != ("--runtime-input-stdin" in argv[len(prefix):]):
+        raise ValueError("external_handler_runtime_input_command_mismatch")
+    options = {"runtime_input": runtime_input} if runtime_input is not None else {}
     rc, output = run_custom_script_by_key(cfg, script_key=key, expected_sha256=digest,
         expected_entrypoint=entrypoint, args=argv[len(prefix):], detach=False,
-        live_output=False, capture_result=True)
+        live_output=False, capture_result=True, **options)
     if rc != 0:
         # Reuse the existing frame validator; no component business statuses are
         # interpreted by the generic decoder or this failure carrier.

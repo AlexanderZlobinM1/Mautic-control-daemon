@@ -44,7 +44,7 @@ def _api_base(cfg: AgentConfig) -> str | None:
     return cfg.mcc_url.rstrip("/")
 
 
-def fetch_service_profile(cfg: AgentConfig, component: str) -> dict[str, Any]:
+def fetch_service_profile(cfg: AgentConfig, component: str, *, include_runtime_input: bool = False) -> dict[str, Any]:
     base = _api_base(cfg)
     if not base:
         return {"status": "disabled", "reason": "mcc_url_not_set"}
@@ -75,13 +75,18 @@ def fetch_service_profile(cfg: AgentConfig, component: str) -> dict[str, Any]:
     try:
         out = _post_json(url, payload, cfg.mcc_token, timeout_sec=12)
         out.setdefault("status", "error")
-        return out
+        return out if include_runtime_input else public_service_profile_response(out)
     except HTTPError as e:
         return {"status": "error", "reason": f"http_{e.code}"}
     except URLError as e:
         return {"status": "error", "reason": f"urlerror:{e.reason}"}
     except Exception as e:
         return {"status": "error", "reason": str(e)}
+
+
+def public_service_profile_response(fetched: dict[str, Any]) -> dict[str, Any]:
+    """Private execution input stays in memory, never in CLI/task receipts."""
+    return {key: value for key, value in fetched.items() if key != "runtime_input"}
 
 
 def fetch_php_fpm_profile(cfg: AgentConfig) -> dict[str, Any]:
@@ -192,13 +197,14 @@ def service_profiles_apply_once(
         if status == "deferred":
             return {"status": "skipped", "reason": applied.get("reason", "deferred"), "apply": applied}
         return {"status": "error", "reason": applied.get("reason", status or "apply_failed"), "apply": applied}
-    fetched = fetch_service_profile(cfg, comp)
+    fetched = fetch_service_profile(cfg, comp, include_runtime_input=True)
+    public_fetch = public_service_profile_response(fetched)
     status = str(fetched.get("status", "")).strip().lower()
     if status != "ok":
-        return {"status": "error", "reason": fetched.get("reason", status or "fetch_failed"), "fetch": fetched}
+        return {"status": "error", "reason": fetched.get("reason", status or "fetch_failed"), "fetch": public_fetch}
     profile = fetched.get("profile")
     if not isinstance(profile, dict):
-        return {"status": "error", "reason": "invalid profile payload", "fetch": fetched}
+        return {"status": "error", "reason": "invalid profile payload", "fetch": public_fetch}
     external_failed = False
     if comp in {"php_fpm", "mysql", "docker", "wazuh"}:
         # Only delivery/admission lives here; the artifact owns the algorithm.
@@ -221,7 +227,7 @@ def service_profiles_apply_once(
     result_status, reason = _service_profile_apply_outcome(applied)
     if external_failed and result_status == "ok":
         result_status, reason = "error", "external_handler_execution_failed"
-    out = {"status": result_status, "fetch": fetched, "apply": applied}
+    out = {"status": result_status, "fetch": public_fetch, "apply": applied}
     if reason:
         out["reason"] = reason
     return out

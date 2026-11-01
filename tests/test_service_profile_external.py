@@ -309,3 +309,56 @@ def test_wazuh_fetch_does_not_guess_missing_core_facts(monkeypatch,missing):
     monkeypatch.setattr(profiles,'resolve_agent_identity',lambda cfg:identity)
     monkeypatch.setattr(profiles,'_post_json',lambda *a,**kw:pytest.fail('missing fact must not be invented for request'))
     assert profiles.fetch_service_profile(cfg,'wazuh')=={'status':'error','reason':'wazuh_identity_context_unavailable'}
+
+
+def test_private_runtime_input_is_memory_only_and_public_fetch_omits_it(wazuh_fetched, monkeypatch):
+    private = {'registration_password':'  SYNTHETIC:é"\\\t\n\n'}
+    wazuh_fetched['runtime_input'] = private
+    for field in ('command','dry_run_command'):
+        wazuh_fetched['external_handler'][field]['argv'].append('--runtime-input-stdin')
+    monkeypatch.setattr(ext,'resolve_agent_identity',lambda cfg:wazuh_fetched['external_handler']['runtime_context'])
+    calls=[]
+    monkeypatch.setattr(ext,'run_custom_script_by_key',lambda *a,**kw:calls.append(kw) or (0,'{"status":"applied"}'))
+    monkeypatch.setattr(profiles,'fetch_service_profile',lambda *a,**kw:wazuh_fetched)
+    result=profiles.service_profiles_apply_once(SimpleNamespace(cluster_id=None),component='wazuh')
+    assert result['status']=='ok'
+    assert 'runtime_input' not in result['fetch']
+    assert private['registration_password'] not in json.dumps(result)
+    assert calls[0]['runtime_input']==private
+    assert private['registration_password'] not in str(calls[0]['args'])
+    assert wazuh_fetched['runtime_input']==private
+
+
+@pytest.mark.parametrize('problem',['capability','flag','null','wrongtype','extra','profile'])
+def test_private_runtime_input_rejected_before_artifact_download(wazuh_fetched,monkeypatch,problem):
+    wazuh_fetched['runtime_input']={'registration_password':'SYNTHETIC-PRIVATE'}
+    h=wazuh_fetched['external_handler']
+    for field in ('command','dry_run_command'):h[field]['argv'].append('--runtime-input-stdin')
+    if problem=='capability':h['minimum_runtime']['required_capabilities']=sorted(ext.BASE_RUNTIME_CAPABILITIES)
+    elif problem=='flag':h['command']['argv'].remove('--runtime-input-stdin')
+    elif problem=='null':wazuh_fetched['runtime_input']=None
+    elif problem=='wrongtype':wazuh_fetched['runtime_input']['registration_password']=42
+    elif problem=='extra':wazuh_fetched['runtime_input']['other']='bad'
+    elif problem=='profile':wazuh_fetched['profile']['registration_password']='SYNTHETIC-PRIVATE'
+    monkeypatch.setattr(ext,'resolve_agent_identity',lambda cfg:h['runtime_context'])
+    monkeypatch.setattr(ext,'run_custom_script_by_key',lambda *a,**kw:pytest.fail('reject before cache/download'))
+    with pytest.raises(ValueError):ext.apply_external_service_profile(None,wazuh_fetched,component='wazuh')
+
+
+def test_public_fetch_never_returns_runtime_input(monkeypatch):
+    raw={'status':'ok','profile':{},'runtime_input':{'registration_password':'SYNTHETIC-PRIVATE'}}
+    monkeypatch.setattr(profiles,'resolve_agent_identity',lambda cfg:{'effective_mcc_host_name':None,'configured_host_name':None,'local_hostname':'local'})
+    monkeypatch.setattr(profiles,'_post_json',lambda *a,**kw:raw)
+    cfg=SimpleNamespace(mcc_url='https://synthetic.example.invalid',mcc_token='synthetic')
+    assert 'runtime_input' not in profiles.fetch_service_profile(cfg,'wazuh')
+    assert profiles.fetch_service_profile(cfg,'wazuh',include_runtime_input=True)['runtime_input']==raw['runtime_input']
+
+
+def test_no_secret_descriptor_keeps_original_two_capabilities(wazuh_fetched,monkeypatch):
+    wazuh_fetched['external_handler']['minimum_runtime']['required_capabilities']=sorted(ext.BASE_RUNTIME_CAPABILITIES)
+    monkeypatch.setattr(ext,'resolve_agent_identity',lambda cfg:wazuh_fetched['external_handler']['runtime_context'])
+    def run(*a,**kw):
+        assert 'runtime_input' not in kw
+        return 0,'{"status":"noop"}'
+    monkeypatch.setattr(ext,'run_custom_script_by_key',run)
+    assert ext.apply_external_service_profile(None,wazuh_fetched,component='wazuh')=={'status':'noop'}

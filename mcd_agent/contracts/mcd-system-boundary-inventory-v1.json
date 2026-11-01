@@ -76,31 +76,31 @@
       "lexical_name_callers": [
         {
           "path": "mcd_agent/cli.py",
-          "line": 3796
-        },
-        {
-          "path": "mcd_agent/cli.py",
           "line": 3750
         },
         {
-          "path": "mcd_agent/service_profiles.py",
-          "line": 88
+          "path": "mcd_agent/cli.py",
+          "line": 3796
         },
         {
           "path": "mcd_agent/service_profiles.py",
-          "line": 92
+          "line": 93
         },
         {
           "path": "mcd_agent/service_profiles.py",
-          "line": 96
+          "line": 97
         },
         {
           "path": "mcd_agent/service_profiles.py",
-          "line": 100
+          "line": 101
         },
         {
           "path": "mcd_agent/service_profiles.py",
-          "line": 195
+          "line": 105
+        },
+        {
+          "path": "mcd_agent/service_profiles.py",
+          "line": 200
         }
       ],
       "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive"
@@ -108,12 +108,12 @@
     {
       "path": "mcd_agent/service_profiles.py",
       "function": "service_profiles_apply_once",
-      "line": 169,
+      "line": 174,
       "classification": "SPLIT",
       "lexical_name_callers": [
         {
           "path": "mcd_agent/cli.py",
-          "line": 3771
+          "line": 3742
         },
         {
           "path": "mcd_agent/cli.py",
@@ -121,7 +121,7 @@
         },
         {
           "path": "mcd_agent/cli.py",
-          "line": 3742
+          "line": 3771
         },
         {
           "path": "mcd_agent/daemon.py",
@@ -302,11 +302,11 @@
       "lexical_name_callers": [
         {
           "path": "mcd_agent/cli.py",
-          "line": 3561
+          "line": 3550
         },
         {
           "path": "mcd_agent/cli.py",
-          "line": 3550
+          "line": 3561
         }
       ],
       "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive"
@@ -332,11 +332,11 @@
       "lexical_name_callers": [
         {
           "path": "mcd_agent/daemon.py",
-          "line": 15730
+          "line": 13940
         },
         {
           "path": "mcd_agent/daemon.py",
-          "line": 13940
+          "line": 15730
         }
       ],
       "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive"
@@ -362,7 +362,7 @@
       "lexical_name_callers": [
         {
           "path": "mcd_agent/custom_scripts.py",
-          "line": 503
+          "line": 533
         }
       ],
       "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive"
@@ -375,7 +375,7 @@
       "lexical_name_callers": [
         {
           "path": "mcd_agent/custom_scripts.py",
-          "line": 523
+          "line": 555
         }
       ],
       "caller_resolution": "static name matches; aliases/dynamic dispatch not exhaustive"
@@ -383,12 +383,12 @@
     {
       "path": "mcd_agent/custom_scripts.py",
       "function": "run_custom_script_by_key",
-      "line": 454,
+      "line": 481,
       "classification": "KEEP",
       "lexical_name_callers": [
         {
           "path": "mcd_agent/service_profile_external.py",
-          "line": 111
+          "line": 129
         },
         {
           "path": "mcd_agent/cli.py",
@@ -418,12 +418,12 @@
     {
       "path": "mcd_agent/service_profile_external.py",
       "function": "apply_external_service_profile",
-      "line": 34,
+      "line": 36,
       "classification": "KEEP",
       "lexical_name_callers": [
         {
           "path": "mcd_agent/service_profiles.py",
-          "line": 207
+          "line": 213
         }
       ],
       "caller_resolution": "explicit PHP/MySQL/Docker/Wazuh generic dispatch; no builtin recipe/fallback"

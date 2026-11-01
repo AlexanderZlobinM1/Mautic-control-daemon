@@ -416,18 +416,45 @@ def _run_direct(script_path: Path, args: list[str], *, live_output: bool, cwd: P
     return int(proc.returncode), out.strip()
 
 
-def _run_capture_result(script_path: Path, args: list[str], *, cwd: Path | None = None) -> tuple[int, str]:
+def _run_capture_result(script_path: Path, args: list[str], *, cwd: Path | None = None,
+                        runtime_input: dict[str, Any] | None = None) -> tuple[int, str]:
     """Reuse the existing process/terminal contract for raw JSONline artifacts."""
     from mcd_agent.commercial_self_hosted import ExternalProcessPolicy
     from mcd_agent.commercial_portal import canonical_json
+    from mcd_agent.scenario_launcher import MAX_CONTEXT_BYTES
     argv = [str(script_path.resolve()), *args]
+    framed = b""
+    private_values: list[str] = []
+    if runtime_input is not None:
+        try:
+            payload = json.dumps(runtime_input, ensure_ascii=False, sort_keys=True,
+                                 separators=(",", ":"), allow_nan=False).encode("utf-8")
+            if not isinstance(runtime_input, dict) or not 0 < len(payload) <= MAX_CONTEXT_BYTES:
+                raise ValueError()
+            if any(not isinstance(value, str) for value in runtime_input.values()):
+                raise ValueError()
+            private_values = [value for value in runtime_input.values() if value]
+            framed = struct.pack("!I", len(payload)) + payload
+        except (ValueError, TypeError, UnicodeError):
+            return 2, "custom runtime input invalid"
     # Ordinary custom direct execution has no implicit lifetime cap. Keep that
     # behavior while reusing bounded output collection and process supervision.
     try:
         policy = ExternalProcessPolicy(argv)
-        completed = policy._run_bounded(argv, b"", os.environ.copy(), cwd=cwd or Path.cwd(), unlimited=True)
+        completed = policy._run_bounded(argv, framed, os.environ.copy(), cwd=cwd or Path.cwd(), unlimited=True)
     except (ValueError, OSError, TimeoutError) as exc:
-        return 1, "custom structured execution rejected: " + str(exc)
+        return 1, "custom structured execution rejected" if runtime_input is not None else "custom structured execution rejected: " + str(exc)
+    if runtime_input is not None:
+        # The external process never streams to public logs in capture mode.
+        # Reject accidental private-value echoes before decoding public frames.
+        for value in private_values:
+            for variant in {value, value.rstrip("\n")} - {""}:
+                forms = [variant, hashlib.sha256(variant.encode()).hexdigest(),
+                         json.dumps(variant, ensure_ascii=True)[1:-1],
+                         json.dumps(variant, ensure_ascii=False)[1:-1]]
+                if any(form.encode() in stream for form in forms
+                       for stream in (completed.stdout or b"", completed.stderr or b"")):
+                    return 1, "custom private output rejected"
     try:
         wire = bytearray()
         for line in (completed.stdout or b"").splitlines():
@@ -448,7 +475,7 @@ def _run_capture_result(script_path: Path, args: list[str], *, cwd: Path | None 
             raise ValueError("custom_public_result_missing")
         return 0, json.dumps(terminal["result"], ensure_ascii=True, sort_keys=True)
     except (ValueError, UnicodeError) as exc:
-        return int(completed.returncode) or 1, "custom structured result rejected: " + str(exc)
+        return int(completed.returncode) or 1, "custom structured result rejected" if runtime_input is not None else "custom structured result rejected: " + str(exc)
 
 
 def run_custom_script_by_key(
@@ -462,7 +489,10 @@ def run_custom_script_by_key(
     fetch_only: bool = False,
     capture_result: bool = False,
     expected_entrypoint: str | None = None,
+    runtime_input: dict[str, Any] | None = None,
 ) -> tuple[int, str]:
+    if runtime_input is not None and not capture_result:
+        return 2, "custom runtime input requires synchronous result capture"
     if capture_result and (fetch_only or detach is True):
         return 2, "custom result capture requires synchronous execution without fetch-only"
     expected = str(expected_sha256 or "").strip().lower()
@@ -515,6 +545,8 @@ def run_custom_script_by_key(
     if found.get("entrypoint") is not None:
         execution_options["cwd"] = script_path.parents[len(Path(found["entrypoint"]).parts) - 1]
     if capture_result:
+        if runtime_input is not None:
+            execution_options["runtime_input"] = runtime_input
         return _run_capture_result(script_path, arg_list, **execution_options)
     if detach_effective and mode == "tmux":
         return _run_detached_tmux(config, script_path, key, arg_list, **execution_options)

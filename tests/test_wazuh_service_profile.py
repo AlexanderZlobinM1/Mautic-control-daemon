@@ -78,7 +78,7 @@ class WazuhServiceProfileTests(unittest.TestCase):
         old_fetch = service_profiles.fetch_service_profile
         old_apply = service_profiles.apply_external_service_profile
         try:
-            service_profiles.fetch_service_profile = lambda _cfg, _comp: {
+            service_profiles.fetch_service_profile = lambda _cfg, _comp, **_kwargs: {
                 "status": "ok",
                 "profile": {
                     "enabled": True,
@@ -105,7 +105,7 @@ class WazuhServiceProfileTests(unittest.TestCase):
         old_fetch = service_profiles.fetch_service_profile
         old_apply = service_profiles.apply_external_service_profile
         try:
-            service_profiles.fetch_service_profile = lambda _cfg, _comp: {
+            service_profiles.fetch_service_profile = lambda _cfg, _comp, **_kwargs: {
                 "status": "ok",
                 "profile": {
                     "enabled": True,

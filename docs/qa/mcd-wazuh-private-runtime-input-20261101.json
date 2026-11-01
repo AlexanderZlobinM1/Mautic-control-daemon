@@ -1,0 +1,43 @@
+{
+  "status": "MCD implementation and focused proof PASS; cross-owner integration pending",
+  "contract": {
+    "authenticated_response_field": "runtime_input",
+    "shape": {
+      "registration_password": "exact string; private, never archived"
+    },
+    "stdin": "uint32 big-endian byte length followed by UTF-8 JSON inner object, then EOF",
+    "max_body_bytes": 262144,
+    "producer": "deterministic compact sorted JSON, ensure_ascii=False",
+    "consumer": "ordinary valid JSON accepted; no canonical-format requirement",
+    "flag": "--runtime-input-stdin",
+    "capability": "framed-runtime-input",
+    "no_secret": "old two capabilities and no stdin read remain supported"
+  },
+  "mcd_files": [
+    "mcd_agent/custom_scripts.py",
+    "mcd_agent/service_profile_external.py",
+    "mcd_agent/service_profiles.py"
+  ],
+  "prototype_receipt_sha256": "74d99e86500fa73ee6191752f41ed6cd474d36493c661450143480632dbde43b",
+  "prototype_scope": "mechanism only; initial prototype used 64KiB and ASCII JSON, final wire uses existing 256KiB/UTF8",
+  "validation": {
+    "focused_passed": 104,
+    "full_passed_before_final_utf8_limit_alignment": 2042,
+    "full_failed": 61,
+    "full_failures_exact_baseline_ids": true,
+    "full_skipped": 57,
+    "release_regression": "PASS",
+    "exact_special_characters": "unicode quotes backslash tab newlines preserved",
+    "private_failure": "fixed public errors, known private output echoes rejected",
+    "public_fetch": "runtime_input removed by default and from apply.fetch",
+    "production_enrollment": false,
+    "host_actor": false,
+    "channel_publication": false
+  },
+  "remaining": [
+    "Portal-owned standalone private-input success/failure and no-secret regression",
+    "MCC-owned authenticated response and capability proof",
+    "MCD real pinned external artifact integrated success/failure proof",
+    "complete whole 1.7 acceptance before Publish MCD promotion"
+  ]
+}

@@ -2403,3 +2403,21 @@ TLS/private keys/token and its local credential bundle removed; port closed,
 production QA host rows zero, production APIs healthy and candidate inactive.
 The no-secret Wazuh transfer is scoped CLOSED. Nonempty legacy runtime-input
 compatibility and complete cross-component 1.7 acceptance remain release gates.
+
+Wazuh private-input compatibility uses the existing authenticated service-profile
+response.runtime_input, exactly {registration_password:string}, held only in
+memory. The external custom capture path sends the inner object over the existing
+process stdin primitive as uint32BE length plus UTF-8 JSON and EOF, bounded by the
+existing256KiB context limit. The producer emits deterministic compact JSON;
+ordinary valid JSON remains acceptable to standalone consumers. Optional
+--runtime-input-stdin and framed-runtime-input negotiate this support; existing
+no-secret two-capability descriptors remain valid. Input shape/capability/flag
+mismatches fail before artifact activation; a nonempty password in the public
+profile is rejected. Public fetch and apply.fetch omit runtime_input. Capture
+never streams raw child output; private errors use fixed messages and accidental
+known-value/normalized-value/digest echoes are rejected before public decoding.
+Only the external Wazuh script owns the unchanged child environment/authd.pass
+normalization and0600 file behavior. No new secret refs/keys/store/runner exists.
+MCD focused104checks pass; full snapshot2042pass with exact61baseline failures,
+57skip and105subtests, release-regressionPASS. Cross-owner pinned-artifact and
+standalone success/failure proof still pending; see private-runtime-input QA JSON.
