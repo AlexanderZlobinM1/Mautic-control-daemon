@@ -1,0 +1,59 @@
+{
+  "status": "SCOPED_PASS_REMAINING_CASES_PENDING",
+  "source_commit": "ebe95ad3027a8c198d3bdb869e58f85bd55285b7",
+  "runtime_archive_sha256": "3540457c623919a43203b5ae92f8a4b2c4a88163f740dea418c3f96d653576c5",
+  "runtime_manifest_sha256": "82eb5df2bd1ef506ffc6c9f4a63a9199fd3c4ede3dee28aa0b531c9d1774391a",
+  "nominal_qa_version": "1.6.48",
+  "target": "Linux x86_64 CPython3.12.3 Ubuntu24.04 glibc2.39 only",
+  "native_build_proof": {
+    "status": "PASS",
+    "receipt_sha256": "d7222d7f222e0655149b2b9125beb93ab6bda8cf42e170dd4d5a8cd1b93a5a60",
+    "old39_actual_updater_cwd": "/",
+    "old39_empty_target_before": [
+      "pip"
+    ],
+    "new_bridge_empty_target_before": [
+      "pip"
+    ],
+    "dependencies_imported": 6,
+    "phpserialize_roundtrip": true,
+    "pip_network_request_count": 0,
+    "host_source_build_count": 0,
+    "installed_resume_selection_and_negative_old_data": "PASS; no positive cron/service activation",
+    "independent_full_reset_receipt_sha256": "ed2df236b77106a603167ac3ecd591846b78ae3a49d19166a4b5893fef103758"
+  },
+  "portal_fresh_and_replay": {
+    "status": "PASS",
+    "producer": "1.4.4",
+    "producer_archive_sha256": "d4b35673f9613d154dbf36a2fa2588beb3c1b9ddec648e4e07629b3ce7292b6b",
+    "harness": "1.2.1",
+    "receipt_sha256": "4d63624b1340670a83bb217d1830d80beb7bad8bf2508c8e075a676c7f346e9f",
+    "trace_archive_sha256": "8434fef03210b5662e04179574bca18c2f0ee94f623701bae35a07f63182d913",
+    "scope": "fresh-MCD-only owned disposable clone; loopback HTTPS registration peer, not clean OS or production Portal enrollment",
+    "actual_helper_before_first_config": true,
+    "passive_business_slots": 0,
+    "replay_http_count": 0,
+    "replay_db_and_cache_bytes_mtime_mode_unchanged": true,
+    "no_bytecode_writes": true,
+    "mcc_attempts": 0,
+    "pip_network_request_count": 0,
+    "host_source_build_count": 0,
+    "full_reset": "requested after receipt extraction; pending independent check"
+  },
+  "remaining_cases": [
+    "admission_missing",
+    "admission_corrupt",
+    "verify_missing",
+    "verify_corrupt",
+    "preseed_offline_repair",
+    "helper_internal",
+    "wrong_key",
+    "wrong_identity",
+    "ordinary_populated_guarded_start",
+    "installed_updater_offline_resource_consumption",
+    "independent_final_reset"
+  ],
+  "publication": false,
+  "dev_artifact": false,
+  "whole_1_7_hold": true
+}
