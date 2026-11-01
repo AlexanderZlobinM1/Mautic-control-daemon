@@ -2523,9 +2523,9 @@ Canonical evidence: docs/qa/mcd-nginx-host-baseline-transfer-20261101.json.
 Исправленный OLD и standalone DIRECT прошли на отдельных полных сбросах QA.
 R17 source91f515ae:17 обычных CLI вызовов,5 отрицательных сценариев до процесса,
 HTTP0 (receipt4de85710). После этой приёмки sourceb45e9449 удалил48 заменённых
-определений и частные пути/генераторы/CIDR defaults. Сохранены12 неизменённых
-AST-определений: core IPv6 fact и явно pending общие Mautic vhost/delete/APT
-helpers; это не разрешение постоянно держать OS-рецепты в core.36 перенесённых
+определений и частные пути/генераторы/CIDR defaults. На этом checkpoint были сохранены12 неизменённых
+AST-определений; после принятого vhost-переноса осталось пять core/shared
+определений; это не разрешение постоянно держать OS-рецепты в core.36 перенесённых
 recipe-test definitions (37pytest cases) приняты в suite владельца Portal;
 MCD сохраняет CLI/cache/маршрутизацию, scoped delete и pending Mautic transforms.
 
@@ -2546,50 +2546,45 @@ R19 receipt0536be96 подтвердил на установленном runtime
 HTTPS200; Docker, Wazuh, /opt/mcd/src и actor-файлы отсутствуют.
 
 Текущий host-baseline scope не означает готовность всей1.7: ещё обязательны
-pending vhost/OS lifecycle, APT/security/local-mail и прочие принятые границы.
-Частичная публикация Test/Approved не выполняется. После их общей приёмки
+pending OS lifecycle, APT/security/local-mail и прочие принятые границы.
+Частичная публикация1.7 не выполняется; отдельно разрешён prerequisite
+maintenance1.6.39 с исправлением updater, без сценариев1.7. После их общей приёмки
 публикация MCD проходит через Publish MCD по штатному процессу.
 
-### Pending: существующие nginx vhost этапы migration и composer move
+### Nginx: существующие vhost этапы migration и composer move
 
-Замороженная граница следующего переноса: handoff d6856678 и supplement4950f91f
-(nginx-vhost-caller-20261101). Текущий migration._write_nginx_vhost принимает
-root/domains/php_version, требует непустые domains, применяет baseline без reload,
-проверяет текущий PHP-FPM socket, выбирает существующий актуальный SAN-сертификат,
-рендерит vhost/form location/assets/http2, пишет site и alias, выполняет nginx-t
-и reload, возвращает str(site). При ошибке записи/валидации отдельного vhost
-rollback здесь нет; это сохранённое ограничение текущего legacy. DNS не меняется.
+Замороженная граница d6856678/supplement4950f91f принята по OLD, DIRECT,
+ordinary installed CLI/actual caller aliases и очищенному R22. Внешний артефакт
+nginx-vhost e3143074 и все22 member pins проверены; baseline307 не меняется.
+Migration принимает root/domains/php_version, требует непустые domains,
+применяет baseline без reload, проверяет PHP-FPM socket и существующий текущий
+SAN-сертификат, пишет vhost/form/assets/http2/site/alias, делает nginx-t/reload.
+Публичный carrier {site:str} возвращается Python-caller как прежняя строка.
+Composer принимает source_root/nginx_root/php_version/site_available/site_enabled,
+сохраняет backup, меняет root/socket/assets/http2, пишет site/alias, выполняет
+nginx-t и reload, возвращает {active,backup}. Ненулевой nginx-t поднимает прежний
+RuntimeError; rc reload, как в legacy, не проверяется. Отдельный vhost rollback
+или ожидание HTTP-готовности не добавлены. DNS и выпуск сертификатов не входят
+в эти этапы. Окружающие stable UID, прямые Mautic-команды, очереди, leases,
+receipts, form-setting authority и lifecycle остаются MCD.
 
-Текущий composer._write_switched_vhost читает source_root/nginx_root/php_version/
-site_available/site_enabled. Он сохраняет backup, заменяет root/socket и
-совместимые assets/http2, пишет site/alias и возвращает {active,backup}. Следом
-существующий caller выполняет nginx-t: ненулевой rc поднимает RuntimeError;
-затем reload, чей rc legacy не проверяет. Внешняя граница включает весь этот
-vhost-этап. После её приёмки caller должен вызывать его один раз, сохраняя
-окружающую Mautic/cron/source-retire логику и прежний результат/ошибку.
-Внешний блок не добавляет отсутствующее восстановление vhost при exception.
-
-Выбор инстанса и его stable UID, прямые Mautic-команды, очереди, leases/receipts
-и настройки форм остаются в MCD. Текущие общие OS/vhost helpers ещё pending
-до OLD/DIRECT/ordinary CLI проверки именно этого этапа; предыдущий host-baseline
-receipt не закрывает этот перенос. Тестовый HTTP после reload проверяется
-ограниченным ожиданием реального ответа с сохранением всех попыток; сам legacy
-recipe ожидания готовности не добавляет. Первый OLD attempt457edcfc сохранил
-успешные TLS/preflight результаты и неудачную немедленную HTTP assertion;
-read-only повтор дал правильный ответ, nginx-t0 и HTTPS200. До повторного
-mutable actor требуется полный reset; этот attempt не объявляется PASS.
-
-Второй OLD attempt ed75c8e прошёл preflight/TLS/HTTP, затем nginx-t выявил
-существующий hash bucket limit на длинном QA-имени composer-vhost. Reload после
-этой ошибки не выполнялся, основной HTTPS сохранил200. Ошибка сохранена;
-положительный сценарий использует короткое QA-имя после полного reset.
-Размер hash bucket и legacy-политика при переносе не меняются.
+Actual migration callers вызывают внешний мост дважды в соответствующих
+ветках, composer — один целый внешний этап вместо прежнего дублированного
+write/test/reload. После R20 удалены12 заменённых определений, migration
+шаблон и семь перенесённых recipe-тестов; прежние private writer имена — aliases
+без встроенных тел. В nginx_baseline остаются пять core/shared определений.
+_nginx_web_root остаётся нужен прямой Mautic media логике, read-only cert
+preflight и остальные lifecycle callers ожидают собственных границ.
+Исторические неудачные OLD попытки и R21 package-preflight failure сохранены
+в evidence; они не объявляются PASS. Каждый mutable actor отделён полным reset.
 
 ### Pending: универсальные workload-профили и authority настроек
 
-MCC подтвердил22 существующие hardware recommendation записи (объект30b3b568),
-но полного опубликованного universal HOST-workload catalog пока нет. Один
-proposed farm-midi example не задаёт остальные профили. Freeze текущего MCD
+MCC подтвердил22 hardware recommendation записи (объект30b3b568) и
+опубликовал неактивный universal HOST-workload resource210ac920, catalog
+d8bcdfde/final handoffc1b49715:14 literal presets, custom operator-owned,
+11 hardware-boundary rows. Это data-only resource без entrypoint, лежащий
+в resources существующего manifest, не в исполняемых items. Freeze текущего MCD
 74df87d1 содержит13 named presets, legacy farm,31 реально назначаемое поле и
 11 унаследованных runtime default значений; это эталон для внешнего authoring,
 а не вторая authority. Custom остаётся операторскими настройками. Поля
@@ -2607,41 +2602,16 @@ ring_count/max_segment_retries/segment_priority_stale_age_sec из proposed sche
 межкомпонентная приёмка universal profiles ещё обязательна. Evidence:
 docs/qa/mcd-universal-profile-authority-transfer-20261101.json.
 
-OLD vhost OS-stage attempt3 принят PASS (receipt530342cc): empty domains и
-missing PHP socket, реальный current SAN TLS write/repeat, HTTP/docroot,
-composer available-alias и regular-enabled, затем реальная nginx-t ошибка
-без legacy vhost rollback. Проверены неизменность исходных соседей/сертов
-и HTTPS200. Полный Mautic migration/composer lifecycle этим прогоном не
-проверяется. До standalone DIRECT и обычного CLI перенесённые функции
-остаются в MCD; после OLD запрошен обязательный полный reset.
+### Consumer двух полных vhost-операций
 
-### Подготовленный consumer двух полных vhost-операций
-
-Новые входы существующего nginx-baseline CLI: migration-vhost apply и
-composer-vhost apply с явным --operation-input JSON. Общий мост принимает
-write_nginx_vhost {root,domains,php_version} либо write_switched_vhost
-{source_root,nginx_root,php_version,site_available,site_enabled}; site_enabled
-может быть None. Проверяются только согласованная форма и типы публичных
-аргументов, точные SHA и текущий контекст. Все значения поступают от caller,
-OS-путей/формул и fallback writer в мосте нет. Status/dry-run/no-reload режимы
-для этих операций отсутствуют в legacy и не добавляются.
-
-Внешний migration carrier {site:str} разворачивается в прежнюю строку для
-Python-caller; composer сохраняет {active,backup}. Failed terminal с
-{error:точный legacy RuntimeError text} поднимает ту же ошибку, без выдуманного
-rollback. CLI показывает отдельный status и прежние публичные значения.
-Standalone использует тот же manual/pinned cache без config/registration/URL.
-Изменённый root или иной набор аргументов требует своего выбранного профиля,
-а не запуска старой selection. Неизвестные поля/режимы отвергаются до процесса.
-
-126 целевых проверок потребителя/кеша/CLI прошли, включая реальный запуск
-синтетического bundle и failed terminal с прежним текстом ошибки. Это unit
-приёмка механизма; замороженный внешний артефакт, DIRECT и installed CLI ещё
-обязательны. До них старые vhost callers и их source definitions не удаляются.
-
-Полная регрессия подготовленного vhost consumer:2057PASS, те же61 baseline
-failure IDs,57skip/105subtests. Новых падений нет. Это source checkpoint
-до нативной приёмки внешнего аналога и переключения старых callers.
+nginx-baseline migration-vhost apply и composer-vhost apply принимают явный
+--operation-input JSON. Мост проверяет согласованные типы/форму, точные SHA
+и текущий контекст, не содержит OS-путей/формул/fallback writer. site_enabled
+может быть None; несуществующие в legacy status/dry-run/no-reload режимы
+не добавляются. Failed {error:legacy text} сохраняет прежнее исключение.
+Standalone использует тот же pinned manual cache без config/registration/URL.
+Изменённые аргументы требуют соответствующей selection; unknown fields и
+неподдерживаемые режимы отвергаются до процесса.
 
 ### Восстановление выбранного артефакта при доступном транспорте
 
@@ -2655,32 +2625,14 @@ recipe запускается offline_only. Полный совпавший ке
 типизированному отказу до процесса. Две проверки missing/corrupt подтверждают
 один exact artifact GET, затем0GET при повторе и сохранение local selection.
 
-Standalone DIRECT vhost принят PASS: receipt0e84bfbf, фактический core-факт
-b7e2ac21, все22 member pins e3143074 и неизменённый baseline307 проверены.
-Все восемь публичных business результатов равны OLD, включая настоящий
-nginx-t failure без vhost rollback; raw argv/stdout/stderr/terminal сохранены.
-После DIRECT запрошен полный reset. Текущий consumer checkpoint с exact
-artifact repair:128focusedPASS/2059fullPASS, те же61baseline IDs/57skip/105subtests.
-Обычный installed CLI и реальные caller aliases остаются следующим этапом.
-
-После DIRECT actual migration callers направлены в _external_write_nginx_vhost;
-composer caller использует _external_write_switched_vhost один раз вместо
-старых write→nginx-t→reload строк. Целый внешний этап сохраняет их порядок и
-ошибки; окружающая Mautic/cron логика не меняется. Старые writer definitions
-пока остаются только эталоном до R20 installed CLI/caller parity, без fallback
-из нового пути. После приёмки они и ненужные shared helpers удаляются.
-
-R20 ordinary installed CLI/caller aliases принят PASS (receipt85164bde):
-восемь OLD business результатов равны DIRECT, шесть отрицательных сценариев,
-HTTP0 и девять реальных external child PID. После этого удалены12 доказанно
-заменённых определений, migration template и семь перенесённых recipe-тестов.
-Прежние private имена writer сохранены как aliases внешнего моста, без
-встроенных тел. В nginx_baseline остаются пять core/shared определений.
-Все остальные определения в изменённых модулях сохранили AST.
-_nginx_web_root нужен прямой Mautic media логике; cert preflight и остальные
-lifecycle callers сохраняются для своих отдельных границ.150 focused PASS;
-очищенный R21 ещё требует installed native proof после полного reset.
-
+R22 очищенный installed runtime принят PASS (ef44e478, source proof f3168f40):
+восемь результатов равны OLD/DIRECT, шесть отрицательных сценариев, HTTP0,
+девять actual child PID, реальные caller aliases и отсутствие удалённого
+шаблона. Соседи/сертификаты bytes/mtime сохранены, HTTPS200. Native scope —
+именно vhost OS stages, не полный Mautic migration/composer lifecycle.
+Финальный canonical full reset и независимый read-only proof459d6def приняты:
+новый boot, MCD inactive, DB/FPM/nginx active, healthOK, HTTPS200, actor/fault,
+Docker/Wazuh/src отсутствуют. Evidence docs/qa/mcd-nginx-vhost-transfer-20261101.json.
 
 ### Runtime wheel ownership and ordinary update migration
 
@@ -2701,6 +2653,6 @@ maintenance-релиз не снимает global1.7 HOLD.
 
 R21 nginx actor не стартовал: preflight нашёл obsolete template вне нового
 RECORD. Ручной зачистки не было, выполнен полный reset. Native package-phase
-с исправленным lifecycle принят отдельно (b9675e87); R22 проверяет очищенный
-installed CLI с прежним строгим template-absence gate. Текущая полная регрессия:
+с исправленным lifecycle принят отдельно (b9675e87); R22 прошёл очищенный
+installed CLI с прежним строгим template-absence gate и финальный reset. Текущая полная регрессия:
 2067PASS/61 прежних failure IDs/57skip/105subtests.

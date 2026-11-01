@@ -642,7 +642,7 @@
     },
     {
       "component": "nginx_existing_vhost_os_stages",
-      "status": "OLD/DIRECT/R20 accepted; cleaned source committed; R21 native proof pending",
+      "status": "scoped transfer CLOSED: cleaned R22 and independent final reset PASS",
       "evidence": "docs/qa/mcd-nginx-vhost-transfer-20261101.json",
       "external_archive_sha256": "e3143074242c4de4cc5a0f672db6e588e9d836c337e8c0b3c7f52376e81002aa",
       "ordinary_cli_caller_receipt_sha256": "85164bde39473542e0c9a03143a6b64f25f4ce439d335c32f848e57284c53514",
@@ -675,7 +675,9 @@
         "instance_migrate": "_nginx_web_root still serves actual Mautic media paths; existing certificate read-only preflight remains; lifecycle pending",
         "nginx_baseline": "five core/read-only/transaction definitions only; instance-delete and APT presence helper pending",
         "mautic_composer_move": "existing source selection/read-only vhost discovery and surrounding Mautic/cron lifecycle retained"
-      }
+      },
+      "cleaned_native_receipt_sha256": "ef44e478ff3b6c3689e81ba01f0962e1f6d06ce217ea8140c441db4e169c3d49",
+      "final_reset_receipt_sha256": "459d6def9cb9aa1e5d7196b65fab7ae62b91322bf8edd88c1532a991f08e0918"
     }
   ]
 }

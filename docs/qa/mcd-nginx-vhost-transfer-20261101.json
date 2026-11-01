@@ -1,5 +1,5 @@
 {
-  "status": "OLD/DIRECT/R20 ordinary CLI and caller parity PASS; cleaned R21 proof pending",
+  "status": "scoped vhost transfer CLOSED: OLD/DIRECT/R20/cleaned R22 and independent final reset PASS; whole1.7 HOLD",
   "owner_source_commit": "3adea1f3be62e7ba38a547f6b93400a408076762",
   "owner_freeze_sha256": "d68566787dea9c3908a9fd3463df46acec2c6faf6636f6b3d9b63a88c2f16d5b",
   "caller_run_supplement_sha256": "4950f91f90a0daecee1675e73c1895cc6f0c8ee93403e57d0ca5b454ba5119ce",
@@ -220,9 +220,24 @@
     "feature_full_failure_ids_exact_baseline": true
   },
   "R22_native": {
-    "status": "RUNNING",
+    "status": "PASS",
     "strict_installed_template_absent_preflight": "PASS",
     "runtime_archive_sha256": "8bc8d5980b84dbd6277797941e944c0b25b70817c99619b2d98a59d67940ec44",
-    "installer": "transported corrected bootstrap package install; no manual package deletion"
+    "installer": "transported corrected bootstrap package install; no manual package deletion",
+    "receipt_sha256": "ef44e478ff3b6c3689e81ba01f0962e1f6d06ce217ea8140c441db4e169c3d49",
+    "installed_source_sha256": "f3168f406ee423ec07c5f48ebd66da0d0ecc62289eb9ffd4c0952776b5ea3903",
+    "positive_cases": 8,
+    "negative_cases": 6,
+    "artifact_HTTP": 0,
+    "actual_child_processes": 9,
+    "business_results_equal_OLD_and_DIRECT": true,
+    "neighbors_certificates_bytes_mtime_unchanged": true,
+    "full_Mautic_lifecycle_claimed": false,
+    "final_reset": {
+      "status": "PASS",
+      "receipt_sha256": "459d6def9cb9aa1e5d7196b65fab7ae62b91322bf8edd88c1532a991f08e0918",
+      "independent_read_only": true,
+      "mutable_actor_after_checkpoint": false
+    }
   }
 }
