@@ -1,0 +1,58 @@
+{
+  "status": "APPROVED",
+  "scope": "narrow prerequisite maintenance 1.6.39; global1.7 HOLD unchanged",
+  "version": "1.6.39",
+  "canonical_source": "d0c52a4982788c1ebdcdf490894119ddbe4960b2",
+  "channels": {
+    "approved": "1.6.39",
+    "latest": "1.6.39",
+    "test": "1.6.39"
+  },
+  "catalog_sha256": "cbe508de0484812524d0f0e2d295e0a4614507110e04af1f58661c2f72d76464",
+  "runtime_archive_sha256": "b65e87a1749da210ff43448db2dbe252db2fd3ffab3db7838ab48a6d8eb0c691",
+  "runtime_manifest_sha256": "5778dd4a784ccff197fe8bc980d8bd9f08109f07f1fd89af327ba1f693b7b4e0",
+  "publication_receipt_sha256": "bd23e0cf82349aca87c9ed32ad171d0751319ecdfd02736fa436ee6ebf9d7aae",
+  "ordinary_chain": {
+    "status": "PASS",
+    "receipt_sha256": "58785e271737f67f4d865653a036fb7e6061a843302279bf894cfadbf7d965ee",
+    "scope": "actual installed apply_update with plans selected from pinned published HTTPS Test catalog; no update/check enrollment/session claim",
+    "actual_published_initial_version": "1.6.38",
+    "initial_wheel_sha256": "9ef568505bffa89cc944a0baee359c4756611d78d6e512651f825f56a2aaf48a",
+    "hops": [
+      "published38 to Test39 via installed38 updater, actual systemd restart",
+      "installed39 to unlisted higher QA identity40, actual systemd restart, runtime-only and retired resource absence",
+      "repeat40 no-op, same PID",
+      "unlisted fault41/import42 post-pip verification failure, ordinary rollback40, same PID"
+    ],
+    "higher_versions_are_QA_only": true,
+    "historical38_transient_legacy_artifact_cache_recorded": true,
+    "configuration_bytes_mtime_and_foreign_file_preserved": true,
+    "bridge_invocation": false,
+    "source_import_install_version_fallback": false,
+    "manual_rm": false
+  },
+  "failed_harness_attempts": [
+    {
+      "receipt_sha256": "5ca7f3d665d26885f8f2997e128cab6bf58de87f63306d15a7b41765a7f44101",
+      "reason": "generic bootstrap HTTP identity rejected before initial package install",
+      "reset_after": true
+    },
+    {
+      "receipt_sha256": "446f06d7885f6556a71c94748f0d399cce0f12acc88e2892e7c1d727cdc1f368",
+      "reason": "QA driver misspelled configuration API keyword before ordinary updater invocation",
+      "reset_after": true
+    }
+  ],
+  "final_reset": {
+    "status": "PASS",
+    "receipt_sha256": "98a02fd7ba45ac1ba4edb07381bd37ab831f488435d26985c1ba37e6ea570b8f",
+    "independent_read_only": true,
+    "new_boot": true,
+    "mutable_actor_after_reset": false,
+    "health_and_HTTPS": "OK and 200 verifiedTLS",
+    "actor_source_Docker_Wazuh_absent": true
+  },
+  "maintenance_worktree_freed": true,
+  "foreign_worktree_2600_touched": false,
+  "nginx_and_universal_feature_changes_in_maintenance": false
+}

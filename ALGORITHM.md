@@ -2671,3 +2671,14 @@ RECORD. Ручной зачистки не было, выполнен полны
 с исправленным lifecycle принят отдельно (b9675e87); R22 прошёл очищенный
 installed CLI с прежним строгим template-absence gate и финальный reset. Текущая полная регрессия:
 2067PASS/61 прежних failure IDs/57skip/105subtests.
+
+Maintenance1.6.39 выпущен штатным Publish MCD в Test→Approved/latest
+после actual installed38→Test39→unlisted cleaned40 ordinary update/restart,
+повторного no-op и real post-pip verification failure41/import42→rollback40
+(receipt58785e27). Прямые apply plans выбраны из pinned HTTPS Test catalog;
+update/check enrollment/session roundtrip не заявляется. Две неудачные попытки
+QA harness сохранены отдельно и отделены полным reset. Финальный full reset и
+independent read-only proof98a02fd7 приняты. Настройки bytes/mtime и foreign
+package file сохранены; никакого bridge substitution/manualrm/fleet prerequisite.
+Это prerequisite updater maintenance, не выпуск nginx/universal/части1.7.
+Evidence docs/qa/mcd-record-maintenance-release-20261101.json.
