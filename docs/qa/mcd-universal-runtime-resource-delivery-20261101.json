@@ -109,7 +109,12 @@
     "source_and_retired_template_absent": true,
     "config_bytes_mtime_and_foreign_data_preserved": true,
     "public_channels_changed": false,
-    "full_reset": "requested; independent final reset proof pending"
+    "full_reset": {
+      "status": "PASS",
+      "independently_verified": true,
+      "receipt_sha256": "bc9171d4366b12c043ad27e44c01b337fcc25568742766deff8d9321c5801c7a",
+      "boot_id": "a2376973-e964-4836-90d1-7f840db04a38"
+    }
   },
   "latest_full_regression": {
     "passed": 2100,

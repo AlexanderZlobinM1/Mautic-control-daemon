@@ -2738,6 +2738,8 @@ MCC-owner handler exports:12 доставленных настроек восс�
 rejected, более новая локальная timestamp сохраняет приоритет. Это не live
 MCC session/enrollment proof. Config bytes/mtime и foreign file сохранены;
 src и retired template отсутствуют. QA44 не публичный выпуск;39 unchanged.
-Полный reset запрошен; независимая проверка reset ещё требуется. Full suite:
+Полный canonical reset выполнен Infra и независимо проверен read-only:
+новый boot, MCD inactive, DB/FPM/nginx active, health ok, HTTPS200, src/Wazuh
+absent. Reset receipt SHA bc9171d4366b12c043ad27e44c01b337fcc25568742766deff8d9321c5801c7a. Full suite:
 2100 PASS,61 строго прежних baseline failures,57 skip,105 subtests PASS.
 Legacy cleanup/cleaned native и full Portal fresh gate ещё pending;1.7 HOLD.
