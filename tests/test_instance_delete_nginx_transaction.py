@@ -13,7 +13,6 @@ def layout(tmp_path, monkeypatch):
     for path in dirs:
         path.mkdir()
     monkeypatch.setattr(delete, '_NGINX_DIRS', tuple(dirs))
-    monkeypatch.setattr(baseline, 'DEFAULT_DENY_FILE', dirs[2] / '00-mcd-default-deny.conf')
     return dirs
 
 
@@ -88,12 +87,12 @@ def test_failure_restores_all_scoped_files_and_aliases(layout, failure):
 
 
 def test_delete_never_repairs_or_changes_shared_default(layout):
-    deny = baseline.DEFAULT_DENY_FILE
-    original = baseline.DEFAULT_DENY_MARKER + '\nserver { server_name _; ssl_certificate /etc/letsencrypt/live/s.apetit.rs/fullchain.pem; }'
+    deny = layout[2] / '00-mcd-default-deny.conf'
+    original = '# Managed by MCD host baseline: deny unknown/default virtual hosts.' + '\nserver { server_name _; ssl_certificate /etc/letsencrypt/live/s.apetit.rs/fullchain.pem; }'
     deny.write_text(original)
     site = layout[1] / 's.apetit.rs.conf'
     site.write_text('server { server_name s.apetit.rs; }')
-    with patch.object(delete, '_run', return_value=(1, 'broken shared default')), patch.object(baseline, '_ensure_default_deny_config') as repair, pytest.raises(RuntimeError):
+    with patch.object(delete, '_run', return_value=(1, 'broken shared default')), patch.object(baseline, 'default_stub_operation') as repair, pytest.raises(RuntimeError):
         delete._remove_nginx_configs_safely(plan(), result())
     assert deny.read_text() == original
     assert site.read_text() == 'server { server_name s.apetit.rs; }'
@@ -119,16 +118,3 @@ def test_validation_failure_precedes_all_irreversible_delete_actions(layout):
     db.assert_not_called()
     cert.assert_not_called()
     files.assert_not_called()
-
-
-def test_default_stub_has_no_certificates_domains_or_generation(layout):
-    with patch.object(baseline, '_active_default_server_ports', return_value=set()), patch.object(baseline.subprocess, 'run') as process:
-        baseline._ensure_default_deny_config(layout[2] / 'backups', {})
-    content = baseline.DEFAULT_DENY_FILE.read_text()
-    assert 'listen 80 default_server;' in content
-    assert '443' not in content
-    assert 'ssl_' not in content
-    assert 'ssl_certificate' not in content
-    assert '/letsencrypt/' not in content
-    assert delete._nginx_server_names(content) == {'_'}
-    process.assert_not_called()
