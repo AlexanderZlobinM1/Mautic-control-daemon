@@ -11,8 +11,10 @@ Approved identifies accepted runtime releases. Test selects the candidate under
 release validation. Dev is a separate development channel for the 1.7 line,
 using the same catalog/channel machinery, never a second release registry.
 
-An empty Dev channel has no selected release. Register the empty channel using
-the representation agreed with MCC's existing consumer; never invent a version,
+An empty Dev channel has no selected release. The agreed existing-catalog
+representation is `channels.dev: null` (MCC 1.2.300 contract). API/CLI reject host
+assignment, UI shows Dev (empty), and agents receive no target. A future pointer
+requires an explicitly accepted build flagged `dev`. Never invent a version,
 publish an unlisted QA fixture as a release, or point Dev at Approved as a
 placeholder. Unlisted R31 and other nominal 1.6.x QA fixtures are not Dev releases.
 
