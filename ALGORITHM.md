@@ -2606,3 +2606,11 @@ ring_count/max_segment_retries/segment_priority_stale_age_sec из proposed sche
 отличается от reset. Восемь текущих MCD-проверок этих правил прошли, live
 межкомпонентная приёмка universal profiles ещё обязательна. Evidence:
 docs/qa/mcd-universal-profile-authority-transfer-20261101.json.
+
+OLD vhost OS-stage attempt3 принят PASS (receipt530342cc): empty domains и
+missing PHP socket, реальный current SAN TLS write/repeat, HTTP/docroot,
+composer available-alias и regular-enabled, затем реальная nginx-t ошибка
+без legacy vhost rollback. Проверены неизменность исходных соседей/сертов
+и HTTPS200. Полный Mautic migration/composer lifecycle этим прогоном не
+проверяется. До standalone DIRECT и обычного CLI перенесённые функции
+остаются в MCD; после OLD запрошен обязательный полный reset.

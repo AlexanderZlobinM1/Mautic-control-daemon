@@ -1,5 +1,5 @@
 {
-  "status": "pending OLD repeat and external authoring; no source deletion or release acceptance",
+  "status": "OLD scoped vhost OS-stage native PASS; external authoring/direct/CLI/cleanup pending",
   "owner_source_commit": "3adea1f3be62e7ba38a547f6b93400a408076762",
   "owner_freeze_sha256": "d68566787dea9c3908a9fd3463df46acec2c6faf6636f6b3d9b63a88c2f16d5b",
   "caller_run_supplement_sha256": "4950f91f90a0daecee1675e73c1895cc6f0c8ee93403e57d0ca5b454ba5119ce",
@@ -48,5 +48,26 @@
     "recipe_fix": false,
     "next_positive_fixtures": "shorter cmp-a/cmp-r names; same source operation",
     "reset": "full reset requested; no manual file cleanup"
+  },
+  "OLD_native": {
+    "status": "PASS",
+    "receipt_sha256": "530342cc73023ba44bd88bb38e3491080db34cfee3c8c4ee3f578012bfb54070",
+    "source_proof_sha256": "5bf95da58ad2c8d0a7160174184687130711904f2047c829a50688643b07122b",
+    "cases": [
+      "preflight_empty_domains",
+      "preflight_missing_php_socket",
+      "migration_existing_tls",
+      "migration_existing_tls_repeat",
+      "migration_http_docroot",
+      "composer_available_alias",
+      "composer_regular_enabled",
+      "composer_validation_failure"
+    ],
+    "original_neighbors_bytes_mtime_unchanged": true,
+    "certificate_bytes_mtime_unchanged": true,
+    "canonical_HTTPS": "200 verifiedTLS",
+    "full_reset_requested": true,
+    "full_Mautic_migration_claimed": false,
+    "public_fixture_sha256": "509f9affa06d39c8e79a4d3a45db61bc18b292002abb8cd874a38621c871207f"
   }
 }
