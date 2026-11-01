@@ -2271,3 +2271,15 @@ the earlier reference-retention checkpoint. Two transferred writer tests were
 retired; owner pure tests preserve their invariants. Generic dispatcher tests
 prove success/failure/raw-result/no-fallback behavior; daemon exclusion and CLI
 fetch compatibility remain. Cleaned R12 native proof and final reset pending.
+
+
+Cleaned Docker R12 attempt1 is NOT accepted: fetch/dry-run passed but apt-get
+update remained in select wait until the unchanged 1800-second command deadline
+(checkpoint-to-failure1803.19s), yielding CLI1 and failed/external_install_failed
+terminal without fake rollback. Docker remained absent and existing services
+healthy. Bounded repository probes passed; cause of the APT wait is unknown.
+The runner/decoder/CLI module hashes equal the successful R11 versions.
+Failure receipt290da381a54e8a570cf4a3ec0624f490332403cc0eaf0ba8ccf110d197508602
+is retained alongside diagnostic619fdf3c…; no algorithm/policy/repository change
+was made. Full reset and a separately recorded same-bytes fresh proof are
+pending; this failure is not relabeled as success or proven network outage.
