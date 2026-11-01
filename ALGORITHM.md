@@ -2296,3 +2296,20 @@ its dictionaries have no per-run timestamp; current producer proof is separate.
 First failed attempt290da381… remains NOT_ACCEPTED, with unknown APT wait cause;
 a successful fresh run does not establish network outage or erase that failure.
 Final full reset and independent clean-baseline verification remain pending.
+
+
+Docker final canonical reset is independently verified: Docker executable and
+package absent, all QA actor paths and source checkout absent, MCD inactive,
+DB/FPM/nginx active and HTTPS200/TLS0. Receipt SHA256
+3868d9f1106a1668c79972c470d3861027328912560c691ddf8e25539add03d3.
+The scoped Docker recipe transfer is closed; first failed R12 attempt remains
+recorded with unknown APT wait cause. Local owned temporary credentials were
+removed and MCC server QA cleanup requested after CLEANUP READY. Remaining
+system recipes and complete1.7 Test/Approved publication remain pending.
+
+
+MCC confirmed Docker QA service/unit, isolated SQLite/catalog/publish tree,
+TLS/private credentials removed and port18444 closed; evidence commitc834abf8.
+Production APIs are healthy and the exact803d/4885 catalog row remains
+candidate/active=false. Local owned QA credential bundle is removed.
+This closes scoped Docker cleanup; complete1.7 activation remains held.

@@ -1,5 +1,5 @@
 {
-  "status": "SCOPED-DOCKER-NATIVE-CLEANUP-PASS; final full reset and independent verification pending",
+  "status": "SCOPED-DOCKER-TRANSFER-PASS; final reset and QA cleanup verified; complete 1.7 pending",
   "scope": "explicit optional Docker runtime installation only; no Mautic Docker engine/capability/preflight changes",
   "source_reference": "19c640e74caa2c92e60e2ee87454d682525b23eb",
   "closure_sha256": "633b281270212f811d2109ea1ff09ec00baca31b089b3c3dff493a5fc3f6cea1",
@@ -103,7 +103,7 @@
       "apply_docker_profile"
     ],
     "retired_transferred_tests": 2,
-    "status": "source and cleaned R12 native verified; final reset pending",
+    "status": "source-and-native-cleanup-verified-final-reset-clean",
     "native_evidence": "docs/qa/mcd-docker-runtime-native-20261101.json",
     "external_archive_sha256": "803dcb3102a8eeb58f96c2b949215297edd9c74f7e96c9e7e95bbad97dc41176",
     "daemon_installation": false,
@@ -172,5 +172,27 @@
     "canonical_release": false,
     "channel_publication": false,
     "source_commit": "cd4903ff2512664c8706adbe54c3e41c55efa735"
+  },
+  "final_reset": {
+    "status": "PASS",
+    "path": "/Users/azlobin/.codex/admin/host-diagnostics/mcd-docker-runtime-native-20261101/final-reset-independent.json",
+    "sha256": "3868d9f1106a1668c79972c470d3861027328912560c691ddf8e25539add03d3",
+    "docker_command_and_package_absent": true,
+    "actor_paths_absent": true,
+    "source_checkout_absent": true,
+    "mcd_inactive": true,
+    "other_services_active": true,
+    "https": 200,
+    "tls_verify": 0,
+    "canonical_owner_full_reset_confirmed": true
+  },
+  "ownership_contract_tests_passed": 3,
+  "temporary_qa_cleanup": {
+    "local_owned_credential_bundle_removed": true,
+    "mcc_server_cleanup": "MCC owner confirmed service/unit/tree/TLS/token removed; port18444 closed",
+    "production_activation": "HOLD",
+    "mcc_evidence_commit": "c834abf8",
+    "production_apis": "healthy",
+    "production_manifest": "exact803d/4885 candidate active=false"
   }
 }
