@@ -608,6 +608,24 @@
       "removed_count": 48,
       "retained_shared_pending_or_core": [
         "_Snapshot",
+        "_snapshot",
+        "_restore_snapshots",
+        "_ipv6_listen_forbidden",
+        "cloudflare_real_ip_profile_present"
+      ],
+      "retired_transferred_tests": 36,
+      "native_gate_receipt_sha256": "4de857105280413eb4c84e87912604410dd39a911bb7800cd9c4e8701f1bd765",
+      "cleaned_native_receipt_sha256": "fad3b5d42f7cf39f72f0ce576ae201f55adb1870439583c8b466b3df725c27d3",
+      "cache_retention_receipt_sha256": "0536be967d1239a4bcc59522ce06b179e2668510211352d4e00ad75042680472",
+      "final_reset": {
+        "status": "PASS",
+        "receipt_sha256": "51615d3450ad537028456bae569e8af3be66d5bee44847f48fa845682c234a62",
+        "ssh_port": 60587,
+        "mutable_actor_after_checkpoint": false,
+        "independent_read_only_verification": true
+      },
+      "retained_at_host_baseline_checkpoint": [
+        "_Snapshot",
         "_find_location_block_end",
         "_ipv6_listen_forbidden",
         "_mautic_public_app_asset_locations",
@@ -620,16 +638,43 @@
         "ensure_mautic_public_app_asset_locations",
         "normalize_legacy_http2_listen"
       ],
-      "retired_transferred_tests": 36,
-      "native_gate_receipt_sha256": "4de857105280413eb4c84e87912604410dd39a911bb7800cd9c4e8701f1bd765",
-      "cleaned_native_receipt_sha256": "fad3b5d42f7cf39f72f0ce576ae201f55adb1870439583c8b466b3df725c27d3",
-      "cache_retention_receipt_sha256": "0536be967d1239a4bcc59522ce06b179e2668510211352d4e00ad75042680472",
-      "final_reset": {
-        "status": "PASS",
-        "receipt_sha256": "51615d3450ad537028456bae569e8af3be66d5bee44847f48fa845682c234a62",
-        "ssh_port": 60587,
-        "mutable_actor_after_checkpoint": false,
-        "independent_read_only_verification": true
+      "subsequent_vhost_transfer": "seven previously pending shared transforms removed after R20 receipt85164bde; see separate vhost stage evidence"
+    },
+    {
+      "component": "nginx_existing_vhost_os_stages",
+      "status": "OLD/DIRECT/R20 accepted; cleaned source committed; R21 native proof pending",
+      "evidence": "docs/qa/mcd-nginx-vhost-transfer-20261101.json",
+      "external_archive_sha256": "e3143074242c4de4cc5a0f672db6e588e9d836c337e8c0b3c7f52376e81002aa",
+      "ordinary_cli_caller_receipt_sha256": "85164bde39473542e0c9a03143a6b64f25f4ce439d335c32f848e57284c53514",
+      "native_gate_receipt_sha256": "85164bde39473542e0c9a03143a6b64f25f4ce439d335c32f848e57284c53514",
+      "removed_definitions": {
+        "mcd_agent/instance_migrate.py": [
+          "_detect_php_version",
+          "_ensure_nginx_sites_layout",
+          "_php_fpm_socket",
+          "_write_nginx_vhost"
+        ],
+        "mcd_agent/mautic_composer_move.py": [
+          "_write_switched_vhost"
+        ],
+        "mcd_agent/nginx_baseline.py": [
+          "_find_location_block_end",
+          "_mautic_public_app_asset_locations",
+          "_nginx_supports_http2_directive",
+          "_nginx_version_tuple",
+          "_normalize_server_blocks",
+          "ensure_mautic_public_app_asset_locations",
+          "normalize_legacy_http2_listen"
+        ]
+      },
+      "retained_definition_AST_unchanged": true,
+      "removed_template": "mcd_agent/templates/nginx/instance_migrate_vhost.conf",
+      "retired_transferred_recipe_tests": 7,
+      "removed_definition_count": 12,
+      "retained_shared_pending": {
+        "instance_migrate": "_nginx_web_root still serves actual Mautic media paths; existing certificate read-only preflight remains; lifecycle pending",
+        "nginx_baseline": "five core/read-only/transaction definitions only; instance-delete and APT presence helper pending",
+        "mautic_composer_move": "existing source selection/read-only vhost discovery and surrounding Mautic/cron lifecycle retained"
       }
     }
   ]
