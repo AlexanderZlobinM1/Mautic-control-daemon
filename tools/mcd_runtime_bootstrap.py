@@ -200,6 +200,36 @@ def _universal_verify_archive(raw: bytes, selected: dict[str, Any]) -> dict[str,
 
 
 
+def _runtime_dependency_wheelhouse(stage: Path, manifest: dict[str, Any]) -> Path | None:
+    """Admit an optional complete flat wheelhouse through the existing payload pins."""
+    declared = manifest.get("dependency_wheelhouse")
+    root = stage / "wheelhouse"
+    payload = manifest.get("payload_sha256", {})
+    if declared is None:
+        if root.exists() or root.is_symlink() or any(str(name).startswith("wheelhouse/") for name in payload):
+            raise RuntimeError("runtime dependency wheelhouse is undeclared")
+        return None
+    if declared != "wheelhouse" or root.is_symlink() or not root.is_dir() or not isinstance(payload, dict):
+        raise RuntimeError("runtime dependency wheelhouse is invalid")
+    entries = sorted(root.iterdir())
+    if not entries:
+        raise RuntimeError("runtime dependency wheelhouse is empty")
+    names = set()
+    for path in entries:
+        if (path.is_symlink() or not path.is_file() or path.suffix != ".whl"
+                or re.fullmatch(r"[A-Za-z0-9_.+-]+\.whl", path.name) is None):
+            raise RuntimeError("runtime dependency wheelhouse contains a non-wheel")
+        name = "wheelhouse/" + path.name
+        expected = payload.get(name)
+        if not isinstance(expected, str) or hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+            raise RuntimeError("runtime dependency wheelhouse checksum mismatch")
+        names.add(name)
+    listed = {name for name in payload if str(name).startswith("wheelhouse/")}
+    if listed != names:
+        raise RuntimeError("runtime dependency wheelhouse closure mismatch")
+    return root
+
+
 def _validate_manifest(stage: Path) -> dict[str, Any]:
     manifest_path = stage / MANIFEST_NAME
     try:
@@ -245,6 +275,7 @@ def _validate_manifest(stage: Path) -> dict[str, Any]:
         if (stage / forbidden).exists():
             raise BridgeError(f"runtime-only payload contains forbidden material: {forbidden}")
 
+    _runtime_dependency_wheelhouse(stage, raw)
     wheel_path = _safe_relative(stage, wheel_name)
     requirements_path = _safe_relative(stage, requirements_name)
     if not wheel_path.is_file() or not requirements_path.is_file():
@@ -471,14 +502,18 @@ def _restore_legacy_runtime_package(install_dir: Path, snapshot: Path) -> None:
 
 def _install_runtime(install_dir: Path, stage: Path, manifest: dict[str, Any], *,
                      custom_cache_dir: Path | None = None) -> dict[str, str]:
-    if manifest.get("universal_workload_resource_ref") is not None:
+    if manifest.get("universal_workload_resource_ref") is not None or manifest.get("dependency_wheelhouse") is not None:
         _validate_manifest(stage)
+    if manifest.get("universal_workload_resource_ref") is not None:
         if custom_cache_dir is None:
             raise BridgeError("selected universal resource requires explicit custom cache directory")
     python = _venv_python(install_dir)
     requirements = stage / str(manifest["requirements"])
     wheel = stage / str(manifest["wheel"])
     metadata_name = _wheel_distribution_metadata_name(wheel)
+    wheelhouse = _runtime_dependency_wheelhouse(stage, manifest)
+    dependency_options = (["--no-index", "--find-links", str(wheelhouse), "--only-binary=:all:"]
+                          if wheelhouse is not None else [])
     _run([str(python), "-m", "pip", "--version"])
     _run(
         [
@@ -488,6 +523,7 @@ def _install_runtime(install_dir: Path, stage: Path, manifest: dict[str, Any], *
             "install",
             "--disable-pip-version-check",
             "--no-input",
+            *dependency_options,
             "-r",
             str(requirements),
         ],

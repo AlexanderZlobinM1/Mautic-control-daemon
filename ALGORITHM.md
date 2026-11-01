@@ -2827,3 +2827,30 @@ Clone является fresh-MCD-only, НЕcleanOS; hostQA /var/www populated. S
 должен использовать ordinarypopulatedview/passive0businessslots, preserving
 protectedneighbors и0MCC attempts; namespaceempty не подменяет этот proof.
 Текущие frozenPortalactors остаются R29/data210, не newDATA1.0.1.1.7HOLD.
+
+Ready dependency delivery contract checkpoint: Portal1.4.2/R29actualattempt2
+PIP_LOG подтвердил phpserialize>=1.3 sources skipped under --only-binary;
+preseed0/registration0, receipt5cd42cb5/diagnosticsdcd7b853 сохранены.
+Глобальногоразрешения hostsourcebuild/dependencydrop/preinstalledfakefresh
+не делаем. На стадииразработки подготовлена полная Linuxx86_64CPython3.12
+wheelclosure из6wheels (phpserialize readywheel включён), exactinputreceipt
+ca655bf9; это ещё не nativefresh/offline acceptance.
+
+Existing runtime manifest v1 получает optional dependency_wheelhouse=wheelhouse,
+всеflatregularwhl входят в прежний payload_sha256. Agent/standalonebridge
+проверяют directory closure/symlinks/digests до pip. Ownerbuilderoptional
+--dependency-wheelhouse copiesexplicitpreparedfiles; canonicalmaingitgate
+НЕменялся. NEWpayloadrequirements добавляет стандартныеpipoptions no-index/
+find-links ./wheelhouse/only-binary, constraintsunchanged. Так старый39client
+с прежним -r сможет употребить readyclosure без newparser/hostsourcebuild;
+проверка actualold39 code/cwd=/ с emptytargetvenv ещё требуется. Newbridge
+передаёт admittedabsolute wheelhousedir и those samepipflags. Никакого нового
+resolver/registry/security/key/wireengine нет. Source2158PASS/61exactbaseline
+failures/57skip/105subtests;26wheelhousecases inclcanonicalbuilderflag и
+requiredrelease-regression PASS.
+
+Nextfullfresh — явноНОВЫЙtargetR31 latestsource+DATA1.0.1b9/a76 и frozen
+Portalproducer1.4.3 7aca8216, после build-stage targetemptyvenvofflineproof.
+Старые39/R29/210/f799 bytes immutable; oldfailedattempts не переименованыPASS.
+Actualtargetidentity Linuxx86_64CPython3.12.3 Ubuntu24.04 glibc2.39 фиксируется
+в prepared/build proofreceipt; инаяархитектура не заявляется.1.7HOLD.

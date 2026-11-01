@@ -1,0 +1,112 @@
+{
+  "schema": "mcd-ready-dependency-wheelhouse-owner-contract-v1",
+  "status": "source/reader/builder regression complete; exact target offline fresh-venv and native proof pending",
+  "manifest_schema": "existing mcd-runtime-package-v1",
+  "optional_field": {
+    "dependency_wheelhouse": "wheelhouse"
+  },
+  "closure": "nonempty flat regular .whl only, no links/directories/unlisted/collisions, every byte bound by existing payload_sha256 before pip",
+  "builder_option": "--dependency-wheelhouse <explicit prepared directory>; canonical origin/main source gate unchanged",
+  "legacy_firsthop": "NEW payload requirements.txt prepends standard pip --no-index / --find-links ./wheelhouse / --only-binary=:all:; same original dependency constraints, requirements-relative path works even with caller cwd=/ (actual proof pending)",
+  "new_installer": "existing pip --no-index --find-links admitted absolute directory --only-binary=:all:; old artifacts without field retain legacy semantics, new full-fresh candidate explicitly requires complete ready closure",
+  "no_new_registry_resolver_engine_or_wire_protocol": true,
+  "prepared_target": {
+    "system": "Linux",
+    "machine": "x86_64",
+    "python_version": "3.12.3",
+    "implementation": "cpython",
+    "os_id": "ubuntu",
+    "os_version": "24.04",
+    "libc": "glibc 2.39"
+  },
+  "prepared_input_receipt_sha256": "ca655bf98c43e12b241d559f0bd1c909aed33d9514fe1f22dca0e2694bc2713c",
+  "prepared_files": [
+    {
+      "name": "cffi-2.1.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+      "sha256": "c1453022f490d2459a11819d83ad1d586e9ff65a12ac3e705ffebd46d3685dcf",
+      "size_bytes": 221822,
+      "distribution": "cffi",
+      "version": "2.1.1",
+      "tags": [
+        "cp312-cp312-manylinux_2_17_x86_64",
+        "cp312-cp312-manylinux2014_x86_64"
+      ]
+    },
+    {
+      "name": "cryptography-50.0.2-cp311-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+      "sha256": "630ebfea3bf689d075f82316324ff7433dc447fe6bc1bfc76524b74b4a9567d2",
+      "size_bytes": 4719841,
+      "distribution": "cryptography",
+      "version": "50.0.2",
+      "tags": [
+        "cp311-abi3-manylinux_2_17_x86_64",
+        "cp311-abi3-manylinux2014_x86_64"
+      ]
+    },
+    {
+      "name": "phpserialize-1.3-py3-none-any.whl",
+      "sha256": "6fb46043bae200dc0744c86ceefd6a807453bee0ce89bef41d26ea9562d8ad6d",
+      "size_bytes": 9506,
+      "distribution": "phpserialize",
+      "version": "1.3",
+      "tags": [
+        "py3-none-any"
+      ]
+    },
+    {
+      "name": "pycparser-3.12-py3-none-any.whl",
+      "sha256": "a076f3f489b39b43ed13563a1dafe42447445bec2e294154ec5c57fcdda4c85e",
+      "size_bytes": 62600,
+      "distribution": "pycparser",
+      "version": "3.12",
+      "tags": [
+        "py3-none-any"
+      ]
+    },
+    {
+      "name": "pymysql-1.2.3-py3-none-any.whl",
+      "sha256": "14f1c68e2ed859243ae5ca41ffbe677027fc46bc136a9f0be8a4e928e5e7415a",
+      "size_bytes": 46740,
+      "distribution": "PyMySQL",
+      "version": "1.2.3",
+      "tags": [
+        "py3-none-any"
+      ]
+    },
+    {
+      "name": "tomli-2.5.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+      "sha256": "6cf74416bdc94ae458b14e37286c1073081850ac8459a00d0c5efef5d44294c6",
+      "size_bytes": 286435,
+      "distribution": "tomli",
+      "version": "2.5.0",
+      "tags": [
+        "cp312-cp312-manylinux_2_17_x86_64",
+        "cp312-cp312-manylinux2014_x86_64",
+        "cp312-cp312-manylinux_2_28_x86_64"
+      ]
+    }
+  ],
+  "target_portability_claim": "only actual Linux x86_64 CPython3.12.3 Ubuntu24.04/glibc2.39 fixture; no other arch/Python claim",
+  "tests": {
+    "focused_initial": 37,
+    "wheelhouse_tests_with_canonical_builder_case": 26,
+    "full_passed": 2158,
+    "full_failed": 61,
+    "exact_baseline_failure_ids": true,
+    "skipped": 57,
+    "subtests_passed": 105,
+    "required_release_regression": "PASS"
+  },
+  "failed_previous_fresh": {
+    "target": "R29/DATA210",
+    "producer": "1.4.2",
+    "receipt_sha256": "5cd42cb56be447e72f185eb7b79a60d5375c35c9e3305a490592589bf6ae1605",
+    "diagnostics_sha256": "dcd7b853102b4c74e878fdb4b25ed65d6a9b70016bdb7cae32e0e3072374aad1",
+    "cause": "phpserialize source distributions rejected under only-binary; incomplete ready dependency delivery, no host source policy workaround",
+    "preseed_calls": 0,
+    "registration_calls": 0,
+    "full_clone_reset": "requested after failed attempt; no manual dependency repair"
+  },
+  "next_candidate": "explicit new QA R31 with latest source and DATA1.0.1 b9 / MCC QA ref a76; old R29/39/1.4.2 immutable",
+  "whole_1_7": "HOLD"
+}

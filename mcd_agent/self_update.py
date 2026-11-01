@@ -337,6 +337,36 @@ def _copytree_ignore_artifacts(_src_dir: str, names: list[str]) -> set[str]:
     return ignored
 
 
+def _runtime_dependency_wheelhouse(stage: Path, manifest: dict[str, Any]) -> Path | None:
+    """Admit an optional complete flat wheelhouse through the existing payload pins."""
+    declared = manifest.get("dependency_wheelhouse")
+    root = stage / "wheelhouse"
+    payload = manifest.get("payload_sha256", {})
+    if declared is None:
+        if root.exists() or root.is_symlink() or any(str(name).startswith("wheelhouse/") for name in payload):
+            raise RuntimeError("runtime dependency wheelhouse is undeclared")
+        return None
+    if declared != "wheelhouse" or root.is_symlink() or not root.is_dir() or not isinstance(payload, dict):
+        raise RuntimeError("runtime dependency wheelhouse is invalid")
+    entries = sorted(root.iterdir())
+    if not entries:
+        raise RuntimeError("runtime dependency wheelhouse is empty")
+    names = set()
+    for path in entries:
+        if (path.is_symlink() or not path.is_file() or path.suffix != ".whl"
+                or re.fullmatch(r"[A-Za-z0-9_.+-]+\.whl", path.name) is None):
+            raise RuntimeError("runtime dependency wheelhouse contains a non-wheel")
+        name = "wheelhouse/" + path.name
+        expected = payload.get(name)
+        if not isinstance(expected, str) or hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+            raise RuntimeError("runtime dependency wheelhouse checksum mismatch")
+        names.add(name)
+    listed = {name for name in payload if str(name).startswith("wheelhouse/")}
+    if listed != names:
+        raise RuntimeError("runtime dependency wheelhouse closure mismatch")
+    return root
+
+
 def _runtime_manifest(source_dir: Path) -> dict[str, Any] | None:
     """Read and verify the detached runtime payload manifest.
 
@@ -408,6 +438,7 @@ def _runtime_manifest(source_dir: Path) -> dict[str, Any] | None:
     package_root = source_dir / "mcd_agent"
     if not (package_root / "__init__.py").is_file():
         raise RuntimeError("runtime-only payload is missing mcd_agent package")
+    _runtime_dependency_wheelhouse(source_dir, raw)
     ref = raw.get("universal_workload_resource_ref")
     if ref is not None:
         from mcd_agent.universal_workload import selected_universal_resource, verify_universal_workload_archive
@@ -588,6 +619,10 @@ def _install_requirements_for_staged_source(install_dir: Path, staged_src_dir: P
         "-r",
         str(req),
     ]
+    manifest = _runtime_manifest(staged_src_dir)
+    wheelhouse = _runtime_dependency_wheelhouse(staged_src_dir, manifest) if manifest else None
+    if wheelhouse is not None:
+        cmd[6:6] = ["--no-index", "--find-links", str(wheelhouse), "--only-binary=:all:"]
     proc = subprocess.run(cmd, cwd="/", capture_output=True, text=True, env=_isolated_venv_env())
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "pip install failed").strip()

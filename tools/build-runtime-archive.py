@@ -176,6 +176,39 @@ def _build_wheel(source: Path, wheel_dir: Path) -> Path:
     return wheels[0]
 
 
+def _dependency_wheel_inputs(directory: Path | None) -> list[Path]:
+    if directory is None:
+        return []
+    if directory.is_symlink() or not directory.is_dir():
+        raise RuntimeError("dependency wheelhouse input must be a regular directory")
+    paths = sorted(directory.iterdir())
+    if not paths:
+        raise RuntimeError("dependency wheelhouse input is empty")
+    for path in paths:
+        if (path.is_symlink() or not path.is_file() or path.suffix != ".whl"
+                or re.fullmatch(r"[A-Za-z0-9_.+-]+\.whl", path.name) is None):
+            raise RuntimeError("dependency wheelhouse input contains a non-wheel")
+    return paths
+
+
+def _copy_dependency_wheelhouse(stage: Path, inputs: list[Path]) -> dict[str, str]:
+    if not inputs:
+        return {}
+    destination = stage / "wheelhouse"
+    if destination.exists() or destination.is_symlink():
+        raise RuntimeError("dependency wheelhouse collides with runtime payload")
+    destination.mkdir()
+    for path in inputs:
+        shutil.copy2(path, destination / path.name)
+    # Standard pip requirements options also protect an older updater whose
+    # code does not know the optional manifest field. The path is relative to
+    # this verified requirements file, not to the caller's working directory.
+    requirements = stage / "requirements.txt"
+    original = requirements.read_text(encoding="utf-8")
+    requirements.write_text("--no-index\n--find-links ./wheelhouse\n--only-binary=:all:\n" + original, encoding="utf-8")
+    return {"dependency_wheelhouse": "wheelhouse"}
+
+
 def _normalise_tarinfo(info: tarfile.TarInfo) -> tarfile.TarInfo:
     info.uid = 0
     info.gid = 0
@@ -202,10 +235,12 @@ def _write_deterministic_archive(stage: Path, destination: Path) -> None:
 
 
 def build(source: Path, destination: Path, *, source_commit: str = "", source_archive_sha256: str = "",
-          universal_workload_ref: Path | None = None, universal_workload_archive: Path | None = None) -> Path:
+          universal_workload_ref: Path | None = None, universal_workload_archive: Path | None = None,
+          dependency_wheelhouse: Path | None = None) -> Path:
     source = source.resolve()
     source_commit = _canonical_source_commit(source, source_commit)
     version = _source_version(source)
+    dependency_inputs = _dependency_wheel_inputs(dependency_wheelhouse)
     if (universal_workload_ref is None) != (universal_workload_archive is None):
         raise RuntimeError("universal workload reference and archive must be supplied together")
     resource_ref = None
@@ -242,6 +277,7 @@ def build(source: Path, destination: Path, *, source_commit: str = "", source_ar
         wheel_stage.mkdir()
         staged_wheel = wheel_stage / wheel.name
         shutil.copy2(wheel, staged_wheel)
+        dependency_fields = _copy_dependency_wheelhouse(stage, dependency_inputs)
 
         payload: dict[str, str] = {}
         for path in sorted(stage.rglob("*")):
@@ -256,6 +292,7 @@ def build(source: Path, destination: Path, *, source_commit: str = "", source_ar
             "payload_sha256": payload,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
+        manifest.update(dependency_fields)
         if resource_ref is not None:
             manifest["universal_workload_resource_ref"] = resource_ref
         manifest_path = stage / MANIFEST_NAME
@@ -287,6 +324,13 @@ def build(source: Path, destination: Path, *, source_commit: str = "", source_ar
         "forbidden_source_material": [],
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
+    if dependency_inputs:
+        receipt["dependency_wheelhouse"] = {
+            "path": "wheelhouse",
+            "files": [{"path": "wheelhouse/" + path.name, "sha256": _sha256(path),
+                       "size_bytes": path.stat().st_size} for path in dependency_inputs],
+            "compatibility": "requires separate target-specific fresh-venv offline closure proof; no portability inferred",
+        }
     if resource_ref is not None:
         receipt["universal_workload_resource"] = {
             "reference_sha256": _sha256(universal_workload_ref),
@@ -306,6 +350,7 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--source-commit", default="")
     parser.add_argument("--source-archive-sha256", default="")
+    parser.add_argument("--dependency-wheelhouse", type=Path)
     parser.add_argument("--universal-workload-ref", type=Path)
     parser.add_argument("--universal-workload-archive", type=Path)
     args = parser.parse_args()
@@ -314,6 +359,7 @@ def main() -> int:
         args.output,
         source_commit=args.source_commit,
         source_archive_sha256=args.source_archive_sha256,
+        dependency_wheelhouse=args.dependency_wheelhouse,
         universal_workload_ref=args.universal_workload_ref,
         universal_workload_archive=args.universal_workload_archive,
     )
