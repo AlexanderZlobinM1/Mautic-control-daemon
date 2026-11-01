@@ -42,6 +42,16 @@ For every defect, first record applicability to both maintained 1.6 and developi
 unaffected line gets an explicit rationale. Do not copy all commits, recipes,
 profiles or 1.7 architecture into 1.6 as a hotfix.
 
+Shared-logic fixes are one synchronous hotfix cycle, not a deferred backport.
+Rings, queues, scheduler and shared core Mautic logic require paired source fixes,
+tests and commit/evidence links in stable 1.6 and developing 1.7. Do not close the
+hotfix or publish the stable fix while its Dev source/test counterpart is pending.
+If whole 1.7 is still on HOLD, record its fix and tests in the development branch;
+this does not authorize Approved promotion, production or host assignment. A truly
+branch-specific fix requires concrete not-applicable evidence for the other line,
+not mechanically copying incompatible implementation. Audit existing migration
+hotfixes for paired coverage without interrupting the native QA actor.
+
 Each affected line needs its own exact source commit, tests, artifact hashes,
 channel decision and receipt. A PASS on one line is not acceptance of the other.
 Whole-1.7 acceptance remains on HOLD independently of Dev availability and ongoing
