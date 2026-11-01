@@ -329,7 +329,7 @@ def test_private_runtime_input_is_memory_only_and_public_fetch_omits_it(wazuh_fe
     assert wazuh_fetched['runtime_input']==private
 
 
-@pytest.mark.parametrize('problem',['capability','flag','null','wrongtype','extra','profile'])
+@pytest.mark.parametrize('problem',['capability','flag','null','wrongtype','extra','profile','invalidutf8'])
 def test_private_runtime_input_rejected_before_artifact_download(wazuh_fetched,monkeypatch,problem):
     wazuh_fetched['runtime_input']={'registration_password':'SYNTHETIC-PRIVATE'}
     h=wazuh_fetched['external_handler']
@@ -340,6 +340,7 @@ def test_private_runtime_input_rejected_before_artifact_download(wazuh_fetched,m
     elif problem=='wrongtype':wazuh_fetched['runtime_input']['registration_password']=42
     elif problem=='extra':wazuh_fetched['runtime_input']['other']='bad'
     elif problem=='profile':wazuh_fetched['profile']['registration_password']='SYNTHETIC-PRIVATE'
+    elif problem=='invalidutf8':wazuh_fetched['runtime_input']['registration_password']='\ud800'
     monkeypatch.setattr(ext,'resolve_agent_identity',lambda cfg:h['runtime_context'])
     monkeypatch.setattr(ext,'run_custom_script_by_key',lambda *a,**kw:pytest.fail('reject before cache/download'))
     with pytest.raises(ValueError):ext.apply_external_service_profile(None,wazuh_fetched,component='wazuh')

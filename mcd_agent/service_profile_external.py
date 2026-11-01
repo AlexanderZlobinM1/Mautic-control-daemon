@@ -60,8 +60,12 @@ def apply_external_service_profile(cfg: Any, fetched: Mapping[str, Any], *,
                 or set(runtime_input) != {"registration_password"}
                 or not isinstance(runtime_input["registration_password"], str)):
             raise ValueError("external_handler_runtime_input_invalid")
-        if len(json.dumps(runtime_input, ensure_ascii=False, sort_keys=True,
-                          separators=(",", ":"), allow_nan=False).encode("utf-8")) > MAX_CONTEXT_BYTES:
+        try:
+            input_bytes = json.dumps(runtime_input, ensure_ascii=False, sort_keys=True,
+                                     separators=(",", ":"), allow_nan=False).encode("utf-8")
+        except (ValueError, UnicodeError):
+            raise ValueError("external_handler_runtime_input_invalid") from None
+        if len(input_bytes) > MAX_CONTEXT_BYTES:
             raise ValueError("external_handler_runtime_input_invalid")
         if "framed-runtime-input" not in required:
             raise ValueError("external_handler_runtime_input_unsupported")
