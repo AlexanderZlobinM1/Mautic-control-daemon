@@ -75,18 +75,23 @@ def _scheduler_status(venv_python: Path, install_dir: Path, config: Path) -> dic
     )
     if proc.returncode != 0:
         raise RepairError(f"scheduler status failed: {(proc.stderr or proc.stdout).strip()}")
-    payload: object | None = None
-    decoder = json.JSONDecoder()
     output = proc.stdout or ""
-    for index, char in enumerate(output):
-        if char != "{":
-            continue
-        try:
-            candidate, _end = decoder.raw_decode(output[index:])
-        except json.JSONDecodeError:
-            continue
-        if isinstance(candidate, dict):
-            payload = candidate
+    payload: object | None = None
+    try:
+        payload = json.loads(output.strip())
+    except json.JSONDecodeError:
+        decoder = json.JSONDecoder()
+        required = {"running_tasks", "tracked_running_tasks", "external_running_tasks"}
+        for index, char in enumerate(output):
+            if char != "{":
+                continue
+            try:
+                candidate, _end = decoder.raw_decode(output[index:])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(candidate, dict) and required.issubset(candidate):
+                payload = candidate
+                break
     if payload is None:
         raise RepairError("scheduler status did not return JSON")
     if not isinstance(payload, dict) or bool(payload.get("paused")):

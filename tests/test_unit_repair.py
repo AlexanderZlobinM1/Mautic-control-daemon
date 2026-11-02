@@ -98,6 +98,13 @@ class UnitRepairTests(unittest.TestCase):
             result = repair_module._scheduler_status(Path("/opt/mcd/venv/bin/python"), Path("/opt/mcd"), Path("/opt/mcd/etc/mcd.toml"))
         self.assertEqual(result["running_tasks"], 0)
 
+    def test_scheduler_status_does_not_select_nested_external_task_object(self) -> None:
+        completed = type("Completed", (), {"returncode": 0, "stdout": '{"paused": false, "running_tasks": 1, "tracked_running_tasks": 0, "external_running_tasks": 1, "tracked_tasks": [], "external_tasks": [{"root": "/var/www/ss/public_html", "task_type": "campaign_trigger", "entity_id": 186}]}', "stderr": ""})()
+        with patch.object(repair_module.subprocess, "run", return_value=completed):
+            result = repair_module._scheduler_status(Path("/opt/mcd/venv/bin/python"), Path("/opt/mcd"), Path("/opt/mcd/etc/mcd.toml"))
+        self.assertEqual(result["running_tasks"], 1)
+        self.assertEqual(result["external_running_tasks"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
