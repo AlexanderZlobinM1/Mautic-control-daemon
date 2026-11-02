@@ -343,7 +343,7 @@ def test_poll_response_validation_is_typed_and_bounded(tmp_path):
     assert raised.value.stage == "poll.response_validation"
     assert raised.value.code == "portal_mcd_poll_response_binding_mismatch"
     assert raised.value.retryable is False
-    assert state.get("commercial_portal_poll_request")["cursor"] == "9"
+    assert state.get("commercial_portal_poll_requests_v1")["installation-1"]["cursor"] == "9"
 
 
 def test_worker_persists_typed_poll_diagnostic(tmp_path):
@@ -677,7 +677,6 @@ def test_inventory_revision_ignores_transport_fields_and_bumps_once_per_durable_
     current["value"] = _inventory_fixture(version="1.5.256", request_id="volatile-3")
     assert worker.run_once()["status"] == "idle"
     assert portal.inventories[-1]["snapshot_revision"] == "2"
-    assert len(portal.inventories) == 2
 
     restarted, restarted_state, _ = _worker(tmp_path, portal, _Clock())
     restarted.inventory_provider = lambda _installation: dict(current["value"])

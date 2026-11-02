@@ -17,7 +17,7 @@ from mcd_agent.service_profile_external import (
     CUSTOM_RUNTIME_CAPABILITIES, nginx_operation_input_valid, ExternalProfileOperationError, apply_external_service_profile,
     validate_external_service_profile,
 )
-from mcd_agent.custom_scripts import run_configured_external_operation
+from mcd_agent.custom_scripts import CustomSelectedTaskError, load_configured_profile_cache, run_configured_external_operation
 from mcd_agent.mautic_db_indexes import apply_mautic_db_indexes
 
 
@@ -48,13 +48,28 @@ def _api_base(cfg: AgentConfig) -> str | None:
 
 def fetch_service_profile(cfg: AgentConfig, component: str, *, include_runtime_input: bool = False,
                           operation: str | None = None, operation_input: dict[str, Any] | None = None,
-                          profile_present: bool | None = None) -> dict[str, Any]:
-    base = _api_base(cfg)
-    if not base:
-        return {"status": "disabled", "reason": "mcc_url_not_set"}
+                          profile_present: bool | None = None,
+                          cache_operation: str | None = None) -> dict[str, Any]:
     comp = (component or "").strip().lower().replace("-", "_")
     if comp not in {"php_fpm", "mysql", "docker", "apt", "wazuh", "nginx", "mautic_db_indexes", "db_indexes"}:
         return {"status": "error", "reason": f"unsupported component: {component}"}
+    base = _api_base(cfg)
+    if not base:
+        if cache_operation:
+            try:
+                cached = load_configured_profile_cache(
+                    cfg, component=comp, operation=cache_operation,
+                )
+            except CustomSelectedTaskError as exc:
+                return {"status": "error", "reason": str(exc)}
+            if cached is not None:
+                return {
+                    "status": "ok",
+                    "component": comp,
+                    "profile": cached["profile"],
+                    "profile_source": cached["source"],
+                }
+        return {"status": "disabled", "reason": "mcc_url_not_set"}
     if comp == "nginx":
         if (not nginx_operation_input_valid(operation, operation_input)
                 or (operation == "cloudflare_real_ip_state" and type(profile_present) is not bool)
@@ -152,6 +167,84 @@ def _service_profile_apply_outcome(applied: dict[str, Any]) -> tuple[str, str | 
     return "error", str(applied.get("reason") or status or "apply_failed")
 
 
+def _decode_configured_operation_result(code: int, output: str) -> dict[str, Any]:
+    """Preserve the public result inside the established failed terminal frame."""
+    try:
+        result = json.loads(output)
+    except (TypeError, ValueError):
+        return {"status": "error", "reason": output or "custom_operation_receipt_invalid"}
+    if not isinstance(result, dict):
+        return {"status": "error", "reason": "custom_operation_receipt_invalid"}
+    if code == 0:
+        return result
+    if (
+        result.get("schema") == "mcd-self-hosted-executable-output-v1"
+        and result.get("frame_type") == "result"
+        and result.get("status") == "failed"
+        and isinstance(result.get("result"), dict)
+    ):
+        # The executor's terminal envelope is transport metadata. The nested
+        # result is the operation's public typed receipt and must remain the
+        # service-profile API result.
+        nested = dict(result["result"])
+        if str(nested.get("status") or "").strip().lower() != "error":
+            nested["status"] = "error"
+            nested.setdefault(
+                "reason",
+                str(result.get("error_code") or "custom_operation_failed"),
+            )
+        return nested
+    return {
+        "status": "error",
+        "reason": str(result.get("reason") or result.get("error_code") or "custom_operation_failed"),
+        "external": result,
+    }
+
+
+def _configured_apt_operation(
+    profile: dict[str, Any],
+    *,
+    cfg: AgentConfig,
+    operation: str,
+    operation_input: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Dispatch one declared APT operation through the existing custom seam.
+
+    ``None`` means that MCC has not installed this optional binding yet.  Any
+    other dispatch or terminal failure is returned as an error and must not
+    silently fall back to the builtin writer.
+    """
+    code, output = run_configured_external_operation(
+        cfg,
+        component="apt",
+        operation=operation,
+        profile=profile,
+        operation_input=operation_input,
+    )
+    if code == 2 and output == "custom_operation_binding_not_configured":
+        return None
+    return _decode_configured_operation_result(code, output)
+
+
+def _configured_apt_apply(
+    profile: dict[str, Any],
+    *,
+    cfg: AgentConfig,
+    dry_run: bool,
+    force_repo_rescan: bool,
+) -> dict[str, Any] | None:
+    """Dispatch the owner-declared complete APT composition as one operation."""
+    return _configured_apt_operation(
+        profile,
+        cfg=cfg,
+        operation="apt_apply",
+        operation_input={
+            "dry_run": bool(dry_run),
+            "force_repo_rescan": bool(force_repo_rescan),
+        },
+    )
+
+
 def _configured_zabbix_bootstrap(
     profile: dict[str, Any],
     *,
@@ -159,23 +252,14 @@ def _configured_zabbix_bootstrap(
     force: bool,
     timeout_sec: int,
 ) -> dict[str, Any]:
-    """Dispatch the selected APT component operation through external data."""
-    code, output = run_configured_external_operation(
-        cfg,
-        component="apt",
+    """Dispatch the selected APT monitor operation through external data."""
+    result = _configured_apt_operation(
+        profile,
+        cfg=cfg,
         operation="zabbix_mysql_monitor_bootstrap",
-        profile=profile,
         operation_input={"force": bool(force), "dry_run": False, "trigger": "service-profile"},
     )
-    try:
-        result = json.loads(output)
-    except (TypeError, ValueError):
-        return {"status": "error", "reason": output or "custom_operation_receipt_invalid"}
-    if not isinstance(result, dict):
-        return {"status": "error", "reason": "custom_operation_receipt_invalid"}
-    if code != 0:
-        return {"status": "error", "reason": str(result.get("reason") or "custom_operation_failed"), "external": result}
-    return result
+    return result or {"status": "error", "reason": "custom_operation_binding_not_configured"}
 
 
 def _agent_cluster_mode(cfg: AgentConfig) -> bool:
@@ -267,7 +351,12 @@ def service_profiles_apply_once(
         dict(operation=operation, operation_input=operation_input, profile_present=profile_present)
         if comp == "nginx" or operation is not None else {}
     )
-    fetched = fetch_service_profile(cfg, comp, include_runtime_input=True, **operation_options)
+    cache_operation = "apt_apply" if comp == "apt" else None
+    fetched = fetch_service_profile(
+        cfg, comp, include_runtime_input=True,
+        cache_operation=cache_operation,
+        **operation_options,
+    )
     public_fetch = public_service_profile_response(fetched)
     status = str(fetched.get("status", "")).strip().lower()
     if status != "ok":
@@ -291,19 +380,47 @@ def service_profiles_apply_once(
     else:
         if os.geteuid() != 0:
             raise RuntimeError("service-profile apply requires root")
-        applied = apply_apt_profile(
+        external_apply = _configured_apt_apply(
             profile,
-            dry_run=dry_run,
             cfg=cfg,
+            dry_run=dry_run,
             force_repo_rescan=bool(force_apt_repo_rescan),
         )
-        if not dry_run:
-            zbx_result = _configured_zabbix_bootstrap(
+        if external_apply is not None:
+            # The owner composition owns ordering, system facts and all
+            # component operations. MCD only admits and executes one bound
+            # operation, then preserves its public receipt semantics.
+            applied = external_apply
+        else:
+            # Compatibility path remains until the complete owner composition
+            # is installed and proven. It is never combined with a partial
+            # external block.
+            applied = apply_apt_profile(
                 profile,
+                dry_run=dry_run,
                 cfg=cfg,
-                force=True,
-                timeout_sec=max(8, int(getattr(cfg, "command_timeout_sec", 20) or 20)),
+                force_repo_rescan=bool(force_apt_repo_rescan),
             )
+        if not dry_run and external_apply is None:
+            # Keep the former apply_apt_profile control-flow boundary: the
+            # monitor operation was reached only after the repository,
+            # refresh and DB-candidate gates had returned successfully.  Do
+            # not let the external replacement turn an early APT failure into
+            # a monitor-account mutation.
+            apt_status = str(applied.get("status") or "").strip().lower()
+            if apt_status == "applied":
+                zbx_result = _configured_zabbix_bootstrap(
+                    profile,
+                    cfg=cfg,
+                    force=True,
+                    timeout_sec=max(8, int(getattr(cfg, "command_timeout_sec", 20) or 20)),
+                )
+            else:
+                zbx_result = {
+                    "status": "skipped",
+                    "reason": "apt_profile_gate_failed",
+                    "apt_profile_status": apt_status or "unknown",
+                }
             applied["zabbix_mysql_monitor"] = zbx_result
             state = applied.get("state")
             if isinstance(state, dict):

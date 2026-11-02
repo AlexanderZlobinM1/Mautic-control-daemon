@@ -28,6 +28,7 @@ def _job(account_id=None):
             "version": "1.0",
             "execution": "generic_primitive",
             "mutates_state": False,
+            "target_scope": "instance",
         },
         "input": {},
         "issued_at": "2026-01-01T00:00:00Z",
@@ -50,6 +51,7 @@ def _inventory(account_id=None):
                 "execution": "generic_primitive",
                 "mutates_state": False,
                 "input_schema_ref": "portal://mcd/input/mautic-version-v1",
+                "target_scope": "instance",
             }],
         }],
     }
@@ -89,6 +91,32 @@ def test_inventory_and_job_tenants_must_be_identical():
         assert str(exc) == "portal_mcd_managed_tenant_binding_invalid"
     else:
         raise AssertionError("cross-tenant inventory/job pair was accepted")
+
+
+def test_managed_host_scope_is_rejected_before_execution():
+    for scope in ("host", None):
+        job = _job("tenant-a")
+        inventory = _inventory("tenant-a")
+        if scope is None:
+            job["command"].pop("target_scope")
+            inventory["capabilities"][0]["commands"][0].pop("target_scope")
+        else:
+            job["command"]["target_scope"] = scope
+            inventory["capabilities"][0]["commands"][0]["target_scope"] = scope
+        try:
+            validate_generic_command_job(job, inventory=inventory)
+        except GenericCommandContractError as exc:
+            assert str(exc) == "portal_mcd_managed_scope_forbidden"
+        else:
+            raise AssertionError("managed host-scoped or legacy job was accepted")
+
+
+def test_own_legacy_job_binds_missing_scope_to_inventory():
+    job = _job()
+    inventory = _inventory()
+    job["installation"].pop("account_id", None)
+    job["command"].pop("target_scope")
+    assert validate_generic_command_job(job, inventory=inventory)["command"]["target_scope"] == "instance"
 
 
 def test_managed_carrier_requires_tenant_per_uid(tmp_path):

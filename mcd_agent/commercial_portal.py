@@ -1184,10 +1184,15 @@ class PortalClient:
         and cursor advancement are controlled by MCD.
         """
         agent_id = str(self.state.get("agent_id") or "")
-        request_state = self.state.get("commercial_portal_poll_request")
+        request_states = self.state.get("commercial_portal_poll_requests_v1")
+        request_state = request_states.get(str(installation_id)) if isinstance(request_states, Mapping) else None
+        if request_state is None and self.state.get("ownership") != "sales_snap_managed" and len(self.state.get("installation_ids") or {}) <= 1:
+            request_state = self.state.get("commercial_portal_poll_request")
         if not isinstance(request_state, dict) or str(request_state.get("cursor") or "") != str(cursor or ""):
             request_state = {"request_id": _b64(os.urandom(16)), "idempotency_key": _b64(os.urandom(16)), "cursor": str(cursor or "")}
-            self.state.put("commercial_portal_poll_request", request_state)
+            request_states = dict(request_states) if isinstance(request_states, Mapping) else {}
+            request_states[str(installation_id)] = request_state
+            self.state.put("commercial_portal_poll_requests_v1", request_states)
         binding = {
             "agent_id": agent_id,
             "installation_id": str(installation_id),
@@ -1218,7 +1223,13 @@ class PortalClient:
             if not re.fullmatch(r"[a-z0-9_]{1,120}", code):
                 code = "portal_mcd_poll_response_invalid"
             raise CommercialPortalError(stage="poll.response_validation", code=code, retryable=False) from exc
-        self.state.put("commercial_portal_poll_request", None)
+        request_states = self.state.get("commercial_portal_poll_requests_v1")
+        if isinstance(request_states, Mapping):
+            request_states = dict(request_states)
+            request_states.pop(str(installation_id), None)
+            self.state.put("commercial_portal_poll_requests_v1", request_states)
+        elif self.state.get("ownership") != "sales_snap_managed" and len(self.state.get("installation_ids") or {}) <= 1:
+            self.state.put("commercial_portal_poll_request", None)
         retry_after_ms = int(verified["retry_after_ms"])
         self.state.put("commercial_portal_server_retry_after", time.time() + (retry_after_ms / 1000.0))
         commands = verified["commands"]

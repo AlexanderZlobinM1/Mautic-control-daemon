@@ -129,9 +129,13 @@ def _capability(value: object, code: str) -> dict[str, Any]:
     parsed = []
     for entry in commands:
         command = _obj(entry, code)
-        if command.get("execution") != "generic_primitive" or not isinstance(command.get("mutates_state"), bool):
+        target_scope = command.get("target_scope", "host")
+        if command.get("execution") != "generic_primitive" or not isinstance(command.get("mutates_state"), bool) or target_scope not in {"host", "instance"}:
             raise _error(code)
-        parsed.append({"command_id": _identifier(command.get("command_id"), code), "version": _identifier(command.get("version"), code, 64), "execution": "generic_primitive", "mutates_state": command["mutates_state"], "input_schema_ref": _text(command.get("input_schema_ref"), code)})
+        parsed_command = {"command_id": _identifier(command.get("command_id"), code), "version": _identifier(command.get("version"), code, 64), "execution": "generic_primitive", "mutates_state": command["mutates_state"], "input_schema_ref": _text(command.get("input_schema_ref"), code)}
+        if "target_scope" in command:
+            parsed_command["target_scope"] = target_scope
+        parsed.append(parsed_command)
     keys = [f"{item['command_id']}:{item['version']}" for item in parsed]
     if len(set(keys)) != len(keys):
         raise _error(code)
@@ -177,17 +181,27 @@ def validate_generic_command_job(value: object, inventory: Mapping[str, Any] | N
     command = _obj(item.get("command"), "portal_mcd_generic_command_job_invalid")
     parsed = _scalar(item.get("input"), "portal_mcd_generic_command_input_invalid")
     cursor = item.get("delivery_cursor")
-    if item.get("schema") != COMMAND_JOB_SCHEMA or item.get("contract_version") != CONTRACT_VERSION or isinstance(cursor, bool) or not isinstance(cursor, int) or cursor < 1 or not isinstance(parsed, Mapping) or command.get("execution") != "generic_primitive" or not isinstance(command.get("mutates_state"), bool):
+    target_scope = command.get("target_scope", "host")
+    if item.get("schema") != COMMAND_JOB_SCHEMA or item.get("contract_version") != CONTRACT_VERSION or isinstance(cursor, bool) or not isinstance(cursor, int) or cursor < 1 or not isinstance(parsed, Mapping) or command.get("execution") != "generic_primitive" or not isinstance(command.get("mutates_state"), bool) or target_scope not in {"host", "instance"}:
         raise _error("portal_mcd_generic_command_job_invalid")
-    result = {"schema": COMMAND_JOB_SCHEMA, "contract_version": CONTRACT_VERSION, "job_id": _identifier(item.get("job_id"), "portal_mcd_generic_command_job_invalid"), "request_id": _identifier(item.get("request_id"), "portal_mcd_generic_command_job_invalid"), "idempotency_key": _identifier(item.get("idempotency_key"), "portal_mcd_generic_command_job_invalid"), "command_id": _identifier(item.get("command_id"), "portal_mcd_generic_command_job_invalid"), "delivery_cursor": cursor, "installation": installation, "capability": {"capability_id": _identifier(capability.get("capability_id"), "portal_mcd_generic_command_job_invalid"), "version": _identifier(capability.get("version"), "portal_mcd_generic_command_job_invalid", 64)}, "command": {"command_id": _identifier(command.get("command_id"), "portal_mcd_generic_command_job_invalid"), "version": _identifier(command.get("version"), "portal_mcd_generic_command_job_invalid", 64), "execution": "generic_primitive", "mutates_state": command["mutates_state"]}, "input": dict(parsed), "issued_at": _text(item.get("issued_at"), "portal_mcd_generic_command_job_invalid"), "expires_at": _text(item.get("expires_at"), "portal_mcd_generic_command_job_invalid")}
+    result = {"schema": COMMAND_JOB_SCHEMA, "contract_version": CONTRACT_VERSION, "job_id": _identifier(item.get("job_id"), "portal_mcd_generic_command_job_invalid"), "request_id": _identifier(item.get("request_id"), "portal_mcd_generic_command_job_invalid"), "idempotency_key": _identifier(item.get("idempotency_key"), "portal_mcd_generic_command_job_invalid"), "command_id": _identifier(item.get("command_id"), "portal_mcd_generic_command_job_invalid"), "delivery_cursor": cursor, "installation": installation, "capability": {"capability_id": _identifier(capability.get("capability_id"), "portal_mcd_generic_command_job_invalid"), "version": _identifier(capability.get("version"), "portal_mcd_generic_command_job_invalid", 64)}, "command": {"command_id": _identifier(command.get("command_id"), "portal_mcd_generic_command_job_invalid"), "version": _identifier(command.get("version"), "portal_mcd_generic_command_job_invalid", 64), "execution": "generic_primitive", "mutates_state": command["mutates_state"], "target_scope": target_scope}, "input": dict(parsed), "issued_at": _text(item.get("issued_at"), "portal_mcd_generic_command_job_invalid"), "expires_at": _text(item.get("expires_at"), "portal_mcd_generic_command_job_invalid")}
     if inventory is not None:
         match = next((entry for entry in inventory.get("capabilities", []) if entry["capability_id"] == result["capability"]["capability_id"] and entry["version"] == result["capability"]["version"]), None)
         advertised = next((entry for entry in (match or {}).get("commands", []) if entry["command_id"] == result["command"]["command_id"] and entry["version"] == result["command"]["version"]), None)
-        if advertised is None or advertised["mutates_state"] != result["command"]["mutates_state"]:
+        advertised_scope = advertised.get("target_scope", "host") if isinstance(advertised, Mapping) else "host"
+        # Own installations may receive a legacy job from a Portal that does
+        # not echo the optional scope field. Bind that legacy job to the
+        # already-advertised command scope; managed jobs remain fail-closed
+        # below because tenant isolation cannot rely on an absent field.
+        if "target_scope" not in command and not installation.get("account_id"):
+            result["command"]["target_scope"] = advertised_scope
+        if advertised is None or advertised["mutates_state"] != result["command"]["mutates_state"] or advertised_scope != result["command"]["target_scope"]:
             raise _error("portal_mcd_generic_command_not_advertised")
         advertised_installation = inventory.get("installation")
         if isinstance(advertised_installation, Mapping) and advertised_installation.get("account_id") != result["installation"].get("account_id"):
             raise _error("portal_mcd_managed_tenant_binding_invalid")
+    if installation.get("account_id") and result["command"]["target_scope"] != "instance":
+        raise _error("portal_mcd_managed_scope_forbidden")
     return result
 
 

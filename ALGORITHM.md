@@ -90,6 +90,28 @@ subprocess output, SSH credentials and DNS credentials are never copied into
 the receipt. This is only transport/execution/retry behavior; external Portal
 artifacts remain the sole owner of bootstrap, OS, Mautic and scenario policy.
 
+Fail2ban startup safety is an MCC-owned external Debian-family scenario/recipe,
+delivered and coordinated through the Portal registry/outbox; it is not an MCD
+daemon startup side effect. The daemon no longer imports or calls the legacy
+`fail2ban_guard` at `run_loop` entry, and the obsolete MCD module/test boundary
+is removed. The external MCC scenario carries its own pinned guard source; it
+does not install, start, or own the system Fail2ban service. Portal only
+delivers the immutable artifact and coordinates stage/job/ACK/lifecycle
+receipts. The Debian-family helper is installed through the ordinary
+stage-selected `scenario.apply` path and is enabled from `mcd.service.wants` with
+`After=mcd.service fail2ban.service` and `PartOf=mcd.service`. A completed
+oneshot can run again after MCD restart. Missing client/filter is a typed
+non-blocking skip; guard/reload errors remain typed results with wrapper exit
+zero, so MCD, its scheduler, and unrelated tasks continue. The helper uses
+the exact selected cached artifact and can execute with the network namespace
+unavailable; no package installation, system Fail2ban start, firewall action,
+or DNS operation is implied. Native DEV135 evidence for applied/noop,
+ordering, restart preservation, offline execution and warning-only failure is
+recorded in `fail2ban-native-replacement-proof-20261101.json`; the earlier
+private native parity receipt remains the evidence for preserving an unrelated
+ban while releasing only the unsafe jail's ban. Legacy double execution is
+not replacement evidence.
+
 Super-priority ticks are a dedicated recurring lane: each tick advances its
 own static round-robin cycle and is not gated by completion, refill, or fair
 turn state of the ordinary lane. Ordinary shared round-robin has the opposite
@@ -1144,10 +1166,12 @@ cycle без ручного `segments:update`, profile/capacity/data changes. Ad
 | self-update preserves ordinary application work and all durable queues | `mcd_agent/self_update.py`, `daemon.py`, systemd unit | `tests/test_self_update_version_reporting.py`, `tools/runtime_bridge_qa.py` (`mcd-runtime-bridge-qa-v1`) |
 | legacy source-tree to runtime-only transition is authority-safe and accepts complete split TOML config | `tools/mcd_runtime_bootstrap.py`, `tools/mcd_profile_authority_probe.py` | `tests/test_profile_authority_probe.py`, `tests/test_runtime_bootstrap_capture.py`, live `mcd-runtime-bootstrap-receipt-v1` |
 | activation-derived Portal material is imported atomically without new auth/job issuance; commercial API-key transport, host binding and installation IDs are validated and persisted while legacy agent/Portal signing-key state is scrubbed | `mcd_agent/commercial_registration.py`, `mcd_agent/commercial_portal.py` | `tests/test_commercial_registration.py`, `tests/test_commercial_outbound_boundary.py`, redacted `mcd-portal-registration-receipt-v1` |
+| successful Portal inventory rescan returns the canonical observed snapshot revision/hash in the existing terminal result; unchanged content does not bump revision and failed rescan returns no reference | `mcd_agent/daemon.py`, `mcd_agent/commercial_primitives.py`, `mcd_agent/commercial_self_hosted.py`, `mcd_agent/commercial_portal.py` | `tests/test_commercial_primitives.py`, `tests/test_daemon_commercial_guard.py`, Portal 1.7 terminal-receipt matching |
 | host-first Portal registration binds an activated MCD host before any Mautic instance exists; request contains only local DNS identity/display name, and the response must create a passive host installation with an active empty-inventory connection | `mcd_agent/commercial_portal.py`, `mcd_agent/commercial_host_registration.py`, `mcd_agent/cli.py` | `tests/test_commercial_portal.py`, redacted `portal-mcd-host-register-response-v1` |
 | self-hosted v2.1 candidate jobs may omit stage metadata for a whole external composition; supplied `stage_selection` must structurally match `execution.stage`, without embedded stage-name/order recipes; existing receipts remain | `mcd_agent/commercial_portal.py`, `mcd_agent/commercial_self_hosted.py`, `mcd_agent/scenario_launcher.py` | `tests/test_commercial_self_hosted_v2.py`, redacted stage/terminal receipts |
 | manual existing commercial-key fallback keeps pending/active/disconnected state idempotently | `mcd_agent/commercial_manual_activation.py`, `mcd_agent/commercial_portal.py`, `mcd_agent/daemon.py` | `tests/test_commercial_manual_activation.py`, redacted `mcd-commercial-manual-activation-receipt-v1` |
 | active Portal state is reconciled after daemon startup; incomplete construction and exited workers retry without duplicates | `mcd_agent/daemon.py:_reconcile_commercial_worker` | `tests/test_daemon_commercial_guard.py` activation-material retry; `tests/test_commercial_self_hosted_v2.py` activate -> poll -> terminal v2 |
+| Fail2ban startup safety is externalized to an MCC-owned scenario/recipe delivered through Portal and the obsolete MCD startup guard boundary is absent | MCC Debian-family scenario/recipe delivered through Portal; no `fail2ban_guard` runtime import/caller | `tests/test_daemon_commercial_guard.py`; `fail2ban-native-replacement-proof-20261101.json`; `fail2ban-external-lifecycle-receipt-20261101.json` |
 | result-signing identity bootstraps from MCD-owned config and gates signed control execution on MCC ACK | `mcd_agent/config.py`, `mcd_agent/result_signing.py`, `mcd_agent/state_push.py`, `mcd_agent/mcd_control.py` | `tests/test_result_signing.py`, `tests/test_mcd_control.py`, live `mcd-state-v1` identity/key/ACK and terminal-receipt evidence |
 | authority-safe desired runtime projection | `mcd_agent/config.py`, `mcd_agent/runtime_overrides.py` | `tests/test_runtime_override_direction.py`, `tests/test_runtime_stable_keys.py`, `tests/test_runtime_migration_adapter.py` |
 | natural b2bss/Adonis evidence | runtime TaskStore/MCC receipts | rollout acceptance (после package/install) |
@@ -1645,7 +1669,9 @@ When a managed installation has no local cursor, MCD sends `cursor=null` and
 accepts that installation's server cursor; it does not import a stale scalar
 cursor from another connection. A saved delivery still retains its own
 installation binding and cursor, so restart/replay cannot cross-ack another
-tenant or installation.
+tenant or installation. Poll request IDs and idempotency keys use the same
+installation scope, so two connections on one provider agent cannot replay
+one another's request state.
 
 Inventory publication has its own durable revision ledger per installation.
 MCD canonicalizes the complete inventory and removes only transport-volatility
@@ -1699,6 +1725,41 @@ external policy, not a host/version default hidden in MCD. Tests assert the
 no-side-effect rejection and enabled/disabled package/service plans. Live
 acceptance uses the unchanged service-profile CLI and scoped server profile.
 
+По APT для Portal 1.7 принят cache delivery: существующий `scenario.apply`
+доставил на DEV135 точный артефакт и binding, но runtime cutover ещё не
+завершён. Следующий обязательный этап — штатный MCD
+`service-profile apply --component apt --dry-run` с исходным профилем и
+доказательством вызова exact artifact; до этого нельзя объявлять 1.7
+завершённым. MCC владеет сценарием, профилем и их authority; Portal доставляет
+и координирует immutable artifact и lifecycle receipts. Старая builtin-
+совместимость допускается только как временный путь до доказанного
+переключения и не является финальным 1.7 решением.
+
+Для offline service-profile через Portal 1.7 существующий custom-cache
+manifest может объявить в operation binding единственный `profile_source`:
+`{"type":"cached-json","file":"<relative>","sha256":"<64 hex>"}`.
+MCD читает только объявленный относительный файл из своего существующего
+cache, проверяет SHA-256 и JSON-object, отклоняет абсолютные пути, traversal,
+symlink на любом компоненте пути, oversized/битый JSON и дубликаты binding.
+MCD не выбирает имя файла, не создаёт default-профиль, не получает MCC
+credentials и не подменяет повреждённый descriptor локальным профилем. Если
+настроен MCC URL, authority остаётся за authenticated MCC response, а offline
+descriptor не используется. Portal доставляет байты профиля, authority/source
+record и digest; MCD выполняет только generic admission и execution.
+
+Private external runtime input uses the existing synchronous framed stdin seam.
+An active external handler may declare `runtime_input_schema` as the generic
+`{"type":"string-map","fields":[...]}` descriptor; the field names belong to
+the external scenario, not to MCD or an individual component. MCD validates
+only the exact string-map shape, the global context-size bound, the required
+`framed-runtime-input` capability and the descriptor's
+`--runtime-input-stdin` command flag. Values remain in memory and the framed
+capture path rejects private-value echoes; public fetches, progress and
+receipts contain only the typed non-secret terminal result. The legacy Wazuh
+registration-password contract remains compatible. The extracted Zabbix
+monitor-user bootstrap must be an explicit operation; routine APT observation
+must not invoke it implicitly.
+
 ### Corporate HTTP client identity
 
 Corporate requests identify the actual client as
@@ -1744,6 +1805,19 @@ version, `execution=generic_primitive` и `mutates_state` должны совп�
 script, argv, executable, sudo, пароль, ключ, token и подпись отклоняются до
 исполнения. Generic primitive вызывается тем же внедрённым MCD handler, который
 использует локальные typed primitives; arbitrary shell route отсутствует.
+
+Каждая команда inventory также имеет `target_scope`: `host` для общих
+хостовых наблюдений и `instance` для операции конкретного Mautic-инстанса.
+Эта metadata не подменяет tenant binding: managed job обязан содержать
+`account_id`, совпадающий с admitted managed instance, и явный
+`target_scope=instance`;
+отсутствующее, неизвестное или `host` значение отклоняется до enqueue/handler.
+В целевом Portal 1.7 wire MCD публикует `target_scope` сразу в первом
+capabilities payload и пересчитывает digest по этому полному payload; ACK
+фиксирует доставленную ревизию, но не является переключателем формата.
+Own legacy job без поля допускается только как single-owner compatibility path
+и привязывается к scope уже advertised inventory; managed legacy job
+fail-closed.
 
 Inventory содержит безопасные read-only-примитивы:
 `read_host_facts`, `check_prerequisites`, `check_web_php`,

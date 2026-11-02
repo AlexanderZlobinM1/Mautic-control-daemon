@@ -19,6 +19,7 @@ from typing import Any
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import PurePosixPath
 
 from mcd_agent import __version__
 from mcd_agent.config import AgentConfig
@@ -80,6 +81,99 @@ def _cache_root(config: AgentConfig) -> Path:
 
 def _cache_manifest_path(config: AgentConfig) -> Path:
     return _cache_root(config) / "manifest.json"
+
+
+def load_configured_profile_cache(
+    config: AgentConfig,
+    *,
+    component: str,
+    operation: str,
+) -> dict[str, Any] | None:
+    """Read an explicitly bound profile object from the existing custom cache.
+
+    Portal/MCC may attach the exact operator profile to an existing operation
+    binding.  The binding is the authority for the relative cache filename and
+    digest; MCD does not choose a filename, fetch a profile, or infer defaults.
+    ``None`` means that this optional cache descriptor was not installed.
+    """
+    root = Path(config.custom_cache_dir)
+    manifest = root / "manifest.json"
+    try:
+        if manifest.is_symlink():
+            raise CustomSelectedTaskError("custom_operation_profile_manifest_invalid")
+        if not manifest.exists():
+            return None
+        if not manifest.is_file() or manifest.stat().st_size > 256 * 1024:
+            raise CustomSelectedTaskError("custom_operation_profile_manifest_invalid")
+        document = json.loads(manifest.read_text(encoding="utf-8"))
+    except CustomSelectedTaskError:
+        raise
+    except (OSError, UnicodeError, ValueError, TypeError):
+        raise CustomSelectedTaskError("custom_operation_profile_manifest_invalid") from None
+    if not isinstance(document, dict):
+        raise CustomSelectedTaskError("custom_operation_profile_manifest_invalid")
+    if "operation_bindings" not in document:
+        return None
+    bindings = document["operation_bindings"]
+    if not isinstance(bindings, list):
+        raise CustomSelectedTaskError("custom_operation_profile_manifest_invalid")
+    matches = [item for item in bindings if isinstance(item, dict)
+               and item.get("component") == component and item.get("operation") == operation]
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise CustomSelectedTaskError("custom_operation_profile_descriptor_ambiguous")
+    source = matches[0].get("profile_source")
+    if source is None:
+        return None
+    if (not isinstance(source, dict)
+            or source.get("type") != "cached-json"
+            or not isinstance(source.get("file"), str)
+            or not isinstance(source.get("sha256"), str)
+            or re.fullmatch(r"[0-9a-f]{64}", source["sha256"].strip().lower()) is None):
+        raise CustomSelectedTaskError("custom_operation_profile_descriptor_invalid")
+    relative = source["file"]
+    posix = PurePosixPath(relative)
+    if (not relative or posix.is_absolute() or posix.as_posix() != relative
+            or ".." in posix.parts or "." in posix.parts):
+        raise CustomSelectedTaskError("custom_operation_profile_descriptor_invalid")
+    profile_path = root.joinpath(*posix.parts)
+    try:
+        if root.is_symlink():
+            raise CustomSelectedTaskError("custom_operation_profile_descriptor_invalid")
+        cursor = root
+        for part in posix.parts:
+            cursor = cursor / part
+            if cursor.is_symlink():
+                raise CustomSelectedTaskError("custom_operation_profile_descriptor_invalid")
+        root_real = root.resolve()
+        profile_real = profile_path.resolve(strict=True)
+        if root_real not in profile_real.parents:
+            raise CustomSelectedTaskError("custom_operation_profile_descriptor_invalid")
+        if not profile_real.is_file() or profile_real.stat().st_size > 256 * 1024:
+            raise CustomSelectedTaskError("custom_operation_profile_invalid")
+        raw = profile_real.read_bytes()
+    except CustomSelectedTaskError:
+        raise
+    except (OSError, RuntimeError):
+        raise CustomSelectedTaskError("custom_operation_profile_missing") from None
+    expected = source["sha256"].strip().lower()
+    if hashlib.sha256(raw).hexdigest() != expected:
+        raise CustomSelectedTaskError("custom_operation_profile_checksum_mismatch")
+    try:
+        profile = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, ValueError):
+        raise CustomSelectedTaskError("custom_operation_profile_invalid") from None
+    if not isinstance(profile, dict):
+        raise CustomSelectedTaskError("custom_operation_profile_invalid")
+    return {
+        "profile": profile,
+        "source": {
+            "type": "cached-json",
+            "file": relative,
+            "sha256": expected,
+        },
+    }
 
 
 def cached_custom_manifest_keys(config: AgentConfig) -> set[str]:
@@ -861,12 +955,12 @@ def run_configured_external_operation(
     """
     if not isinstance(operation_input, dict):
         return 2, "custom_operation_input_invalid"
-    path = _cache_manifest_path(config)
     try:
+        path = _cache_manifest_path(config)
         if path.is_symlink() or not path.is_file() or path.stat().st_size > 256 * 1024:
             return 2, "custom_operation_binding_not_configured"
         document = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, ValueError):
+    except (AttributeError, OSError, UnicodeError, ValueError, TypeError):
         return 2, "custom_operation_binding_not_configured"
     if not isinstance(document, dict):
         return 2, "custom_operation_mapping_invalid"
@@ -904,7 +998,11 @@ def run_configured_external_operation(
     if not isinstance(mapping, dict) or set(mapping) != set(fields):
         return 2, "custom_operation_mapping_runtime_mapping_invalid"
 
-    def _encoded(value: Any, declared_fields: Any = None) -> str | None:
+    def _encoded(value: Any, declared_fields: Any = None, envelope_key: Any = None) -> str | None:
+        if envelope_key is not None:
+            if not isinstance(envelope_key, str) or not envelope_key.strip():
+                return None
+            value = {envelope_key: value}
         if declared_fields is not None:
             if (not isinstance(declared_fields, list)
                     or any(not isinstance(field, str) for field in declared_fields)):
@@ -936,7 +1034,7 @@ def run_configured_external_operation(
                 return 2, "custom_operation_mapping_runtime_mapping_invalid"
         else:
             return 2, "custom_operation_mapping_runtime_mapping_invalid"
-        encoded = _encoded(value, spec.get("fields"))
+        encoded = _encoded(value, spec.get("fields"), spec.get("envelope_key"))
         if encoded is None:
             return 2, "custom_operation_runtime_input_invalid"
         runtime_input[field] = encoded

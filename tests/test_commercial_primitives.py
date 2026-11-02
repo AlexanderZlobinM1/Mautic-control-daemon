@@ -52,6 +52,27 @@ def test_inventory_rescan_fails_closed_without_native_handler():
     }
 
 
+def test_inventory_rescan_preserves_canonical_snapshot_reference():
+    result = execute_generic_primitive(
+        {"command": {"command_id": "rescan_inventory"}, "input": {}},
+        inventory_rescan=lambda: {
+            "discovered_count": 2,
+            "snapshot_reference": {
+                "snapshot_revision": 4,
+                "durable_hash": "sha256:" + "a" * 64,
+            },
+        },
+    )
+    assert result == {
+        "status": "succeeded",
+        "discovered_count": 2,
+        "snapshot_reference": {
+            "snapshot_revision": 4,
+            "durable_hash": "sha256:" + "a" * 64,
+        },
+    }
+
+
 def test_inventory_rescan_does_not_disclose_discovery_errors():
     def fail():
         raise RuntimeError("protected-local-config-content")

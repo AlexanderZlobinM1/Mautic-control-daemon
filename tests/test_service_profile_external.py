@@ -104,15 +104,235 @@ def test_existing_post_advertises_actual_capabilities_without_candidate_opt_in(m
     assert 'external_handler_candidate_opt_in' not in payload
 
 
-def test_active_apt_handler_uses_existing_external_custom_seam(fetched, monkeypatch):
-    fetched.update(component='apt', resolved_plan_key='apt:mutating-candidate')
-    fetched['external_handler'].update(component='apt', resolved_plan_key='apt:mutating-candidate')
+def test_offline_service_profile_reads_only_explicit_portal_cache_descriptor(tmp_path):
+    profile = {"repo": "mariadb_11_4", "refresh_cache": True}
+    raw = json.dumps(profile, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    cache = tmp_path / "custom"
+    cache.mkdir()
+    (cache / "profiles").mkdir()
+    (cache / "profiles" / "apt.json").write_bytes(raw)
+    manifest = {
+        "manifest_version": 1,
+        "items": [],
+        "operation_bindings": [{
+            "component": "apt", "operation": "apt_apply",
+            "profile_source": {
+                "type": "cached-json", "file": "profiles/apt.json",
+                "sha256": hashlib.sha256(raw).hexdigest(),
+            },
+        }],
+    }
+    (cache / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    cfg = SimpleNamespace(mcc_url=None, custom_cache_dir=str(cache))
+
+    result = profiles.fetch_service_profile(
+        cfg, "apt", include_runtime_input=True, cache_operation="apt_apply",
+    )
+
+    assert result["status"] == "ok"
+    assert result["profile"] == profile
+    assert result["profile_source"]["sha256"] == hashlib.sha256(raw).hexdigest()
+
+
+@pytest.mark.parametrize("mutation,reason", [
+    ("digest", "custom_operation_profile_checksum_mismatch"),
+    ("path", "custom_operation_profile_descriptor_invalid"),
+    ("intermediate_symlink", "custom_operation_profile_descriptor_invalid"),
+    ("duplicate", "custom_operation_profile_descriptor_ambiguous"),
+    ("manifest", "custom_operation_profile_manifest_invalid"),
+    ("manifest_symlink", "custom_operation_profile_manifest_invalid"),
+])
+def test_offline_profile_cache_is_fail_closed(tmp_path, mutation, reason):
+    raw = b'{"repo":"mariadb_11_4"}'
+    cache = tmp_path / "custom"
+    cache.mkdir()
+    (cache / "profiles.json").write_bytes(raw)
+    source = {"type": "cached-json", "file": "profiles.json", "sha256": hashlib.sha256(raw).hexdigest()}
+    bindings = [{"component": "apt", "operation": "apt_apply", "profile_source": source}]
+    if mutation == "digest":
+        source["sha256"] = "0" * 64
+    elif mutation == "path":
+        source["file"] = "../profiles.json"
+    elif mutation == "intermediate_symlink":
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "profile.json").write_bytes(raw)
+        (cache / "link").symlink_to(outside, target_is_directory=True)
+        source["file"] = "link/profile.json"
+    elif mutation == "duplicate":
+        bindings.append(dict(bindings[0]))
+    else:
+        bindings = "broken"
+    if mutation == "manifest_symlink":
+        (cache / "manifest.json").symlink_to(cache / "missing-manifest.json")
+    else:
+        (cache / "manifest.json").write_text(json.dumps({
+            "operation_bindings": bindings,
+        }), encoding="utf-8")
+    cfg = SimpleNamespace(mcc_url=None, custom_cache_dir=str(cache))
+
+    result = profiles.fetch_service_profile(
+        cfg, "apt", include_runtime_input=True, cache_operation="apt_apply",
+    )
+
+    assert result == {"status": "error", "reason": reason}
+
+
+def test_offline_profile_cache_is_not_used_when_mcc_is_configured(monkeypatch, tmp_path):
+    cache = tmp_path / "custom"
+    cache.mkdir()
+    (cache / "manifest.json").write_text(json.dumps({"operation_bindings": []}), encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(profiles, "_post_json", lambda *a, **kw: calls.append(a) or {"status": "ok"})
+    monkeypatch.setattr(profiles, "resolve_agent_identity", lambda _cfg: {
+        "effective_hostname": "host", "effective_mcc_host_name": "", "configured_host_name": None,
+        "local_hostname": "host",
+    })
+    cfg = SimpleNamespace(mcc_url="https://portal.invalid", mcc_token="unused", custom_cache_dir=str(cache))
+
+    result = profiles.fetch_service_profile(cfg, "apt", cache_operation="apt_apply")
+
+    assert result["status"] == "ok"
+    assert len(calls) == 1
+
+
+def test_apt_owner_binding_runs_as_one_external_operation_without_builtin_composition(fetched, monkeypatch):
+    fetched.update(component='apt', resolved_plan_key='apt:profile')
     monkeypatch.setattr(profiles, 'fetch_service_profile', lambda *a, **kw: fetched)
-    monkeypatch.setattr(profiles, 'apply_external_service_profile', lambda *a, **kw: {'status': 'applied', 'changed_files': []})
-    monkeypatch.setattr(profiles, 'apply_apt_profile', lambda *a, **kw: pytest.fail('active apt handler must own the apply'))
-    result = profiles.service_profiles_apply_once(SimpleNamespace(cluster_id=None), component='apt')
+    monkeypatch.setattr(profiles.os, 'geteuid', lambda: 0)
+    calls = []
+    monkeypatch.setattr(
+        profiles, '_configured_apt_apply',
+        lambda *args, **kwargs: calls.append((args, kwargs)) or {'status': 'applied', 'actions': ['owner-composition']},
+    )
+    monkeypatch.setattr(profiles, 'apply_apt_profile', lambda *a, **kw: pytest.fail('builtin must not compose selected owner operation'))
+    monkeypatch.setattr(profiles, '_configured_zabbix_bootstrap', lambda *a, **kw: pytest.fail('owner composition already owns monitor stage'))
+    result = profiles.service_profiles_apply_once(
+        SimpleNamespace(cluster_id=None), component='apt', dry_run=False,
+    )
+
     assert result['status'] == 'ok'
-    assert result['apply'] == {'status': 'applied', 'changed_files': []}
+    assert len(calls) == 1
+    assert calls[0][1]['dry_run'] is False
+    assert result['apply'] == {'status': 'applied', 'actions': ['owner-composition']}
+
+
+def test_apt_external_failure_does_not_fallback_to_builtin(fetched, monkeypatch):
+    fetched.update(component='apt', resolved_plan_key='apt:profile')
+    monkeypatch.setattr(profiles, 'fetch_service_profile', lambda *a, **kw: fetched)
+    monkeypatch.setattr(profiles.os, 'geteuid', lambda: 0)
+    monkeypatch.setattr(
+        profiles, '_configured_apt_apply',
+        lambda *args, **kwargs: {'status': 'error', 'reason': 'owner_composition_failed'},
+    )
+    monkeypatch.setattr(profiles, 'apply_apt_profile', lambda *a, **kw: pytest.fail('must not fall back'))
+
+    result = profiles.service_profiles_apply_once(
+        SimpleNamespace(cluster_id=None), component='apt', dry_run=True,
+    )
+
+    assert result['status'] == 'error'
+    assert result['apply']['reason'] == 'owner_composition_failed'
+
+
+def test_configured_operation_preserves_typed_result_from_failed_terminal(fetched, monkeypatch):
+    terminal = failed_terminal({
+        'status': 'error',
+        'reason': 'apt_profile_repo_failed',
+        'errors': ['repo profile failed'],
+        'state': {'marker_retained': True},
+    })
+    monkeypatch.setattr(
+        profiles,
+        'run_configured_external_operation',
+        lambda *args, **kwargs: (1, json.dumps(terminal)),
+    )
+
+    result = profiles._configured_apt_operation(
+        fetched['profile'],
+        cfg=SimpleNamespace(),
+        operation='apt_apply',
+        operation_input={'dry_run': False, 'force_repo_rescan': False},
+    )
+
+    assert result == terminal['result']
+    assert result['reason'] == 'apt_profile_repo_failed'
+
+    terminal['result']['status'] = 'applied'
+    monkeypatch.setattr(
+        profiles,
+        'run_configured_external_operation',
+        lambda *args, **kwargs: (1, json.dumps(terminal)),
+    )
+    result = profiles._configured_apt_operation(
+        fetched['profile'],
+        cfg=SimpleNamespace(),
+        operation='apt_apply',
+        operation_input={'dry_run': False, 'force_repo_rescan': False},
+    )
+    assert result['status'] == 'error'
+    assert result['reason'] == 'apt_profile_repo_failed'
+
+
+def test_configured_apt_binding_preserves_exact_private_input_contract(tmp_path, monkeypatch):
+    from mcd_agent import custom_scripts as custom
+
+    root = tmp_path / 'custom'
+    root.mkdir()
+    digest = 'b' * 64
+    binding = {
+        'component': 'apt',
+        'operation': 'apt_apply',
+        'artifact': {'key': 'apt-full-composition-v1.0.0', 'sha256': digest, 'entrypoint': 'block.py'},
+        'args': ['--runtime-input-stdin'],
+        'capture_result': True,
+        'detach': False,
+        'live_output': False,
+        'offline_only': True,
+        'runtime_input_schema': {
+            'type': 'string-map',
+            'fields': ['operator_profile_json', 'cfg_facts_json', 'operation_input_json'],
+        },
+        'runtime_input_mapping': {
+            'operator_profile_json': {'encoding': 'json', 'source': 'existing_private_operator_profile', 'envelope_key': 'profile'},
+            'cfg_facts_json': {'encoding': 'json', 'source': 'effective_caller_cfg', 'fields': [
+                'state_db_path', 'state_mysql_host', 'state_mysql_port', 'state_mysql_unix_socket',
+                'state_mysql_user', 'state_mysql_password',
+            ]},
+            'operation_input_json': {'encoding': 'json', 'source': 'caller_operation_input', 'fields': ['dry_run', 'force_repo_rescan']},
+        },
+    }
+    (root / 'manifest.json').write_text(json.dumps({'operation_bindings': [binding]}))
+    cfg = SimpleNamespace(
+        custom_cache_dir=str(root), state_db_path='/var/lib/mcd/state.db',
+        state_mysql_host='127.0.0.1', state_mysql_port=3306,
+        state_mysql_unix_socket='', state_mysql_user='mcd', state_mysql_password='secret',
+    )
+    calls = []
+    monkeypatch.setattr(
+        custom, 'run_custom_script_by_key',
+        lambda config, **kwargs: calls.append(kwargs) or (0, '{"status":"planned"}'),
+    )
+
+    code, output = custom.run_configured_external_operation(
+        cfg,
+        component='apt',
+        operation='apt_apply',
+        profile={'x': 1},
+        operation_input={'dry_run': False, 'force_repo_rescan': True},
+    )
+
+    assert code == 0 and json.loads(output) == {'status': 'planned'}
+    assert len(calls) == 1
+    assert json.loads(calls[0]['runtime_input']['operator_profile_json']) == {'profile': {'x': 1}}
+    assert json.loads(calls[0]['runtime_input']['cfg_facts_json']) == {
+        'state_db_path': '/var/lib/mcd/state.db', 'state_mysql_host': '127.0.0.1',
+        'state_mysql_port': 3306, 'state_mysql_unix_socket': '',
+        'state_mysql_user': 'mcd', 'state_mysql_password': 'secret',
+    }
+    assert json.loads(calls[0]['runtime_input']['operation_input_json']) == {
+        'dry_run': False, 'force_repo_rescan': True,
+    }
 
 
 def test_unselected_apt_handler_keeps_explicit_legacy_compatibility_path(fetched, monkeypatch):
@@ -125,6 +345,63 @@ def test_unselected_apt_handler_keeps_explicit_legacy_compatibility_path(fetched
     result = profiles.service_profiles_apply_once(SimpleNamespace(cluster_id=None), component='apt', dry_run=True)
     assert result['status'] == 'ok'
     assert result['apply'] == {'status': 'planned', 'actions': []}
+
+
+def test_apt_monitor_does_not_bypass_early_apply_gate(fetched, monkeypatch):
+    fetched.update(component='apt', resolved_plan_key='apt:zabbix-monitor-bootstrap')
+    fetched['external_handler'].update(component='apt', resolved_plan_key='apt:zabbix-monitor-bootstrap')
+    monkeypatch.setattr(profiles, 'fetch_service_profile', lambda *a, **kw: fetched)
+    monkeypatch.setattr(profiles.os, 'geteuid', lambda: 0)
+    monkeypatch.setattr(
+        profiles,
+        'apply_apt_profile',
+        lambda *a, **kw: {
+            'status': 'error',
+            'reason': 'apt_profile_repo_failed',
+            'actions': [],
+            'changed_files': [],
+        },
+    )
+    calls = []
+    monkeypatch.setattr(
+        profiles,
+        '_configured_zabbix_bootstrap',
+        lambda *a, **kw: calls.append((a, kw)) or {'status': 'already_present'},
+    )
+
+    result = profiles.service_profiles_apply_once(SimpleNamespace(cluster_id=None), component='apt')
+
+    assert result['status'] == 'error'
+    assert calls == []
+    assert result['apply']['zabbix_mysql_monitor'] == {
+        'status': 'skipped',
+        'reason': 'apt_profile_gate_failed',
+        'apt_profile_status': 'error',
+    }
+
+
+def test_apt_monitor_runs_at_the_former_reached_operation_step(fetched, monkeypatch):
+    fetched.update(component='apt', resolved_plan_key='apt:zabbix-monitor-bootstrap')
+    fetched['external_handler'].update(component='apt', resolved_plan_key='apt:zabbix-monitor-bootstrap')
+    monkeypatch.setattr(profiles, 'fetch_service_profile', lambda *a, **kw: fetched)
+    monkeypatch.setattr(profiles.os, 'geteuid', lambda: 0)
+    monkeypatch.setattr(
+        profiles,
+        'apply_apt_profile',
+        lambda *a, **kw: {'status': 'applied', 'actions': [], 'state': {}},
+    )
+    calls = []
+    monkeypatch.setattr(
+        profiles,
+        '_configured_zabbix_bootstrap',
+        lambda *a, **kw: calls.append((a, kw)) or {'status': 'already_present'},
+    )
+
+    result = profiles.service_profiles_apply_once(SimpleNamespace(cluster_id=None), component='apt')
+
+    assert result['status'] == 'ok'
+    assert len(calls) == 1
+    assert result['apply']['zabbix_mysql_monitor'] == {'status': 'already_present'}
 
 
 def test_profile_pin_uses_authority_utf8_without_ascii_escaping(fetched,monkeypatch):

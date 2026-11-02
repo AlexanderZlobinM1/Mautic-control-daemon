@@ -82,7 +82,6 @@ class RuntimeAckDaemonIntegrationTests(TestCase):
             with ExitStack() as stack:
                 for target, value in (
                     ("_ensure_mcd_service_kill_mode", False),
-                    ("ensure_nginx_4xx_scan_safety", {"status": "ok"}),
                     ("ensure_managed_web_firewall_loopback", {"status": "ok"}),
                     ("fetch_custom_manifest", ([], "fixture")),
                     ("resolve_agent_identity", {"clone_detected": False}),

@@ -30,7 +30,7 @@ def build_capability_manifest(*, agent_version: str, source_commit: str = "", ru
 
 def mautic_version_capability() -> dict[str, Any]:
     """Advertise the existing registered-UID Mautic core observation."""
-    return {"capability_id": "mautic", "version": "1.0", "commands": [{"command_id": "mautic_version", "version": "1.0", "execution": "generic_primitive", "mutates_state": False, "input_schema_ref": "portal://mcd/input/mautic-version-v1"}]}
+    return {"capability_id": "mautic", "version": "1.0", "commands": [{"command_id": "mautic_version", "version": "1.0", "execution": "generic_primitive", "mutates_state": False, "input_schema_ref": "portal://mcd/input/mautic-version-v1", "target_scope": "instance"}]}
 
 
 def execute_mautic_version(job: dict[str, Any], *, config: Any) -> dict[str, Any]:

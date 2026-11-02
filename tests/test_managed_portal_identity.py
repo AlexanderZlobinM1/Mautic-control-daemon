@@ -111,3 +111,28 @@ def test_managed_portal_cursors_are_scoped_to_installation(tmp_path):
  assert s.get("commercial_portal_cursors_v1")=={"installation-1":"3"}
  assert s.get("commercial_portal_cursor")=="11"
  assert worker._cursor_for("installation-1")=="3"
+
+
+def test_managed_poll_request_state_is_scoped_to_installation(tmp_path):
+ s=state(tmp_path);m=material();import_activation_material(s,m)
+ s.put("commercial_portal_poll_requests_v1", {"installation-1": {"request_id":"old-a","idempotency_key":"old-a","cursor":"3"}})
+ client=PortalClient(s)
+ client._request=lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("stop-after-request-state"))
+ with pytest.raises(RuntimeError, match="stop-after-request-state"):
+  client.pull_job(installation_id="installation-2", cursor="", wait_seconds=0)
+ requests=s.get("commercial_portal_poll_requests_v1")
+ assert requests["installation-1"]["request_id"]=="old-a"
+ assert requests["installation-2"]["cursor"]==""
+ assert requests["installation-2"]["request_id"]!="old-a"
+
+
+def test_capability_scope_wire_is_direct_for_portal_17(tmp_path, monkeypatch):
+ from mcd_agent.commercial_primitives import build_capability_inventory
+ s=state(tmp_path);m=material();import_activation_material(s,m);client=PortalClient(s);sent=[]
+ monkeypatch.setattr(client,"send_capability_inventory",lambda **kw:sent.append(kw) or {"capability_features":["target_scope"]})
+ provider=lambda ident:build_capability_inventory(installation_id=ident,dns_name=DNS1)
+ worker=SelfHostedPortalWorker(client,SelfHostedScenarioExecutor(s),installation_id="installation-1",portal_keys={},publisher_keys={},context={"identity_kind":"dns","local_identity":HOST},commercial_key_id="key-id",agent_id="agent",host_fingerprint="",capability_inventory_provider=provider)
+ assert worker._publish_capabilities("installation-1")
+ assert any("target_scope" in command for capability in sent[-1]["inventory"]["capabilities"] for command in capability["commands"])
+ assert worker._publish_capabilities("installation-1")
+ assert len(sent)==1

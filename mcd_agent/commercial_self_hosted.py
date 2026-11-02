@@ -98,6 +98,12 @@ def _nonnegative_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
+def _capability_features(response: object) -> list[str]:
+    if not isinstance(response, Mapping) or not isinstance(response.get("capability_features"), list):
+        return []
+    return sorted({str(value) for value in response["capability_features"] if isinstance(value, str) and re.fullmatch(r"[a-z0-9_]{1,80}", value)})
+
+
 class RunnerExecutionError(ValueError):
     """A bounded, secret-free diagnostic for the external runner boundary."""
 
@@ -1443,6 +1449,7 @@ class SelfHostedPortalWorker:
         sent = self.executor.state.get(_GENERIC_INVENTORY_KEY)
         sent = dict(sent) if isinstance(sent, Mapping) else {}
         prior = sent.get(str(installation_id))
+        prior_features = _capability_features(prior)
         if isinstance(prior, Mapping) and prior.get("request_id") and prior.get("observed_at"):
             # Reuse exactly the acknowledged snapshot while its capabilities
             # remain unchanged. Time/request metadata must not race queued jobs.
@@ -1462,10 +1469,12 @@ class SelfHostedPortalWorker:
                 self.executor.state.put("commercial_portal_generic_capabilities_v1", cached)
             return True
         try:
-            self._outbound("capability_inventory", lambda: self.client.send_capability_inventory(installation_id=installation_id, inventory=inventory))
+            acknowledgement = self._outbound("capability_inventory", lambda: self.client.send_capability_inventory(installation_id=installation_id, inventory=inventory))
         except _PortalTransportError:
             return False
-        sent[str(installation_id)] = {"inventory_sha256": inventory["inventory_sha256"], "request_id": inventory["request_id"], "observed_at": inventory["observed_at"]}
+        acknowledged_features = _capability_features(acknowledgement)
+        features = sorted(set(prior_features) | set(acknowledged_features))
+        sent[str(installation_id)] = {"inventory_sha256": inventory["inventory_sha256"], "request_id": inventory["request_id"], "observed_at": inventory["observed_at"], "capability_features": features}
         self.executor.state.put(_GENERIC_INVENTORY_KEY, sent)
         cached = self.executor.state.get("commercial_portal_generic_capabilities_v1")
         cached = dict(cached) if isinstance(cached, Mapping) else {}

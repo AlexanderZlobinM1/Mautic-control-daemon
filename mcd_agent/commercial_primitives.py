@@ -9,6 +9,7 @@ artifact-bound contract.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from datetime import datetime, timezone
@@ -25,14 +26,15 @@ from mcd_agent.hardware_profile import read_memory_kib
 
 CAPABILITY_VERSION = "1.0"
 COMMAND_VERSION = "1.0"
+_SNAPSHOT_HASH_RE = re.compile(r"sha256:[0-9a-f]{64}")
 
 _COMMANDS = (
-    ("host_facts", "read_host_facts", False, "portal://mcd/input/host-facts-v1"),
-    ("prerequisites", "check_prerequisites", False, "portal://mcd/input/prerequisites-v1"),
-    ("web_php", "check_web_php", False, "portal://mcd/input/web-php-v1"),
-    ("mysql", "check_mysql", False, "portal://mcd/input/mysql-v1"),
-    ("redis", "check_redis", False, "portal://mcd/input/redis-v1"),
-    ("inventory", "rescan_inventory", True, "portal://mcd/input/inventory-rescan-v1"),
+    ("host_facts", "read_host_facts", False, "portal://mcd/input/host-facts-v1", "host"),
+    ("prerequisites", "check_prerequisites", False, "portal://mcd/input/prerequisites-v1", "host"),
+    ("web_php", "check_web_php", False, "portal://mcd/input/web-php-v1", "host"),
+    ("mysql", "check_mysql", False, "portal://mcd/input/mysql-v1", "host"),
+    ("redis", "check_redis", False, "portal://mcd/input/redis-v1", "host"),
+    ("inventory", "rescan_inventory", True, "portal://mcd/input/inventory-rescan-v1", "host"),
 )
 
 
@@ -55,10 +57,11 @@ def build_capability_inventory(*, installation_id: str, dns_name: str) -> dict[s
                         "execution": "generic_primitive",
                         "mutates_state": mutates_state,
                         "input_schema_ref": schema_ref,
+                        "target_scope": target_scope,
                     }
                 ],
             }
-            for capability_id, command_id, mutates_state, schema_ref in sorted(_COMMANDS)
+            for capability_id, command_id, mutates_state, schema_ref, target_scope in sorted(_COMMANDS)
         ],
     }
     unsigned["inventory_sha256"] = capability_inventory_digest(unsigned)
@@ -100,14 +103,29 @@ def execute_generic_primitive(job: Mapping[str, Any], *, inventory_rescan: Calla
         if inventory_rescan is None:
             return {"status": "failed", "reason": "commercial_inventory_rescan_unavailable"}
         try:
-            count = inventory_rescan()
+            outcome = inventory_rescan()
         except Exception:
             # Discovery may inspect protected local configuration. Never put
             # an exception containing that material into a command receipt.
             return {"status": "failed", "reason": "commercial_inventory_rescan_failed"}
+        reference = None
+        if isinstance(outcome, Mapping):
+            count = outcome.get("discovered_count")
+            reference = outcome.get("snapshot_reference")
+        else:
+            count = outcome
         if type(count) is not int or count < 0:
             return {"status": "failed", "reason": "commercial_inventory_rescan_result_invalid"}
-        return {"status": "succeeded", "discovered_count": count}
+        result: dict[str, Any] = {"status": "succeeded", "discovered_count": count}
+        if reference is not None:
+            if not isinstance(reference, Mapping):
+                return {"status": "failed", "reason": "commercial_inventory_snapshot_reference_invalid"}
+            raw_revision = reference.get("snapshot_revision")
+            durable_hash = reference.get("durable_hash")
+            if type(raw_revision) is not int or raw_revision < 0 or not isinstance(durable_hash, str) or _SNAPSHOT_HASH_RE.fullmatch(durable_hash) is None:
+                return {"status": "failed", "reason": "commercial_inventory_snapshot_reference_invalid"}
+            result["snapshot_reference"] = {"snapshot_revision": raw_revision, "durable_hash": durable_hash}
+        return result
     if command == "read_host_facts":
         try:
             cpu_count = os.cpu_count()

@@ -82,7 +82,6 @@ from mcd_agent.db_watchdog import collect_db_watchdog_snapshot, effective_db_wat
 from mcd_agent.email_counters import repair_campaign_email_counters
 from mcd_agent.executor import render_mautic_command
 from mcd_agent.native_comparator import shared_root_fence_path
-from mcd_agent.fail2ban_guard import ensure_nginx_4xx_scan_safety
 from mcd_agent.security_blocklist import sync_security_blocklist_once
 from mcd_agent.web_ingress_firewall import ensure_managed_web_firewall_loopback
 from mcd_agent.fs_permissions import effective_guard_identity, ensure_instance_permissions
@@ -610,15 +609,30 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
                     from mcd_agent.commercial_capabilities import execute_mautic_version
                     local_cfg = load_config(config.config_file_path, allow_recover_from_mcc=False)
                     return execute_mautic_version(job, config=local_cfg)
-                return execute_generic_primitive(job, inventory_rescan=rescan_inventory)
+                installation_id = str((job.get("installation") or {}).get("installation_id") or "").strip()
+                if not installation_id:
+                    return {"status": "failed", "reason": "commercial_inventory_installation_binding_missing"}
+                return execute_generic_primitive(job, inventory_rescan=lambda: rescan_inventory(installation_id))
 
-            def rescan_inventory() -> int:
+            def rescan_inventory(installation_id: str) -> Mapping[str, Any]:
                 local_cfg = load_config(config.config_file_path, allow_recover_from_mcc=False)
                 local_inventory = InstanceInventory(local_cfg.state_db_path)
                 try:
-                    return local_inventory.rescan(local_cfg, preserve_manual=True)
+                    count = local_inventory.rescan(local_cfg, preserve_manual=True)
                 finally:
                     local_inventory.conn.close()
+                snapshot = inventory_snapshot(installation_id)
+                _prepared, record = state.prepare_inventory_snapshot(
+                    installation_id=installation_id,
+                    inventory=snapshot,
+                )
+                return {
+                    "discovered_count": count,
+                    "snapshot_reference": {
+                        "snapshot_revision": int(record["snapshot_revision"]),
+                        "durable_hash": str(record["durable_hash"]),
+                    },
+                }
 
             worker = SelfHostedPortalWorker(
                 PortalClient(state),
@@ -17267,19 +17281,6 @@ def run_loop(
             logging.info("MCD systemd unit migrated to KillMode=process; running task workers survive supervisor restart")
     except Exception as exc:
         logging.warning("MCD systemd unit migration failed: %s", exc)
-
-    try:
-        fail2ban_guard = ensure_nginx_4xx_scan_safety()
-        if bool(fail2ban_guard.get("changed", False)):
-            logging.warning(
-                "Unsafe path-agnostic nginx 4xx jail disabled: released=%s preserved=%s",
-                fail2ban_guard.get("released_bans", 0),
-                fail2ban_guard.get("preserved_bans", 0),
-            )
-        elif str(fail2ban_guard.get("status", "")) == "error":
-            logging.warning("Fail2ban nginx 4xx safety guard failed: %s", fail2ban_guard.get("reason", "unknown"))
-    except Exception as exc:
-        logging.warning("Fail2ban nginx 4xx safety guard failed: %s", exc)
 
     try:
         web_firewall_guard = ensure_managed_web_firewall_loopback()
