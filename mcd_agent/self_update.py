@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import time
@@ -74,6 +75,29 @@ _RUNTIME_FORBIDDEN_TOP_LEVEL = {
     "setup.cfg",
     "tox.ini",
 }
+
+
+def assert_production_runtime_origin(install_dir: str | Path = "/opt/mcd") -> None:
+    """Fail closed if production resolves MCD from a source checkout."""
+    root = Path(install_dir).resolve()
+    if root != Path("/opt/mcd"):
+        return
+    forbidden = (root / "src").resolve()
+    module_path = Path(__file__).resolve()
+    try:
+        module_path.relative_to(forbidden)
+    except ValueError:
+        pass
+    else:
+        raise RuntimeError("production MCD must not run from /opt/mcd/src")
+    for entry in (os.environ.get("PYTHONPATH", "").split(os.pathsep) + list(sys.path)):
+        if not entry:
+            continue
+        try:
+            Path(entry).resolve().relative_to(forbidden)
+        except ValueError:
+            continue
+        raise RuntimeError("production MCD must not use /opt/mcd/src via PYTHONPATH or sys.path")
 
 
 def _semver(v: str) -> tuple[int, int, int]:
@@ -1607,6 +1631,7 @@ def maybe_cluster_auto_update(
 
 
 def apply_update(cfg: AgentConfig, plan: dict[str, Any]) -> tuple[bool, str]:
+    assert_production_runtime_origin(getattr(cfg, "mcd_install_dir", "/opt/mcd"))
     # Use the existing source-update lock for the entire mutation path,
     # including package-sync repairs and restart-only updates. Operations
     # retain a shared lease even while no PHP console process is present.

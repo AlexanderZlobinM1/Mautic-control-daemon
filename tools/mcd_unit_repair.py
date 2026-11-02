@@ -40,6 +40,74 @@ def _show(systemctl: str, service: str, prop: str) -> str:
     return (proc.stdout or "").strip()
 
 
+def _runtime_probe(venv_python: Path, install_dir: Path, expected_version: str = "") -> dict[str, str]:
+    code = (
+        "import importlib.metadata as m, mcd_agent; "
+        "print(m.version('mcd-agent')); print(mcd_agent.__version__); print(mcd_agent.__file__)"
+    )
+    proc = subprocess.run(
+        [str(venv_python), "-I", "-B", "-c", code],
+        cwd=str(install_dir), env={"PATH": os.defpath}, text=True,
+        capture_output=True, check=False,
+    )
+    if proc.returncode != 0:
+        raise RepairError(f"managed venv import probe failed: {(proc.stderr or proc.stdout).strip()}")
+    values = [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()]
+    if len(values) < 3:
+        raise RepairError("managed venv import probe returned incomplete output")
+    metadata_version, imported_version, imported_path = values[-3:]
+    if expected_version and metadata_version != expected_version:
+        raise RepairError(f"managed venv version mismatch expected={expected_version} actual={metadata_version}")
+    resolved = str(Path(imported_path).resolve())
+    if "/src/" in f"/{resolved.lstrip('/')}" or resolved.startswith(str(install_dir / "src")):
+        raise RepairError(f"managed venv imports forbidden source checkout: {resolved}")
+    if str((install_dir / "venv").resolve()) not in resolved:
+        raise RepairError(f"managed venv imports outside managed venv: {resolved}")
+    return {"metadata_version": metadata_version, "imported_version": imported_version, "imported_path": resolved}
+
+
+def _scheduler_status(venv_python: Path, install_dir: Path, config: Path) -> dict[str, object]:
+    proc = subprocess.run(
+        [str(venv_python), "-m", "mcd_agent", "scheduler", "--config", str(config),
+         "status", "--verbose", "--json"],
+        cwd=str(install_dir), env={"PATH": os.defpath}, text=True,
+        capture_output=True, check=False,
+    )
+    if proc.returncode != 0:
+        raise RepairError(f"scheduler status failed: {(proc.stderr or proc.stdout).strip()}")
+    try:
+        payload = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise RepairError("scheduler status did not return JSON") from exc
+    if not isinstance(payload, dict) or bool(payload.get("paused")):
+        raise RepairError("scheduler is paused after repair")
+    for key in ("running_tasks", "tracked_running_tasks", "external_running_tasks"):
+        if int(payload.get(key, -1) or -1) < 0:
+            raise RepairError(f"scheduler status missing valid {key}")
+    return payload
+
+
+def _scheduler_gate(before: dict[str, object], after: dict[str, object]) -> dict[str, object]:
+    def task_keys(payload: dict[str, object]) -> set[str]:
+        rows = []
+        for key in ("tracked_tasks", "external_tasks"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                rows.extend(value)
+        return {json.dumps(row, sort_keys=True, ensure_ascii=True) for row in rows if isinstance(row, dict)}
+    before_keys = task_keys(before)
+    after_keys = task_keys(after)
+    if before_keys and not (before_keys & after_keys):
+        raise RepairError("scheduler worker re-adoption evidence is missing")
+    return {
+        "admission": "accepted" if not bool(after.get("paused")) else "rejected",
+        "completion_probe": "status_ok",
+        "worker_re_adoption": "verified" if before_keys & after_keys else "not_applicable_no_running_tasks",
+        "before_running_tasks": int(before.get("running_tasks", 0) or 0),
+        "after_running_tasks": int(after.get("running_tasks", 0) or 0),
+    }
+
+
 def _atomic_write(path: Path, content: str, mode: int = 0o644) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, raw = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
@@ -87,6 +155,7 @@ def repair(
     systemd_dir: Path,
     timeout: int,
     allow_nonproduction: bool = False,
+    expected_runtime_version: str = "",
 ) -> dict[str, object]:
     if install_dir != Path("/opt/mcd") and not allow_nonproduction:
         raise RepairError("production repair requires --install-dir /opt/mcd")
@@ -98,6 +167,7 @@ def repair(
         raise RepairError(f"MCD config missing: {config}")
     if (install_dir / "src").exists():
         raise RepairError("refusing repair while forbidden /opt/mcd/src exists")
+    runtime_before = _runtime_probe(venv_python, install_dir, expected_runtime_version)
 
     unit = systemd_dir / f"{service}.service"
     if not unit.is_file():
@@ -106,11 +176,15 @@ def repair(
     previous = dropin.read_bytes() if dropin.exists() else None
     content = "[Service]\nWorkingDirectory=/opt/mcd\nKillMode=process\n"
     before = {prop: _show(systemctl, service, prop) for prop in ("WorkingDirectory", "ExecStart", "KillMode")}
+    scheduler_before = _scheduler_status(venv_python, install_dir, config)
     try:
         _atomic_write(dropin, content)
         _run([systemctl, "daemon-reload"])
         _run([systemctl, "restart", service])
         after = _health(systemctl, service, timeout)
+        runtime_after = _runtime_probe(venv_python, install_dir, expected_runtime_version)
+        scheduler_after = _scheduler_status(venv_python, install_dir, config)
+        scheduler_gate = _scheduler_gate(scheduler_before, scheduler_after)
         receipt = {
             "schema": "mcd-unit-repair-v1",
             "status": "success",
@@ -118,6 +192,11 @@ def repair(
             "dropin": str(dropin),
             "before": before,
             "after": after,
+            "runtime_before": runtime_before,
+            "runtime_after": runtime_after,
+            "scheduler_before": scheduler_before,
+            "scheduler_after": scheduler_after,
+            "scheduler_gate": scheduler_gate,
             "config": str(config),
             "venv_python": str(venv_python),
             "source_checkout_used": False,
@@ -128,11 +207,18 @@ def repair(
         receipt["receipt"] = str(receipt_path)
         return receipt
     except Exception:
+        rollback = {"status": "started"}
         if previous is None:
             dropin.unlink(missing_ok=True)
         else:
             dropin.write_bytes(previous)
-        _run([systemctl, "daemon-reload"], check=False)
+        reload_result = _run([systemctl, "daemon-reload"], check=False)
+        rollback["daemon_reload"] = reload_result.returncode == 0
+        restart_result = _run([systemctl, "restart", service], check=False)
+        rollback["restart"] = restart_result.returncode == 0
+        rollback["health"] = "not_checked"
+        failure = install_dir / "var" / "repair" / f"mcd-unit-repair-failed-{int(time.time())}.json"
+        _atomic_write(failure, json.dumps({"schema": "mcd-unit-repair-v1", "status": "failed", "rollback": rollback}, indent=2) + "\n", 0o600)
         raise
 
 
@@ -143,6 +229,7 @@ def main() -> int:
     parser.add_argument("--systemctl", default="systemctl")
     parser.add_argument("--systemd-dir", default="/etc/systemd/system")
     parser.add_argument("--health-timeout-sec", type=int, default=45)
+    parser.add_argument("--expected-runtime-version", default="")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
     try:
@@ -152,6 +239,7 @@ def main() -> int:
             systemctl=args.systemctl,
             systemd_dir=Path(args.systemd_dir).resolve(),
             timeout=args.health_timeout_sec,
+            expected_runtime_version=args.expected_runtime_version,
         )
     except RepairError as exc:
         print(f"mcd unit repair failed: {exc}", file=sys.stderr)

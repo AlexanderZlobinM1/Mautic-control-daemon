@@ -36,6 +36,8 @@ class UnitRepairTests(unittest.TestCase):
                 "ExecStart": "/opt/mcd/venv/bin/python -m mcd_agent run --config /opt/mcd/etc/mcd.toml",
                 "KillMode": "process",
             }.get(prop, "")), patch.object(repair_module, "_run"), patch.object(
+                repair_module, "_runtime_probe", return_value={"metadata_version": "1.6.40", "imported_version": "1.6.40", "imported_path": str(install / "venv" / "lib" / "mcd_agent" / "__init__.py")}
+            ), patch.object(repair_module, "_scheduler_status", return_value={"paused": False, "running_tasks": 0, "tracked_running_tasks": 0, "external_running_tasks": 0}), patch.object(
                 repair_module, "_health", return_value={"ActiveState": "active", "SubState": "running"}
             ):
                 result = repair_module.repair(
@@ -57,6 +59,27 @@ class UnitRepairTests(unittest.TestCase):
                     install_dir=install, service="mcd", systemctl="systemctl",
                     systemd_dir=systemd, timeout=1, allow_nonproduction=True,
                 )
+
+    def test_failure_rolls_back_dropin_and_restarts_for_readback(self) -> None:
+        with TemporaryDirectory() as raw:
+            root = Path(raw)
+            install, systemd = self._layout(root)
+            dropin = systemd / "mcd.service.d" / repair_module.DROPIN_NAME
+            dropin.parent.mkdir()
+            dropin.write_text("[Service]\nWorkingDirectory=/old\nKillMode=process\n", encoding="utf-8")
+            with patch.object(repair_module, "_show", return_value=""), patch.object(repair_module, "_run") as run, patch.object(
+                repair_module, "_runtime_probe", return_value={"metadata_version": "1.6.40", "imported_version": "1.6.40", "imported_path": str(install / "venv" / "lib" / "mcd_agent" / "__init__.py")}
+            ), patch.object(repair_module, "_scheduler_status", return_value={"paused": False, "running_tasks": 0, "tracked_running_tasks": 0, "external_running_tasks": 0}), patch.object(
+                repair_module, "_health", side_effect=repair_module.RepairError("health failed")
+            ):
+                with self.assertRaisesRegex(repair_module.RepairError, "health failed"):
+                    repair_module.repair(
+                        install_dir=install, service="mcd", systemctl="systemctl",
+                        systemd_dir=systemd, timeout=1, allow_nonproduction=True,
+                    )
+            self.assertEqual(dropin.read_text(encoding="utf-8"), "[Service]\nWorkingDirectory=/old\nKillMode=process\n")
+            self.assertTrue(any(call.args[0][1:3] == ["restart", "mcd"] for call in run.call_args_list if call.args))
+            self.assertTrue(list((install / "var" / "repair").glob("mcd-unit-repair-failed-*.json")))
 
 
 if __name__ == "__main__":

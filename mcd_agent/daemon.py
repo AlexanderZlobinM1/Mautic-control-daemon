@@ -199,7 +199,7 @@ from mcd_agent.static_segment_lanes import (
     state_key as _static_lane_state_key,
 )
 from mcd_agent.service_profiles import service_profiles_apply_once
-from mcd_agent.self_update import _ensure_mcd_service_kill_mode, maybe_auto_update
+from mcd_agent.self_update import _ensure_mcd_service_kill_mode, assert_production_runtime_origin, maybe_auto_update
 from mcd_agent.update_admission import _pid_start_time, scheduler_admission_lock, scheduler_pause_path
 from mcd_agent.segment_filter_safety import format_segment_filter_issues, segment_invalid_filter_issues
 from mcd_agent.segment_recurring_priority import entries_for_instance as recurring_priority_entries_for_instance
@@ -17203,6 +17203,7 @@ def run_loop(
     """Run the daemon."""
 
     global _ACTIVE_PRIORITY_EXECUTOR, _SEGMENT_DISPATCH_WAKEUP, _ORDINARY_REFILL_WAKEUP
+    assert_production_runtime_origin(getattr(config, "mcd_install_dir", "/opt/mcd"))
     logging.info("MCD loop started")
     # Per-root context metadata is reset before each root pass below.  Keep a
     # function-scope default as well because the first pass may reach the
