@@ -104,13 +104,22 @@ def _scheduler_status(venv_python: Path, install_dir: Path, config: Path) -> dic
 
 
 def _scheduler_gate(before: dict[str, object], after: dict[str, object]) -> dict[str, object]:
+    def task_identity(row: dict[str, object]) -> tuple[str, str, str, str, str]:
+        return (
+            str(row.get("root") or ""),
+            str(row.get("task_type") or ""),
+            str(row.get("entity_id") or ""),
+            str(row.get("pid") or ""),
+            str(row.get("command_str") or row.get("cmd") or ""),
+        )
+
     def task_keys(payload: dict[str, object]) -> set[str]:
         rows = []
         for key in ("tracked_tasks", "external_tasks"):
             value = payload.get(key)
             if isinstance(value, list):
                 rows.extend(value)
-        return {json.dumps(row, sort_keys=True, ensure_ascii=True) for row in rows if isinstance(row, dict)}
+        return {"|".join(task_identity(row)) for row in rows if isinstance(row, dict)}
     before_keys = task_keys(before)
     after_keys = task_keys(after)
     if before_keys and not (before_keys & after_keys):
