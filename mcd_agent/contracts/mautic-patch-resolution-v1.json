@@ -1,6 +1,6 @@
 {
   "schema": "mcd-mautic-patch-resolution-v1",
-  "minimum_agent_version": "1.6.47",
+  "minimum_agent_version": "1.6.48",
   "features": {"typed_execution_context_v1": true, "facts_receipt_binding_v1": true, "typed_context_preflight_v1": true, "release_transition_authorization_v3": true, "prepared_target_input_v1": true},
   "prepared_target_input": {
     "schema": "mcd-mautic-prepared-target-input-v1",
@@ -433,7 +433,7 @@
     "status"
   ],
   "evidence_integrity": "MCC verifies the authenticated host owns instance_uid and verifies registry, catalog, and plan hashes before recording evidence",
-  "host_identity": "MCD sends its configured mcc_host_name and hostname; it never supplies MCC Host.id. MCC resolves host identity server-side, returns the derived host_id in the resolve response, and requires that UUID together with the host names on evidence submission.",
+  "host_identity": "MCD sends its configured mcc_host_name and hostname; it never supplies MCC Host.id. MCC resolves host identity server-side, returns the derived host_id in the resolve response, and requires that UUID together with the host names on evidence submission. Inventory keeps native instance_uid locally; the MCC wire identity is instance_uid@effective_mcc_host_name when that host name exists. Bare UID is a same-host legacy alias only; a qualified UID for another host is rejected fail-closed.",
   "cache_semantics": "catalog bytes are not an MCD source of truth; a cache hint is only catalog_revision plus catalog_sha256; a stale or unknown hint returns a complete immutable selected plan",
   "max_plan_bytes": 33554432,
   "max_payload_bytes": 16777216,

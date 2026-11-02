@@ -71,6 +71,7 @@ from mcd_agent.state_backend import (
     upsert_state_snapshot_mysql,
 )
 from mcd_agent.version_identity import agent_version_payload
+from mcd_agent.instance_uid import qualify_instance_uid
 
 _BUNDLE_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*Bundle$")
 _LOCAL_SOCKET_CANDIDATES: tuple[str, ...] = (
@@ -2541,6 +2542,7 @@ class MCCStatePusher:
         instances_snapshot_complete: bool = True,
     ) -> dict[str, Any]:
         identity = resolve_agent_identity(self.cfg)
+        wire_host_name = str(identity.get("effective_mcc_host_name") or "").strip()
         result_key = None
         result_private_key = None
         key_path = str(getattr(self.cfg, "result_signing_key_path", "") or "")
@@ -2581,7 +2583,7 @@ class MCCStatePusher:
             )
             instances.append(
                 {
-                    "instance_uid": i.instance_uid,
+                    "instance_uid": qualify_instance_uid(i.instance_uid, wire_host_name),
                     "name": i.name,
                     "root": i.root,
                     "source": i.source,
