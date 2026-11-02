@@ -3445,6 +3445,7 @@ def main() -> int:
         ensure_seeded(inv, cfg)
         if args.op == "list":
             rows = inv.list_instances()
+            host_name = _mcc_host_name(cfg)
             if not rows:
                 print("No instances")
                 return 0
@@ -3456,7 +3457,7 @@ def main() -> int:
                 runtime = str(getattr(i, "runtime", "host") or "host")
                 install_type = str(i.install_type or detect_install_type(i.root)).strip().lower() or "unknown"
                 print(
-                    f"{i.name}\t{i.root}\t{i.source}\tmajor={i.mautic_major}\tuid={i.instance_uid}"
+                    f"{i.name}\t{i.root}\t{i.source}\tmajor={i.mautic_major}\tuid={_wire_instance_uid(i, host_name)}"
                     f"\tdomains={domains_cell}\truntime={runtime}\tinstall_type={install_type}"
                 )
             return 0
