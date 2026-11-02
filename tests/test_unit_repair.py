@@ -105,6 +105,29 @@ class UnitRepairTests(unittest.TestCase):
         self.assertEqual(result["running_tasks"], 1)
         self.assertEqual(result["external_running_tasks"], 1)
 
+    def test_scheduler_gate_uses_stable_task_identity_not_elapsed_time(self) -> None:
+        before = {"paused": False, "running_tasks": 1, "tracked_tasks": [], "external_tasks": [{
+            "root": "/var/www/ss/public_html", "task_type": "campaign_trigger", "entity_id": 186,
+            "pid": 2547067, "command_str": "php bin/console mautic:campaigns:trigger", "elapsed_sec": 10,
+        }]}
+        after = {"paused": False, "running_tasks": 1, "tracked_tasks": [], "external_tasks": [{
+            **before["external_tasks"][0], "elapsed_sec": 40, "started_at": 123456,
+        }]}
+        gate = repair_module._scheduler_gate(before, after)
+        self.assertEqual(gate["worker_re_adoption"], "verified")
+
+    def test_scheduler_gate_rejects_unrelated_task_identity(self) -> None:
+        before = {"paused": False, "running_tasks": 1, "tracked_tasks": [], "external_tasks": [{
+            "root": "/var/www/ss/public_html", "task_type": "campaign_trigger", "entity_id": 186,
+            "pid": 2547067, "command_str": "php bin/console mautic:campaigns:trigger",
+        }]}
+        after = {"paused": False, "running_tasks": 1, "tracked_tasks": [], "external_tasks": [{
+            "root": "/var/www/other", "task_type": "campaign_trigger", "entity_id": 186,
+            "pid": 2548000, "command_str": "php bin/console mautic:campaigns:trigger",
+        }]}
+        with self.assertRaisesRegex(repair_module.RepairError, "re-adoption evidence"):
+            repair_module._scheduler_gate(before, after)
+
 
 if __name__ == "__main__":
     unittest.main()
