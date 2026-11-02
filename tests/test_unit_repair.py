@@ -92,6 +92,12 @@ class UnitRepairTests(unittest.TestCase):
         self.assertEqual(gate["completion_probe"], "not_executed")
         self.assertTrue(gate["pilot_cycle_required"])
 
+    def test_scheduler_status_accepts_warning_prefixed_json(self) -> None:
+        completed = type("Completed", (), {"returncode": 0, "stdout": 'WARNING stale task reconciled\\n{"paused": false, "running_tasks": 0, "tracked_running_tasks": 0, "external_running_tasks": 0}', "stderr": ""})()
+        with patch.object(repair_module.subprocess, "run", return_value=completed):
+            result = repair_module._scheduler_status(Path("/opt/mcd/venv/bin/python"), Path("/opt/mcd"), Path("/opt/mcd/etc/mcd.toml"))
+        self.assertEqual(result["running_tasks"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
