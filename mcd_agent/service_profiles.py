@@ -83,7 +83,7 @@ def fetch_service_profile(cfg: AgentConfig, component: str, *, include_runtime_i
                        ipv6_listen_forbidden=_ipv6_listen_forbidden())
         if operation == "cloudflare_real_ip_state":
             payload["profile_present"] = profile_present
-    if comp in {"php_fpm", "mysql", "docker", "wazuh", "nginx"}:
+    if comp in {"php_fpm", "mysql", "docker", "wazuh", "nginx", "apt"}:
         payload["external_handler_capabilities"] = sorted(CUSTOM_RUNTIME_CAPABILITIES)
     url = base + f"/api/v1/agent/service-profile/{comp.replace('_', '-')}"
     try:
@@ -238,7 +238,13 @@ def service_profiles_apply_once(
     if not isinstance(profile, dict) and not (comp == "nginx" and profile is None):
         return {"status": "error", "reason": "invalid profile payload", "fetch": public_fetch}
     external_failed = False
-    if comp in {"php_fpm", "mysql", "docker", "wazuh", "nginx"}:
+    external_apt_selected = (
+        comp == "apt"
+        and isinstance(fetched.get("external_handler"), dict)
+        and fetched["external_handler"].get("state") == "active"
+        and fetched["external_handler"].get("active") is True
+    )
+    if comp in {"php_fpm", "mysql", "docker", "wazuh", "nginx"} or external_apt_selected:
         # Only delivery/admission lives here; the artifact owns the algorithm.
         # No builtin writer or fallback exists after external selection.
         try:

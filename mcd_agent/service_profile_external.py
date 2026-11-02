@@ -56,6 +56,41 @@ def external_handler_selected(handler: Mapping[str, Any]) -> bool:
     raise ValueError('external_handler_activation_invalid')
 
 
+def _runtime_input_schema(handler: Mapping[str, Any], *, component: str,
+                          runtime_input: Any) -> tuple[set[str] | None, bool]:
+    """Validate the generic descriptor-declared private string-map contract.
+
+    Wazuh predates the descriptor schema and keeps its exact legacy contract.
+    Other components may opt into the same bounded stdin transport only by
+    declaring their field names in the external descriptor; MCD does not own
+    component-specific secret names or defaults.
+    """
+    schema = handler.get("runtime_input_schema")
+    if schema is None:
+        if component != "wazuh":
+            return None, runtime_input is None
+        valid = (isinstance(runtime_input, dict)
+                 and set(runtime_input) == {"registration_password"}
+                 and isinstance(runtime_input["registration_password"], str))
+        return {"registration_password"} if valid else None, valid
+    if (not isinstance(schema, Mapping)
+            or set(schema) != {"type", "fields"}
+            or schema.get("type") != "string-map"):
+        raise ValueError("external_handler_runtime_input_schema_invalid")
+    fields = schema.get("fields")
+    if (not isinstance(fields, list) or not fields
+            or any(not isinstance(field, str) or not field for field in fields)
+            or len(set(fields)) != len(fields)):
+        raise ValueError("external_handler_runtime_input_schema_invalid")
+    expected = set(fields)
+    if runtime_input is None:
+        return expected, False
+    if (not isinstance(runtime_input, dict) or set(runtime_input) != expected
+            or any(not isinstance(value, str) for value in runtime_input.values())):
+        raise ValueError("external_handler_runtime_input_invalid")
+    return expected, True
+
+
 def _admit_external_service_profile(cfg: Any, fetched: Mapping[str, Any], *,
                                    component: str, dry_run: bool = False) -> dict[str, Any]:
     handler = fetched.get('external_handler')
@@ -79,9 +114,10 @@ def _admit_external_service_profile(cfg: Any, fetched: Mapping[str, Any], *,
         raise ValueError('external_handler_capability_unavailable')
     runtime_input = fetched.get("runtime_input")
     if "runtime_input" in fetched:
-        if (component != "wazuh" or not isinstance(runtime_input, dict)
-                or set(runtime_input) != {"registration_password"}
-                or not isinstance(runtime_input["registration_password"], str)):
+        _fields, valid_runtime_input = _runtime_input_schema(
+            handler, component=component, runtime_input=runtime_input
+        )
+        if not valid_runtime_input:
             raise ValueError("external_handler_runtime_input_invalid")
         try:
             input_bytes = json.dumps(runtime_input, ensure_ascii=False, sort_keys=True,
@@ -92,6 +128,8 @@ def _admit_external_service_profile(cfg: Any, fetched: Mapping[str, Any], *,
             raise ValueError("external_handler_runtime_input_invalid")
         if "framed-runtime-input" not in required:
             raise ValueError("external_handler_runtime_input_unsupported")
+    elif "runtime_input_schema" in handler:
+        _runtime_input_schema(handler, component=component, runtime_input=None)
     profile_input = handler.get('profile_input')
     profile = fetched.get('profile')
     if not isinstance(profile_input, Mapping) or profile_input.get('source') != 'response.profile' or not (isinstance(profile, Mapping) or (component == 'nginx' and profile is None)):

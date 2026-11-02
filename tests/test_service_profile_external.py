@@ -91,7 +91,7 @@ def test_missing_descriptor_cannot_silently_use_legacy(fetched,monkeypatch):
         profiles.service_profiles_apply_once(None)
 
 
-@pytest.mark.parametrize('component',['php_fpm','mysql','docker','wazuh'])
+@pytest.mark.parametrize('component',['php_fpm','mysql','docker','wazuh','apt'])
 def test_existing_post_advertises_actual_capabilities_without_candidate_opt_in(monkeypatch,component):
     cfg=SimpleNamespace(mcc_url='https://controller.invalid',mcc_token='test')
     monkeypatch.setattr(profiles,'resolve_agent_identity',lambda cfg:{'effective_hostname':'disposable','effective_mcc_host_name':'','configured_host_name':None,'local_hostname':'disposable'})
@@ -102,6 +102,29 @@ def test_existing_post_advertises_actual_capabilities_without_candidate_opt_in(m
     assert url.endswith('/api/v1/agent/service-profile/'+component.replace('_','-'))
     assert set(payload['external_handler_capabilities'])==ext.CUSTOM_RUNTIME_CAPABILITIES
     assert 'external_handler_candidate_opt_in' not in payload
+
+
+def test_active_apt_handler_uses_existing_external_custom_seam(fetched, monkeypatch):
+    fetched.update(component='apt', resolved_plan_key='apt:mutating-candidate')
+    fetched['external_handler'].update(component='apt', resolved_plan_key='apt:mutating-candidate')
+    monkeypatch.setattr(profiles, 'fetch_service_profile', lambda *a, **kw: fetched)
+    monkeypatch.setattr(profiles, 'apply_external_service_profile', lambda *a, **kw: {'status': 'applied', 'changed_files': []})
+    monkeypatch.setattr(profiles, 'apply_apt_profile', lambda *a, **kw: pytest.fail('active apt handler must own the apply'))
+    result = profiles.service_profiles_apply_once(SimpleNamespace(cluster_id=None), component='apt')
+    assert result['status'] == 'ok'
+    assert result['apply'] == {'status': 'applied', 'changed_files': []}
+
+
+def test_unselected_apt_handler_keeps_explicit_legacy_compatibility_path(fetched, monkeypatch):
+    fetched.update(component='apt', resolved_plan_key='apt:legacy')
+    fetched['external_handler'].update(component='apt', resolved_plan_key='apt:legacy', state='candidate', active=False)
+    monkeypatch.setattr(profiles, 'fetch_service_profile', lambda *a, **kw: fetched)
+    monkeypatch.setattr(profiles.os, 'geteuid', lambda: 0)
+    monkeypatch.setattr(profiles, 'apply_apt_profile', lambda *a, **kw: {'status': 'planned', 'actions': []})
+    monkeypatch.setattr(profiles, 'apply_external_service_profile', lambda *a, **kw: pytest.fail('candidate apt handler must not execute'))
+    result = profiles.service_profiles_apply_once(SimpleNamespace(cluster_id=None), component='apt', dry_run=True)
+    assert result['status'] == 'ok'
+    assert result['apply'] == {'status': 'planned', 'actions': []}
 
 
 def test_profile_pin_uses_authority_utf8_without_ascii_escaping(fetched,monkeypatch):
@@ -327,6 +350,57 @@ def test_private_runtime_input_is_memory_only_and_public_fetch_omits_it(wazuh_fe
     assert calls[0]['runtime_input']==private
     assert private['registration_password'] not in str(calls[0]['args'])
     assert wazuh_fetched['runtime_input']==private
+
+
+def test_descriptor_declared_private_string_map_uses_generic_stdin_seam(fetched, monkeypatch):
+    fetched.update(component='apt', resolved_plan_key='apt:zabbix-monitor-bootstrap')
+    fetched['external_handler'].update(
+        component='apt', resolved_plan_key='apt:zabbix-monitor-bootstrap',
+        runtime_input_schema={
+            'type': 'string-map',
+            'fields': ['state_dir', 'mysql_password'],
+        },
+    )
+    private = {'state_dir': '/opt/mcd/var', 'mysql_password': 'SYNTHETIC-PRIVATE'}
+    fetched['runtime_input'] = private
+    for field in ('command', 'dry_run_command'):
+        fetched['external_handler'][field]['argv'].append('--runtime-input-stdin')
+    calls = []
+    monkeypatch.setattr(ext, 'run_custom_script_by_key', lambda cfg, **kw: calls.append(kw) or (0, '{"status":"applied"}'))
+    result = ext.apply_external_service_profile(SimpleNamespace(), fetched, component='apt')
+    assert result == {'status': 'applied'}
+    assert calls[0]['runtime_input'] == private
+    assert private['mysql_password'] not in str(calls[0]['args'])
+    assert 'runtime_input' not in profiles.public_service_profile_response(fetched)
+
+
+@pytest.mark.parametrize('schema', [
+    {'type': 'string-map', 'fields': []},
+    {'type': 'string-map', 'fields': ['x', 'x']},
+    {'type': 'object', 'fields': ['x']},
+])
+def test_descriptor_declared_private_string_map_rejects_invalid_schema(fetched, schema):
+    fetched.update(component='apt', resolved_plan_key='apt:zabbix-monitor-bootstrap')
+    fetched['external_handler'].update(
+        component='apt', resolved_plan_key='apt:zabbix-monitor-bootstrap',
+        runtime_input_schema=schema,
+    )
+    fetched['runtime_input'] = {'x': 'SYNTHETIC-PRIVATE'}
+    fetched['external_handler']['command']['argv'].append('--runtime-input-stdin')
+    with pytest.raises(ValueError, match='external_handler_runtime_input_schema_invalid'):
+        ext.apply_external_service_profile(SimpleNamespace(), fetched, component='apt')
+
+
+def test_descriptor_declared_private_string_map_requires_exact_fields(fetched):
+    fetched.update(component='apt', resolved_plan_key='apt:zabbix-monitor-bootstrap')
+    fetched['external_handler'].update(
+        component='apt', resolved_plan_key='apt:zabbix-monitor-bootstrap',
+        runtime_input_schema={'type': 'string-map', 'fields': ['x']},
+    )
+    fetched['runtime_input'] = {'x': 'SYNTHETIC-PRIVATE', 'extra': 'SYNTHETIC-PRIVATE'}
+    fetched['external_handler']['command']['argv'].append('--runtime-input-stdin')
+    with pytest.raises(ValueError, match='external_handler_runtime_input_invalid'):
+        ext.apply_external_service_profile(SimpleNamespace(), fetched, component='apt')
 
 
 @pytest.mark.parametrize('problem',['capability','flag','null','wrongtype','extra','profile','invalidutf8'])
