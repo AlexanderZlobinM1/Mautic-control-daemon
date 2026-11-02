@@ -46,6 +46,7 @@ from mcd_agent.apt_profile import (
 )
 from mcd_agent.admin_user import clear_hostnet_auth_mfa, hostnet_auth_mfa_status, reset_admin_password
 from mcd_agent.config import load_config
+from mcd_agent.host_identity import resolve_agent_identity
 from mcd_agent.commercial_portal import CommercialState, PortalClient
 from mcd_agent.cluster_assets import (
     collect_cluster_assets_status,
@@ -186,6 +187,19 @@ from mcd_agent.tuner import format_tune_result, tune_segments
 from mcd_agent.uninstall import run_uninstall
 from mcd_agent.version_identity import agent_version_payload, installed_agent_version
 from mcd_agent.version_check import maybe_notify_update
+from mcd_agent.instance_uid import instance_uid_matches, qualify_instance_uid
+
+
+def _mcc_host_name(cfg) -> str:
+    try:
+        identity = resolve_agent_identity(cfg)
+    except Exception:
+        return ""
+    return str(identity.get("effective_mcc_host_name") or "").strip()
+
+
+def _wire_instance_uid(inst, host_name: str) -> str:
+    return qualify_instance_uid(str(getattr(inst, "instance_uid", "") or ""), host_name)
 
 _MANUAL_CMD_SEP = "\x1f"
 
@@ -582,7 +596,7 @@ def _select_root_for_ops(cfg, root: str | None, *, allow_missing_absolute: bool 
     installs = inv.list_instances()
     if root:
         for inst in installs:
-            if inst.root == root or inst.instance_uid == root:
+            if inst.root == root or instance_uid_matches(root, inst.instance_uid, _mcc_host_name(cfg)):
                 return inst.root
         if allow_missing_absolute and Path(root).is_absolute():
             return root
@@ -605,7 +619,7 @@ def _select_instance_for_ops(cfg, root: str | None):
             domains = [str(x).strip().lower() for x in (getattr(inst, "domains", []) or [])]
             if (
                 inst.root == target
-                or inst.instance_uid == target
+                or instance_uid_matches(target, inst.instance_uid, _mcc_host_name(cfg))
                 or inst.name == target
                 or str(inst.primary_domain or "").strip().lower() == target.lower()
                 or target.lower() in domains
@@ -890,7 +904,7 @@ def _select_installs_for_patch(cfg, root: str | None):
     ensure_seeded(inv, cfg)
     installs = inv.list_instances()
     if root:
-        return [x for x in installs if x.root == root or x.instance_uid == root]
+        return [x for x in installs if x.root == root or instance_uid_matches(root, x.instance_uid, _mcc_host_name(cfg))]
     return installs
 
 
@@ -2842,7 +2856,7 @@ def main() -> int:
         installs = inv.list_instances()
         target_root = str(getattr(args, "root", "") or "").strip()
         if target_root:
-            installs = [i for i in installs if i.root == target_root or i.instance_uid == target_root]
+            installs = [i for i in installs if i.root == target_root or instance_uid_matches(target_root, i.instance_uid, _mcc_host_name(cfg))]
             if not installs:
                 msg = f"Mautic install not found for root: {target_root}"
                 if bool(getattr(args, "json", False)):
@@ -3431,6 +3445,7 @@ def main() -> int:
         ensure_seeded(inv, cfg)
         if args.op == "list":
             rows = inv.list_instances()
+            host_name = _mcc_host_name(cfg)
             if not rows:
                 print("No instances")
                 return 0
@@ -3442,7 +3457,7 @@ def main() -> int:
                 runtime = str(getattr(i, "runtime", "host") or "host")
                 install_type = str(i.install_type or detect_install_type(i.root)).strip().lower() or "unknown"
                 print(
-                    f"{i.name}\t{i.root}\t{i.source}\tmajor={i.mautic_major}\tuid={i.instance_uid}"
+                    f"{i.name}\t{i.root}\t{i.source}\tmajor={i.mautic_major}\tuid={_wire_instance_uid(i, host_name)}"
                     f"\tdomains={domains_cell}\truntime={runtime}\tinstall_type={install_type}"
                 )
             return 0

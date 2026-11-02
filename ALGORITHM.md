@@ -31,6 +31,15 @@ project root с `composer.json` и `bin/console`, затем `docroot/` или `
 полные application-структуры остаются неоднозначными и блокируются; обычные
 root-only, docroot-only и symlink layouts сохраняют fail-closed semantics.
 
+### Stable instance UID and MCC wire identity
+
+Локальный inventory сохраняет свой стабильный native `instance_uid` без переименования.
+При наличии эффективного `mcc_host_name` MCD в state/inventory payloads передаёт MCC
+канонический wire UID `instance_uid@host_name`. Bare UID принимается только как legacy
+alias текущего хоста; qualified UID другого хоста отклоняется fail-closed. Patch context,
+migration selectors и state sync используют одну и ту же проверку. В standalone-режиме
+без effective MCC host name native UID остаётся bare.
+
 Upgrade maintenance fencing is a cross-process admission barrier, not only a
 marker file. The upgrade owner acquires the exclusive
 `maintenance.dispatch.fence.lock` beside `scheduler.pause` before publishing

@@ -37,6 +37,7 @@ from mcd_agent.runtime_adapters import run_runtime_adapter, runtime_adapter_path
 from mcd_agent.runtime_descriptor import descriptor_for_root
 from mcd_agent.runtime_matrix import build_runtime_profile
 from mcd_agent.source_operation import stable_source_operation
+from mcd_agent.instance_uid import instance_uid_matches
 
 
 _MIN_TARGET_HEADROOM_BYTES = 5 * 1024 * 1024 * 1024
@@ -49,6 +50,15 @@ _MYSQL_DATE_FORMAT_GENERATED_RE = re.compile(
 NGINX_SITES_AVAILABLE = Path("/etc/nginx/sites-available")
 NGINX_SITES_ENABLED = Path("/etc/nginx/sites-enabled")
 LETSENCRYPT_ROOT = Path("/etc/letsencrypt")
+
+
+def _mcc_wire_host_name(config: AgentConfig) -> str:
+    from mcd_agent.host_identity import resolve_agent_identity
+    try:
+        identity = resolve_agent_identity(config)
+    except Exception:
+        return str(getattr(config, "mcc_host_name", "") or "").strip()
+    return str(identity.get("effective_mcc_host_name") or "").strip()
 
 
 def _utc_now() -> str:
@@ -519,7 +529,7 @@ def _target_db_exists(db_name: str) -> bool:
 def stream_source_files(config: AgentConfig, *, selector: str | None, output: Any) -> int:
     inv = InstanceInventory(config.state_db_path)
     ensure_seeded(inv, config)
-    inst = _select_instance(inv.list_instances(), selector)
+    inst = _select_instance(inv.list_instances(), selector, host_name=_mcc_wire_host_name(config))
     root = Path(inst.root).resolve()
     if not root.exists() or not root.is_dir():
         raise RuntimeError(f"source root is not a directory: {root}")
@@ -693,7 +703,7 @@ def receive_target_letsencrypt(*, input_stream: Any) -> dict[str, Any]:
 def stream_source_db(config: AgentConfig, *, selector: str | None, output: Any) -> int:
     inv = InstanceInventory(config.state_db_path)
     ensure_seeded(inv, config)
-    inst = _select_instance(inv.list_instances(), selector)
+    inst = _select_instance(inv.list_instances(), selector, host_name=_mcc_wire_host_name(config))
     # Runtime descriptors translate container-only DB endpoints to the
     # host-side address MCD can actually reach.  Re-reading local.php here
     # would discard that translation (for example 172.30.0.1 -> 127.0.0.1)
@@ -1370,7 +1380,7 @@ def _database_probe(inst: MauticInstall) -> dict[str, Any]:
     return out
 
 
-def _select_instance(instances: list[MauticInstall], selector: str | None) -> MauticInstall:
+def _select_instance(instances: list[MauticInstall], selector: str | None, *, host_name: str = "") -> MauticInstall:
     token = str(selector or "").strip()
     if not token:
         if len(instances) == 1:
@@ -1385,7 +1395,8 @@ def _select_instance(instances: list[MauticInstall], selector: str | None) -> Ma
             str(inst.primary_domain or "").strip(),
             *[str(x or "").strip() for x in list(inst.domains or [])],
         }
-        if token in candidates or token_l in {x.lower() for x in candidates if x}:
+        if (token in candidates or token_l in {x.lower() for x in candidates if x}
+                or instance_uid_matches(token, str(inst.instance_uid or ""), host_name)):
             return inst
     raise RuntimeError(f"instance not found: {token}")
 
@@ -1394,7 +1405,7 @@ def collect_source_probe(config: AgentConfig, selector: str | None = None) -> di
     inv = InstanceInventory(config.state_db_path)
     ensure_seeded(inv, config)
     instances = inv.list_instances()
-    inst = _select_instance(instances, selector)
+    inst = _select_instance(instances, selector, host_name=_mcc_wire_host_name(config))
     root = Path(inst.root).resolve()
     if not root.exists() or not root.is_dir():
         raise RuntimeError(f"instance root is not a directory: {root}")
