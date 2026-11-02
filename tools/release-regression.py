@@ -14,6 +14,7 @@ REQUIRED_TESTS = (
     "test_mautic7_database_preflight.py",
     "test_mautic_upgrade_contract.py",
     "test_mautic_composer_move.py",
+    "test_production_runtime_boundary.py",
 )
 
 
