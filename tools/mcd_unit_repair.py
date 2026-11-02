@@ -101,10 +101,24 @@ def _scheduler_gate(before: dict[str, object], after: dict[str, object]) -> dict
         raise RepairError("scheduler worker re-adoption evidence is missing")
     return {
         "admission": "accepted" if not bool(after.get("paused")) else "rejected",
-        "completion_probe": "status_ok",
+        "completion_probe": "not_executed",
+        "status_probe": "ok",
         "worker_re_adoption": "verified" if before_keys & after_keys else "not_applicable_no_running_tasks",
         "before_running_tasks": int(before.get("running_tasks", 0) or 0),
         "after_running_tasks": int(after.get("running_tasks", 0) or 0),
+        "pilot_cycle_required": True,
+    }
+
+
+def _rollback_readback(systemctl: str, service: str) -> dict[str, object]:
+    active = _run([systemctl, "is-active", "--quiet", service], check=False)
+    return {
+        "active": active.returncode == 0,
+        "ActiveState": _show(systemctl, service, "ActiveState"),
+        "SubState": _show(systemctl, service, "SubState"),
+        "WorkingDirectory": _show(systemctl, service, "WorkingDirectory"),
+        "ExecStart": _show(systemctl, service, "ExecStart"),
+        "KillMode": _show(systemctl, service, "KillMode"),
     }
 
 
@@ -206,7 +220,7 @@ def repair(
         _atomic_write(receipt_path, json.dumps(receipt, indent=2, sort_keys=True) + "\n", 0o600)
         receipt["receipt"] = str(receipt_path)
         return receipt
-    except Exception:
+    except Exception as original_error:
         rollback = {"status": "started"}
         if previous is None:
             dropin.unlink(missing_ok=True)
@@ -216,7 +230,9 @@ def repair(
         rollback["daemon_reload"] = reload_result.returncode == 0
         restart_result = _run([systemctl, "restart", service], check=False)
         rollback["restart"] = restart_result.returncode == 0
-        rollback["health"] = "not_checked"
+        rollback["readback"] = _rollback_readback(systemctl, service)
+        rollback["health"] = "readback_only_original_state_may_be_unhealthy"
+        rollback["error"] = str(original_error)
         failure = install_dir / "var" / "repair" / f"mcd-unit-repair-failed-{int(time.time())}.json"
         _atomic_write(failure, json.dumps({"schema": "mcd-unit-repair-v1", "status": "failed", "rollback": rollback}, indent=2) + "\n", 0o600)
         raise

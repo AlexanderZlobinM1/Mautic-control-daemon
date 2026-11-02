@@ -79,7 +79,18 @@ class UnitRepairTests(unittest.TestCase):
                     )
             self.assertEqual(dropin.read_text(encoding="utf-8"), "[Service]\nWorkingDirectory=/old\nKillMode=process\n")
             self.assertTrue(any(call.args[0][1:3] == ["restart", "mcd"] for call in run.call_args_list if call.args))
-            self.assertTrue(list((install / "var" / "repair").glob("mcd-unit-repair-failed-*.json")))
+            receipts = list((install / "var" / "repair").glob("mcd-unit-repair-failed-*.json"))
+            self.assertTrue(receipts)
+            failure = receipts[0].read_text(encoding="utf-8")
+            self.assertIn('"error": "health failed"', failure)
+            self.assertIn('"readback"', failure)
+
+    def test_scheduler_gate_is_status_only_until_operations_pilot_cycle(self) -> None:
+        before = {"paused": False, "running_tasks": 0, "tracked_tasks": [], "external_tasks": []}
+        gate = repair_module._scheduler_gate(before, dict(before))
+        self.assertEqual(gate["status_probe"], "ok")
+        self.assertEqual(gate["completion_probe"], "not_executed")
+        self.assertTrue(gate["pilot_cycle_required"])
 
 
 if __name__ == "__main__":
