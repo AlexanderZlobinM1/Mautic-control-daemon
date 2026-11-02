@@ -113,15 +113,26 @@ def _scheduler_gate(before: dict[str, object], after: dict[str, object]) -> dict
             str(row.get("command_str") or row.get("cmd") or ""),
         )
 
-    def task_keys(payload: dict[str, object]) -> set[str]:
+    def task_keys(payload: dict[str, object]) -> set[tuple[str, str, str, str, str]]:
         rows = []
         for key in ("tracked_tasks", "external_tasks"):
             value = payload.get(key)
             if isinstance(value, list):
                 rows.extend(value)
-        return {"|".join(task_identity(row)) for row in rows if isinstance(row, dict)}
+        identities: set[tuple[str, str, str, str, str]] = set()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            identity = task_identity(row)
+            if identity[3] and any(identity[index] for index in (0, 1, 2, 4)):
+                identities.add(identity)
+        return identities
     before_keys = task_keys(before)
     after_keys = task_keys(after)
+    if int(before.get("running_tasks", 0) or 0) > 0 and not before_keys:
+        raise RepairError("scheduler worker re-adoption evidence is missing")
+    if int(after.get("running_tasks", 0) or 0) > 0 and not after_keys:
+        raise RepairError("scheduler worker re-adoption evidence is missing")
     if before_keys and not (before_keys & after_keys):
         raise RepairError("scheduler worker re-adoption evidence is missing")
     return {

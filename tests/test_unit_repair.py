@@ -128,6 +128,16 @@ class UnitRepairTests(unittest.TestCase):
         with self.assertRaisesRegex(repair_module.RepairError, "re-adoption evidence"):
             repair_module._scheduler_gate(before, after)
 
+    def test_scheduler_gate_rejects_empty_or_incomplete_task_rows(self) -> None:
+        before = {"paused": False, "running_tasks": 1, "tracked_tasks": [], "external_tasks": [{}]}
+        after = {"paused": False, "running_tasks": 1, "tracked_tasks": [], "external_tasks": [{}]}
+        with self.assertRaisesRegex(repair_module.RepairError, "re-adoption evidence"):
+            repair_module._scheduler_gate(before, after)
+        before["external_tasks"] = [{"pid": "2547067"}]
+        after["external_tasks"] = [{"pid": "2547067"}]
+        with self.assertRaisesRegex(repair_module.RepairError, "re-adoption evidence"):
+            repair_module._scheduler_gate(before, after)
+
 
 if __name__ == "__main__":
     unittest.main()
