@@ -15,6 +15,46 @@ from mcd_agent.mautic_patch_plan_v3 import (
 from mcd_agent.mautic_patch_resolution import canonical_json_sha256
 
 
+def _is_composer_project_root(root: Path) -> bool:
+    """Return whether root is a Composer project wrapper for a split install."""
+    return (
+        (root / "composer.json").is_file()
+        and not (root / "composer.json").is_symlink()
+        and (root / "bin/console").is_file()
+        and not (root / "bin/console").is_symlink()
+    )
+
+
+def _is_upgrade_only_directory(path: Path) -> bool:
+    """Recognize the stale root/app marker left beside a Composer docroot."""
+    if path.is_symlink() or not path.is_dir():
+        return False
+    try:
+        entries = list(path.iterdir())
+    except OSError:
+        return False
+    return (
+        len(entries) == 1
+        and entries[0].name == "upgrade"
+        and entries[0].is_dir()
+        and not entries[0].is_symlink()
+    )
+
+
+def _is_stale_composer_application_candidate(root: Path) -> bool:
+    """Ignore only the known Composer wrapper residue, never a real root layout."""
+    if not _is_composer_project_root(root):
+        return False
+    plugins = root / "plugins"
+    if plugins.is_symlink() or not plugins.is_dir():
+        return False
+    try:
+        plugins_empty = not any(plugins.iterdir())
+    except OSError:
+        return False
+    return _is_upgrade_only_directory(root / "app") and plugins_empty
+
+
 def application_root(value: str | Path) -> Path:
     root = _root(str(value))
     if (root.name in {"docroot", "public"}
@@ -27,6 +67,8 @@ def application_root(value: str | Path) -> Path:
         candidate = root / relative
         if candidate.is_symlink():
             raise PatchPlanV3Error("application_root_symlink")
+        if not relative and _is_stale_composer_application_candidate(candidate):
+            continue
         console_root = candidate
         if relative and not (candidate / "bin/console").exists():
             console_root = root

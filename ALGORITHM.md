@@ -23,6 +23,14 @@ MCC через существующий `record_mautic_patch_evidence`; stdout m
 успех без фактической проверки. Повторный запуск использует тот же immutable
 plan и остаётся идемпотентным.
 
+Разрешение Mautic application root для Composer split-layout проверяет сначала
+project root с `composer.json` и `bin/console`, затем `docroot/` или `public/` с
+валидированными `app/` и `plugins/`. Если в project root остался только
+`app/upgrade` и пустой `plugins/`, это известный wrapper residue и он не создаёт
+вторую кандидатуру: выбирается полный `docroot/` или `public/`. Настоящие две
+полные application-структуры остаются неоднозначными и блокируются; обычные
+root-only, docroot-only и symlink layouts сохраняют fail-closed semantics.
+
 Upgrade maintenance fencing is a cross-process admission barrier, not only a
 marker file. The upgrade owner acquires the exclusive
 `maintenance.dispatch.fence.lock` beside `scheduler.pause` before publishing
