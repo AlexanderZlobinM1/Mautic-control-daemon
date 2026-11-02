@@ -93,7 +93,6 @@ class AptProfileDbRepoTests(unittest.TestCase):
         old_apply_unattended = apt_profile._apply_unattended_upgrades
         old_hosts = apt_profile.ensure_local_fqdn_hosts_entry
         old_zabbix_agent = apt_profile.ensure_zabbix_agent
-        old_zabbix_mysql = apt_profile.ensure_zabbix_mysql_monitor_user
         old_collect = apt_profile.collect_apt_state
         old_postcheck = apt_profile._apt_upgrade_service_postcheck
         old_cf_present = apt_profile.cloudflare_real_ip_profile_present
@@ -103,7 +102,6 @@ class AptProfileDbRepoTests(unittest.TestCase):
             apt_profile._apply_unattended_upgrades = lambda *args, **kwargs: ([], [], [])
             apt_profile.ensure_local_fqdn_hosts_entry = lambda **_kwargs: (False, "hosts_fqdn:skipped")
             apt_profile.ensure_zabbix_agent = lambda *args, **kwargs: {"status": "disabled"}
-            apt_profile.ensure_zabbix_mysql_monitor_user = lambda *args, **kwargs: {"status": "disabled"}
             apt_profile.collect_apt_state = lambda *args, **kwargs: {"status": "ok", "errors": []}
             apt_profile.cloudflare_real_ip_profile_present = lambda _profile: False
 
@@ -133,7 +131,6 @@ class AptProfileDbRepoTests(unittest.TestCase):
             apt_profile._apply_unattended_upgrades = old_apply_unattended
             apt_profile.ensure_local_fqdn_hosts_entry = old_hosts
             apt_profile.ensure_zabbix_agent = old_zabbix_agent
-            apt_profile.ensure_zabbix_mysql_monitor_user = old_zabbix_mysql
             apt_profile.collect_apt_state = old_collect
             apt_profile._apt_upgrade_service_postcheck = old_postcheck
             apt_profile.cloudflare_real_ip_profile_present = old_cf_present

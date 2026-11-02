@@ -2356,7 +2356,10 @@ class MCCStatePusher:
             and (now_ts - self.latest_apt_state_ts) < interval
         ):
             return dict(self.latest_apt_state)
-        payload = collect_apt_state(timeout_sec=30, cfg=self.cfg)
+        # Periodic state publication is observation-only.  The explicit
+        # service-profile/``zabbix bootstrap-mysql-user`` operations retain
+        # ownership of the mutating bootstrap and its durable marker.
+        payload = collect_apt_state(timeout_sec=30, cfg=self.cfg, auto_bootstrap_zabbix=False)
         self.latest_apt_state = payload
         self.latest_apt_state_ts = now_ts
         self.latest_apt_probe_key = probe_key

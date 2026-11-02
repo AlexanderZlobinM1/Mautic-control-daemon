@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import configparser
 from datetime import datetime, timezone
 import hashlib
 import ipaddress
@@ -1860,249 +1859,6 @@ def collect_unattended_upgrade_state() -> dict[str, Any]:
     return state
 
 
-def _mysql_client_bin() -> str | None:
-    for name in ("mariadb", "mysql"):
-        path = shutil.which(name)
-        if path:
-            return path
-    return None
-
-
-def _sql_escape(value: str) -> str:
-    return str(value).replace("\\", "\\\\").replace("'", "''")
-
-
-def _normalize_grants(raw: Any) -> list[str]:
-    default = ["REPLICATION CLIENT", "PROCESS", "SHOW DATABASES", "SHOW VIEW"]
-    if not isinstance(raw, list):
-        return default
-    out: list[str] = []
-    for item in raw:
-        s = str(item or "").strip().upper()
-        if not s:
-            continue
-        if not re.match(r"^[A-Z_ ]+$", s):
-            continue
-        out.append(s)
-    return out or default
-
-
-def _is_local_mysql_host(raw: str) -> bool:
-    host = str(raw or "").strip().lower()
-    return host in {"", "localhost", "127.0.0.1", "::1"}
-
-
-def _run_mysql_root_sql(sql: str, *, timeout_sec: int = 20, cfg: Any | None = None) -> tuple[bool, str]:
-    mysql_bin = _mysql_client_bin()
-    if not mysql_bin:
-        return False, "mysql_client_not_found"
-    candidates: list[dict[str, str]] = [
-        {
-            "label": "root_socket",
-            "user": "",
-            "password": "",
-            "socket": "",
-            "protocol": "socket",
-        }
-    ]
-    # Some hosts use password-protected root; fallback to distro-maintained DB admin creds.
-    debian_cnf = Path("/etc/mysql/debian.cnf")
-    if debian_cnf.exists() and debian_cnf.is_file():
-        try:
-            parser = configparser.RawConfigParser(interpolation=None)
-            parser.read(debian_cnf, encoding="utf-8")
-            sections = [s for s in parser.sections()]
-            if "" not in sections:
-                sections.insert(0, "")
-            seen: set[tuple[str, str, str]] = set()
-            for sec in sections:
-                user = parser.get(sec, "user", fallback="").strip() if sec else parser.defaults().get("user", "").strip()
-                password = parser.get(sec, "password", fallback="").strip() if sec else parser.defaults().get("password", "").strip()
-                socket = parser.get(sec, "socket", fallback="").strip() if sec else parser.defaults().get("socket", "").strip()
-                if not user:
-                    continue
-                key = (user, password, socket)
-                if key in seen:
-                    continue
-                seen.add(key)
-                label = f"debian_cnf:{sec or 'defaults'}"
-                candidates.append(
-                    {
-                        "label": label,
-                        "user": user,
-                        "password": password,
-                        "socket": socket,
-                        "protocol": "socket",
-                    }
-                )
-        except Exception:
-            pass
-
-    # Optional fallback: MCD runtime state DB credentials can be a valid local
-    # DB-admin source on some hosts even when root socket auth is disabled.
-    if cfg is not None:
-        try:
-            rt_user = str(getattr(cfg, "state_mysql_user", "") or "").strip()
-            rt_password = str(getattr(cfg, "state_mysql_password", "") or "")
-            rt_socket = str(getattr(cfg, "state_mysql_unix_socket", "") or "").strip()
-            rt_host = str(getattr(cfg, "state_mysql_host", "") or "").strip() or "127.0.0.1"
-            rt_port = int(getattr(cfg, "state_mysql_port", 3306) or 3306)
-            if rt_user:
-                if rt_socket:
-                    candidates.append(
-                        {
-                            "label": "runtime_state:socket",
-                            "user": rt_user,
-                            "password": rt_password,
-                            "socket": rt_socket,
-                            "protocol": "socket",
-                        }
-                    )
-                else:
-                    candidates.append(
-                        {
-                            "label": "runtime_state:tcp",
-                            "user": rt_user,
-                            "password": rt_password,
-                            "host": rt_host,
-                            "port": str(rt_port),
-                            "protocol": "tcp",
-                        }
-                    )
-        except Exception:
-            pass
-
-    errors: list[str] = []
-    for cand in candidates:
-        protocol = str(cand.get("protocol", "socket") or "socket").strip().lower()
-        cmd = [mysql_bin, "--batch", "--skip-column-names"]
-        if protocol == "tcp":
-            host = str(cand.get("host", "")).strip() or "127.0.0.1"
-            port = str(cand.get("port", "")).strip()
-            cmd.extend(["--protocol=tcp", "-h", host])
-            if port:
-                cmd.extend(["-P", port])
-        else:
-            cmd.append("--protocol=socket")
-        user = str(cand.get("user", "")).strip()
-        password = str(cand.get("password", ""))
-        socket = str(cand.get("socket", "")).strip()
-        if protocol != "tcp" and socket:
-            cmd.extend(["--socket", socket])
-        if user:
-            cmd.extend(["-u", user])
-        if password:
-            cmd.append(f"-p{password}")
-        cmd.extend(["-e", sql])
-        proc = _run(cmd, timeout_sec=timeout_sec)
-        if proc.returncode == 0:
-            return True, (proc.stdout or "").strip()
-        detail = (proc.stderr or proc.stdout or "").strip() or f"mysql_exec_failed_rc_{proc.returncode}"
-        errors.append(f"{cand.get('label', 'unknown')}:{detail}")
-
-    return False, " | ".join(errors[:3])
-
-
-def _needs_validate_password_policy_workaround(detail: str) -> bool:
-    txt = str(detail or "").strip().lower()
-    if not txt:
-        return False
-    return (
-        "error 1819" in txt
-        or "does not satisfy the current policy requirements" in txt
-        or ("validate_password" in txt and "policy" in txt)
-    )
-
-
-def _mysql_get_validate_password_policy(*, timeout_sec: int = 12, cfg: Any | None = None) -> tuple[bool, str, str]:
-    ok, detail = _run_mysql_root_sql(
-        "SHOW VARIABLES LIKE 'validate_password.policy';",
-        timeout_sec=timeout_sec,
-        cfg=cfg,
-    )
-    if not ok:
-        return False, "", str(detail or "validate_password_policy_probe_failed")
-    policy = ""
-    for raw in (detail or "").splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        parts = re.split(r"\s+", line)
-        if len(parts) >= 2 and parts[0].strip().lower() == "validate_password.policy":
-            policy = parts[1].strip()
-            break
-    if not policy:
-        return False, "", f"validate_password_policy_not_found:{(detail or '').strip()}"
-    return True, policy, ""
-
-
-def _run_sql_with_validate_password_policy_relax(
-    sql: str,
-    *,
-    timeout_sec: int = 20,
-    cfg: Any | None = None,
-) -> tuple[bool, str]:
-    policy_ok, previous_policy_raw, policy_err = _mysql_get_validate_password_policy(
-        timeout_sec=max(5, int(timeout_sec)),
-        cfg=cfg,
-    )
-    if not policy_ok:
-        return False, str(policy_err or "validate_password_policy_probe_failed")
-
-    previous_policy = str(previous_policy_raw or "").strip().upper() or "MEDIUM"
-    lowered = False
-    if previous_policy != "LOW":
-        ok_low, low_detail = _run_mysql_root_sql(
-            "SET GLOBAL validate_password.policy='LOW';",
-            timeout_sec=max(5, int(timeout_sec)),
-            cfg=cfg,
-        )
-        if not ok_low:
-            return False, f"validate_password_policy_set_low_failed:{str(low_detail or '').strip()}"
-        lowered = True
-
-    ok_apply, apply_detail = _run_mysql_root_sql(sql, timeout_sec=max(8, int(timeout_sec)), cfg=cfg)
-
-    restore_warn = ""
-    if lowered:
-        ok_restore, restore_detail = _run_mysql_root_sql(
-            f"SET GLOBAL validate_password.policy='{_sql_escape(previous_policy)}';",
-            timeout_sec=max(5, int(timeout_sec)),
-            cfg=cfg,
-        )
-        if not ok_restore:
-            restore_warn = f"validate_password_policy_restore_failed:{str(restore_detail or '').strip()}"
-
-    if not ok_apply:
-        reason = f"apply_failed_under_relaxed_policy:{str(apply_detail or '').strip()}"
-        if restore_warn:
-            reason = f"{reason} | {restore_warn}"
-        return False, reason
-
-    detail = str(apply_detail or "").strip()
-    if restore_warn:
-        detail = f"{detail} | {restore_warn}" if detail else restore_warn
-    return True, detail
-
-
-def _mysql_user_exists(
-    user: str,
-    host: str,
-    *,
-    timeout_sec: int = 12,
-    cfg: Any | None = None,
-) -> tuple[bool | None, str]:
-    sql = (
-        "SELECT 1 FROM mysql.user "
-        f"WHERE User='{_sql_escape(user)}' AND Host='{_sql_escape(host)}' LIMIT 1;"
-    )
-    ok, detail = _run_mysql_root_sql(sql, timeout_sec=timeout_sec, cfg=cfg)
-    if not ok:
-        return None, detail
-    exists = any(x.strip() == "1" for x in (detail or "").splitlines())
-    return exists, ""
-
-
 def collect_zabbix_mysql_monitor_state(*, cfg: Any | None = None) -> dict[str, Any]:
     marker_path = _zbx_marker_path(cfg)
     marker = _read_json(marker_path)
@@ -2117,199 +1873,6 @@ def collect_zabbix_mysql_monitor_state(*, cfg: Any | None = None) -> dict[str, A
         "marker_path": str(marker_path),
     }
     return out
-
-
-def ensure_zabbix_mysql_monitor_user(
-    profile: dict[str, Any] | None,
-    *,
-    cfg: Any | None = None,
-    force: bool = False,
-    timeout_sec: int = 20,
-) -> dict[str, Any]:
-    prof = profile if isinstance(profile, dict) else {}
-    enabled = _bool(prof.get("zabbix_mysql_monitor_enabled"), True)
-    user = str(prof.get("zabbix_mysql_monitor_user", "zbx_monitor") or "zbx_monitor").strip() or "zbx_monitor"
-    host = str(prof.get("zabbix_mysql_monitor_host", "127.0.0.1") or "127.0.0.1").strip() or "127.0.0.1"
-    password = str(prof.get("zabbix_mysql_monitor_password", "zbx_monitor") or "zbx_monitor")
-    grants = _normalize_grants(prof.get("zabbix_mysql_monitor_grants"))
-    apply_once = _bool(prof.get("zabbix_mysql_monitor_apply_once"), True)
-    marker_path = _zbx_marker_path(cfg)
-    marker = _read_json(marker_path)
-
-    if not enabled:
-        result = {
-            "status": "disabled",
-            "user": user,
-            "host": host,
-            "marker_path": str(marker_path),
-            "reason": "zabbix_mysql_monitor_disabled",
-        }
-        marker.update(
-            {
-                "last_status": "disabled",
-                "user": user,
-                "host": host,
-                "attempted_at_utc": _now_utc_iso(),
-                "last_error": "",
-            }
-        )
-        _write_json(marker_path, marker)
-        return result
-
-    if apply_once and not force and bool(marker.get("applied", False)):
-        return {
-            "status": "noop",
-            "reason": "already_applied_once",
-            "user": user,
-            "host": host,
-            "marker_path": str(marker_path),
-            "applied_at_utc": str(marker.get("applied_at_utc", "") or ""),
-        }
-
-    exists_before, exists_err = _mysql_user_exists(user, host, timeout_sec=max(5, int(timeout_sec)), cfg=cfg)
-    if exists_before is True:
-        marker.update(
-            {
-                "last_status": "already_present",
-                "applied": True,
-                "user": user,
-                "host": host,
-                "attempted_at_utc": _now_utc_iso(),
-                "applied_at_utc": str(marker.get("applied_at_utc") or _now_utc_iso()),
-                "last_error": "",
-            }
-        )
-        _write_json(marker_path, marker)
-        return {
-            "status": "already_present",
-            "user": user,
-            "host": host,
-            "marker_path": str(marker_path),
-            "user_exists_before": True,
-            "user_exists_after": True,
-        }
-    if exists_before is None:
-        marker.update(
-            {
-                "last_status": "error",
-                "applied": bool(marker.get("applied", False)),
-                "user": user,
-                "host": host,
-                "attempted_at_utc": _now_utc_iso(),
-                "attempted_once": bool(apply_once) or bool(marker.get("attempted_once", False)),
-                "last_error": str(exists_err or "mysql_user_probe_failed"),
-            }
-        )
-        _write_json(marker_path, marker)
-        return {
-            "status": "error",
-            "reason": str(exists_err or "mysql_user_probe_failed"),
-            "user": user,
-            "host": host,
-            "marker_path": str(marker_path),
-        }
-
-    if apply_once and not force and bool(marker.get("attempted_once", False)):
-        return {
-            "status": "skipped",
-            "reason": "already_attempted_once",
-            "user": user,
-            "host": host,
-            "marker_path": str(marker_path),
-            "last_status": str(marker.get("last_status", "") or ""),
-            "last_error": str(marker.get("last_error", "") or ""),
-        }
-
-    grants_sql = ", ".join(grants)
-    sql = "\n".join(
-        [
-            f"CREATE USER IF NOT EXISTS '{_sql_escape(user)}'@'{_sql_escape(host)}' IDENTIFIED BY '{_sql_escape(password)}';",
-            f"GRANT {grants_sql} ON *.* TO '{_sql_escape(user)}'@'{_sql_escape(host)}';",
-            "FLUSH PRIVILEGES;",
-        ]
-    )
-    ok, detail = _run_mysql_root_sql(sql, timeout_sec=max(8, int(timeout_sec)), cfg=cfg)
-    validate_password_policy_relaxed = False
-    if not ok and _needs_validate_password_policy_workaround(detail):
-        wrk_ok, wrk_detail = _run_sql_with_validate_password_policy_relax(
-            sql,
-            timeout_sec=max(8, int(timeout_sec)),
-            cfg=cfg,
-        )
-        if wrk_ok:
-            ok = True
-            detail = wrk_detail
-            validate_password_policy_relaxed = True
-        else:
-            detail = f"{str(detail or '').strip()} | {str(wrk_detail or '').strip()}".strip(" |")
-    attempted_at = _now_utc_iso()
-    if not ok:
-        marker.update(
-            {
-                "last_status": "error",
-                "applied": bool(marker.get("applied", False)),
-                "user": user,
-                "host": host,
-                "attempted_at_utc": attempted_at,
-                "attempted_once": bool(apply_once) or bool(marker.get("attempted_once", False)),
-                "last_error": str(detail or "mysql_exec_failed"),
-            }
-        )
-        _write_json(marker_path, marker)
-        return {
-            "status": "error",
-            "reason": str(detail or "mysql_exec_failed"),
-            "user": user,
-            "host": host,
-            "marker_path": str(marker_path),
-        }
-
-    exists_after, verify_err = _mysql_user_exists(user, host, timeout_sec=max(5, int(timeout_sec)), cfg=cfg)
-    if exists_after is not True:
-        reason = str(verify_err or "mysql_user_not_visible_after_apply")
-        marker.update(
-            {
-                "last_status": "error",
-                "applied": False,
-                "user": user,
-                "host": host,
-                "attempted_at_utc": attempted_at,
-                "attempted_once": bool(apply_once) or bool(marker.get("attempted_once", False)),
-                "last_error": reason,
-            }
-        )
-        _write_json(marker_path, marker)
-        return {
-            "status": "error",
-            "reason": reason,
-            "user": user,
-            "host": host,
-            "marker_path": str(marker_path),
-        }
-
-    marker.update(
-        {
-            "last_status": "applied",
-            "applied": True,
-            "user": user,
-            "host": host,
-            "attempted_at_utc": attempted_at,
-            "applied_at_utc": _now_utc_iso(),
-            "attempted_once": bool(apply_once) or bool(marker.get("attempted_once", False)),
-            "last_error": "",
-        }
-    )
-    _write_json(marker_path, marker)
-    return {
-        "status": "applied",
-        "user": user,
-        "host": host,
-        "marker_path": str(marker_path),
-        "user_exists_before": False,
-        "user_exists_after": True,
-        "grants": grants,
-        "validate_password_policy_relaxed": bool(validate_password_policy_relaxed),
-    }
 
 
 def _normalize_ip_networks(raw: Any) -> list[str]:
@@ -2683,11 +2246,9 @@ def collect_apt_state(
         level = 2
     else:
         level = 5
-    zbx_payload = (
-        ensure_zabbix_mysql_monitor_user({}, cfg=cfg, force=False, timeout_sec=min(12, max(5, int(timeout_sec))))
-        if bool(auto_bootstrap_zabbix)
-        else collect_zabbix_mysql_monitor_state(cfg=cfg)
-    )
+    # The compatibility argument is retained for callers, but observation is
+    # always read-only.  The external custom operation owns any bootstrap.
+    zbx_payload = collect_zabbix_mysql_monitor_state(cfg=cfg)
     zbx_agent_payload = collect_zabbix_agent_state(profile=profile)
     return {
         "status": status,
@@ -2771,7 +2332,6 @@ def apply_apt_profile(
     *,
     dry_run: bool = False,
     cfg: Any | None = None,
-    force_zabbix_bootstrap: bool = False,
     force_repo_rescan: bool = False,
 ) -> dict[str, Any]:
     if profile is None:
@@ -3028,12 +2588,13 @@ def apply_apt_profile(
         else:
             errors.append((p.stderr or p.stdout or "apt dist-upgrade failed").strip())
 
-    zbx_result = ensure_zabbix_mysql_monitor_user(
-        profile,
-        cfg=cfg,
-        force=bool(force_zabbix_bootstrap),
-        timeout_sec=max(8, int(refresh_timeout_sec)),
-    )
+    # The concrete Zabbix monitor operation is an authority-selected external
+    # custom item.  APT only reports its declared slot; it does not execute an
+    # OS/database mutator as a side effect of a generic profile apply.
+    zbx_result = {
+        "status": "skipped",
+        "reason": "zabbix_bootstrap_external_operation_required",
+    }
     zbx_status = str(zbx_result.get("status", "") or "").strip().lower()
     if zbx_status in {"applied", "already_present", "noop", "disabled", "skipped"}:
         actions.append(f"zabbix_mysql_monitor:{zbx_status}")

@@ -844,6 +844,116 @@ def run_custom_script_by_key(
     return _run_direct(script_path, arg_list, live_output=live_output, **execution_options)
 
 
+def run_configured_external_operation(
+    config: AgentConfig,
+    *,
+    component: str,
+    operation: str,
+    profile: dict[str, Any] | None,
+    operation_input: dict[str, Any],
+) -> tuple[int, str]:
+    """Dispatch an authority-bound operation through the existing custom item.
+
+    Operation bindings and runtime-input field mappings are external manifest
+    data.  MCD only validates the binding, constructs its declared private
+    string-map, and delegates execution to the established custom-item cache,
+    framing, supervision and public-result decoder.
+    """
+    if not isinstance(operation_input, dict):
+        return 2, "custom_operation_input_invalid"
+    path = _cache_manifest_path(config)
+    try:
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > 256 * 1024:
+            return 2, "custom_operation_binding_not_configured"
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return 2, "custom_operation_binding_not_configured"
+    if not isinstance(document, dict):
+        return 2, "custom_operation_mapping_invalid"
+    bindings = document.get("operation_bindings")
+    if not isinstance(bindings, list):
+        return 2, "custom_operation_binding_not_configured"
+    matches = [item for item in bindings if isinstance(item, dict)
+               and item.get("component") == component and item.get("operation") == operation]
+    if len(matches) != 1:
+        return 2, "custom_operation_binding_not_configured" if not matches else "custom_operation_mapping_invalid"
+    binding = matches[0]
+    artifact = binding.get("artifact")
+    if (not isinstance(artifact, dict)
+            or not isinstance(artifact.get("key"), str) or not artifact["key"].strip()
+            or not isinstance(artifact.get("sha256"), str)
+            or re.fullmatch(r"[0-9a-f]{64}", artifact["sha256"].strip().lower()) is None
+            or not isinstance(artifact.get("entrypoint"), str) or not artifact["entrypoint"].strip()):
+        return 2, "custom_operation_mapping_artifact_invalid"
+    args = binding.get("args", [])
+    if not isinstance(args, list) or any(not isinstance(value, str) or "\x00" in value for value in args):
+        return 2, "custom_operation_mapping_args_invalid"
+    if binding.get("capture_result") is not True or binding.get("detach") is not False or binding.get("live_output") is not False:
+        return 2, "custom_operation_mapping_execution_invalid"
+    if binding.get("offline_only") is not True:
+        return 2, "custom_operation_mapping_offline_policy_invalid"
+    schema = binding.get("runtime_input_schema")
+    if (not isinstance(schema, dict) or schema.get("type") != "string-map"
+            or not isinstance(schema.get("fields"), list)
+            or not schema["fields"]
+            or any(not isinstance(field, str) or not field for field in schema["fields"])
+            or len(set(schema["fields"])) != len(schema["fields"])):
+        return 2, "custom_operation_mapping_runtime_schema_invalid"
+    fields = list(schema["fields"])
+    mapping = binding.get("runtime_input_mapping")
+    if not isinstance(mapping, dict) or set(mapping) != set(fields):
+        return 2, "custom_operation_mapping_runtime_mapping_invalid"
+
+    def _encoded(value: Any, declared_fields: Any = None) -> str | None:
+        if declared_fields is not None:
+            if (not isinstance(declared_fields, list)
+                    or any(not isinstance(field, str) for field in declared_fields)):
+                return None
+            if not isinstance(value, dict) or set(value) != set(declared_fields):
+                return None
+        try:
+            return json.dumps(value, ensure_ascii=False, sort_keys=True,
+                              separators=(",", ":"), allow_nan=False)
+        except (TypeError, ValueError, UnicodeError):
+            return None
+
+    runtime_input: dict[str, str] = {}
+    for field in fields:
+        spec = mapping.get(field)
+        if not isinstance(spec, dict) or spec.get("encoding") != "json":
+            return 2, "custom_operation_mapping_runtime_mapping_invalid"
+        source = spec.get("source")
+        if source == "existing_private_operator_profile":
+            value = profile if isinstance(profile, dict) else {}
+        elif source == "caller_operation_input":
+            value = operation_input
+        elif source == "effective_caller_cfg":
+            declared = spec.get("fields")
+            if not isinstance(declared, list) or any(not isinstance(name, str) or not name for name in declared):
+                return 2, "custom_operation_mapping_runtime_mapping_invalid"
+            value = {name: getattr(config, name, None) for name in declared}
+            if any(not hasattr(config, name) for name in declared):
+                return 2, "custom_operation_mapping_runtime_mapping_invalid"
+        else:
+            return 2, "custom_operation_mapping_runtime_mapping_invalid"
+        encoded = _encoded(value, spec.get("fields"))
+        if encoded is None:
+            return 2, "custom_operation_runtime_input_invalid"
+        runtime_input[field] = encoded
+    return run_custom_script_by_key(
+        config,
+        script_key=artifact["key"].strip(),
+        args=list(args),
+        expected_sha256=artifact["sha256"].strip().lower(),
+        expected_entrypoint=artifact["entrypoint"],
+        capture_result=True,
+        detach=False,
+        live_output=False,
+        runtime_input=runtime_input,
+        offline_only=True,
+    )
+
+
 def format_custom_scripts_list(rows: list[dict[str, Any]], *, with_idx: bool = True) -> str:
     if not rows:
         return "No custom scripts"

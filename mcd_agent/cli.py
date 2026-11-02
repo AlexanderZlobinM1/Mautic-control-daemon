@@ -42,7 +42,6 @@ from mcd_agent.backup import (
 from mcd_agent.apt_profile import (
     clear_apt_repo_profile_markers,
     collect_apt_state,
-    ensure_zabbix_mysql_monitor_user,
 )
 from mcd_agent.admin_user import clear_hostnet_auth_mfa, hostnet_auth_mfa_status, reset_admin_password
 from mcd_agent.config import load_config
@@ -65,7 +64,12 @@ from mcd_agent.contact_field_metadata_report import (
     contact_field_metadata_error,
 )
 from mcd_agent.mautic_version_cache import collect_mautic_version
-from mcd_agent.custom_scripts import fetch_custom_manifest, format_custom_scripts_list, run_custom_script_by_key
+from mcd_agent.custom_scripts import (
+    fetch_custom_manifest,
+    format_custom_scripts_list,
+    run_configured_external_operation,
+    run_custom_script_by_key,
+)
 from mcd_agent.db import MauticDB
 from mcd_agent.daemon import (
     TaskStore,
@@ -3842,11 +3846,32 @@ def main() -> int:
             print(json.dumps(out, ensure_ascii=True, indent=2))
             return 0
 
-        fetched = fetch_service_profile(cfg, "apt")
+        fetched = fetch_service_profile(
+            cfg,
+            "apt",
+            include_runtime_input=True,
+            operation="zabbix_mysql_monitor_bootstrap",
+            operation_input={"force": bool(args.force)},
+        )
         profile = fetched.get("profile") if isinstance(fetched, dict) else None
         if not isinstance(profile, dict):
             profile = {}
-        res = ensure_zabbix_mysql_monitor_user(profile, cfg=cfg, force=bool(args.force), timeout_sec=20)
+        code, output = run_configured_external_operation(
+            cfg,
+            component="apt",
+            operation="zabbix_mysql_monitor_bootstrap",
+            profile=profile,
+            operation_input={"force": bool(args.force), "dry_run": False, "trigger": "explicit"},
+        )
+        if code == 0:
+            try:
+                res = json.loads(output)
+            except (TypeError, ValueError):
+                res = {"status": "error", "reason": "custom_operation_receipt_invalid"}
+            if not isinstance(res, dict):
+                res = {"status": "error", "reason": "custom_operation_receipt_invalid"}
+        else:
+            res = {"status": "error", "reason": output or "custom_operation_failed"}
         out = {
             "status": "ok" if str(res.get("status", "")).strip().lower() in {"applied", "already_present", "noop", "skipped", "disabled"} else "error",
             "fetch_status": str(fetched.get("status", "n/a")) if isinstance(fetched, dict) else "n/a",

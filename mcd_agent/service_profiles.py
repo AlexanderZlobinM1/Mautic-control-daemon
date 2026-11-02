@@ -17,6 +17,7 @@ from mcd_agent.service_profile_external import (
     CUSTOM_RUNTIME_CAPABILITIES, nginx_operation_input_valid, ExternalProfileOperationError, apply_external_service_profile,
     validate_external_service_profile,
 )
+from mcd_agent.custom_scripts import run_configured_external_operation
 from mcd_agent.mautic_db_indexes import apply_mautic_db_indexes
 
 
@@ -59,6 +60,12 @@ def fetch_service_profile(cfg: AgentConfig, component: str, *, include_runtime_i
                 or (operation == "cloudflare_real_ip_state" and type(profile_present) is not bool)
                 or (operation != "cloudflare_real_ip_state" and profile_present is not None)):
             return {"status": "error", "reason": "nginx_operation_input_invalid"}
+    elif operation is not None:
+        # Explicit non-nginx operations are data selected by MCC.  MCD only
+        # carries the opaque operation coordinates to the authority and later
+        # checks that the returned external handler is bound to the same input.
+        if not isinstance(operation, str) or not operation.strip() or not isinstance(operation_input, dict):
+            return {"status": "error", "reason": "service_profile_operation_input_invalid"}
     ident = resolve_agent_identity(cfg)
     payload = {
         "hostname": str(ident.get("effective_hostname") or ""),
@@ -83,6 +90,8 @@ def fetch_service_profile(cfg: AgentConfig, component: str, *, include_runtime_i
                        ipv6_listen_forbidden=_ipv6_listen_forbidden())
         if operation == "cloudflare_real_ip_state":
             payload["profile_present"] = profile_present
+    elif operation is not None:
+        payload.update(operation=operation, operation_input=operation_input)
     if comp in {"php_fpm", "mysql", "docker", "wazuh", "nginx", "apt"}:
         payload["external_handler_capabilities"] = sorted(CUSTOM_RUNTIME_CAPABILITIES)
     url = base + f"/api/v1/agent/service-profile/{comp.replace('_', '-')}"
@@ -141,6 +150,32 @@ def _service_profile_apply_outcome(applied: dict[str, Any]) -> tuple[str, str | 
     if status in {"skipped", "deferred"}:
         return "skipped", str(applied.get("reason") or status or "skipped")
     return "error", str(applied.get("reason") or status or "apply_failed")
+
+
+def _configured_zabbix_bootstrap(
+    profile: dict[str, Any],
+    *,
+    cfg: AgentConfig,
+    force: bool,
+    timeout_sec: int,
+) -> dict[str, Any]:
+    """Dispatch the selected APT component operation through external data."""
+    code, output = run_configured_external_operation(
+        cfg,
+        component="apt",
+        operation="zabbix_mysql_monitor_bootstrap",
+        profile=profile,
+        operation_input={"force": bool(force), "dry_run": False, "trigger": "service-profile"},
+    )
+    try:
+        result = json.loads(output)
+    except (TypeError, ValueError):
+        return {"status": "error", "reason": output or "custom_operation_receipt_invalid"}
+    if not isinstance(result, dict):
+        return {"status": "error", "reason": "custom_operation_receipt_invalid"}
+    if code != 0:
+        return {"status": "error", "reason": str(result.get("reason") or "custom_operation_failed"), "external": result}
+    return result
 
 
 def _agent_cluster_mode(cfg: AgentConfig) -> bool:
@@ -228,7 +263,10 @@ def service_profiles_apply_once(
         if status == "deferred":
             return {"status": "skipped", "reason": applied.get("reason", "deferred"), "apply": applied}
         return {"status": "error", "reason": applied.get("reason", status or "apply_failed"), "apply": applied}
-    operation_options = dict(operation=operation, operation_input=operation_input, profile_present=profile_present) if comp == "nginx" else {}
+    operation_options = (
+        dict(operation=operation, operation_input=operation_input, profile_present=profile_present)
+        if comp == "nginx" or operation is not None else {}
+    )
     fetched = fetch_service_profile(cfg, comp, include_runtime_input=True, **operation_options)
     public_fetch = public_service_profile_response(fetched)
     status = str(fetched.get("status", "")).strip().lower()
@@ -238,13 +276,7 @@ def service_profiles_apply_once(
     if not isinstance(profile, dict) and not (comp == "nginx" and profile is None):
         return {"status": "error", "reason": "invalid profile payload", "fetch": public_fetch}
     external_failed = False
-    external_apt_selected = (
-        comp == "apt"
-        and isinstance(fetched.get("external_handler"), dict)
-        and fetched["external_handler"].get("state") == "active"
-        and fetched["external_handler"].get("active") is True
-    )
-    if comp in {"php_fpm", "mysql", "docker", "wazuh", "nginx"} or external_apt_selected:
+    if comp in {"php_fpm", "mysql", "docker", "wazuh", "nginx"}:
         # Only delivery/admission lives here; the artifact owns the algorithm.
         # No builtin writer or fallback exists after external selection.
         try:
@@ -263,9 +295,28 @@ def service_profiles_apply_once(
             profile,
             dry_run=dry_run,
             cfg=cfg,
-            force_zabbix_bootstrap=not bool(dry_run),
             force_repo_rescan=bool(force_apt_repo_rescan),
         )
+        if not dry_run:
+            zbx_result = _configured_zabbix_bootstrap(
+                profile,
+                cfg=cfg,
+                force=True,
+                timeout_sec=max(8, int(getattr(cfg, "command_timeout_sec", 20) or 20)),
+            )
+            applied["zabbix_mysql_monitor"] = zbx_result
+            state = applied.get("state")
+            if isinstance(state, dict):
+                state["zabbix_mysql_monitor"] = zbx_result
+            zbx_status = str(zbx_result.get("status") or "").strip().lower()
+            if zbx_status in {"applied", "already_present", "noop", "disabled", "skipped"}:
+                actions = applied.setdefault("actions", [])
+                actions[:] = [item for item in actions if not str(item).startswith("zabbix_mysql_monitor:")]
+                actions.append(f"zabbix_mysql_monitor:{zbx_status}")
+            else:
+                applied["status"] = "error"
+                errors = applied.setdefault("errors", [])
+                errors.append(f"zabbix_mysql_monitor:{str(zbx_result.get('reason') or 'external_operation_failed')}")
     if comp == "nginx":
         # The external wrapper owns writer/observer outcome semantics, including
         # successful drift observations. Reuse its validated terminal decision.
