@@ -1,5 +1,6 @@
 from pathlib import Path
 import copy
+import json
 import pytest
 
 from mcd_agent.commercial_generic import capability_inventory_digest, validate_generic_command_job
@@ -75,6 +76,51 @@ def test_generic_job_requires_latest_advertised_inventory():
         raise AssertionError("unadvertised command must be rejected")
 
 
+def test_generic_job_requires_exact_advertised_external_binding():
+    inventory = _inventory()
+    command = inventory["capabilities"][0]["commands"][0]
+    command["binding_schema"] = "mcd-connected-host-lifecycle-binding-v1"
+    command["binding_sha256"] = "sha256:" + "b" * 64
+    inventory["inventory_sha256"] = capability_inventory_digest(
+        {key: value for key, value in inventory.items() if key != "inventory_sha256"}
+    )
+    job = _job()
+    job["command"]["binding_schema"] = command["binding_schema"]
+    job["command"]["binding_sha256"] = command["binding_sha256"]
+
+    validated = validate_generic_command_job(job, inventory=inventory)
+    assert validated["command"]["binding_schema"] == command["binding_schema"]
+    assert validated["command"]["binding_sha256"] == command["binding_sha256"]
+
+    for field, value in (
+        ("binding_schema", "mcd-connected-host-lifecycle-binding-v2"),
+        ("binding_sha256", "sha256:" + "c" * 64),
+    ):
+        changed = copy.deepcopy(job)
+        changed["command"][field] = value
+        with pytest.raises(ValueError, match="portal_mcd_generic_command_not_advertised"):
+            validate_generic_command_job(changed, inventory=inventory)
+
+
+def test_generic_binding_fields_are_an_atomic_pair():
+    inventory = _inventory()
+    inventory["capabilities"][0]["commands"][0]["binding_schema"] = (
+        "mcd-connected-host-lifecycle-binding-v1"
+    )
+    inventory["inventory_sha256"] = capability_inventory_digest(
+        {key: value for key, value in inventory.items() if key != "inventory_sha256"}
+    )
+    from mcd_agent.commercial_generic import validate_capability_inventory
+
+    with pytest.raises(ValueError, match="portal_mcd_capability_inventory_invalid"):
+        validate_capability_inventory(inventory)
+
+    job = _job()
+    job["command"]["binding_schema"] = "mcd-connected-host-lifecycle-binding-v1"
+    with pytest.raises(ValueError, match="portal_mcd_generic_command_job_invalid"):
+        validate_generic_command_job(job)
+
+
 def test_inventory_rescan_terminal_survives_restart_without_rescanning(tmp_path):
     from mcd_agent.commercial_primitives import build_capability_inventory, execute_generic_primitive
 
@@ -134,6 +180,73 @@ def test_inventory_rescan_terminal_survives_restart_without_rescanning(tmp_path)
     assert portal.receipts[-1] == pending[0]
     assert CommercialState(state_path).get("commercial_portal_cursor") == "1"
     assert CommercialState(state_path).get("commercial_self_hosted_pending_receipts") == []
+
+
+def test_transient_artifact_grant_is_consumed_before_durable_delivery(tmp_path):
+    from mcd_agent.commercial_primitives import build_capability_inventory
+
+    state_path = str(tmp_path / "commercial.sqlite")
+    inventory = build_capability_inventory(
+        installation_id="installation-1", dns_name="mautic.example.com",
+    )
+    job = _job()
+    job["capability"] = {"capability_id": "external_operation_cache", "version": "1.0"}
+    job["command"].update(
+        command_id="sync_binding", mutates_state=True, target_scope="host",
+    )
+    job["input"] = {
+        "catalog_item_id": "mcc.scenario.debian-family-self-hosted",
+        "catalog_item_revision": "3.2.1",
+        "closure_digest": "sha256:" + "a" * 64,
+        "closure_size_bytes": 123,
+        "closure_media_type": "application/gzip",
+        "binding_schema": "mcd-mautic-connected-host-lifecycle-binding-v1",
+        "binding_sha256": "sha256:" + "b" * 64,
+    }
+    job["artifact_delivery"] = {
+        "schema": "portal-mcd-transient-artifact-delivery-v1",
+        "contract_version": "1.0",
+        "artifacts": [{"artifact_grant": "one-time-grant-must-not-persist"}],
+    }
+
+    class Portal:
+        polled = False
+        receipts = []
+
+        def send_capability_inventory(self, **kwargs):
+            return {}
+
+        def pull_job(self, **kwargs):
+            if self.polled:
+                return None
+            self.polled = True
+            return {"cursor": "1", "job": job}
+
+        def send_receipt(self, payload, **kwargs):
+            self.receipts.append(copy.deepcopy(payload))
+            return {}
+
+    staged = []
+
+    def stager(command):
+        staged.append(copy.deepcopy(command["artifact_delivery"]))
+        sanitized = dict(command)
+        sanitized.pop("artifact_delivery")
+        return sanitized
+
+    portal = Portal()
+    worker = SelfHostedPortalWorker(
+        portal, _Executor(CommercialState(state_path)), installation_id="installation-1",
+        portal_keys={}, publisher_keys={}, context={}, commercial_key_id="commercial-1",
+        agent_id="agent-1", host_fingerprint="sha256:" + "a" * 64, clock=_Clock(),
+        capability_inventory_provider=lambda _installation: inventory,
+        generic_command_handler=lambda command: {"status": "succeeded", "synced": True},
+        generic_artifact_stager=stager,
+    )
+    assert worker.run_once() == {"status": "succeeded", "job_id": "generic-job-1"}
+    assert staged[0]["artifacts"][0]["artifact_grant"] == "one-time-grant-must-not-persist"
+    assert b"one-time-grant-must-not-persist" not in Path(state_path).read_bytes()
+    assert all("artifact_delivery" not in json.dumps(receipt) for receipt in portal.receipts)
 
 
 @pytest.mark.parametrize("host_result", [None, "facts", "invalid"])

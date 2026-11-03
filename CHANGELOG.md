@@ -5,6 +5,11 @@
   generic artifact cache/verification/execution/progress/receipts only.
 - Candidate work removes DNS mutation/credential paths and adds generic bundle
   delivery plus exact selected-task cache reuse, including manual/offline cache.
+- Add Portal-brokered, grant-free durable cache synchronization for immutable
+  external-operation closures. Advertise connected-host lifecycle commands only
+  after complete binding/artifact/profile verification, execute them through the
+  existing offline runner, and reject host-qualified instance UIDs such as
+  `uid@host`.
 - NOT READY: remaining embedded implementations/callers, external replacement
   integration, complete-task closure and same-artifact native acceptance remain
   required. No 1.7.0 release is claimed or authorized by this entry.

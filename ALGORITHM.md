@@ -1177,6 +1177,8 @@ cycle без ручного `segments:update`, profile/capacity/data changes. Ad
 | activation-derived Portal material is imported atomically without new auth/job issuance; commercial API-key transport, host binding and installation IDs are validated and persisted while legacy agent/Portal signing-key state is scrubbed | `mcd_agent/commercial_registration.py`, `mcd_agent/commercial_portal.py` | `tests/test_commercial_registration.py`, `tests/test_commercial_outbound_boundary.py`, redacted `mcd-portal-registration-receipt-v1` |
 | Portal worker restart forces one independently ACKed complete inventory per installation; a successful installation cannot clear another installation's pending startup publication, and transport failures retry through ordinary backoff without cursor/cutover mutation | `mcd_agent/commercial_self_hosted.py:SelfHostedPortalWorker._publish_inventory` | `tests/test_commercial_outbound_boundary.py` multi-install restart and partial-failure retry |
 | successful Portal inventory rescan returns the canonical observed snapshot revision/hash in the existing terminal result; unchanged content does not bump revision and failed rescan returns no reference | `mcd_agent/daemon.py`, `mcd_agent/commercial_primitives.py`, `mcd_agent/commercial_self_hosted.py`, `mcd_agent/commercial_portal.py` | `tests/test_commercial_primitives.py`, `tests/test_daemon_commercial_guard.py`, Portal 1.7 terminal-receipt matching |
+| Portal-only external-operation cache sync consumes a transient one-time grant before durable storage, verifies the complete closure/binding preimage, preserves unrelated cache rows and activates the manifest last | `mcd_agent/external_operation_cache.py`, `mcd_agent/commercial_self_hosted.py`, `mcd_agent/daemon.py` | `tests/test_connected_host_lifecycle.py`, `tests/test_commercial_generic.py` grant non-persistence/replay evidence; MCC 3.2.1 closure `sha256:ca8140086414c3cee58b5431dc652a7933b599f56c85a62a6514bcd934ac3e70` |
+| connected-host lifecycle is an exact host-scoped external binding with preflight/create/receipt-owned cleanup/recreate; stable target UID forbids `@host`, exact binding/artifact/profile pins are checked before the existing offline-only runner, and only create/recreate ownership receipts authorize Portal projection | `mcd_agent/connected_host_lifecycle.py`, `mcd_agent/commercial_primitives.py`, `mcd_agent/commercial_generic.py` | `tests/test_connected_host_lifecycle.py`, `tests/test_commercial_generic.py`; binding `sha256:79d7ba83ba2bfab1acc01ab237bd6ad30276f3f3597fec26086b608ad784798f` |
 | host-first Portal registration binds an activated MCD host before any Mautic instance exists; request contains only local DNS identity/display name, and the response must create a passive host installation with an active empty-inventory connection | `mcd_agent/commercial_portal.py`, `mcd_agent/commercial_host_registration.py`, `mcd_agent/cli.py` | `tests/test_commercial_portal.py`, redacted `portal-mcd-host-register-response-v1` |
 | self-hosted v2.1 candidate jobs may omit stage metadata for a whole external composition; supplied `stage_selection` must structurally match `execution.stage`, without embedded stage-name/order recipes; existing receipts remain | `mcd_agent/commercial_portal.py`, `mcd_agent/commercial_self_hosted.py`, `mcd_agent/scenario_launcher.py` | `tests/test_commercial_self_hosted_v2.py`, redacted stage/terminal receipts |
 | manual existing commercial-key fallback keeps pending/active/disconnected state idempotently | `mcd_agent/commercial_manual_activation.py`, `mcd_agent/commercial_portal.py`, `mcd_agent/daemon.py` | `tests/test_commercial_manual_activation.py`, redacted `mcd-commercial-manual-activation-receipt-v1` |
@@ -1904,9 +1906,46 @@ advertisement, binding, TTL, lease, durable started/terminal и replay gates.
 без повторного rescan. Live evidence требует authentic command receipt,
 новый inventory revision/ACK, фактический root/версию и ровно один экземпляр
 под прежней DNS-карточкой.
-Установка Mautic из архива пока не публикуется как generic capability: для неё
-нужен отдельный artifact-bound typed contract; Portal не может прислать такой
-шаг под видом произвольной generic-команды.
+Для independently versioned external operations MCD публикует встроенную
+host-scoped capability `external_operation_cache/sync_binding`. Её durable
+input содержит только catalog revision, closure size/media/SHA-256 и ожидаемые
+`binding_schema`/`binding_sha256`; URL, path на хосте и grant в durable job не
+попадают. Portal добавляет ровно один `artifact_delivery` только в poll-ответе,
+с одноразовым grant, привязанным к account/agent/control-installation/job и
+активному MCC catalog artifact. Worker скачивает closure только через
+authenticated `PortalClient.download_artifact`, проверяет размер и SHA-256,
+сохраняет content-addressed ingress и удаляет весь transient delivery до записи
+pending delivery/job digest. Рестарт поэтому никогда не хранит grant: он либо
+повторит безопасную доставку до durable admission, либо использует уже
+проверенный ingress object.
+
+`sync_binding` не запускает внешний сценарий. Он проверяет gzip closure,
+закрытый список members, digest каждого resource и canonical binding preimage,
+затем append-only устанавливает executable bundle, operator profile и binding
+identity. Existing manifest entries сохраняются; конфликт component/operation,
+resource или content-addressed path завершает job fail-closed. Manifest меняется
+последним: незавершённый import может оставить только неактивные digest-файлы,
+но не capability.
+
+После полной проверки cache MCD добавляет host-scoped capability
+`mautic_lifecycle/1.0` с четырьмя командами: read-only `preflight` и mutating
+`create`, `cleanup_owned`, `recreate`. Каждая команда рекламирует точные
+`binding_schema` и recomputed `binding_sha256`; generic job обязан повторить их
+без изменений. Operation input является exact string-map внешнего контракта,
+а artifact/profile/catalog pins обязаны совпасть с установленной binding
+identity. `target_instance_uid` — стабильная сущность без `@host`; host остаётся
+только transport/routing coordinate и отдельным диагностическим полем, но не
+частью UID и не показывается как идентификатор в UI. Cleanup/recreate допускаются
+только с canonical ownership receipt, а любая mutation — с canonical preflight
+receipt и before-state hash. Исполнение идёт через существующий
+`run_configured_external_operation(..., offline_only=True)`; OS/Mautic recipe,
+пути и provider formulas в MCD отсутствуют. Durable started/terminal receipts,
+ACK cursor и replay semantics остаются штатными generic broker semantics.
+
+Portal может создать или заменить instance projection только после succeeded
+terminal `create`/`recreate`, чей ownership receipt совпадает со stable UID,
+DNS, root, DB/user, vhost paths, plan hash и artifact binding. `preflight` и
+`cleanup_owned` сами по себе регистрацию не разрешают.
 
 Managed generic jobs carry the tenant `account_id` inside the installation
 binding. MCD admits that value only when it exactly matches the

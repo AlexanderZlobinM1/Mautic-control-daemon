@@ -29,6 +29,7 @@ COMMAND_VERSION = "1.0"
 _SNAPSHOT_HASH_RE = re.compile(r"sha256:[0-9a-f]{64}")
 
 _COMMANDS = (
+    ("external_operation_cache", "sync_binding", True, "portal://mcd/input/external-operation-cache-sync-v1", "host"),
     ("host_facts", "read_host_facts", False, "portal://mcd/input/host-facts-v1", "host"),
     ("prerequisites", "check_prerequisites", False, "portal://mcd/input/prerequisites-v1", "host"),
     ("web_php", "check_web_php", False, "portal://mcd/input/web-php-v1", "host"),
@@ -38,7 +39,7 @@ _COMMANDS = (
 )
 
 
-def build_capability_inventory(*, installation_id: str, dns_name: str) -> dict[str, Any]:
+def build_capability_inventory(*, installation_id: str, dns_name: str, config: Any | None = None) -> dict[str, Any]:
     """Build the exact secret-free inventory sent to Portal."""
     unsigned: dict[str, Any] = {
         "schema": "portal-mcd-capability-inventory-v1",
@@ -64,6 +65,12 @@ def build_capability_inventory(*, installation_id: str, dns_name: str) -> dict[s
             for capability_id, command_id, mutates_state, schema_ref, target_scope in sorted(_COMMANDS)
         ],
     }
+    if config is not None:
+        from mcd_agent.connected_host_lifecycle import capability as lifecycle_capability
+        lifecycle = lifecycle_capability(config)
+        if lifecycle is not None:
+            unsigned["capabilities"].append(lifecycle)
+            unsigned["capabilities"].sort(key=lambda item: str(item["capability_id"]))
     unsigned["inventory_sha256"] = capability_inventory_digest(unsigned)
     return unsigned
 
@@ -88,7 +95,12 @@ def _service_state(names: tuple[str, ...]) -> dict[str, Any]:
     return {"installed": False, "active": False, "service": ""}
 
 
-def execute_generic_primitive(job: Mapping[str, Any], *, inventory_rescan: Callable[[], int] | None = None) -> Mapping[str, Any]:
+def execute_generic_primitive(
+    job: Mapping[str, Any],
+    *,
+    inventory_rescan: Callable[[], int] | None = None,
+    config: Any | None = None,
+) -> Mapping[str, Any]:
     """Execute one declared primitive without caller-controlled paths or argv.
 
     The input is intentionally empty for every primitive. Rejecting any
@@ -97,6 +109,17 @@ def execute_generic_primitive(job: Mapping[str, Any], *, inventory_rescan: Calla
     """
     command = str((job.get("command") or {}).get("command_id") or "")
     value = job.get("input")
+    capability_id = str((job.get("capability") or {}).get("capability_id") or "")
+    if capability_id == "mautic_lifecycle":
+        if config is None:
+            return {"status": "failed", "reason": "mautic_lifecycle_config_unavailable"}
+        from mcd_agent.connected_host_lifecycle import execute
+        return execute(job, config=config)
+    if capability_id == "external_operation_cache" and command == "sync_binding":
+        if config is None:
+            return {"status": "failed", "reason": "external_operation_cache_config_unavailable"}
+        from mcd_agent.external_operation_cache import sync_binding
+        return sync_binding(job, config=config)
     if not isinstance(value, Mapping) or value:
         return {"status": "failed", "reason": "commercial_generic_input_must_be_empty"}
     if command == "rescan_inventory":

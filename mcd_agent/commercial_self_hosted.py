@@ -1016,7 +1016,7 @@ class SelfHostedPortalWorker:
     command before its receipt has been delivered.
     """
 
-    def __init__(self, client: Any, executor: ScenarioExecutor, *, installation_id: str | list[str], portal_keys: Mapping[str, str], publisher_keys: Mapping[str, Any], context: Mapping[str, Any], commercial_key_id: str, agent_id: str, host_fingerprint: str, poll_wait_seconds: int = _DEFAULT_LONG_POLL_SECONDS, backoff_base_seconds: float = _DEFAULT_BACKOFF_BASE_SECONDS, backoff_max_seconds: float = _DEFAULT_BACKOFF_MAX_SECONDS, clock: Callable[[], float] | None = None, inventory_provider: Callable[[str], Mapping[str, Any]] | None = None, runtime_command_handler: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None, capability_inventory_provider: Callable[[str], Mapping[str, Any]] | None = None, generic_command_handler: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None):
+    def __init__(self, client: Any, executor: ScenarioExecutor, *, installation_id: str | list[str], portal_keys: Mapping[str, str], publisher_keys: Mapping[str, Any], context: Mapping[str, Any], commercial_key_id: str, agent_id: str, host_fingerprint: str, poll_wait_seconds: int = _DEFAULT_LONG_POLL_SECONDS, backoff_base_seconds: float = _DEFAULT_BACKOFF_BASE_SECONDS, backoff_max_seconds: float = _DEFAULT_BACKOFF_MAX_SECONDS, clock: Callable[[], float] | None = None, inventory_provider: Callable[[str], Mapping[str, Any]] | None = None, runtime_command_handler: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None, capability_inventory_provider: Callable[[str], Mapping[str, Any]] | None = None, generic_command_handler: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None, generic_artifact_stager: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None):
         self.client = client
         self.executor = executor
         self.installation_ids = [installation_id] if isinstance(installation_id, str) else [str(value) for value in installation_id]
@@ -1040,6 +1040,7 @@ class SelfHostedPortalWorker:
         self.runtime_command_handler = runtime_command_handler
         self.capability_inventory_provider = capability_inventory_provider
         self.generic_command_handler = generic_command_handler
+        self.generic_artifact_stager = generic_artifact_stager
         self._active_installation_id = self.installation_ids[0]
         # A daemon restart is also the supported recovery point for a stale
         # Portal projection. Every installation needs its own complete
@@ -1329,6 +1330,37 @@ class SelfHostedPortalWorker:
 
     def _remember_delivery(self, *, installation_id: str, cursor: str, cursor_next: str, job: Mapping[str, Any]) -> None:
         self.executor.state.put(_PENDING_DELIVERY_KEY, {"installation_id": installation_id, "cursor": cursor, "cursor_next": cursor_next, "job": dict(job)})
+
+    def _stage_transient_generic_delivery(self, job: Mapping[str, Any]) -> dict[str, Any]:
+        """Consume one-time grants before persisting the pending delivery."""
+        if self.generic_artifact_stager is None:
+            return dict(job)
+
+        def stage(command: Mapping[str, Any]) -> dict[str, Any]:
+            if command.get("schema") != COMMAND_JOB_SCHEMA or "artifact_delivery" not in command:
+                return dict(command)
+            try:
+                value = self.generic_artifact_stager(dict(command))
+            except Exception as exc:
+                if str(exc) == "external_operation_cache_delivery_failed":
+                    raise
+                # Integrity/contract failures are terminal command failures,
+                # not transport retries.  Strip every transient grant before
+                # durable storage; the sync handler will fail closed because
+                # the exact content-addressed ingress object is absent.
+                value = dict(command)
+                value.pop("artifact_delivery", None)
+            if not isinstance(value, Mapping) or "artifact_delivery" in value:
+                raise ValueError("external_operation_cache_stager_invalid")
+            return dict(value)
+
+        commands = job.get("commands")
+        if isinstance(commands, list):
+            return {
+                **dict(job),
+                "commands": [stage(item) if isinstance(item, Mapping) else item for item in commands],
+            }
+        return stage(job)
 
     def _cursor_for(self, installation_id: str) -> str:
         cursors = self.executor.state.get(_CURSORS_KEY)
@@ -1898,6 +1930,11 @@ class SelfHostedPortalWorker:
                 job = delivery.get("job") if isinstance(delivery, Mapping) and isinstance(delivery.get("job"), Mapping) else delivery
             if not isinstance(job, Mapping):
                 return {"status": "rejected", "reason": "self_hosted_mcd_job_delivery_missing"}
+            try:
+                job = self._stage_transient_generic_delivery(job)
+            except Exception:
+                retry_after = self._transport_failed("artifact_delivery")
+                return {"status": "backoff", "retry_after": retry_after}
             self._remember_delivery(installation_id=active_installation_id, cursor=cursor, cursor_next=cursor_next, job=job)
         commands = self._commands_from_delivery(job)
         if not commands:
