@@ -34,6 +34,12 @@ package/runtime SHA и реальный MCC/package/install receipt.
    repair, остаётся внутри единого compensation path. Fixture доказывает
    rollback certificate/vhost/root/firewall/renewal boundaries; только повтор
    полностью валидного состояния возвращает честный `noop`.
+6. Generic terminal fixture фиксирует wire wrapper
+   `{status, host_prerequisites}` и executable `artifact_sha256` отдельно от
+   closure digest. Raw `privkey_sha256` проверяется внутри MCD, но отсутствует в
+   bounded Portal projection. Если первый ACK отклонён, рестарт/следующий poll
+   повторно доставляет exact durable sequence-2 receipt, не вызывая primitive и
+   host operation второй раз.
 
 ## Mandatory self-update lifecycle gate
 

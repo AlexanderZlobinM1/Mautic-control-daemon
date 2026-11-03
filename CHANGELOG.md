@@ -1,5 +1,9 @@
 ## 1.7.0 — Unreleased architecture candidate
 
+- Freeze the connected-host generic terminal wire contract: preserve the
+  `{status, host_prerequisites}` wrapper, keep executable and closure digests
+  distinct, document private-key evidence redaction, and prove that a rejected
+  terminal ACK redelivers the exact durable receipt without host re-execution.
 - Required boundary: independently versioned MCC-distributed external wrapping
   owns all install/upgrade/migrate/config/profile/matrix semantics. MCD retains
   generic artifact cache/verification/execution/progress/receipts only.

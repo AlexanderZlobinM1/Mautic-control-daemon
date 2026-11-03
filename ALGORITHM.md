@@ -2069,6 +2069,18 @@ confined-to-parent proof и отсутствие stale temporary reference. MCD 
 `unchanged=false`: renewal config входит в directory boundary, поэтому его
 штатный repair обязан менять этот digest, не меняя certificate material.
 
+Generic Portal terminal сохраняет канонический wrapper MCD primitive
+`{status, host_prerequisites}`. Внутри `host_prerequisites.artifact_binding`
+поле `artifact_sha256` означает SHA выбранного executable, а transport closure
+остаётся отдельным digest и не подменяет executable identity. До broker boundary
+MCD проверяет полный raw result, включая `privkey_sha256`; публичная bounded
+secret-free проекция затем удаляет key-shaped поля. Поэтому Portal admission
+проверяет projected wire receipt, immutable binding/executable identity и
+certificate boundary proof, но не требует удалённый private-key digest и не
+переинтерпретирует wrapper как raw external-runner frame. Если terminal уже
+durably сохранён, повтор доставки отправляет те же bytes/semantics и никогда не
+перезапускает host operation.
+
 Выбранная immutable revision для этого контракта — MCC `1.0.7`: closure
 `sha256:064ad78086e71120185d3c10aa485078c2bad1b341bd65801cb2a6bb25d80e63`
 (52718 bytes), binding

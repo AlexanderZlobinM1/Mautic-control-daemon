@@ -1668,6 +1668,12 @@ class SelfHostedPortalWorker:
         else:
             payload.update({"stage_id": "execute", "observed_at": _utc()})
         if result is not None:
+            # ``result`` is the canonical generic-primitive wrapper returned by
+            # the MCD handler (for example ``{status, host_prerequisites}``).
+            # Preserve that wrapper and its artifact semantics on the wire;
+            # only the shared bounded/secret-free projection is applied here.
+            # Portal validates this projected broker receipt rather than
+            # reinterpreting it as the private raw external-runner frame.
             payload["result"] = _bounded_result(result)
         if error is not None:
             payload["error"] = {"code": str(error.get("code") or "commercial_generic_command_failed")[:120], "message": str(error.get("message") or "generic command failed")[:1024]}

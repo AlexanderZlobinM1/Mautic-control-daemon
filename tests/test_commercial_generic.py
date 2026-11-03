@@ -200,6 +200,141 @@ def test_inventory_rescan_terminal_survives_restart_without_rescanning(tmp_path)
     assert CommercialState(state_path).get("commercial_self_hosted_pending_receipts") == []
 
 
+def test_host_prerequisites_terminal_preserves_canonical_wire_contract_on_redelivery(tmp_path):
+    """A rejected ACK retries the exact broker receipt, never the host operation."""
+    state_path = str(tmp_path / "commercial.sqlite")
+    binding_sha256 = "sha256:" + "6" * 64
+    executable_sha256 = "2" * 64
+    inventory = _inventory()
+    inventory["capabilities"] = [{
+        "capability_id": "mautic_host_prerequisites",
+        "version": "1.0",
+        "commands": [{
+            "command_id": "prepare_create",
+            "version": "1.0",
+            "execution": "generic_primitive",
+            "mutates_state": True,
+            "input_schema_ref": "portal://mcd/input/mautic-host-prerequisites-prepare-v1",
+            "target_scope": "host",
+            "binding_schema": "mcd-mautic-connected-host-prerequisites-binding-v1",
+            "binding_sha256": binding_sha256,
+        }],
+    }]
+    inventory["inventory_sha256"] = capability_inventory_digest(
+        {key: value for key, value in inventory.items() if key != "inventory_sha256"}
+    )
+    job = _job()
+    job["capability"] = {"capability_id": "mautic_host_prerequisites", "version": "1.0"}
+    job["command"] = {
+        "command_id": "prepare_create",
+        "version": "1.0",
+        "execution": "generic_primitive",
+        "mutates_state": True,
+        "target_scope": "host",
+        "binding_schema": "mcd-mautic-connected-host-prerequisites-binding-v1",
+        "binding_sha256": binding_sha256,
+    }
+    job["input"] = {}
+    nested = {
+        "schema": "mcd-mautic-connected-host-prerequisites-v1",
+        "contract_version": "1.0",
+        "status": "noop",
+        "operation": "prepare_create",
+        "operation_id": "prepare-example-r7",
+        "target": {"instance_uid": "future.example.com", "dns": "future.example.com"},
+        "mutation_started": False,
+        "rollback": "not_needed",
+        "artifact_binding": {
+            "catalog_item_id": "mcc.scenario.mautic-connected-host-prerequisites",
+            "catalog_item_revision": "1.0.7",
+            # This is the selected executable digest. The transport closure
+            # digest is a different coordinate and does not replace it.
+            "artifact_sha256": executable_sha256,
+            "profile_sha256": "7" * 64,
+            "binding_sha256": binding_sha256,
+        },
+        "preserved_boundaries": {
+            "certificate": {
+                "requested": True,
+                "directory": "/etc/letsencrypt/live/future.example.com",
+                "before_sha256": "sha256:" + "8" * 64,
+                "after_sha256": "sha256:" + "8" * 64,
+                "disposition": "preserved",
+                "unchanged": True,
+            },
+            "unrelated": {
+                "checked": True,
+                "before_sha256": "sha256:" + "9" * 64,
+                "after_sha256": "sha256:" + "9" * 64,
+                "unchanged": True,
+            },
+        },
+        "post_state": {
+            "certificate": {
+                "directory": "/etc/letsencrypt/live/future.example.com",
+                "fullchain_sha256": "sha256:" + "a" * 64,
+                # Validated inside MCD, then omitted by the public
+                # secret/key-shaped field projection.
+                "privkey_sha256": "sha256:" + "b" * 64,
+                "covers_target_dns": True,
+                "current": True,
+            },
+        },
+    }
+    handler_calls = []
+
+    class Portal:
+        polled = False
+        reject_terminal = True
+
+        def __init__(self):
+            self.receipts = []
+
+        def send_capability_inventory(self, **kwargs):
+            return {}
+
+        def pull_job(self, **kwargs):
+            if self.polled:
+                return None
+            self.polled = True
+            return {"cursor": "1", "job": job}
+
+        def send_receipt(self, payload, **kwargs):
+            self.receipts.append(copy.deepcopy(payload))
+            if self.reject_terminal and payload["sequence"] == 2:
+                raise OSError("portal admission rejected")
+            return {}
+
+    portal = Portal()
+
+    def worker():
+        return SelfHostedPortalWorker(
+            portal, _Executor(CommercialState(state_path)), installation_id="installation-1",
+            portal_keys={}, publisher_keys={}, context={}, commercial_key_id="commercial-1",
+            agent_id="agent-1", host_fingerprint="sha256:" + "c" * 64, clock=_Clock(),
+            capability_inventory_provider=lambda _installation: inventory,
+            generic_command_handler=lambda _job: handler_calls.append(copy.deepcopy(_job)) or {
+                "status": "succeeded", "host_prerequisites": nested,
+            },
+        )
+
+    assert worker().run_once() == {"status": "receipt_pending", "job_id": "generic-job-1"}
+    pending = CommercialState(state_path).get("commercial_self_hosted_pending_receipts")[0]
+    assert set(pending["result"]) == {"status", "host_prerequisites"}
+    projected = pending["result"]["host_prerequisites"]
+    assert projected["artifact_binding"]["artifact_sha256"] == executable_sha256
+    assert "closure_digest" not in projected["artifact_binding"]
+    assert "privkey_sha256" not in projected["post_state"]["certificate"]
+    assert projected["preserved_boundaries"]["certificate"]["unchanged"] is True
+
+    portal.reject_terminal = False
+    assert worker().run_once() == {"status": "succeeded", "job_id": "generic-job-1"}
+    assert portal.receipts[-1] == pending
+    assert len(handler_calls) == 1
+    assert CommercialState(state_path).get("commercial_self_hosted_pending_receipts") == []
+    assert CommercialState(state_path).get("commercial_portal_cursor") == "1"
+
+
 def test_transient_artifact_grant_is_consumed_before_durable_delivery(tmp_path):
     from mcd_agent.commercial_primitives import build_capability_inventory
 
