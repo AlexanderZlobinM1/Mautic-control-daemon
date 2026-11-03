@@ -674,6 +674,33 @@ def test_execute_reduces_invalid_external_failure_output():
         }
 
 
+def test_execute_preserves_bounded_pre_execution_operation_code():
+    binding = {
+        "binding_schema": prerequisites.BINDING_SCHEMA,
+        "binding_sha256": "sha256:" + "b" * 64,
+        "artifact_sha256": "c" * 64,
+        "profile_sha256": "d" * 64,
+        "catalog_item_revision": "1.0.4",
+    }
+    job = {
+        "installation": {"installation_id": "control-1", "dns_name": "control.example.com"},
+        "command": {
+            "command_id": "prepare_create",
+            "binding_schema": prerequisites.BINDING_SCHEMA,
+            "binding_sha256": binding["binding_sha256"],
+        },
+        "input": input_map(),
+    }
+    with patch.object(prerequisites, "installed_binding", return_value=binding), \
+         patch.object(prerequisites, "_inventory_context", return_value={}), \
+         patch.object(prerequisites, "load_configured_profile_cache", return_value={"profile": {}}), \
+         patch.object(prerequisites, "run_configured_external_operation", return_value=(2, "custom_operation_mapping_invalid")):
+        assert prerequisites.execute(job, config=SimpleNamespace()) == {
+            "status": "failed",
+            "reason": "custom_operation_mapping_invalid",
+        }
+
+
 def test_generic_runner_serializes_exact_resolved_operation_context(tmp_path):
     from mcd_agent import custom_scripts
 

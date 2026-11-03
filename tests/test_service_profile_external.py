@@ -357,7 +357,33 @@ def test_configured_apt_binding_preserves_exact_private_input_contract(tmp_path,
             'operation_input_json': {'encoding': 'json', 'source': 'caller_operation_input', 'fields': ['dry_run', 'force_repo_rescan']},
         },
     }
-    (root / 'manifest.json').write_text(json.dumps({'operation_bindings': [binding]}))
+    historical = copy.deepcopy(binding)
+    historical['artifact'] = {
+        'key': 'apt-full-composition-v0.9.0', 'sha256': '9' * 64, 'entrypoint': 'old-block.py',
+    }
+    binding_schema = 'mcc-apt-full-composition-binding-v1'
+    identity = {
+        'schema': binding_schema, 'catalog_item_id': 'mcc.scenario.apt-full-composition',
+        'catalog_item_revision': '1.0.0', 'operation_bindings': [binding],
+    }
+    canonical_identity = json.dumps(
+        identity, ensure_ascii=True, sort_keys=True, separators=(',', ':'),
+    ).encode()
+    identity_raw = canonical_identity + b'\n'
+    resource_sha = hashlib.sha256(identity_raw).hexdigest()
+    identity_file = f'bindings/by-sha256/{resource_sha}.json'
+    (root / 'bindings' / 'by-sha256').mkdir(parents=True)
+    (root / identity_file).write_bytes(identity_raw)
+    (root / 'manifest.json').write_text(json.dumps({
+        'operation_bindings': [historical, binding],
+        'active_bindings': {binding_schema: {
+            'catalog_item_id': identity['catalog_item_id'],
+            'catalog_item_revision': identity['catalog_item_revision'],
+            'binding_sha256': 'sha256:' + hashlib.sha256(canonical_identity).hexdigest(),
+            'cache_file': identity_file,
+            'resource_sha256': resource_sha,
+        }},
+    }))
     cfg = SimpleNamespace(
         custom_cache_dir=str(root), state_db_path='/var/lib/mcd/state.db',
         state_mysql_host='127.0.0.1', state_mysql_port=3306,

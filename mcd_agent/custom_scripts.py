@@ -1063,9 +1063,18 @@ def run_configured_external_operation(
         return 2, "custom_operation_binding_not_configured"
     matches = [item for item in bindings if isinstance(item, dict)
                and item.get("component") == component and item.get("operation") == operation]
-    if len(matches) != 1:
-        return 2, "custom_operation_binding_not_configured" if not matches else "custom_operation_mapping_invalid"
-    binding = matches[0]
+    if not matches:
+        return 2, "custom_operation_binding_not_configured"
+    try:
+        selected = _active_operation_binding(
+            document, root=Path(config.custom_cache_dir), component=component,
+            operation=operation, matches=matches,
+        )
+    except CustomSelectedTaskError as exc:
+        return 2, str(exc)
+    if selected is None and len(matches) != 1:
+        return 2, "custom_operation_mapping_invalid"
+    binding = selected or matches[0]
     artifact = binding.get("artifact")
     if (not isinstance(artifact, dict)
             or not isinstance(artifact.get("key"), str) or not artifact["key"].strip()

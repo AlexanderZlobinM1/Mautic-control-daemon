@@ -785,6 +785,8 @@ def execute(job: Mapping[str, Any], *, config: Any) -> Mapping[str, Any]:
                     "reason": failure["error_code"],
                     "host_prerequisites": failure,
                 }
+            if isinstance(output, str) and re.fullmatch(r"custom_operation_[a-z0-9_]{1,112}", output):
+                return {"status": "failed", "reason": output}
             raise _fail("mautic_host_prerequisites_external_operation_failed")
         result = _validate_result(command_id, operation_input, binding, json.loads(output))
         return {"status": "succeeded", "host_prerequisites": result}
