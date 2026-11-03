@@ -1177,10 +1177,10 @@ cycle без ручного `segments:update`, profile/capacity/data changes. Ad
 | activation-derived Portal material is imported atomically without new auth/job issuance; commercial API-key transport, host binding and installation IDs are validated and persisted while legacy agent/Portal signing-key state is scrubbed | `mcd_agent/commercial_registration.py`, `mcd_agent/commercial_portal.py` | `tests/test_commercial_registration.py`, `tests/test_commercial_outbound_boundary.py`, redacted `mcd-portal-registration-receipt-v1` |
 | Portal worker restart forces one independently ACKed complete inventory per installation; a successful installation cannot clear another installation's pending startup publication, and transport failures retry through ordinary backoff without cursor/cutover mutation | `mcd_agent/commercial_self_hosted.py:SelfHostedPortalWorker._publish_inventory` | `tests/test_commercial_outbound_boundary.py` multi-install restart and partial-failure retry |
 | successful Portal inventory rescan returns the canonical observed snapshot revision/hash in the existing terminal result; unchanged content does not bump revision and failed rescan returns no reference | `mcd_agent/daemon.py`, `mcd_agent/commercial_primitives.py`, `mcd_agent/commercial_self_hosted.py`, `mcd_agent/commercial_portal.py` | `tests/test_commercial_primitives.py`, `tests/test_daemon_commercial_guard.py`, Portal 1.7 terminal-receipt matching |
-| Portal-only external-operation cache sync consumes a transient one-time grant before durable storage, verifies the complete closure/binding preimage, preserves unrelated cache rows and activates the manifest last | `mcd_agent/external_operation_cache.py`, `mcd_agent/commercial_self_hosted.py`, `mcd_agent/daemon.py` | `tests/test_connected_host_lifecycle.py`, `tests/test_commercial_generic.py` grant non-persistence/replay evidence; MCC 3.2.1 closure `sha256:ca8140086414c3cee58b5431dc652a7933b599f56c85a62a6514bcd934ac3e70` |
-| connected-host lifecycle is an exact host-scoped external binding with preflight/create/receipt-owned cleanup/recreate; stable target UID forbids `@host`, exact binding/artifact/profile pins are checked before the existing offline-only runner, and only create/recreate ownership receipts authorize Portal projection | `mcd_agent/connected_host_lifecycle.py`, `mcd_agent/commercial_primitives.py`, `mcd_agent/commercial_generic.py` | `tests/test_connected_host_lifecycle.py`, `tests/test_commercial_generic.py`; binding `sha256:79d7ba83ba2bfab1acc01ab237bd6ad30276f3f3597fec26086b608ad784798f` |
+| Portal-only external-operation cache sync consumes a transient one-time grant before durable storage, verifies the complete closure/binding preimage, preserves unrelated cache rows and activates the manifest last | `mcd_agent/external_operation_cache.py`, `mcd_agent/commercial_self_hosted.py`, `mcd_agent/daemon.py` | `tests/test_connected_host_lifecycle.py`, `tests/test_commercial_generic.py` grant non-persistence/replay evidence; MCC 3.2.2 closure `sha256:4f7600b32c2893f2a1753cec41a8a0c04f2fb4576c5087959246f5834b30cb9d` |
+| connected-host lifecycle is an exact host-scoped external binding with preflight/create/receipt-owned cleanup/recreate; stable target UID forbids `@host`, admitted PHP limits are bounded strings, exact binding/artifact/profile pins are checked before the existing offline-only runner, receipt-bearing JSON registration owns its first inventory row before discovery, and only create/recreate ownership receipts authorize Portal projection | `mcd_agent/connected_host_lifecycle.py`, `mcd_agent/cli.py`, `mcd_agent/commercial_primitives.py`, `mcd_agent/commercial_generic.py` | `tests/test_connected_host_lifecycle.py`, `tests/test_instances_json_selector.py`, `tests/test_commercial_generic.py`; MCC revision `3.2.2`, binding `sha256:ad5ed56727be9c8e796e2f0f37886e59bbddf3047d3086b095ef5069332f29a8`, executable `sha256:b60e09fdd3ec12a1ea05514080c61bc514b8cd14aee8b0fba3b36ec0ffacf995`, profile `sha256:bce8216ae4628e39bbc454266c958620ad791912fb9e259f78c667ca4855f89f` |
 | connected-host source export resolves all local paths/DB access inside MCD, admits only exact installation+operation identities, delegates archive semantics to the immutable external artifact, validates regular-file pins and supports secret-free read-only `rollback=not_needed` framing/idempotent replay | `mcd_agent/connected_host_source_export.py`, `mcd_agent/custom_scripts.py`, `mcd_agent/external_operation_cache.py`, `mcd_agent/commercial_self_hosted.py` | `tests/test_connected_host_source_export.py`; closure `sha256:627783f0311aba277289ed1d99e040270de7e1e133c41371b0735277952b92b9`, binding `sha256:e7105ddb31a01185784e4e7d66e3e688e39d03fcc5b3ac2db89a4819b9ad42d2` |
-| connected-host prepare/pre-clean accepts only stable UID/DNS/policy strings, resolves exact local legacy identity inside MCD without secrets, admits one immutable external binding, and proves certificate/renewal/unrelated-boundary preservation plus command-specific post-state before success | `mcd_agent/connected_host_prerequisites.py`, `mcd_agent/external_operation_cache.py`, `mcd_agent/commercial_primitives.py`, `mcd_agent/instance_delete.py` | `tests/test_connected_host_prerequisites.py`, `tests/test_instance_delete_cli.py`; MCC revision `1.0.7`, closure `sha256:064ad78086e71120185d3c10aa485078c2bad1b341bd65801cb2a6bb25d80e63`, binding `sha256:64ee3aa0923fca19d28160a3479dedab7822182a4d5e004a771b127bb62ce05c` |
+| connected-host prepare/pre-clean accepts only stable UID/DNS/policy strings, resolves exact local legacy identity inside MCD without secrets, admits one immutable external binding, and proves certificate/renewal/unrelated-boundary preservation plus authoritative DB/user post-state before success; same-name local DB users are removed only after exact-grant proof and verified absent afterwards | `mcd_agent/connected_host_prerequisites.py`, `mcd_agent/external_operation_cache.py`, `mcd_agent/commercial_primitives.py`, `mcd_agent/instance_delete.py` | `tests/test_connected_host_prerequisites.py`, `tests/test_instance_delete_cli.py`; MCC revision `1.0.8`, closure `sha256:9892d5234aa901b6386b89fd8b6a42f140ab838bfdc1340837d122c2e5f85e2a`, binding `sha256:0436e7c508aa1a85ff0ac87fcb617107677d941d5dc516abbdb700b93bc88feb`, executable `sha256:d2b30285014fd458f8152da1ea4ac8893b4d4adeeedefdc0fdffd5319581b489`, profile `sha256:f0bae373a8ec28059d44098c456cf7319c39ceb89248501431cf34f083a9dbc9` |
 | host-first Portal registration binds an activated MCD host before any Mautic instance exists; request contains only local DNS identity/display name, and the response must create a passive host installation with an active empty-inventory connection | `mcd_agent/commercial_portal.py`, `mcd_agent/commercial_host_registration.py`, `mcd_agent/cli.py` | `tests/test_commercial_portal.py`, redacted `portal-mcd-host-register-response-v1` |
 | self-hosted v2.1 candidate jobs may omit stage metadata for a whole external composition; supplied `stage_selection` must structurally match `execution.stage`, without embedded stage-name/order recipes; existing receipts remain | `mcd_agent/commercial_portal.py`, `mcd_agent/commercial_self_hosted.py`, `mcd_agent/scenario_launcher.py` | `tests/test_commercial_self_hosted_v2.py`, redacted stage/terminal receipts |
 | manual existing commercial-key fallback keeps pending/active/disconnected state idempotently | `mcd_agent/commercial_manual_activation.py`, `mcd_agent/commercial_portal.py`, `mcd_agent/daemon.py` | `tests/test_commercial_manual_activation.py`, redacted `mcd-commercial-manual-activation-receipt-v1` |
@@ -1959,7 +1959,16 @@ identity. `target_instance_uid` — стабильная сущность без
 только transport/routing coordinate и отдельным диагностическим полем, но не
 частью UID и не показывается как идентификатор в UI. Cleanup/recreate допускаются
 только с canonical ownership receipt, а любая mutation — с canonical preflight
-receipt и before-state hash. Исполнение идёт через существующий
+receipt и before-state hash. `php_memory_limit_mb` и
+`php_max_execution_time_sec` обязательны, принимаются как decimal strings и
+ограничены диапазонами `256..8192` и `1..3600` соответственно. Receipt-bearing
+`mcd-cli instances add --json` не запускает предварительный autodiscovery:
+первую inventory row обязан создать сам registration receipt с тем же operation
+ID, иначе cleanup не сможет доказать владение записью. При ненулевом exit
+валидный bounded `mcd-self-hosted-executable-output-v1` failure frame сохраняет
+свой безопасный `error_code`; malformed, успешный или несогласованный frame
+сворачивается в общий `mautic_lifecycle_external_operation_failed`. Исполнение
+идёт через существующий
 `run_configured_external_operation(..., offline_only=True)`; OS/Mautic recipe,
 пути и provider formulas в MCD отсутствуют. Durable started/terminal receipts,
 ACK cursor и replay semantics остаются штатными generic broker semantics.
@@ -2016,7 +2025,12 @@ command-specific post-state. `prepare_create` доказывает parent/certif
 удаление temporary vhost, `nginx -t` и DNS observation; `preclean_legacy`
 доказывает отсутствие только target root/vhost/DB/user/inventory при сохранённом
 certificate. Простая декларация списка «preserved» без before/after evidence не
-считается receipt.
+считается receipt. Для удаления локальной DB допускается явный `db_user`; при
+отсутствии прикладного пароля используется локальная root-socket аутентификация.
+Одноимённый с DB пользователь удаляется только если `SHOW GRANTS` доказал ровно
+`USAGE` и grants только на эту схему. После `DROP DATABASE` отдельный запрос к
+`INFORMATION_SCHEMA.SCHEMATA`, а после `DROP USER` — запрос к `mysql.user`
+обязаны доказать отсутствие объектов; иначе операция fail-closed.
 
 Ненулевой exit внешнего prerequisite не уничтожает его terminal evidence.
 Если generic runner уже проверил корректный bounded result frame, MCD повторно
@@ -2026,7 +2040,7 @@ certificate. Простая декларация списка «preserved» бе
 в общий `mautic_host_prerequisites_external_operation_failed`; произвольный
 stdout или невалидные поля в receipt не проходят.
 
-Revision `1.0.7` оставляет этот public failure contract неизменным и хранит
+Revision `1.0.8` оставляет этот public failure contract неизменным и хранит
 подробности компенсации только в mode-0600 private artifact receipt. До первой
 target mutation recipe fail-closed проверяет отсутствие target vhost и
 доступность private receipt root, включая replay. HTTP-01 выполняется внутри
@@ -2055,7 +2069,7 @@ compensation scope и после успешной выдачи удаляла op
 завершиться `prepare_post_state_invalid`, `mutation_started=true`,
 `rollback=not_attempted` и оставить неработоспособный renewal webroot.
 
-Revision `1.0.7` принимает только строгие symlink, чьи resolved regular-file
+Revision `1.0.8` принимает только строгие symlink, чьи resolved regular-file
 targets confined точным `archive/<dns>`, отвергает broken/escape/mixed-generation
 деревья и включает postcheck в единый compensation scope. HTTP-01 использует
 стабильный challenge root внутри managed parent. Existing certificate со stale
@@ -2081,12 +2095,12 @@ certificate boundary proof, но не требует удалённый private-
 durably сохранён, повтор доставки отправляет те же bytes/semantics и никогда не
 перезапускает host operation.
 
-Выбранная immutable revision для этого контракта — MCC `1.0.7`: closure
-`sha256:064ad78086e71120185d3c10aa485078c2bad1b341bd65801cb2a6bb25d80e63`
-(52718 bytes), binding
-`sha256:64ee3aa0923fca19d28160a3479dedab7822182a4d5e004a771b127bb62ce05c`,
-executable `2e8b83302280de38a169cadf3597f28a08c34e7e271164d8dd8ed5c43ac06651`
-и profile `7c4ea709d8664614a063bc301fb9d26833c4ac3184601e86271313d9c42959f5`.
+Выбранная immutable revision для этого контракта — MCC `1.0.8`: closure
+`sha256:9892d5234aa901b6386b89fd8b6a42f140ab838bfdc1340837d122c2e5f85e2a`
+(52813 bytes), binding
+`sha256:0436e7c508aa1a85ff0ac87fcb617107677d941d5dc516abbdb700b93bc88feb`,
+executable `d2b30285014fd458f8152da1ea4ac8893b4d4adeeedefdc0fdffd5319581b489`
+и profile `f0bae373a8ec28059d44098c456cf7319c39ceb89248501431cf34f083a9dbc9`.
 Published revisions `1.0.3`–`1.0.6` остаются неизменной историей и не
 переиспользуются для исправленного artifact/profile.
 Независимый admission обязан выполнить полный

@@ -1787,6 +1787,7 @@ def _build_parser() -> argparse.ArgumentParser:
     inst_delete.add_argument("--root", help="Mautic root or instance uid")
     inst_delete.add_argument("--domain", action="append", help="Expected instance domain (repeatable)")
     inst_delete.add_argument("--db-name", help="Expected database name (defaults to local.php db_name)")
+    inst_delete.add_argument("--db-user", help="Expected dedicated database user (defaults to local.php db_user)")
     inst_delete.add_argument("--delete-files", action="store_true", help="Remove the application root directory")
     inst_delete.add_argument("--delete-vhost", action="store_true", help="Remove matching nginx vhost files/symlinks")
     inst_delete.add_argument("--delete-db", action="store_true", help="Drop the local database from local.php/--db-name")
@@ -2771,6 +2772,7 @@ def main() -> int:
                         root=root,
                         domains=list(args.domain or []),
                         db_name=args.db_name,
+                        db_user=args.db_user,
                         delete_files=bool(args.delete_files),
                         delete_vhost=bool(args.delete_vhost),
                         delete_db=bool(args.delete_db),
@@ -2785,6 +2787,7 @@ def main() -> int:
                     root=root,
                     domains=list(args.domain or []),
                     db_name=args.db_name,
+                    db_user=args.db_user,
                     delete_files=bool(args.delete_files),
                     delete_vhost=bool(args.delete_vhost),
                     delete_db=bool(args.delete_db),
@@ -3511,7 +3514,12 @@ def main() -> int:
         if note:
             print(f"NOTICE: {note}", file=sys.stderr if args.json else sys.stdout)
         inv = InstanceInventory(cfg.state_db_path)
-        ensure_seeded(inv, cfg)
+        # A receipt-bearing registration must own the first row it creates.
+        # Seeding here would autodiscover the just-installed root before add,
+        # producing an unowned row that cleanup cannot remove by operation ID.
+        owned_registration = args.op == "add" and args.json
+        if not owned_registration:
+            ensure_seeded(inv, cfg)
         if args.op == "list":
             rows = inv.list_instances()
             if args.instance_uid:

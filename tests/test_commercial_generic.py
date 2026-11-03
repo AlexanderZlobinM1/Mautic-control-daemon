@@ -246,7 +246,7 @@ def test_host_prerequisites_terminal_preserves_canonical_wire_contract_on_redeli
         "rollback": "not_needed",
         "artifact_binding": {
             "catalog_item_id": "mcc.scenario.mautic-connected-host-prerequisites",
-            "catalog_item_revision": "1.0.7",
+            "catalog_item_revision": "1.0.8",
             # This is the selected executable digest. The transport closure
             # digest is a different coordinate and does not replace it.
             "artifact_sha256": executable_sha256,
@@ -349,7 +349,7 @@ def test_transient_artifact_grant_is_consumed_before_durable_delivery(tmp_path):
     )
     job["input"] = {
         "catalog_item_id": "mcc.scenario.debian-family-self-hosted",
-        "catalog_item_revision": "3.2.1",
+        "catalog_item_revision": "3.2.2",
         "closure_digest": "sha256:" + "a" * 64,
         "closure_size_bytes": 123,
         "closure_media_type": "application/gzip",

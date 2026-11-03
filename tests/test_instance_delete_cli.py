@@ -63,7 +63,190 @@ class InstanceDeleteCliTests(unittest.TestCase):
 
         self.assertTrue(result["deleted"]["db_user"])
         self.assertEqual(sql[0], "DROP DATABASE IF EXISTS `baza_shop`")
-        self.assertEqual(sql[1], "DROP USER IF EXISTS 'korisnik_shop'@'localhost'")
+        self.assertIn("INFORMATION_SCHEMA.SCHEMATA", sql[1])
+        self.assertEqual(sql[2], "DROP USER IF EXISTS 'korisnik_shop'@'localhost'")
+        self.assertIn("SELECT COUNT(*) FROM mysql.user", sql[3])
+
+    def test_delete_uses_root_socket_when_application_password_is_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "project"
+            root.mkdir()
+            plan = instance_delete.InstanceDeletePlan(
+                root=root,
+                local_php=None,
+                domains=[],
+                nginx_paths=[],
+                db_name="sales_snap_fixture",
+                db_host="localhost",
+                db_port="3306",
+                db_user="application_user",
+                db_password="",
+                delete_files=False,
+                delete_vhost=False,
+                delete_db=True,
+            )
+            calls: list[tuple[str, dict[str, object]]] = []
+
+            def mysql_exec(statement: str, **kwargs: object) -> str:
+                calls.append((statement, kwargs))
+                return ""
+
+            with (
+                patch.object(instance_delete, "build_delete_plan", return_value=plan),
+                patch.object(instance_delete.os, "geteuid", return_value=0),
+                patch.object(instance_delete, "_mysql_exec", side_effect=mysql_exec),
+                patch("mcd_agent.inventory.InstanceInventory.rescan", return_value=0),
+            ):
+                result = instance_delete.delete_instance_artifacts(
+                    SimpleNamespace(state_db_path=str(Path(tmp) / "state.db")),
+                    root=str(root),
+                    delete_db=True,
+                    yes=True,
+                )
+
+        self.assertTrue(result["deleted"]["db"])
+        self.assertEqual(calls, [
+            ("DROP DATABASE IF EXISTS `sales_snap_fixture`", {"timeout_sec": 300}),
+            (
+                "SELECT COUNT(*) FROM INFORMATION_SCHEMA.SCHEMATA "
+                "WHERE SCHEMA_NAME='sales_snap_fixture'",
+                {},
+            ),
+        ])
+
+    def test_delete_fails_when_managed_database_user_remains(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "project"
+            root.mkdir()
+            plan = instance_delete.InstanceDeletePlan(
+                root=root,
+                local_php=None,
+                domains=[],
+                nginx_paths=[],
+                db_name="baza_shop",
+                db_host="localhost",
+                db_port="3306",
+                db_user="korisnik_shop",
+                db_password="secret",
+                delete_files=False,
+                delete_vhost=False,
+                delete_db=True,
+            )
+
+            def mysql_exec(statement: str, **_kwargs: object) -> str:
+                return "1" if "mysql.user" in statement else ""
+
+            with (
+                patch.object(instance_delete, "build_delete_plan", return_value=plan),
+                patch.object(instance_delete.os, "geteuid", return_value=0),
+                patch.object(instance_delete, "_mysql_exec", side_effect=mysql_exec),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "database user remains"):
+                    instance_delete.delete_instance_artifacts(
+                        SimpleNamespace(state_db_path=str(Path(tmp) / "state.db")),
+                        root=str(root),
+                        delete_db=True,
+                        yes=True,
+                    )
+
+    def test_delete_fails_when_database_remains(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "project"
+            root.mkdir()
+            plan = instance_delete.InstanceDeletePlan(
+                root=root,
+                local_php=None,
+                domains=[],
+                nginx_paths=[],
+                db_name="sales_snap_fixture",
+                db_host="localhost",
+                db_port="3306",
+                db_user="application_user",
+                db_password="secret",
+                delete_files=False,
+                delete_vhost=False,
+                delete_db=True,
+            )
+
+            def mysql_exec(statement: str, **_kwargs: object) -> str:
+                return "1" if "INFORMATION_SCHEMA.SCHEMATA" in statement else ""
+
+            with (
+                patch.object(instance_delete, "build_delete_plan", return_value=plan),
+                patch.object(instance_delete.os, "geteuid", return_value=0),
+                patch.object(instance_delete, "_mysql_exec", side_effect=mysql_exec),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "database remains"):
+                    instance_delete.delete_instance_artifacts(
+                        SimpleNamespace(state_db_path=str(Path(tmp) / "state.db")),
+                        root=str(root),
+                        delete_db=True,
+                        yes=True,
+                    )
+
+    def test_delete_drops_proven_same_name_dedicated_database_user(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "project"
+            root.mkdir()
+            plan = instance_delete.InstanceDeletePlan(
+                root=root,
+                local_php=None,
+                domains=[],
+                nginx_paths=[],
+                db_name="sales_snap_fixture",
+                db_host="localhost",
+                db_port="3306",
+                db_user="sales_snap_fixture",
+                db_password="secret",
+                delete_files=False,
+                delete_vhost=False,
+                delete_db=True,
+            )
+            sql: list[str] = []
+            user_checks = 0
+
+            def mysql_exec(statement: str, **_kwargs: object) -> str:
+                nonlocal user_checks
+                sql.append(statement)
+                if statement.startswith("SHOW GRANTS"):
+                    return "\n".join((
+                        "GRANT USAGE ON *.* TO `sales_snap_fixture`@`localhost`",
+                        "GRANT ALL PRIVILEGES ON `sales_snap_fixture`.* TO `sales_snap_fixture`@`localhost`",
+                    ))
+                if "mysql.user" in statement:
+                    user_checks += 1
+                    return "1" if user_checks == 1 else "0"
+                return ""
+
+            with (
+                patch.object(instance_delete, "build_delete_plan", return_value=plan),
+                patch.object(instance_delete.os, "geteuid", return_value=0),
+                patch.object(instance_delete, "_mysql_exec", side_effect=mysql_exec),
+                patch("mcd_agent.inventory.InstanceInventory.rescan", return_value=0),
+            ):
+                result = instance_delete.delete_instance_artifacts(
+                    SimpleNamespace(state_db_path=str(Path(tmp) / "state.db")),
+                    root=str(root),
+                    db_name=plan.db_name,
+                    db_user=plan.db_user,
+                    delete_db=True,
+                    yes=True,
+                )
+
+        self.assertTrue(result["deleted"]["db_user"])
+        self.assertIn("DROP USER IF EXISTS 'sales_snap_fixture'@'localhost'", sql)
+
+    def test_delete_preserves_same_name_user_with_unrelated_grant(self) -> None:
+        grants = "\n".join((
+            "GRANT USAGE ON *.* TO `sales_snap_fixture`@`localhost`",
+            "GRANT ALL PRIVILEGES ON `other_schema`.* TO `sales_snap_fixture`@`localhost`",
+        ))
+        with patch.object(instance_delete, "_mysql_exec", return_value=grants):
+            self.assertFalse(
+                instance_delete._same_name_database_user_is_dedicated(
+                    "sales_snap_fixture", "sales_snap_fixture"
+                )
+            )
 
     def test_delete_removes_empty_parent_when_webroot_is_already_absent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -165,11 +348,15 @@ class InstanceDeleteCliTests(unittest.TestCase):
                 order.append("mail")
                 return {"status": "ok"}
 
+            def mysql_exec(*_args: object, **_kwargs: object) -> str:
+                order.append("db")
+                return ""
+
             with (
                 patch.object(instance_delete, "build_delete_plan", return_value=plan),
                 patch.object(instance_delete.os, "geteuid", return_value=0),
                 patch("mcd_agent.local_mail.disable_local_mail", side_effect=disable_mail),
-                patch.object(instance_delete, "_mysql_exec", side_effect=lambda *_a, **_k: order.append("db")),
+                patch.object(instance_delete, "_mysql_exec", side_effect=mysql_exec),
                 patch.object(instance_delete, "_remove_instance_root", side_effect=lambda *_a, **_k: order.append("files")),
                 patch("mcd_agent.inventory.InstanceInventory.rescan", return_value=0),
             ):
@@ -183,7 +370,7 @@ class InstanceDeleteCliTests(unittest.TestCase):
                     yes=True,
                 )
 
-        self.assertEqual(order, ["mail", "db", "files"])
+        self.assertEqual(order, ["mail", "db", "db", "files"])
         self.assertEqual(result["deleted"]["local_mail"], ["shop.example.com"])
 
     def test_delete_preserves_certificate_when_explicitly_requested(self) -> None:
@@ -261,6 +448,10 @@ class InstanceDeleteCliTests(unittest.TestCase):
                 "instance-delete",
                 "--root",
                 "/var/www/ss/public_html",
+                "--db-name",
+                "sales_snap_fixture",
+                "--db-user",
+                "sales_snap_fixture",
                 "--delete-files",
                 "--preserve-certificates",
                 "--yes",
@@ -278,6 +469,8 @@ class InstanceDeleteCliTests(unittest.TestCase):
 
         self.assertEqual(calls, [{"root": "/var/www/ss/public_html", "allow_missing_absolute": True}])
         self.assertTrue(delete_call.call_args.kwargs["preserve_certificates"])
+        self.assertEqual(delete_call.call_args.kwargs["db_name"], "sales_snap_fixture")
+        self.assertEqual(delete_call.call_args.kwargs["db_user"], "sales_snap_fixture")
         self.assertEqual(json.loads(stdout.getvalue()), {"status": "ok"})
         self.assertIn("NOTICE: new version available", stderr.getvalue())
 

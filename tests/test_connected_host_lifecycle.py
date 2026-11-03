@@ -11,7 +11,7 @@ import tarfile
 from mcd_agent import connected_host_lifecycle as lifecycle
 from mcd_agent.external_operation_cache import stage_transient_delivery, sync_binding
 
-REVISION = "3.2.1"
+REVISION = "3.2.2"
 
 
 def canonical(value):
@@ -68,7 +68,7 @@ def build_closure(tmp_path: Path):
     profile_file = f"profiles/profile-{profile_sha}.json"
     bundle = b"fixture-executable-bundle"
     artifact_sha = hashlib.sha256(bundle).hexdigest()
-    key = "mautic-connected-host-lifecycle-v3.2.1"
+    key = f"mautic-connected-host-lifecycle-v{REVISION}"
     entrypoint = "scenarios/lifecycle.py"
     mappings = {
         "operator_profile_json": {"encoding": "json", "envelope_key": "profile", "source": "existing_private_operator_profile"},
@@ -242,7 +242,7 @@ def test_cache_sync_conflict_keeps_live_manifest_unchanged(tmp_path):
     manifest_path = Path(cfg.custom_cache_dir) / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
     manifest["items"].append({
-        "key": "mautic-connected-host-lifecycle-v3.2.1",
+        "key": f"mautic-connected-host-lifecycle-v{REVISION}",
         "file": "conflicting.tar.gz",
         "sha256": "f" * 64,
     })
@@ -263,7 +263,9 @@ def valid_operation_input(binding):
     values.update({
         "action": "instance.create", "plan_operation": "instance.create",
         "target_instance_uid": "future-instance-1", "target_dns": "mautic.example.com",
-        "dns_check_mode": "require_absent", "php_version": "8.4", "health_wait_seconds": "30",
+        "dns_check_mode": "require_absent", "php_version": "8.4",
+        "php_memory_limit_mb": "512", "php_max_execution_time_sec": "120",
+        "health_wait_seconds": "30",
         "catalog_item_id": lifecycle.CATALOG_ITEM_ID,
         "catalog_item_revision": REVISION,
         "artifact_sha256": binding["artifact_sha256"], "profile_sha256": binding["profile_sha256"],
@@ -325,6 +327,25 @@ def test_lifecycle_execution_rejects_host_qualified_uid_and_preserves_binding(tm
         "status": "failed", "reason": "mautic_lifecycle_instance_uid_invalid",
     }
     assert len(calls) == 1
+    for field, value in (
+        ("php_memory_limit_mb", "255"),
+        ("php_memory_limit_mb", "8193"),
+        ("php_memory_limit_mb", "512M"),
+        ("php_max_execution_time_sec", "0"),
+        ("php_max_execution_time_sec", "3601"),
+        ("php_max_execution_time_sec", "120.0"),
+    ):
+        job["input"] = {**operation_input, field: value}
+        assert lifecycle.execute(job, config=cfg) == {
+            "status": "failed", "reason": "mautic_lifecycle_input_invalid",
+        }
+    missing = dict(operation_input)
+    missing.pop("php_memory_limit_mb")
+    job["input"] = missing
+    assert lifecycle.execute(job, config=cfg) == {
+        "status": "failed", "reason": "mautic_lifecycle_input_invalid",
+    }
+    assert len(calls) == 1
     job["input"] = {
         **operation_input,
         "preflight_receipt_sha256": "4" * 64,
@@ -333,3 +354,55 @@ def test_lifecycle_execution_rejects_host_qualified_uid_and_preserves_binding(tm
         "status": "failed", "reason": "mautic_lifecycle_preflight_receipt_invalid",
     }
     assert len(calls) == 1
+
+
+def test_lifecycle_execution_preserves_bounded_external_failure_code(tmp_path, monkeypatch):
+    cfg, _, _, _ = install_fixture(tmp_path)
+    binding = lifecycle.installed_binding(cfg)
+    operation_input = valid_operation_input(binding)
+    job = {
+        "command": {
+            "binding_schema": binding["binding_schema"],
+            "binding_sha256": binding["binding_sha256"],
+            "command_id": "create",
+        },
+        "input": operation_input,
+    }
+    frame = {
+        "schema": "mcd-self-hosted-executable-output-v1",
+        "contract_version": "1.0",
+        "frame_type": "result",
+        "status": "failed",
+        "exit_code": 70,
+        "completed": 0,
+        "total": 1,
+        "rollback": "succeeded",
+        "error_code": "mcd_inventory_operation_failed",
+        "result": {"status": "error"},
+    }
+    monkeypatch.setattr(
+        lifecycle,
+        "run_configured_external_operation",
+        lambda *args, **kwargs: (70, json.dumps(frame)),
+    )
+    assert lifecycle.execute(job, config=cfg) == {
+        "status": "failed",
+        "reason": "mcd_inventory_operation_failed",
+    }
+
+    for invalid in (
+        [],
+        {**frame, "schema": "untrusted"},
+        {**frame, "status": "succeeded"},
+        {**frame, "exit_code": 0},
+        {**frame, "error_code": "Unsafe Error"},
+    ):
+        monkeypatch.setattr(
+            lifecycle,
+            "run_configured_external_operation",
+            lambda *args, value=invalid, **kwargs: (70, json.dumps(value)),
+        )
+        assert lifecycle.execute(job, config=cfg) == {
+            "status": "failed",
+            "reason": "mautic_lifecycle_external_operation_failed",
+        }

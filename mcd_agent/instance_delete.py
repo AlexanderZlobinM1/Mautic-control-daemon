@@ -382,6 +382,7 @@ def build_delete_plan(
     root: str,
     domains: list[str] | None = None,
     db_name: str | None = None,
+    db_user: str | None = None,
     delete_files: bool = False,
     delete_vhost: bool = False,
     delete_db: bool = False,
@@ -408,7 +409,8 @@ def build_delete_plan(
     final_db_name = str(explicit_db_name or local_cfg.get("db_name", "") or (inventory_db.name if inventory_db else "") or "").strip()
     db_host = str(local_cfg.get("db_host", "") or (inventory_db.host if inventory_db else "") or "").strip().lower()
     db_port = str(local_cfg.get("db_port", "") or (inventory_db.port if inventory_db else "") or "").strip()
-    db_user = str(local_cfg.get("db_user", "") or (inventory_db.user if inventory_db else "") or "").strip()
+    explicit_db_user = str(db_user or "").strip()
+    final_db_user = str(explicit_db_user or local_cfg.get("db_user", "") or (inventory_db.user if inventory_db else "") or "").strip()
     db_password = str(local_cfg.get("db_password", "") or (inventory_db.password if inventory_db else "") or "")
     if delete_db:
         if not final_db_name:
@@ -417,8 +419,10 @@ def build_delete_plan(
             raise RuntimeError(f"unsafe database name: {final_db_name}")
         if db_host not in _LOCAL_DB_HOSTS:
             raise RuntimeError(f"refusing to drop non-local database host: {db_host}")
-        if not db_user and not explicit_db_name:
+        if not final_db_user and not explicit_db_name:
             raise RuntimeError("database user is unavailable; local.php is missing or incomplete")
+        if final_db_user and not _DB_NAME_RE.match(final_db_user):
+            raise RuntimeError(f"unsafe database user: {final_db_user}")
 
     nginx_paths = _nginx_candidates(target_root, cleaned_domains) if delete_vhost else []
     return InstanceDeletePlan(
@@ -429,7 +433,7 @@ def build_delete_plan(
         db_name=final_db_name,
         db_host=db_host,
         db_port=db_port,
-        db_user=db_user,
+        db_user=final_db_user,
         db_password=db_password,
         delete_files=bool(delete_files),
         delete_vhost=bool(delete_vhost),
@@ -583,6 +587,62 @@ def _managed_image_db_user(db_name: str, db_user: str) -> str:
     return expected
 
 
+def _same_name_database_user_is_dedicated(db_name: str, db_user: str) -> bool:
+    """Prove that a same-name localhost account has no grants outside its database."""
+    clean_name = str(db_name or "").strip()
+    clean_user = str(db_user or "").strip()
+    if not clean_name or clean_name != clean_user or not _DB_NAME_RE.match(clean_name):
+        return False
+    try:
+        grants = _mysql_exec(f"SHOW GRANTS FOR {_quote_sql(clean_user)}@'localhost'")
+    except Exception:
+        return False
+    lines = [line.strip() for line in grants.splitlines() if line.strip()]
+    if not lines:
+        return False
+    target = f" ON {_quote_ident(clean_name)}.* TO "
+    for line in lines:
+        upper = line.upper()
+        if upper.startswith("GRANT USAGE ON *.* TO "):
+            continue
+        if upper.startswith("GRANT ") and target in line:
+            continue
+        return False
+    return True
+
+
+def _database_user_exists(db_user: str) -> bool:
+    clean_user = str(db_user or "").strip()
+    if not clean_user:
+        return False
+    out = _mysql_exec(
+        "SELECT COUNT(*) FROM mysql.user "
+        f"WHERE User={_quote_sql(clean_user)} AND Host='localhost'"
+    )
+    if not isinstance(out, str):
+        raise RuntimeError("database user post-state result is invalid")
+    try:
+        return int(out.strip() or "0") != 0
+    except ValueError as exc:
+        raise RuntimeError("database user post-state result is invalid") from exc
+
+
+def _database_exists(db_name: str) -> bool:
+    clean_name = str(db_name or "").strip()
+    if not clean_name:
+        return False
+    out = _mysql_exec(
+        "SELECT COUNT(*) FROM INFORMATION_SCHEMA.SCHEMATA "
+        f"WHERE SCHEMA_NAME={_quote_sql(clean_name)}"
+    )
+    if not isinstance(out, str):
+        raise RuntimeError("database post-state result is invalid")
+    try:
+        return int(out.strip() or "0") != 0
+    except ValueError as exc:
+        raise RuntimeError("database post-state result is invalid") from exc
+
+
 def _remove_dedicated_certificate(domain: str) -> tuple[bool, str]:
     cert_dir = _LETSENCRYPT_LIVE / domain
     renewal = _LETSENCRYPT_RENEWAL / f"{domain}.conf"
@@ -610,6 +670,7 @@ def delete_instance_artifacts(
     root: str,
     domains: list[str] | None = None,
     db_name: str | None = None,
+    db_user: str | None = None,
     delete_files: bool = False,
     delete_vhost: bool = False,
     delete_db: bool = False,
@@ -624,6 +685,7 @@ def delete_instance_artifacts(
         root=root,
         domains=domains,
         db_name=db_name,
+        db_user=db_user,
         delete_files=delete_files,
         delete_vhost=delete_vhost,
         delete_db=delete_db,
@@ -664,25 +726,36 @@ def delete_instance_artifacts(
 
     if plan.delete_db:
         print(f"Dropping database {plan.db_name}")
+        database_connection: dict[str, str] = {}
+        if plan.db_password:
+            database_connection = {
+                "host": plan.db_host,
+                "port": plan.db_port,
+                "user": plan.db_user,
+                "password": plan.db_password,
+            }
         _mysql_exec(
             f"DROP DATABASE IF EXISTS {_quote_ident(plan.db_name)}",
             timeout_sec=300,
-            host=plan.db_host,
-            port=plan.db_port,
-            user=plan.db_user,
-            password=plan.db_password,
+            **database_connection,
         )
+        if _database_exists(plan.db_name):
+            raise RuntimeError("database remains after cleanup")
         result["deleted"]["db"] = True
         managed_db_user = _managed_image_db_user(plan.db_name, plan.db_user)
-        if managed_db_user:
-            try:
-                _mysql_exec(
-                    f"DROP USER IF EXISTS {_quote_sql(managed_db_user)}@'localhost'",
-                    timeout_sec=120,
-                )
+        if not managed_db_user and plan.db_user == plan.db_name:
+            if not _database_user_exists(plan.db_user):
                 result["deleted"]["db_user"] = True
-            except Exception as exc:
-                result["warnings"].append(f"managed database user cleanup failed: {exc}")
+            elif _same_name_database_user_is_dedicated(plan.db_name, plan.db_user):
+                managed_db_user = plan.db_user
+        if managed_db_user:
+            _mysql_exec(
+                f"DROP USER IF EXISTS {_quote_sql(managed_db_user)}@'localhost'",
+                timeout_sec=120,
+            )
+            if _database_user_exists(managed_db_user):
+                raise RuntimeError("managed database user remains after cleanup")
+            result["deleted"]["db_user"] = True
 
     if plan.delete_vhost:
         print("Deleting nginx vhost")

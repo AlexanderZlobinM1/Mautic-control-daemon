@@ -49,7 +49,8 @@ _STRING_FIELDS = {
     "action", "plan_operation", "target_instance_uid", "target_dns", "operation_id",
     "managed_root", "database_name", "database_user", "vhost_available_path",
     "vhost_enabled_path", "certificate_directory", "dns_check_mode", "php_version",
-    "php_fpm_socket", "runtime_php_bin", "runtime_user", "runtime_state_dir",
+    "php_memory_limit_mb", "php_max_execution_time_sec", "php_fpm_socket",
+    "runtime_php_bin", "runtime_user", "runtime_state_dir",
     "filesystem_owner", "filesystem_group", "mcd_cli_path", "mcd_config_path",
     "health_url", "health_connect_address", "health_wait_seconds", "expected_plan_hash",
     "ownership_receipt_sha256", "preflight_receipt_sha256", "expected_before_state_sha256",
@@ -73,6 +74,27 @@ def _fail(code: str) -> ConnectedHostLifecycleError:
 
 def _canonical(value: Any) -> bytes:
     return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _external_failure_code(output: str) -> str:
+    """Preserve the bounded public error emitted by the external lifecycle."""
+    try:
+        frame = json.loads(output)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return "mautic_lifecycle_external_operation_failed"
+    if not isinstance(frame, Mapping):
+        return "mautic_lifecycle_external_operation_failed"
+    code = frame.get("error_code")
+    if (
+        frame.get("schema") != "mcd-self-hosted-executable-output-v1"
+        or frame.get("status") != "failed"
+        or not isinstance(frame.get("exit_code"), int)
+        or frame.get("exit_code") == 0
+        or not isinstance(code, str)
+        or re.fullmatch(r"[a-z][a-z0-9_.:-]{0,127}", code) is None
+    ):
+        return "mautic_lifecycle_external_operation_failed"
+    return code
 
 
 def _read_json(path: Path, *, max_bytes: int, code: str) -> tuple[dict[str, Any], bytes]:
@@ -310,6 +332,11 @@ def _validate_input(command_id: str, value: object, binding: Mapping[str, Any]) 
         raise _fail("mautic_lifecycle_binding_mismatch")
     if result["dns_check_mode"] not in {"skip", "require_absent", "require_exact"} or re.fullmatch(r"\d+\.\d+", result["php_version"]) is None:
         raise _fail("mautic_lifecycle_input_invalid")
+    if (not result["php_memory_limit_mb"].isdigit()
+            or not 256 <= int(result["php_memory_limit_mb"]) <= 8192
+            or not result["php_max_execution_time_sec"].isdigit()
+            or not 1 <= int(result["php_max_execution_time_sec"]) <= 3600):
+        raise _fail("mautic_lifecycle_input_invalid")
     if not result["health_wait_seconds"].isdigit() or not 1 <= int(result["health_wait_seconds"]) <= 600:
         raise _fail("mautic_lifecycle_input_invalid")
     for field in _JSON_FIELDS:
@@ -458,7 +485,7 @@ def execute(job: Mapping[str, Any], *, config: Any) -> Mapping[str, Any]:
             operation_input=operation_input,
         )
         if rc != 0:
-            raise _fail("mautic_lifecycle_external_operation_failed")
+            raise _fail(_external_failure_code(output))
         result = _validate_result(command_id, operation_input, binding, json.loads(output))
         return {"status": "succeeded", "lifecycle": result}
     except (ConnectedHostLifecycleError, CustomSelectedTaskError) as exc:
