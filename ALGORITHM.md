@@ -1940,6 +1940,11 @@ revision, binding digest и content-addressed resource. Поэтому обыч�
 одной immutable revision, повреждённый existing manifest/resource или drift
 content-addressed path завершают job fail-closed. Незавершённый import может
 оставить только неактивные digest-файлы, но не capability.
+Generic profile loader при нескольких historical `component/operation` rows
+разрешает ровно одну строку через проверенную active binding identity: selector,
+raw resource digest, canonical binding digest, catalog item/revision и точная
+operation row обязаны совпасть. Без selector прежнее правило одной строки
+сохраняется; неоднозначность или drift блокируют запуск до внешней mutation.
 
 После полной проверки cache MCD добавляет host-scoped capability
 `mautic_lifecycle/1.0` с четырьмя командами: read-only `preflight` и mutating

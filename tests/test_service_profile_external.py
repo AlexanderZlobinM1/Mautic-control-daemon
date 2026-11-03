@@ -7,6 +7,7 @@ import pytest
 
 from mcd_agent import service_profile_external as ext, service_profiles as profiles
 from mcd_agent.commercial_portal import canonical_json
+from mcd_agent.custom_scripts import load_configured_profile_cache
 
 
 @pytest.fixture
@@ -132,6 +133,60 @@ def test_offline_service_profile_reads_only_explicit_portal_cache_descriptor(tmp
     assert result["status"] == "ok"
     assert result["profile"] == profile
     assert result["profile_source"]["sha256"] == hashlib.sha256(raw).hexdigest()
+
+
+def test_offline_profile_cache_uses_active_binding_selector_with_history(tmp_path):
+    cache = tmp_path / "custom"
+    (cache / "profiles").mkdir(parents=True)
+    old_profile = b'{"revision":"1.0.3"}'
+    new_profile = b'{"revision":"1.0.4"}'
+    old_profile_sha = hashlib.sha256(old_profile).hexdigest()
+    new_profile_sha = hashlib.sha256(new_profile).hexdigest()
+    (cache / "profiles" / "old.json").write_bytes(old_profile)
+    (cache / "profiles" / "new.json").write_bytes(new_profile)
+    old_binding = {
+        "component": "mautic_host_prerequisites", "operation": "prepare_create",
+        "artifact": {"key": "prerequisites-v1.0.3", "sha256": "3" * 64, "entrypoint": "old.py"},
+        "profile_source": {"type": "cached-json", "file": "profiles/old.json", "sha256": old_profile_sha},
+    }
+    new_binding = {
+        "component": "mautic_host_prerequisites", "operation": "prepare_create",
+        "artifact": {"key": "prerequisites-v1.0.4", "sha256": "4" * 64, "entrypoint": "new.py"},
+        "profile_source": {"type": "cached-json", "file": "profiles/new.json", "sha256": new_profile_sha},
+    }
+    binding_schema = "mcd-mautic-connected-host-prerequisites-binding-v1"
+    identity = {
+        "schema": binding_schema,
+        "catalog_item_id": "mcc.scenario.mautic-connected-host-prerequisites",
+        "catalog_item_revision": "1.0.4",
+        "operation_bindings": [new_binding],
+    }
+    canonical_identity = json.dumps(identity, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()
+    identity_raw = canonical_identity + b"\n"
+    resource_sha = hashlib.sha256(identity_raw).hexdigest()
+    identity_file = f"bindings/by-sha256/{resource_sha}.json"
+    (cache / "bindings" / "by-sha256").mkdir(parents=True)
+    (cache / identity_file).write_bytes(identity_raw)
+    (cache / "manifest.json").write_text(json.dumps({
+        "manifest_version": 1,
+        "items": [],
+        "operation_bindings": [old_binding, new_binding],
+        "active_bindings": {binding_schema: {
+            "catalog_item_id": identity["catalog_item_id"],
+            "catalog_item_revision": identity["catalog_item_revision"],
+            "binding_sha256": "sha256:" + hashlib.sha256(canonical_identity).hexdigest(),
+            "cache_file": identity_file,
+            "resource_sha256": resource_sha,
+        }},
+    }), encoding="utf-8")
+    cfg = SimpleNamespace(mcc_url=None, custom_cache_dir=str(cache))
+
+    result = load_configured_profile_cache(
+        cfg, component="mautic_host_prerequisites", operation="prepare_create",
+    )
+
+    assert result["profile"] == {"revision": "1.0.4"}
+    assert result["source"]["sha256"] == new_profile_sha
 
 
 @pytest.mark.parametrize("mutation,reason", [
