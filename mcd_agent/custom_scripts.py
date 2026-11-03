@@ -945,6 +945,7 @@ def run_configured_external_operation(
     operation: str,
     profile: dict[str, Any] | None,
     operation_input: dict[str, Any],
+    resolved_context: dict[str, Any] | None = None,
 ) -> tuple[int, str]:
     """Dispatch an authority-bound operation through the existing custom item.
 
@@ -1032,6 +1033,14 @@ def run_configured_external_operation(
             value = {name: getattr(config, name, None) for name in declared}
             if any(not hasattr(config, name) for name in declared):
                 return 2, "custom_operation_mapping_runtime_mapping_invalid"
+        elif source == "mcd_resolved_source_installation_context":
+            expected_schema = spec.get("schema")
+            if (not isinstance(resolved_context, dict)
+                    or not isinstance(expected_schema, str)
+                    or not expected_schema
+                    or resolved_context.get("schema") != expected_schema):
+                return 2, "custom_operation_resolved_context_invalid"
+            value = dict(resolved_context)
         else:
             return 2, "custom_operation_mapping_runtime_mapping_invalid"
         encoded = _encoded(value, spec.get("fields"), spec.get("envelope_key"))

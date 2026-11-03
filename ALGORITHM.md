@@ -1179,6 +1179,7 @@ cycle без ручного `segments:update`, profile/capacity/data changes. Ad
 | successful Portal inventory rescan returns the canonical observed snapshot revision/hash in the existing terminal result; unchanged content does not bump revision and failed rescan returns no reference | `mcd_agent/daemon.py`, `mcd_agent/commercial_primitives.py`, `mcd_agent/commercial_self_hosted.py`, `mcd_agent/commercial_portal.py` | `tests/test_commercial_primitives.py`, `tests/test_daemon_commercial_guard.py`, Portal 1.7 terminal-receipt matching |
 | Portal-only external-operation cache sync consumes a transient one-time grant before durable storage, verifies the complete closure/binding preimage, preserves unrelated cache rows and activates the manifest last | `mcd_agent/external_operation_cache.py`, `mcd_agent/commercial_self_hosted.py`, `mcd_agent/daemon.py` | `tests/test_connected_host_lifecycle.py`, `tests/test_commercial_generic.py` grant non-persistence/replay evidence; MCC 3.2.1 closure `sha256:ca8140086414c3cee58b5431dc652a7933b599f56c85a62a6514bcd934ac3e70` |
 | connected-host lifecycle is an exact host-scoped external binding with preflight/create/receipt-owned cleanup/recreate; stable target UID forbids `@host`, exact binding/artifact/profile pins are checked before the existing offline-only runner, and only create/recreate ownership receipts authorize Portal projection | `mcd_agent/connected_host_lifecycle.py`, `mcd_agent/commercial_primitives.py`, `mcd_agent/commercial_generic.py` | `tests/test_connected_host_lifecycle.py`, `tests/test_commercial_generic.py`; binding `sha256:79d7ba83ba2bfab1acc01ab237bd6ad30276f3f3597fec26086b608ad784798f` |
+| connected-host source export resolves all local paths/DB access inside MCD, admits only exact installation+operation identities, delegates archive semantics to the immutable external artifact, validates regular-file pins and supports secret-free read-only `rollback=not_needed` framing/idempotent replay | `mcd_agent/connected_host_source_export.py`, `mcd_agent/custom_scripts.py`, `mcd_agent/external_operation_cache.py`, `mcd_agent/commercial_self_hosted.py` | `tests/test_connected_host_source_export.py`; closure `sha256:627783f0311aba277289ed1d99e040270de7e1e133c41371b0735277952b92b9`, binding `sha256:e7105ddb31a01185784e4e7d66e3e688e39d03fcc5b3ac2db89a4819b9ad42d2` |
 | host-first Portal registration binds an activated MCD host before any Mautic instance exists; request contains only local DNS identity/display name, and the response must create a passive host installation with an active empty-inventory connection | `mcd_agent/commercial_portal.py`, `mcd_agent/commercial_host_registration.py`, `mcd_agent/cli.py` | `tests/test_commercial_portal.py`, redacted `portal-mcd-host-register-response-v1` |
 | self-hosted v2.1 candidate jobs may omit stage metadata for a whole external composition; supplied `stage_selection` must structurally match `execution.stage`, without embedded stage-name/order recipes; existing receipts remain | `mcd_agent/commercial_portal.py`, `mcd_agent/commercial_self_hosted.py`, `mcd_agent/scenario_launcher.py` | `tests/test_commercial_self_hosted_v2.py`, redacted stage/terminal receipts |
 | manual existing commercial-key fallback keeps pending/active/disconnected state idempotently | `mcd_agent/commercial_manual_activation.py`, `mcd_agent/commercial_portal.py`, `mcd_agent/daemon.py` | `tests/test_commercial_manual_activation.py`, redacted `mcd-commercial-manual-activation-receipt-v1` |
@@ -1952,6 +1953,24 @@ Portal может создать или заменить instance projection т�
 terminal `create`/`recreate`, чей ownership receipt совпадает со stable UID,
 DNS, root, DB/user, vhost paths, plan hash и artifact binding. `preflight` и
 `cleanup_owned` сами по себе регистрацию не разрешают.
+
+Подготовка source archives для этого lifecycle является отдельной внешней
+host-scoped capability `mautic_source_export/source_export@1.0`. Portal
+передаёт только точные строки `source_installation_id` и `operation_id`; local
+root, DB identity, private MySQL defaults-file, dump argv и private output root
+разрешает MCD из собственной inventory выбранной installation. Они никогда не
+принимаются от Portal или пользователя. MCD recompute-проверяет binding
+`mcd-mautic-connected-host-source-export-binding-v1`, profile и executable,
+передаёт локальный context через декларативный mapping существующего generic
+runner и после завершения повторно проверяет regular-file path/size/SHA pins.
+Архивный алгоритм, исключения, dump flags и idempotent output layout остаются в
+immutable MCC artifact; core MCD их не дублирует. Public result содержит ровно
+пару `tar.gz`/`sql.gz`, source snapshot SHA и `source_mutation=false`.
+Read-only terminal frame вправе иметь `rollback=not_needed`; framing всё равно
+проверяет canonical JSON, exit/status и secret-free result. Replay того же
+operation ID обязан вернуть те же pins, а mismatch/extra input завершается до
+source mutation. DEV46 cleanup запрещён до независимой проверки reversible
+export и restore-readability.
 
 Instance-scoped managed generic jobs carry the tenant `account_id` inside the
 job installation binding. MCD admits that value only when it exactly matches the

@@ -297,7 +297,12 @@ def sync_binding(job: Mapping[str, Any], *, config: Any) -> Mapping[str, Any]:
                 target = validation_root / relative
                 target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
                 shutil.copyfile(source, target)
-            from mcd_agent.connected_host_lifecycle import installed_binding
+            if value["binding_schema"] == "mcd-mautic-connected-host-lifecycle-binding-v1":
+                from mcd_agent.connected_host_lifecycle import installed_binding
+            elif value["binding_schema"] == "mcd-mautic-connected-host-source-export-binding-v1":
+                from mcd_agent.connected_host_source_export import installed_binding
+            else:
+                raise _fail("external_operation_cache_binding_schema_unsupported")
             admitted = installed_binding(SimpleNamespace(custom_cache_dir=str(validation_root)))
             if admitted.get("binding_sha256") != value["binding_sha256"]:
                 raise _fail("external_operation_cache_binding_digest_mismatch")

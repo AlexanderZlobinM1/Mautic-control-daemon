@@ -608,7 +608,7 @@ class ExternalProcessPolicy:
                     raise ValueError("self_hosted_mcd_runner_output_terminal_order_invalid")
             elif status in {"succeeded", "failed"}:
                 allowed = {"schema", "contract_version", "frame_type", "status", "exit_code", "completed", "total", "rollback", "error_code", "result"}
-                if terminal_seen or frame.get("frame_type") != "result" or set(frame) - allowed or not all(_nonnegative_int(frame.get(key)) for key in ("exit_code", "completed", "total")) or frame.get("total") < 1 or frame.get("completed") > frame.get("total") or frame.get("rollback") not in {"not_attempted", "not_started", "succeeded", "failed"}:
+                if terminal_seen or frame.get("frame_type") != "result" or set(frame) - allowed or not all(_nonnegative_int(frame.get(key)) for key in ("exit_code", "completed", "total")) or frame.get("total") < 1 or frame.get("completed") > frame.get("total") or frame.get("rollback") not in {"not_attempted", "not_started", "not_needed", "succeeded", "failed"}:
                     raise ValueError("self_hosted_mcd_runner_output_terminal_invalid")
                 if "result" in frame and not isinstance(frame["result"], Mapping):
                     raise ValueError("self_hosted_mcd_runner_output_result_invalid")

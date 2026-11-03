@@ -70,7 +70,11 @@ def build_capability_inventory(*, installation_id: str, dns_name: str, config: A
         lifecycle = lifecycle_capability(config)
         if lifecycle is not None:
             unsigned["capabilities"].append(lifecycle)
-            unsigned["capabilities"].sort(key=lambda item: str(item["capability_id"]))
+        from mcd_agent.connected_host_source_export import capability as source_export_capability
+        source_export = source_export_capability(config)
+        if source_export is not None:
+            unsigned["capabilities"].append(source_export)
+        unsigned["capabilities"].sort(key=lambda item: str(item["capability_id"]))
     unsigned["inventory_sha256"] = capability_inventory_digest(unsigned)
     return unsigned
 
@@ -114,6 +118,11 @@ def execute_generic_primitive(
         if config is None:
             return {"status": "failed", "reason": "mautic_lifecycle_config_unavailable"}
         from mcd_agent.connected_host_lifecycle import execute
+        return execute(job, config=config)
+    if capability_id == "mautic_source_export":
+        if config is None:
+            return {"status": "failed", "reason": "mautic_source_export_config_unavailable"}
+        from mcd_agent.connected_host_source_export import execute
         return execute(job, config=config)
     if capability_id == "external_operation_cache" and command == "sync_binding":
         if config is None:
