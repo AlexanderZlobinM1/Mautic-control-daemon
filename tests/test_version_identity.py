@@ -8,7 +8,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from mcd_agent import __version__
-from mcd_agent.version_identity import agent_version_payload, installed_agent_version, source_version
+from mcd_agent.version_identity import (
+    agent_version_payload,
+    installed_agent_version,
+    runtime_source_revision,
+    source_version,
+)
 
 
 class VersionIdentityTests(unittest.TestCase):
@@ -50,6 +55,7 @@ class VersionIdentityTests(unittest.TestCase):
         self.assertEqual(payload["agent_running_version"], "0.9.75")
         self.assertEqual(payload["agent_installed_version"], "0.9.75")
         self.assertEqual(payload["agent_source_version"], "0.9.37")
+        self.assertEqual(payload["agent_source_revision"], "")
         self.assertEqual(payload["agent_package_version"], "0.9.39")
         self.assertTrue(payload["agent_package_mismatch"])
         self.assertTrue(payload["agent_version_mismatch"])
@@ -67,6 +73,7 @@ def test_default_runtime_identity_never_reads_parallel_source(monkeypatch):
     assert identity.source_version() is None
     assert identity.installed_agent_version() == identity.__version__
     assert identity.agent_version_payload()["agent_source_version"] == ""
+    assert identity.agent_version_payload()["agent_source_revision"] == ""
 
 
 def test_runtime_flags_detect_stale_package_metadata_without_source(monkeypatch):
@@ -75,6 +82,37 @@ def test_runtime_flags_detect_stale_package_metadata_without_source(monkeypatch)
     monkeypatch.setattr(identity, 'package_agent_version', lambda: '1.6.38')
     payload = identity.agent_version_payload()
     assert payload['agent_source_version'] == ''
+    assert payload['agent_source_revision'] == ''
     assert payload['agent_installed_version'] == '1.7.0'
     assert payload['agent_package_mismatch'] is True
     assert payload['agent_version_mismatch'] is True
+
+
+def test_runtime_source_revision_reads_only_explicit_verified_manifest(tmp_path):
+    manifest = tmp_path / "mcd-runtime-manifest.json"
+    manifest.write_text(
+        '{"schema":"mcd-runtime-package-v1",'
+        '"source_commit":"D6720DCC37943B038E4F08AC6AB72DCD586805F5"}',
+        encoding="utf-8",
+    )
+
+    assert runtime_source_revision(manifest) == "d6720dcc37943b038e4f08ac6ab72dcd586805f5"
+    payload = agent_version_payload(runtime_manifest=manifest)
+    assert payload["agent_source_version"] == ""
+    assert payload["agent_source_revision"] == "d6720dcc37943b038e4f08ac6ab72dcd586805f5"
+    assert payload["agent_version_mismatch"] is False
+
+
+def test_runtime_source_revision_rejects_wrong_schema_and_non_commit(tmp_path):
+    manifest = tmp_path / "mcd-runtime-manifest.json"
+    manifest.write_text(
+        '{"schema":"other","source_commit":"d6720dcc"}',
+        encoding="utf-8",
+    )
+    assert runtime_source_revision(manifest) is None
+
+    manifest.write_text(
+        '{"schema":"mcd-runtime-package-v1","source_commit":"not-a-commit"}',
+        encoding="utf-8",
+    )
+    assert runtime_source_revision(manifest) is None

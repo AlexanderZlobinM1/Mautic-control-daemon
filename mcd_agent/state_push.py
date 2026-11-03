@@ -2675,7 +2675,9 @@ class MCCStatePusher:
             "sent_at_utc": datetime.fromtimestamp(now_ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
         _advertise_image_compatibility(payload)
-        payload.update(agent_version_payload())
+        config_path = Path(self.cfg.config_file_path).resolve()
+        runtime_manifest = config_path.parent.parent / "runtime" / "mcd-runtime-manifest.json"
+        payload.update(agent_version_payload(runtime_manifest=runtime_manifest))
         if include_signals:
             payload["signals"] = self._signals_payload()
             payload["signals_collected_at_ts"] = int(self.latest_signals_ts or 0)

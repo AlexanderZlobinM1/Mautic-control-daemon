@@ -3084,6 +3084,11 @@ selected cache проверяется/восстанавливается из em
 config/profile load. Config recovery читает MCC bootstrap из effective split
 include graph, поэтому secret-bearing `mcd.local.toml` остаётся единственным
 источником transport material и не копируется в публичный entrypoint.
+Обычный state push выводит путь installed runtime manifest из фактического
+`config_file_path` и передаёт его валидированный `source_commit` отдельным
+полем `agent_source_revision`. Поле `agent_source_version` не переиспользуется:
+оно сохраняет прежнюю семантику версии explicit source tree, а source-free
+runtime не ищет checkout и не зависит от `<install>/src`.
 
 Первое применение cfg при отсутствии explicit runtime setting берёт только
 ref из verified ready manifest рядом с managed venv и предварительно готовит
