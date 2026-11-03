@@ -1919,7 +1919,9 @@ authenticated `PortalClient.download_artifact`, проверяет размер 
 сохраняет content-addressed ingress и удаляет весь transient delivery до записи
 pending delivery/job digest. Рестарт поэтому никогда не хранит grant: он либо
 повторит безопасную доставку до durable admission, либо использует уже
-проверенный ingress object.
+проверенный ingress object. Origin-relative `artifact_path` с ведущим `/`
+заменяет path настроенного Portal base на том же HTTPS origin; он не дописывается
+после `/api/v1/commercial`, а абсолютный URL другого origin отклоняется.
 
 `sync_binding` не запускает внешний сценарий. Он проверяет gzip closure,
 закрытый список members, digest каждого resource и canonical binding preimage,

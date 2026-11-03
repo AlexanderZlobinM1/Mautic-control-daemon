@@ -133,6 +133,44 @@ def test_all_portal_http_requests_use_product_user_agent(monkeypatch, tmp_path):
     assert all(req.get_header("User-agent") == PORTAL_USER_AGENT for req in requests)
 
 
+def test_artifact_download_origin_relative_path_replaces_commercial_base(monkeypatch, tmp_path):
+    requests = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit=-1):
+            return b"ok"
+
+    monkeypatch.setattr(
+        "mcd_agent.commercial_portal._portal_urlopen",
+        lambda req, **_kwargs: requests.append(req) or Response(),
+    )
+    state = CommercialState(str(tmp_path / "state.sqlite"))
+    state.put("portal_api_base", "https://portal.example/api/v1/commercial")
+    state.put("portal_agent_credential", "credential")
+    client = PortalClient(state)
+
+    assert client.download_artifact(
+        path="/api/v1/commercial/artifacts/sha256%3Aabc",
+        grant="one-time",
+        expected_size=2,
+    ) == b"ok"
+    assert requests[0].full_url == (
+        "https://portal.example/api/v1/commercial/artifacts/sha256%3Aabc"
+    )
+    assert "/api/v1/commercial/api/v1/commercial/" not in requests[0].full_url
+
+    with pytest.raises(ValueError, match="commercial_artifact_path_invalid"):
+        client.download_artifact(
+            path="https://other.example/artifact", grant="one-time", expected_size=2,
+        )
+
+
 def test_authenticated_artifact_download_requires_api_key(tmp_path):
     state = CommercialState(str(tmp_path / "state.sqlite"))
     state.put("portal_api_base", "https://portal.example/api/v1/commercial")

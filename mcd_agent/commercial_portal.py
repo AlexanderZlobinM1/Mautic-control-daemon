@@ -18,7 +18,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Mapping
 from urllib import request
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit, urlunsplit
 from urllib.error import HTTPError, URLError
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -1358,7 +1358,19 @@ class PortalClient:
         expected = int(expected_size)
         if expected < 0 or expected > MAX_ARTIFACT_BYTES:
             raise ValueError("commercial_artifact_size_invalid")
-        req = request.Request(base + "/" + path.lstrip("/"), headers={"Authorization": "Bearer " + str(self.state.get("portal_agent_credential")), "X-Portal-Contract": CONTRACT, "X-Portal-Artifact-Grant": grant, "User-Agent": PORTAL_USER_AGENT}, method="GET")
+        artifact_path = str(path or "")
+        parsed_path = urlsplit(artifact_path)
+        if (not artifact_path or "\x00" in artifact_path or parsed_path.scheme
+                or parsed_path.netloc or parsed_path.query or parsed_path.fragment):
+            raise ValueError("commercial_artifact_path_invalid")
+        if artifact_path.startswith("/"):
+            parsed_base = urlsplit(base)
+            artifact_url = urlunsplit(
+                (parsed_base.scheme, parsed_base.netloc, artifact_path, "", "")
+            )
+        else:
+            artifact_url = base + "/" + artifact_path
+        req = request.Request(artifact_url, headers={"Authorization": "Bearer " + str(self.state.get("portal_agent_credential")), "X-Portal-Contract": CONTRACT, "X-Portal-Artifact-Grant": grant, "User-Agent": PORTAL_USER_AGENT}, method="GET")
         try:
             with _portal_urlopen(req, timeout=self.timeout_sec, context=ssl.create_default_context()) as response:
                 body = response.read(expected + 1)
