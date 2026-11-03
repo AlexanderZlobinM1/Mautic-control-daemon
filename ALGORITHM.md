@@ -1818,7 +1818,10 @@ continuity digest всей остальной commercial state, включая p
 очереди и receipts. Ошибка postcheck атомарно возвращает старый endpoint и
 inventory counters; mismatch, downgrade, concurrent state change или
 невозможный rollback завершаются fail-closed. Повторный запуск выполняет те же
-сетевые проверки и возвращает idempotent receipt. Контракт и rollback проверяются
+сетевые проверки и возвращает idempotent receipt. Transport/HTTP failure receipt
+сохраняет только bounded typed Portal cause (`code`, HTTP status, retryable), не
+URL, response body, credential или header values; это позволяет отличить local
+prepare failure от edge/origin rejection без раскрытия секрета. Контракт и rollback проверяются
 `tests/test_commercial_endpoint_cutover.py`.
 
 ### OWH-AUTO и generic command broker Portal↔MCD

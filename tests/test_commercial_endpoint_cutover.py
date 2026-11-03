@@ -14,7 +14,7 @@ from mcd_agent.commercial_endpoint_cutover import (
     cutover_portal_endpoint,
     prepare_cutover_request,
 )
-from mcd_agent.commercial_portal import CommercialState
+from mcd_agent.commercial_portal import CommercialPortalError, CommercialState
 from mcd_agent.commercial_portal import (
     PORTAL_INVENTORY_LOCAL_PROVENANCE_FIELDS,
     PORTAL_INVENTORY_LOCAL_TOP_LEVEL_FIELDS,
@@ -189,6 +189,31 @@ def test_prepare_failure_does_not_mutate_state(tmp_path):
         cutover_portal_endpoint(state, TARGET, transport=failed)
     assert state.get("portal_api_base") == OLD
     assert state.continuity_digest() == before
+
+
+def test_prepare_failure_preserves_only_bounded_portal_subcode(tmp_path):
+    state = state_at(tmp_path)
+
+    def failed(*_args):
+        raise CommercialPortalError(
+            stage="portal.request",
+            code="commercial_portal_http_403",
+            http_status=403,
+            retryable=False,
+        )
+
+    with pytest.raises(EndpointCutoverError) as captured:
+        cutover_portal_endpoint(state, TARGET, transport=failed)
+
+    assert captured.value.receipt_fields() == {
+        "code": "portal_endpoint_cutover_prepare_failed",
+        "cause": {
+            "code": "commercial_portal_http_403",
+            "http_status": 403,
+            "retryable": False,
+        },
+    }
+    assert state.get("portal_api_base") == OLD
 
 
 def test_postcheck_failure_rolls_back_exact_state(tmp_path):

@@ -15,6 +15,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from mcd_agent.commercial_portal import (
     MAX_SAFE_INVENTORY_REVISION,
+    CommercialPortalError,
     CommercialState,
     PortalClient,
     canonical_json,
@@ -35,9 +36,41 @@ ENDPOINT_PATH = "dns-agent-cutovers"
 class EndpointCutoverError(ValueError):
     """Bounded, secret-free endpoint cutover failure."""
 
+    def __init__(
+        self,
+        code: str,
+        *,
+        cause_code: str = "",
+        http_status: int | None = None,
+        retryable: bool = False,
+    ):
+        self.code = str(code)
+        self.cause_code = str(cause_code)
+        self.http_status = int(http_status) if http_status is not None else None
+        self.retryable = bool(retryable)
+        super().__init__(self.code)
+
+    def receipt_fields(self) -> dict[str, Any]:
+        fields: dict[str, Any] = {"code": self.code}
+        if self.cause_code:
+            cause: dict[str, Any] = {"code": self.cause_code, "retryable": self.retryable}
+            if self.http_status is not None:
+                cause["http_status"] = self.http_status
+            fields["cause"] = cause
+        return fields
+
 
 def _error(code: str) -> EndpointCutoverError:
     return EndpointCutoverError(str(code))
+
+
+def _portal_error(code: str, cause: CommercialPortalError) -> EndpointCutoverError:
+    return EndpointCutoverError(
+        code,
+        cause_code=cause.code,
+        http_status=cause.http_status,
+        retryable=cause.retryable,
+    )
 
 
 def _text(value: object) -> str:
@@ -448,6 +481,8 @@ def cutover_portal_endpoint(
         validated = validate_cutover_response(first, payload)
     except EndpointCutoverError:
         raise
+    except CommercialPortalError as exc:
+        raise _portal_error("portal_endpoint_cutover_prepare_failed", exc) from exc
     except Exception as exc:
         raise _error("portal_endpoint_cutover_prepare_failed") from exc
     inventory_before, inventory_after, reconciliations = _inventory_reconciliation(state, payload, validated)
@@ -501,6 +536,8 @@ def cutover_portal_endpoint(
             raise _error("portal_endpoint_cutover_rollback_state_changed") from exc
         if isinstance(exc, EndpointCutoverError):
             raise
+        if isinstance(exc, CommercialPortalError):
+            raise _portal_error("portal_endpoint_cutover_postcheck_failed", exc) from exc
         raise _error("portal_endpoint_cutover_postcheck_failed") from exc
     return {
         "schema": RECEIPT_SCHEMA,
@@ -558,7 +595,7 @@ def main(argv: list[str] | None = None) -> int:
             "schema": RECEIPT_SCHEMA,
             "contract_version": CONTRACT_VERSION,
             "status": "failed",
-            "code": str(exc),
+            **exc.receipt_fields(),
         }
         print(json.dumps(receipt, ensure_ascii=True, sort_keys=True))
         return 1
