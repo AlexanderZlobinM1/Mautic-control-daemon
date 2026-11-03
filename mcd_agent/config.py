@@ -1842,6 +1842,44 @@ def _extract_mcc_bootstrap(raw_text: str) -> tuple[str | None, str | None, str |
     return url, token, host_name
 
 
+def _extract_mcc_bootstrap_from_config_path(
+    config_path: str | Path,
+    *,
+    root_text: str | None = None,
+) -> tuple[str | None, str | None, str | None]:
+    """Read bootstrap transport from the effective split configuration.
+
+    Runtime-only hosts keep the secret-bearing ``[mcc]`` section in the
+    mutable include (normally ``mcd.local.toml``), not in the public
+    entrypoint.  Semantic load failures such as a missing selected immutable
+    resource happen *after* includes were merged, so recovery must use the
+    same include view instead of inspecting only the entrypoint bytes.
+
+    If the entrypoint is syntactically broken, retain the historical bounded
+    raw-text fallback.  That path cannot safely discover includes and is used
+    only when the root itself still carries enough bootstrap material.
+    """
+    path = Path(config_path)
+    try:
+        merged = _load_toml_with_includes(str(path))
+        mcc = merged.get("mcc", {})
+        if isinstance(mcc, dict):
+            url = str(mcc.get("url", "")).strip() or None
+            token = str(mcc.get("token", "")).strip() or None
+            host_name = str(mcc.get("host_name", "")).strip() or None
+            if url and token:
+                return url, token, host_name
+    except Exception:
+        pass
+
+    if root_text is None:
+        try:
+            root_text = path.read_text(encoding="utf-8")
+        except Exception:
+            root_text = ""
+    return _extract_mcc_bootstrap(root_text)
+
+
 def _preserve_existing_backup_schedule(existing_text: str, desired_text: str) -> str:
     """Keep the effective local schedule when MCC bootstrap omits that section."""
     try:
@@ -1878,7 +1916,7 @@ def _attempt_recover_config_from_mcc(config_path: str, *, load_error: Exception)
     except Exception as e:
         return False, f"failed to read broken config: {e}"
 
-    url, token, host_name = _extract_mcc_bootstrap(raw_text)
+    url, token, host_name = _extract_mcc_bootstrap_from_config_path(p, root_text=raw_text)
     if not url or not token:
         return False, "mcc bootstrap (url/token) unavailable in broken config"
 
@@ -1930,7 +1968,7 @@ def _fetch_desired_config_payload_from_mcc(config_path: str) -> tuple[bool, dict
     except Exception as e:
         return False, f"failed to read config: {e}"
 
-    url, token, host_name = _extract_mcc_bootstrap(raw_text)
+    url, token, host_name = _extract_mcc_bootstrap_from_config_path(p, root_text=raw_text)
     if not url or not token:
         return False, "mcc bootstrap (url/token) unavailable in local config"
 

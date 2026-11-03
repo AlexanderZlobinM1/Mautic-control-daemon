@@ -667,7 +667,7 @@ def _profile_array_depth(value: str) -> int:
     return depth
 
 
-def _profile_include_files(config: Path) -> list[Path]:
+def _profile_include_files_raw(config: Path) -> list[str]:
     try:
         text = config.read_text(encoding="utf-8")
     except OSError as exc:
@@ -718,13 +718,17 @@ def _profile_include_files(config: Path) -> list[Path]:
         values = [item.strip() for item in parsed]
     if value_parts is None:
         return []
+    return values or []
+
+
+def _profile_include_files(config: Path) -> list[Path]:
     return [
         (config.parent / item).resolve() if not Path(item).is_absolute() else Path(item).resolve()
-        for item in values or []
+        for item in _profile_include_files_raw(config)
     ]
 
 
-def _profile_config_files(config: Path) -> list[dict[str, Any]]:
+def _profile_config_files(config: Path, *, require_existing: bool = True) -> list[dict[str, Any]]:
     if not config.is_file():
         raise BridgeError(f"declared config file is missing: {config}")
     files: list[dict[str, Any]] = []
@@ -738,7 +742,11 @@ def _profile_config_files(config: Path) -> list[dict[str, Any]]:
         files.append({"path": str(resolved), "exists": resolved.is_file()})
         for child in _profile_include_files(resolved):
             if not child.is_file():
-                raise BridgeError(f"declared include file is missing: {child}")
+                files.append({"path": str(child), "exists": False})
+                seen.add(child)
+                if require_existing:
+                    raise BridgeError(f"declared include file is missing: {child}")
+                continue
             visit(child)
 
     visit(config)
@@ -753,7 +761,11 @@ def _profile_mutable_config_path(config: Path) -> Path:
 
 def _capture_profile_authority(install_dir: Path, config: Path) -> dict[str, Any]:
     """Capture profile authority without a co-transported probe sidecar."""
-    files = _profile_config_files(config)
+    # A source-free runtime can inherit exact legacy /opt/mcd/src include
+    # declarations from the migration that retired that tree.  Capture those
+    # missing paths as evidence; the verified successor runtime must repair
+    # them before service restart.
+    files = _profile_config_files(config, require_existing=False)
     selection_path = install_dir / "var" / _PROFILE_SELECTION_FILE
     exists = selection_path.is_file()
     raw = selection_path.read_bytes() if exists else b""
@@ -769,6 +781,109 @@ def _capture_profile_authority(install_dir: Path, config: Path) -> dict[str, Any
         "selection_exists": exists,
         "selection_sha256": _sha256(selection_path) if exists else "",
         "selection_bytes_base64": base64.b64encode(raw).decode("ascii"),
+    }
+
+
+def _declared_profile_name(path: Path) -> str:
+    """Read only the literal [profile].name needed for package closure admission."""
+    if not path.is_file():
+        return ""
+    section = ""
+    selected = ""
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        clean = _profile_strip_toml_comment(raw).strip()
+        if not clean:
+            continue
+        if clean.startswith("["):
+            match = re.fullmatch(r"\[\s*([A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*)\s*\]", clean)
+            section = match.group(1) if match else ""
+            continue
+        if section != "profile" or "=" not in clean:
+            continue
+        key, value = clean.split("=", 1)
+        if key.strip() != "name":
+            continue
+        try:
+            parsed = ast.literal_eval(value.strip())
+        except (SyntaxError, ValueError) as exc:
+            raise BridgeError(f"malformed profile.name in {path}") from exc
+        if not isinstance(parsed, str):
+            raise BridgeError(f"profile.name must be a string in {path}")
+        selected = parsed.strip().lower()
+    return selected
+
+
+def _effective_declared_profile_name(config: Path) -> str:
+    selected = ""
+    seen: set[Path] = set()
+
+    def visit(path: Path) -> None:
+        nonlocal selected
+        resolved = path.resolve()
+        if resolved in seen or not resolved.is_file():
+            return
+        seen.add(resolved)
+        selected = _declared_profile_name(resolved) or selected
+        for child in _profile_include_files(resolved):
+            visit(child)
+
+    visit(config)
+    return selected
+
+
+def _require_runtime_profile_closure(config: Path, manifest: dict[str, Any]) -> str:
+    selected = _effective_declared_profile_name(config)
+    if selected not in {"", "custom"} and manifest.get("universal_workload_resource_ref") is None:
+        raise BridgeError(
+            "named workload profile requires a runtime package with universal_workload_resource_ref"
+        )
+    return selected
+
+
+def _migrate_runtime_config_includes(config: Path, install_dir: Path, runtime_dir: Path) -> dict[str, Any]:
+    """Point exact managed legacy defaults at the verified runtime payload."""
+    text = config.read_text(encoding="utf-8")
+    before_sha256 = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    legacy_root = (install_dir / "src" / "etc").resolve()
+    runtime_root = (runtime_dir / "etc").resolve()
+    allowed = {"mcd-agent.system.example.toml", "mcd-agent.operator.example.toml"}
+    replacements: list[tuple[str, str]] = []
+    for raw, resolved in zip(
+        _profile_include_files_raw(config),
+        _profile_include_files(config),
+        strict=True,
+    ):
+        if resolved.parent != legacy_root or resolved.name not in allowed:
+            continue
+        successor = runtime_root / resolved.name
+        if not successor.is_file() or successor.is_symlink():
+            raise BridgeError(f"successor runtime include is missing: {successor}")
+        replacement = str(successor) if Path(raw).is_absolute() else os.path.relpath(successor, config.parent)
+        replacements.append((raw, replacement))
+
+    updated = text
+    for old, new in replacements:
+        double_old = json.dumps(old)
+        single_old = "'" + old.replace("'", "\\'") + "'"
+        if double_old in updated:
+            updated = updated.replace(double_old, json.dumps(new))
+        elif single_old in updated:
+            updated = updated.replace(single_old, "'" + new.replace("'", "\\'") + "'")
+        else:
+            raise BridgeError(f"cannot rewrite declared legacy include without changing unrelated config: {old}")
+
+    if updated != text:
+        mode = config.stat().st_mode & 0o777
+        staged = config.with_name(f".{config.name}.runtime-includes-{os.getpid()}.tmp")
+        staged.write_text(updated, encoding="utf-8")
+        os.chmod(staged, mode)
+        os.replace(staged, config)
+    _profile_config_files(config, require_existing=True)
+    return {
+        "changed": updated != text,
+        "replacements": [{"from": old, "to": new} for old, new in replacements],
+        "before_sha256": before_sha256,
+        "after_sha256": _sha256(config),
     }
 
 
@@ -1028,6 +1143,7 @@ def bridge(args: argparse.Namespace) -> dict[str, Any]:
         pass
 
     profile_authority = _capture_profile_authority(install_dir, config)
+    config_before_bytes = config.read_bytes()
 
     updates_dir = install_dir / "var" / "updates"
     updates_dir.mkdir(parents=True, exist_ok=True)
@@ -1046,6 +1162,7 @@ def bridge(args: argparse.Namespace) -> dict[str, Any]:
     manifest: dict[str, Any] = {}
     target = ""
     legacy_runtime_snapshot: Path | None = None
+    config_migration: dict[str, Any] = {"changed": False, "replacements": []}
 
     with _exclusive_lock(install_dir / "var" / "mcd-self-update.lock"):
         if not args.sandbox:
@@ -1054,6 +1171,7 @@ def bridge(args: argparse.Namespace) -> dict[str, Any]:
         target = str(manifest.get("version") or "").strip()
         if args.expected_target and target != args.expected_target:
             raise BridgeError(f"runtime target mismatch expected={args.expected_target} actual={target}")
+        declared_profile = _require_runtime_profile_closure(config, manifest)
         if args.expected_manifest_sha256:
             actual_manifest_sha = _sha256(stage / MANIFEST_NAME)
             if actual_manifest_sha.lower() != args.expected_manifest_sha256.lower():
@@ -1095,6 +1213,8 @@ def bridge(args: argparse.Namespace) -> dict[str, Any]:
                 os.replace(stage, runtime_dir)
                 src_dir = runtime_dir
                 switched = True
+
+                config_migration = _migrate_runtime_config_includes(config, install_dir, runtime_dir)
 
                 if not args.no_systemd:
                     systemd_path, previous_dropin = _write_systemd_dropin(systemd_dir, args.service_name, install_dir)
@@ -1145,6 +1265,8 @@ def bridge(args: argparse.Namespace) -> dict[str, Any]:
                         "import_probe": post_import,
                         "scheduler": post_scheduler,
                         "state_sha256": _sha256(state_path) if state_path.is_file() else "",
+                        "config_includes": config_migration,
+                        "declared_profile": declared_profile or None,
                     },
                     "service": {
                         "systemd": not bool(args.no_systemd),
@@ -1180,6 +1302,11 @@ def bridge(args: argparse.Namespace) -> dict[str, Any]:
                         # still recorded by the caller's traceback/error path;
                         # the managed venv snapshot is best-effort cleanup.
                         pass
+                if config.read_bytes() != config_before_bytes:
+                    temporary_config = config.with_name(f".{config.name}.rollback-{os.getpid()}.tmp")
+                    temporary_config.write_bytes(config_before_bytes)
+                    os.chmod(temporary_config, config.stat().st_mode & 0o777)
+                    os.replace(temporary_config, config)
                 if before_state_bytes is None:
                     state_path.unlink(missing_ok=True)
                 else:

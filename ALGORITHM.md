@@ -3073,6 +3073,18 @@ stdlib проверки до pip. Installed preseed helper работает до
 CustomSelectedTaskError.code, без traceback/секретов. CommercialState read_only
 открывает существующий DB в mode=ro, не выполняет init/scrub/chmod.
 
+Named workload profile является обязательной частью selected runtime closure:
+bridge отвергает package без `universal_workload_resource_ref` до pip/switch.
+На source-free host capture сохраняет отсутствующие legacy include как evidence,
+а после проверки successor payload атомарно меняет только управляемые
+`<install>/src/etc/mcd-agent.{system,operator}.example.toml` на одноимённые
+`<install>/runtime/etc` файлы; mutable include и чужие bytes не переписываются,
+при последующем отказе entrypoint возвращается byte-for-byte. Matching/corrupt
+selected cache проверяется/восстанавливается из embedded exact digest до первого
+config/profile load. Config recovery читает MCC bootstrap из effective split
+include graph, поэтому secret-bearing `mcd.local.toml` остаётся единственным
+источником transport material и не копируется в публичный entrypoint.
+
 Первое применение cfg при отсутствии explicit runtime setting берёт только
 ref из verified ready manifest рядом с managed venv и предварительно готовит
 existing custom cache. Explicit durable ref всегда важнее initial package ref;
