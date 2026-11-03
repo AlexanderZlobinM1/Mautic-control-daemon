@@ -39,15 +39,15 @@ def build_closure(tmp_path: Path):
     (root / "manifest.json").write_text('{"manifest_version":1,"items":[]}\n')
     profile = {
         "schema": "mcc-mautic-connected-host-prerequisites-profile-v1",
-        "version": "1.0.3",
-        "catalog_item": {"id": prerequisites.CATALOG_ITEM_ID, "revision": "1.0.3"},
+        "version": "1.0.4",
+        "catalog_item": {"id": prerequisites.CATALOG_ITEM_ID, "revision": "1.0.4"},
     }
     profile_bytes = canonical(profile) + b"\n"
     profile_sha = hashlib.sha256(profile_bytes).hexdigest()
     profile_file = f"profiles/host-prerequisites-{profile_sha}.json"
     bundle = b"fixture-host-prerequisites-bundle"
     artifact_sha = hashlib.sha256(bundle).hexdigest()
-    key = "mautic-connected-host-prerequisites-v1.0.3"
+    key = "mautic-connected-host-prerequisites-v1.0.4"
     entrypoint = "scenarios/host_prerequisites.py"
     mapping = {
         "operator_profile_json": {"encoding": "json", "envelope_key": "profile", "source": "existing_private_operator_profile"},
@@ -72,7 +72,7 @@ def build_closure(tmp_path: Path):
     identity = {
         "schema": prerequisites.BINDING_SCHEMA,
         "catalog_item_id": prerequisites.CATALOG_ITEM_ID,
-        "catalog_item_revision": "1.0.3",
+        "catalog_item_revision": "1.0.4",
         "artifact": {
             "key": key, "sha256": artifact_sha, "size_bytes": len(bundle),
             "media_type": "application/gzip", "entrypoint": entrypoint,
@@ -147,7 +147,7 @@ def build_closure(tmp_path: Path):
     descriptor = {
         "schema": "mcc-external-operation-cache-closure-v1",
         "catalog_item_id": prerequisites.CATALOG_ITEM_ID,
-        "catalog_item_revision": "1.0.3",
+        "catalog_item_revision": "1.0.4",
         "binding_schema": prerequisites.BINDING_SCHEMA,
         "binding_sha256": binding_sha,
         "install_mode": "atomic_append_only_preserve_existing",
@@ -161,7 +161,7 @@ def build_closure(tmp_path: Path):
         "command": {"command_id": "sync_binding", "version": "1.0"},
         "input": {
             "catalog_item_id": prerequisites.CATALOG_ITEM_ID,
-            "catalog_item_revision": "1.0.3",
+            "catalog_item_revision": "1.0.4",
             "closure_digest": digest, "closure_size_bytes": len(closure),
             "closure_media_type": "application/gzip",
             "binding_schema": prerequisites.BINDING_SCHEMA,
@@ -173,9 +173,9 @@ def build_closure(tmp_path: Path):
                 "role": "binding_closure", "artifact_path": "/artifacts/host-prerequisites",
                 "artifact_grant": "one-time", "artifact_digest": digest,
                 "artifact_size_bytes": len(closure), "artifact_media_type": "application/gzip",
-                "artifact_revision": "1.0.3", "trusted_catalog": {
+                "artifact_revision": "1.0.4", "trusted_catalog": {
                     "source": "mcc", "transport": "portal_authenticated_catalog", "status": "active",
-                    "revision": "1.0.3", "artifact_digest": digest,
+                    "revision": "1.0.4", "artifact_digest": digest,
                 },
             }],
         },
@@ -280,7 +280,7 @@ def test_preclean_replay_uses_operation_bound_secret_free_tombstone(tmp_path):
     )
     job = {"installation": {"installation_id": "control-1", "dns_name": "control.example.com"}}
     binding = {
-        "catalog_item_revision": "1.0.3",
+        "catalog_item_revision": "1.0.4",
         "artifact_sha256": "c" * 64,
         "profile_sha256": "d" * 64,
         "binding_sha256": "sha256:" + "b" * 64,
@@ -344,7 +344,7 @@ def test_preclean_absent_target_without_matching_tombstone_fails_closed(tmp_path
         config_file_path=str(config_file),
     )
     binding = {
-        "catalog_item_revision": "1.0.3",
+        "catalog_item_revision": "1.0.4",
         "artifact_sha256": "c" * 64,
         "profile_sha256": "d" * 64,
         "binding_sha256": "sha256:" + "b" * 64,
@@ -372,7 +372,7 @@ def test_preclean_absent_target_without_matching_tombstone_fails_closed(tmp_path
 
 def test_preclean_result_requires_equal_certificate_and_boundary_hashes():
     binding = {
-        "catalog_item_revision": "1.0.3",
+        "catalog_item_revision": "1.0.4",
         "artifact_sha256": "c" * 64,
         "profile_sha256": "d" * 64,
         "binding_sha256": "sha256:" + "b" * 64,
@@ -386,7 +386,7 @@ def test_preclean_result_requires_equal_certificate_and_boundary_hashes():
         "mutation_started": True, "rollback": "not_needed",
         "artifact_binding": {
             "catalog_item_id": prerequisites.CATALOG_ITEM_ID,
-            "catalog_item_revision": "1.0.3", "artifact_sha256": "c" * 64,
+            "catalog_item_revision": "1.0.4", "artifact_sha256": "c" * 64,
             "profile_sha256": "d" * 64, "binding_sha256": "sha256:" + "b" * 64,
         },
         "preserved_boundaries": {
@@ -424,7 +424,7 @@ def test_execute_passes_only_mcd_resolved_context_to_existing_runner():
         "binding_sha256": "sha256:" + "b" * 64,
         "artifact_sha256": "c" * 64,
         "profile_sha256": "d" * 64,
-        "catalog_item_revision": "1.0.3",
+        "catalog_item_revision": "1.0.4",
     }
     operation_input = input_map()
     context = {
@@ -442,7 +442,7 @@ def test_execute_passes_only_mcd_resolved_context_to_existing_runner():
         "source_export_roots": [],
         "artifact_binding": {
             "catalog_item_id": prerequisites.CATALOG_ITEM_ID,
-            "catalog_item_revision": "1.0.3",
+            "catalog_item_revision": "1.0.4",
             "artifact_sha256": "c" * 64,
             "profile_sha256": "d" * 64,
             "binding_sha256": "sha256:" + "b" * 64,
@@ -456,7 +456,7 @@ def test_execute_passes_only_mcd_resolved_context_to_existing_runner():
         "mutation_started": True, "rollback": "not_needed",
         "artifact_binding": {
             "catalog_item_id": prerequisites.CATALOG_ITEM_ID,
-            "catalog_item_revision": "1.0.3", "artifact_sha256": "c" * 64,
+            "catalog_item_revision": "1.0.4", "artifact_sha256": "c" * 64,
             "profile_sha256": "d" * 64, "binding_sha256": "sha256:" + "b" * 64,
         },
         "preserved_boundaries": {
@@ -514,7 +514,7 @@ def test_execute_preserves_valid_external_failure_evidence():
         "binding_sha256": "sha256:" + "b" * 64,
         "artifact_sha256": "c" * 64,
         "profile_sha256": "d" * 64,
-        "catalog_item_revision": "1.0.3",
+        "catalog_item_revision": "1.0.4",
     }
     operation_input = input_map()
     nested = {
@@ -565,7 +565,7 @@ def test_execute_reduces_invalid_external_failure_output():
         "binding_sha256": "sha256:" + "b" * 64,
         "artifact_sha256": "c" * 64,
         "profile_sha256": "d" * 64,
-        "catalog_item_revision": "1.0.3",
+        "catalog_item_revision": "1.0.4",
     }
     operation_input = input_map()
     job = {
@@ -638,7 +638,7 @@ def test_generic_runner_serializes_exact_resolved_operation_context(tmp_path):
         "source_export_roots": [],
         "artifact_binding": {
             "catalog_item_id": prerequisites.CATALOG_ITEM_ID,
-            "catalog_item_revision": "1.0.3",
+            "catalog_item_revision": "1.0.4",
             "artifact_sha256": digest,
             "profile_sha256": "b" * 64,
             "binding_sha256": "sha256:" + "c" * 64,
