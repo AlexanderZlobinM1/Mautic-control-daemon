@@ -619,6 +619,28 @@ def test_execute_passes_only_mcd_resolved_context_to_existing_runner():
     else:
         raise AssertionError("renewal webroot outside managed parent accepted")
 
+    repaired = json.loads(json.dumps(nested))
+    repaired_certificate = repaired["preserved_boundaries"]["certificate"]
+    repaired_certificate.update({
+        "before_sha256": "sha256:" + "3" * 64,
+        "disposition": "repaired",
+        "unchanged": False,
+    })
+    assert prerequisites._validate_result(
+        "prepare_create", operation_input, binding, repaired,
+    ) == repaired
+
+    invalid_repair = json.loads(json.dumps(repaired))
+    invalid_repair["mutation_started"] = False
+    try:
+        prerequisites._validate_result(
+            "prepare_create", operation_input, binding, invalid_repair,
+        )
+    except prerequisites.ConnectedHostPrerequisitesError as exc:
+        assert str(exc) == "mautic_host_prerequisites_result_invalid"
+    else:
+        raise AssertionError("non-mutating renewal repair accepted")
+
 
 def test_execute_preserves_valid_external_failure_evidence():
     binding = {

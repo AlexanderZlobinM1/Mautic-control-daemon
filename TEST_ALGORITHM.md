@@ -27,6 +27,9 @@ package/runtime SHA и реальный MCC/package/install receipt.
    `config_path`, `webroot_path`, `webroot_exists`,
    `confined_to_managed_parent`, `stale_temporary_reference_absent`; MCD
    отвергает missing/extra/false fields и webroot вне reported parent.
+   `disposition=repaired` допускается только как mutating applied-result с
+   различными непустыми before/after boundary hashes и `unchanged=false`;
+   noop/non-mutating/equal-hash варианты fail closed.
 5. Любая ошибка после первой mutation, включая финальный postcheck и renewal
    repair, остаётся внутри единого compensation path. Fixture доказывает
    rollback certificate/vhost/root/firewall/renewal boundaries; только повтор

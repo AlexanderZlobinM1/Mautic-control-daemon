@@ -15,6 +15,10 @@
   the managed parent, and reject stale temporary renewal paths before success.
   The external artifact owns Certbot symlink validation and post-mutation
   compensation; MCD independently validates the exact public result contract.
+- Accept the revision 1.0.7 `repaired` certificate-boundary disposition only
+  for a mutating applied result with distinct valid before/after hashes. This
+  preserves fail-closed receipt validation while allowing the bounded renewal
+  webroot repair to report its real directory-boundary change.
 - Preserve production custom-manifest v1 group rows and multi-entrypoint bundle
   rows while append-only merging an external-operation binding closure.
 - NOT READY: remaining embedded implementations/callers, external replacement

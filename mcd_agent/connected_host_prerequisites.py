@@ -633,7 +633,7 @@ def _validate_result(command_id: str, operation_input: Mapping[str, str], bindin
             or not Path(certificate["directory"]).is_absolute()
             or certificate.get("before_sha256") not in {""} and _SHA.fullmatch(str(certificate.get("before_sha256"))) is None
             or _SHA.fullmatch(str(certificate.get("after_sha256") or "")) is None
-            or certificate.get("disposition") not in {"created", "preserved"}
+            or certificate.get("disposition") not in {"created", "preserved", "repaired"}
             or not isinstance(certificate.get("unchanged"), bool)
             or not isinstance(unrelated, Mapping)
             or set(unrelated) != {"checked", "before_sha256", "after_sha256", "unchanged"}
@@ -649,6 +649,13 @@ def _validate_result(command_id: str, operation_input: Mapping[str, str], bindin
             raise _fail("mautic_host_prerequisites_result_invalid")
     elif certificate["disposition"] == "created":
         if certificate["before_sha256"] != "" or certificate["unchanged"] is not False:
+            raise _fail("mautic_host_prerequisites_result_invalid")
+    elif certificate["disposition"] == "repaired":
+        if (result["status"] != "applied"
+                or result["mutation_started"] is not True
+                or _SHA.fullmatch(str(certificate["before_sha256"])) is None
+                or certificate["before_sha256"] == certificate["after_sha256"]
+                or certificate["unchanged"] is not False):
             raise _fail("mautic_host_prerequisites_result_invalid")
     elif (certificate["before_sha256"] != certificate["after_sha256"]
           or certificate["unchanged"] is not True):

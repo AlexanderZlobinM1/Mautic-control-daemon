@@ -2064,6 +2064,10 @@ operation-scoped renewal path проходит bounded repair; только сл
 `post_state.renewal`: absolute config/webroot paths, существование webroot,
 confined-to-parent proof и отсутствие stale temporary reference. MCD независимо
 проверяет exact keys и лексическое вхождение webroot в reported parent.
+`disposition=repaired` принимается только для `status=applied` с
+`mutation_started=true`, двумя различными непустыми boundary SHA и
+`unchanged=false`: renewal config входит в directory boundary, поэтому его
+штатный repair обязан менять этот digest, не меняя certificate material.
 
 Выбранная immutable revision для этого контракта — MCC `1.0.7`: closure
 `sha256:064ad78086e71120185d3c10aa485078c2bad1b341bd65801cb2a6bb25d80e63`
