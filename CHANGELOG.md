@@ -10,6 +10,8 @@
   after complete binding/artifact/profile verification, execute them through the
   existing offline runner, and reject host-qualified instance UIDs such as
   `uid@host`.
+- Preserve production custom-manifest v1 group rows and multi-entrypoint bundle
+  rows while append-only merging an external-operation binding closure.
 - NOT READY: remaining embedded implementations/callers, external replacement
   integration, complete-task closure and same-artifact native acceptance remain
   required. No 1.7.0 release is claimed or authorized by this entry.

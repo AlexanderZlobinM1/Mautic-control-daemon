@@ -1926,7 +1926,9 @@ pending delivery/job digest. Рестарт поэтому никогда не �
 `sync_binding` не запускает внешний сценарий. Он проверяет gzip closure,
 закрытый список members, digest каждого resource и canonical binding preimage,
 затем append-only устанавливает executable bundle, operator profile и binding
-identity. Existing manifest entries сохраняются; конфликт component/operation,
+identity. Existing manifest entries сохраняются, включая key-less group rows и
+несколько entrypoint rows одного immutable bundle key; конфликт точного
+key/entrypoint, component/operation,
 resource или content-addressed path завершает job fail-closed. Manifest меняется
 последним: незавершённый import может оставить только неактивные digest-файлы,
 но не capability.

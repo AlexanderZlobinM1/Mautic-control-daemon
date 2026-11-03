@@ -39,7 +39,24 @@ def build_closure(tmp_path: Path):
     root.mkdir(parents=True)
     (root / "manifest.json").write_text(json.dumps({
         "manifest_version": 1,
-        "items": [{"key": "existing", "file": "existing.sh", "sha256": "e" * 64}],
+        "items": [
+            {"type": "group", "name": "Existing group", "items": []},
+            {"key": "existing", "file": "existing.sh", "sha256": "e" * 64},
+            {
+                "key": "shared-existing-bundle", "name": "first",
+                "file": "bundles/shared.tar.gz", "entrypoint": "first.py",
+                "sha256": "d" * 64, "type": "script",
+            },
+            {
+                "key": "shared-existing-bundle", "name": "second",
+                "file": "bundles/shared.tar.gz", "entrypoint": "second.py",
+                "sha256": "d" * 64, "type": "script",
+            },
+        ],
+        "resources": [
+            {"key": "existing-resource-a", "file": "resources/a.tar.gz"},
+            {"key": "existing-resource-b", "file": "resources/b.tar.gz"},
+        ],
     }))
     profile = {
         "schema": "mcc-mautic-connected-host-lifecycle-profile-v1",
@@ -201,6 +218,14 @@ def test_portal_grant_is_stripped_before_atomic_cache_activation(tmp_path):
     assert [row["command_id"] for row in installed["capability"]["commands"]] == list(lifecycle._COMMANDS)
     manifest = json.loads((Path(cfg.custom_cache_dir) / "manifest.json").read_text())
     assert any(row.get("key") == "existing" for row in manifest["items"])
+    assert any(row.get("name") == "Existing group" for row in manifest["items"])
+    assert [
+        row.get("entrypoint") for row in manifest["items"]
+        if row.get("key") == "shared-existing-bundle"
+    ] == ["first.py", "second.py"]
+    assert [row.get("key") for row in manifest["resources"][:2]] == [
+        "existing-resource-a", "existing-resource-b",
+    ]
     assert sync_binding({"input": {
         "catalog_item_id": lifecycle.CATALOG_ITEM_ID,
         "catalog_item_revision": REVISION,

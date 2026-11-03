@@ -184,7 +184,39 @@ def _merge_manifest(existing: object, incoming: object) -> dict[str, Any]:
                 by_key[key] = copied
         current[field] = merged
 
-    merge_rows("items", lambda row: (row.get("key"),))
+    def item_identity(row: Mapping[str, Any]) -> tuple[Any, ...]:
+        """Match the identities already supported by custom manifest v1.
+
+        A bundle key is not unique by itself: one immutable bundle may expose
+        several entrypoints as separate items. Group rows intentionally have
+        no key at all. Preserve both established forms while still making a
+        conflicting replacement of the same logical row fail closed.
+        """
+        key = row.get("key")
+        entrypoint = row.get("entrypoint")
+        if isinstance(key, str) and key:
+            return ("item", key, entrypoint if isinstance(entrypoint, str) else None)
+        row_type = row.get("type")
+        name = row.get("name")
+        if isinstance(row_type, str) and row_type and isinstance(name, str) and name:
+            return ("named", row_type, name)
+        return ("opaque", hashlib.sha256(_canonical(row)).hexdigest())
+
+    old_items = current.get("items", [])
+    new_items = incoming.get("items", [])
+    if isinstance(old_items, list) and isinstance(new_items, list):
+        old_artifacts: dict[str, set[tuple[Any, Any]]] = {}
+        for row in old_items:
+            if isinstance(row, Mapping) and isinstance(row.get("key"), str) and row["key"]:
+                old_artifacts.setdefault(row["key"], set()).add((row.get("file"), row.get("sha256")))
+        for row in new_items:
+            if not isinstance(row, Mapping) or not isinstance(row.get("key"), str) or not row["key"]:
+                continue
+            prior = old_artifacts.get(row["key"])
+            if prior is not None and (row.get("file"), row.get("sha256")) not in prior:
+                raise _fail("external_operation_cache_manifest_conflict")
+
+    merge_rows("items", item_identity)
     merge_rows("operation_bindings", lambda row: (row.get("component"), row.get("operation")))
     merge_rows("resources", lambda row: (row.get("role"), row.get("cache_file", row.get("file"))))
     return current
