@@ -506,6 +506,14 @@ config на его profile baseline и только после этого при
    its SHA-256, source commit, runtime archive SHA, runtime manifest SHA, and
    bridge-QA sidecar SHA. The host accepts it only after exact SHA checks and
    runs the bridge locally; the runtime archive remains unchanged.
+   An already runtime-only DEV host may replace a build with the same semantic
+   version only through the explicit `--allow-same-version-rebuild` path. That
+   path requires exact target, archive and manifest pins, requires the incoming
+   manifest to differ from the active manifest, uses the same lease/barrier,
+   atomic runtime swap and rollback, and emits
+   `runtime-to-runtime-pinned-rebuild` in the receipt. It is not a channel or
+   implicit production update rule; without the explicit flag every equal or
+   older runtime remains rejected.
    The sidecar must accept the complete valid split TOML graph, including
    array-of-table sections, while never writing configuration.
    The MCD runtime always supplies an MCD-owned default
@@ -1165,6 +1173,7 @@ cycle без ручного `segments:update`, profile/capacity/data changes. Ad
 | heavy-plan deferral and durable pending guard | `mcd_agent/daemon.py` | `tests/test_segment_liveness.py`, live M6/M7 acceptance receipt |
 | self-update preserves ordinary application work and all durable queues | `mcd_agent/self_update.py`, `daemon.py`, systemd unit | `tests/test_self_update_version_reporting.py`, `tools/runtime_bridge_qa.py` (`mcd-runtime-bridge-qa-v1`) |
 | legacy source-tree to runtime-only transition is authority-safe and accepts complete split TOML config | `tools/mcd_runtime_bootstrap.py`, `tools/mcd_profile_authority_probe.py` | `tests/test_profile_authority_probe.py`, `tests/test_runtime_bootstrap_capture.py`, live `mcd-runtime-bootstrap-receipt-v1` |
+| same-version unlisted DEV runtime replacement is explicit, fully pinned, atomic and fail-closed | `tools/mcd_runtime_bootstrap.py` | `tests/test_runtime_bootstrap.py`, live `mcd-runtime-bootstrap-receipt-v1` with `runtime-to-runtime-pinned-rebuild` |
 | activation-derived Portal material is imported atomically without new auth/job issuance; commercial API-key transport, host binding and installation IDs are validated and persisted while legacy agent/Portal signing-key state is scrubbed | `mcd_agent/commercial_registration.py`, `mcd_agent/commercial_portal.py` | `tests/test_commercial_registration.py`, `tests/test_commercial_outbound_boundary.py`, redacted `mcd-portal-registration-receipt-v1` |
 | successful Portal inventory rescan returns the canonical observed snapshot revision/hash in the existing terminal result; unchanged content does not bump revision and failed rescan returns no reference | `mcd_agent/daemon.py`, `mcd_agent/commercial_primitives.py`, `mcd_agent/commercial_self_hosted.py`, `mcd_agent/commercial_portal.py` | `tests/test_commercial_primitives.py`, `tests/test_daemon_commercial_guard.py`, Portal 1.7 terminal-receipt matching |
 | host-first Portal registration binds an activated MCD host before any Mautic instance exists; request contains only local DNS identity/display name, and the response must create a passive host installation with an active empty-inventory connection | `mcd_agent/commercial_portal.py`, `mcd_agent/commercial_host_registration.py`, `mcd_agent/cli.py` | `tests/test_commercial_portal.py`, redacted `portal-mcd-host-register-response-v1` |

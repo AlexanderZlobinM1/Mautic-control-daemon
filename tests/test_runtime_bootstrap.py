@@ -103,3 +103,77 @@ def test_bridge_successful_replay_is_read_only_and_hash_bound(tmp_path: Path) ->
     assert observed["readback"] == {"metadata_version": "1.5.182"}
     probe.assert_called_once_with(install, "1.5.182")
     assert receipt_path.read_text(encoding="utf-8") == json.dumps(receipt) + "\n"
+
+
+def test_same_version_runtime_rebuild_requires_explicit_exact_pins(tmp_path: Path) -> None:
+    bridge = _load_bridge()
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    current = runtime / bridge.MANIFEST_NAME
+    staged = tmp_path / "staged-manifest.json"
+    current.write_text('{"version":"1.7.0.dev0","payload_sha256":{"wheel":"a"}}\n', encoding="utf-8")
+    staged.write_text('{"version":"1.7.0.dev0","payload_sha256":{"wheel":"b"}}\n', encoding="utf-8")
+    args = SimpleNamespace(
+        allow_same_version_rebuild=True,
+        expected_target="1.7.0.dev0",
+        expected_archive_sha256="a" * 64,
+        expected_manifest_sha256=bridge._sha256(staged),
+    )
+
+    assert bridge._same_version_pinned_rebuild_allowed(
+        args,
+        original_dir=runtime,
+        runtime_dir=runtime,
+        current_manifest=current,
+        staged_manifest=staged,
+        current_version="1.7.0.dev0",
+        target_version="1.7.0.dev0",
+    ) is True
+
+    args.expected_archive_sha256 = ""
+    try:
+        bridge._same_version_pinned_rebuild_allowed(
+            args,
+            original_dir=runtime,
+            runtime_dir=runtime,
+            current_manifest=current,
+            staged_manifest=staged,
+            current_version="1.7.0.dev0",
+            target_version="1.7.0.dev0",
+        )
+    except bridge.BridgeError as exc:
+        assert str(exc) == "same-version rebuild requires exact target and archive pins"
+    else:
+        raise AssertionError("missing archive pin must fail closed")
+
+
+def test_same_version_runtime_rebuild_rejects_identical_active_manifest(tmp_path: Path) -> None:
+    bridge = _load_bridge()
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    current = runtime / bridge.MANIFEST_NAME
+    staged = tmp_path / "staged-manifest.json"
+    payload = '{"version":"1.7.0.dev0","payload_sha256":{"wheel":"a"}}\n'
+    current.write_text(payload, encoding="utf-8")
+    staged.write_text(payload, encoding="utf-8")
+    args = SimpleNamespace(
+        allow_same_version_rebuild=True,
+        expected_target="1.7.0.dev0",
+        expected_archive_sha256="a" * 64,
+        expected_manifest_sha256=bridge._sha256(staged),
+    )
+
+    try:
+        bridge._same_version_pinned_rebuild_allowed(
+            args,
+            original_dir=runtime,
+            runtime_dir=runtime,
+            current_manifest=current,
+            staged_manifest=staged,
+            current_version="1.7.0.dev0",
+            target_version="1.7.0.dev0",
+        )
+    except bridge.BridgeError as exc:
+        assert str(exc) == "same-version rebuild is already active but has no matching success receipt"
+    else:
+        raise AssertionError("identical active manifest must not be reinstalled")

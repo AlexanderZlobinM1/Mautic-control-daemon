@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bridge a legacy source-tree MCD install to a runtime-only package.
+"""Install a pinned runtime-only package, including the legacy first bridge.
 
 The normal 1.5.127 updater expects ``pyproject.toml`` in the downloaded
 archive.  A runtime-only release intentionally does not contain that checkout
@@ -23,6 +23,12 @@ The bridge is deliberately fail-closed:
 
 It is not part of the runtime archive.  The source tree is the transport
 input for the bridge only; the active supervisor imports the installed wheel.
+
+An already runtime-only DEV host may also receive an explicitly authorized
+same-version rebuild.  That path is disabled by default and requires exact
+target, archive and manifest pins; the incoming manifest must differ from the
+active manifest.  It exists for immutable unlisted DEV candidates and never
+turns a mutable version label into an implicit update channel.
 """
 
 from __future__ import annotations
@@ -953,6 +959,40 @@ def _successful_replay(
     return replay
 
 
+def _same_version_pinned_rebuild_allowed(
+    args: argparse.Namespace,
+    *,
+    original_dir: Path,
+    runtime_dir: Path,
+    current_manifest: Path,
+    staged_manifest: Path,
+    current_version: str,
+    target_version: str,
+) -> bool:
+    """Admit only an explicit, fully pinned runtime-to-runtime DEV rebuild."""
+    if not bool(getattr(args, "allow_same_version_rebuild", False)):
+        return False
+    if original_dir != runtime_dir or not current_manifest.is_file():
+        raise BridgeError("same-version rebuild requires an active runtime-only layout")
+    if _version_key(target_version) != _version_key(current_version):
+        raise BridgeError("same-version rebuild flag is valid only for an equal runtime version")
+    expected_target = str(getattr(args, "expected_target", "") or "").strip()
+    expected_archive = str(getattr(args, "expected_archive_sha256", "") or "").strip().lower()
+    expected_manifest = str(getattr(args, "expected_manifest_sha256", "") or "").strip().lower()
+    if expected_target != target_version or not re.fullmatch(r"[0-9a-f]{64}", expected_archive):
+        raise BridgeError("same-version rebuild requires exact target and archive pins")
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_manifest):
+        raise BridgeError("same-version rebuild requires an exact manifest pin")
+    staged_sha = _sha256(staged_manifest).lower()
+    if staged_sha != expected_manifest:
+        raise BridgeError(
+            f"runtime manifest SHA mismatch expected={expected_manifest} actual={staged_sha}"
+        )
+    if _sha256(current_manifest).lower() == staged_sha:
+        raise BridgeError("same-version rebuild is already active but has no matching success receipt")
+    return True
+
+
 def bridge(args: argparse.Namespace) -> dict[str, Any]:
     install_dir = Path(args.install_dir).resolve()
     archive = Path(args.archive).resolve()
@@ -1020,13 +1060,24 @@ def bridge(args: argparse.Namespace) -> dict[str, Any]:
                 raise BridgeError(
                     f"runtime manifest SHA mismatch expected={args.expected_manifest_sha256} actual={actual_manifest_sha}"
                 )
+        same_version_pinned_rebuild = False
         if _version_key(target) <= _version_key(old_source_version) and (src_dir / MANIFEST_NAME).is_file():
             same_pinned_layout_migration = (
                 original_dir == legacy_dir
                 and _version_key(target) == _version_key(old_source_version)
                 and _sha256(src_dir / MANIFEST_NAME) == _sha256(stage / MANIFEST_NAME)
             )
-            if not same_pinned_layout_migration:
+            if _version_key(target) == _version_key(old_source_version) and not same_pinned_layout_migration:
+                same_version_pinned_rebuild = _same_version_pinned_rebuild_allowed(
+                    args,
+                    original_dir=original_dir,
+                    runtime_dir=runtime_dir,
+                    current_manifest=src_dir / MANIFEST_NAME,
+                    staged_manifest=stage / MANIFEST_NAME,
+                    current_version=old_source_version,
+                    target_version=target,
+                )
+            if not same_pinned_layout_migration and not same_version_pinned_rebuild:
                 raise BridgeError(f"runtime bridge target is not newer than active source: {old_source_version} -> {target}")
 
         with _scheduler_barrier(install_dir) as barrier_created:
@@ -1071,7 +1122,11 @@ def bridge(args: argparse.Namespace) -> dict[str, Any]:
                 receipt = {
                     "schema": RECEIPT_SCHEMA,
                     "status": "success",
-                    "bridge": "legacy-source-to-runtime-only",
+                    "bridge": (
+                        "runtime-to-runtime-pinned-rebuild"
+                        if same_version_pinned_rebuild
+                        else "legacy-source-to-runtime-only"
+                    ),
                     "target": target,
                     "archive": str(archive),
                     "archive_sha256": _sha256(archive),
@@ -1175,6 +1230,11 @@ def _parser() -> argparse.ArgumentParser:
         "--capture-profile-authority",
         action="store_true",
         help="Read-only pre-bridge profile-selection capture; does not require an archive",
+    )
+    parser.add_argument(
+        "--allow-same-version-rebuild",
+        action="store_true",
+        help="DEV only: install a different runtime manifest at the same version; exact target/archive/manifest pins are mandatory",
     )
     parser.add_argument("--custom-cache-dir", type=Path, help="Explicit existing data cache for a selected universal resource")
     parser.add_argument("--json", action="store_true")
