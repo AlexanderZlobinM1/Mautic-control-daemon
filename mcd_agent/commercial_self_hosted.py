@@ -1042,10 +1042,10 @@ class SelfHostedPortalWorker:
         self.generic_command_handler = generic_command_handler
         self._active_installation_id = self.installation_ids[0]
         # A daemon restart is also the supported recovery point for a stale
-        # Portal projection. Publish one complete inventory on the first
-        # outbound cycle even when the durable content hash is unchanged;
-        # subsequent cycles remain hash/idempotency gated.
-        self._publish_inventory_on_startup = True
+        # Portal projection. Every installation needs its own complete
+        # inventory ACK before hash/idempotency gating resumes; success for
+        # one installation must not suppress startup publication for another.
+        self._startup_inventory_pending = set(self.installation_ids)
 
     @property
     def identity_coordinate(self) -> dict[str, str]:
@@ -1496,7 +1496,8 @@ class SelfHostedPortalWorker:
             pinned_revision = int(pinned.get("snapshot_revision") or -1) if isinstance(pinned, Mapping) else -1
         except (TypeError, ValueError):
             raise ValueError("commercial_inventory_state_invalid")
-        if not self._publish_inventory_on_startup and isinstance(pinned, Mapping) and str(pinned.get("durable_hash") or "") == durable_hash and pinned_revision == revision:
+        force_startup_publish = str(installation_id) in self._startup_inventory_pending
+        if not force_startup_publish and isinstance(pinned, Mapping) and str(pinned.get("durable_hash") or "") == durable_hash and pinned_revision == revision:
             return True
         try:
             self._outbound("inventory", lambda: self._send_inventory(installation_id, inventory))
@@ -1506,7 +1507,7 @@ class SelfHostedPortalWorker:
         acknowledge = getattr(self.executor.state, "acknowledge_inventory", None)
         if callable(acknowledge):
             acknowledge(installation_id=installation_id, inventory=inventory)
-        self._publish_inventory_on_startup = False
+        self._startup_inventory_pending.discard(str(installation_id))
         return True
 
     def _send_inventory(self, installation_id: str, inventory: Mapping[str, Any]) -> Any:

@@ -646,6 +646,116 @@ def _inventory_fixture(*, version="1.5.255", settings=None, instances=None, requ
     }
 
 
+def test_restart_forces_inventory_publication_for_every_installation(tmp_path):
+    class Portal:
+        def __init__(self):
+            self.installations = []
+
+        def send_inventory(self, **kwargs):
+            self.installations.append(kwargs["installation_id"])
+            return {"status": "accepted"}
+
+        def pull_job(self, **_kwargs):
+            return None
+
+    state = CommercialState(str(tmp_path / "commercial.sqlite"))
+    executor = _Executor(state)
+    installation_ids = ["installation-1", "installation-2"]
+
+    def inventory(installation_id):
+        value = _inventory_fixture()
+        value["binding"] = {**value["binding"], "installation_id": installation_id}
+        return value
+
+    for installation_id in installation_ids:
+        prepared, _record = state.prepare_inventory_snapshot(
+            installation_id=installation_id,
+            inventory=inventory(installation_id),
+        )
+        assert state.acknowledge_inventory(installation_id=installation_id, inventory=prepared)
+
+    portal = Portal()
+    worker = SelfHostedPortalWorker(
+        portal,
+        executor,
+        installation_id=installation_ids,
+        portal_keys={"portal-1": "key"},
+        publisher_keys={},
+        context={},
+        commercial_key_id="commercial-key-1",
+        agent_id="agent-1",
+        host_fingerprint="sha256:" + "a" * 64,
+        poll_wait_seconds=0,
+        clock=_Clock(),
+        inventory_provider=inventory,
+    )
+
+    assert worker.run_once()["status"] == "idle"
+    assert portal.installations == installation_ids
+    assert worker._startup_inventory_pending == set()
+
+
+def test_restart_retries_only_the_installation_without_inventory_ack(tmp_path):
+    class Portal:
+        def __init__(self):
+            self.attempts = []
+            self.fail_second_once = True
+
+        def send_inventory(self, **kwargs):
+            installation_id = kwargs["installation_id"]
+            self.attempts.append(installation_id)
+            if installation_id == "installation-2" and self.fail_second_once:
+                self.fail_second_once = False
+                raise OSError("Portal temporarily unavailable")
+            return {"status": "accepted"}
+
+        def pull_job(self, **_kwargs):
+            return None
+
+    state = CommercialState(str(tmp_path / "commercial.sqlite"))
+    executor = _Executor(state)
+    installation_ids = ["installation-1", "installation-2"]
+
+    def inventory(installation_id):
+        value = _inventory_fixture()
+        value["binding"] = {**value["binding"], "installation_id": installation_id}
+        return value
+
+    for installation_id in installation_ids:
+        prepared, _record = state.prepare_inventory_snapshot(
+            installation_id=installation_id,
+            inventory=inventory(installation_id),
+        )
+        assert state.acknowledge_inventory(installation_id=installation_id, inventory=prepared)
+
+    clock = _Clock()
+    portal = Portal()
+    worker = SelfHostedPortalWorker(
+        portal,
+        executor,
+        installation_id=installation_ids,
+        portal_keys={"portal-1": "key"},
+        publisher_keys={},
+        context={},
+        commercial_key_id="commercial-key-1",
+        agent_id="agent-1",
+        host_fingerprint="sha256:" + "a" * 64,
+        poll_wait_seconds=0,
+        backoff_base_seconds=1,
+        clock=clock,
+        inventory_provider=inventory,
+    )
+
+    assert worker.run_once()["status"] == "backoff"
+    assert portal.attempts == installation_ids
+    assert worker._startup_inventory_pending == {"installation-2"}
+
+    clock.value = 101.0
+    assert worker.run_once()["status"] == "idle"
+    assert portal.attempts == ["installation-1", "installation-2", "installation-2"]
+    assert worker._startup_inventory_pending == set()
+
+
 def test_inventory_revision_ignores_transport_fields_and_bumps_once_per_durable_change(tmp_path):
     class Portal:
         def __init__(self):

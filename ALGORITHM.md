@@ -1175,6 +1175,7 @@ cycle без ручного `segments:update`, profile/capacity/data changes. Ad
 | legacy source-tree to runtime-only transition is authority-safe and accepts complete split TOML config | `tools/mcd_runtime_bootstrap.py`, `tools/mcd_profile_authority_probe.py` | `tests/test_profile_authority_probe.py`, `tests/test_runtime_bootstrap_capture.py`, live `mcd-runtime-bootstrap-receipt-v1` |
 | same-version unlisted DEV runtime replacement is explicit, fully pinned, atomic and fail-closed | `tools/mcd_runtime_bootstrap.py` | `tests/test_runtime_bootstrap.py`, live `mcd-runtime-bootstrap-receipt-v1` with `runtime-to-runtime-pinned-rebuild` |
 | activation-derived Portal material is imported atomically without new auth/job issuance; commercial API-key transport, host binding and installation IDs are validated and persisted while legacy agent/Portal signing-key state is scrubbed | `mcd_agent/commercial_registration.py`, `mcd_agent/commercial_portal.py` | `tests/test_commercial_registration.py`, `tests/test_commercial_outbound_boundary.py`, redacted `mcd-portal-registration-receipt-v1` |
+| Portal worker restart forces one independently ACKed complete inventory per installation; a successful installation cannot clear another installation's pending startup publication, and transport failures retry through ordinary backoff without cursor/cutover mutation | `mcd_agent/commercial_self_hosted.py:SelfHostedPortalWorker._publish_inventory` | `tests/test_commercial_outbound_boundary.py` multi-install restart and partial-failure retry |
 | successful Portal inventory rescan returns the canonical observed snapshot revision/hash in the existing terminal result; unchanged content does not bump revision and failed rescan returns no reference | `mcd_agent/daemon.py`, `mcd_agent/commercial_primitives.py`, `mcd_agent/commercial_self_hosted.py`, `mcd_agent/commercial_portal.py` | `tests/test_commercial_primitives.py`, `tests/test_daemon_commercial_guard.py`, Portal 1.7 terminal-receipt matching |
 | host-first Portal registration binds an activated MCD host before any Mautic instance exists; request contains only local DNS identity/display name, and the response must create a passive host installation with an active empty-inventory connection | `mcd_agent/commercial_portal.py`, `mcd_agent/commercial_host_registration.py`, `mcd_agent/cli.py` | `tests/test_commercial_portal.py`, redacted `portal-mcd-host-register-response-v1` |
 | self-hosted v2.1 candidate jobs may omit stage metadata for a whole external composition; supplied `stage_selection` must structurally match `execution.stage`, without embedded stage-name/order recipes; existing receipts remain | `mcd_agent/commercial_portal.py`, `mcd_agent/commercial_self_hosted.py`, `mcd_agent/scenario_launcher.py` | `tests/test_commercial_self_hosted_v2.py`, redacted stage/terminal receipts |
@@ -1324,6 +1325,14 @@ revision include the field. Missing detector facts fail closed. Scenario
 `required_capabilities` remain Portal-side applicability predicates and are
 never synthesized into this facts mapping. Older Portal consumers may
 ignore the additive field.
+On every Portal worker start, each bound installation independently owes one
+complete inventory publication and Portal ACK before unchanged-content hash
+gating resumes for that installation. An ACK for one installation must not
+suppress startup publication for another. A transport failure leaves only the
+affected installation pending for the ordinary bounded retry; already ACKed
+installations remain hash-gated. This restores every Portal projection after an
+MCD restart without changing installation IDs, delivery cursors or cutover
+state.
 The producer reports truthful host/preflight capabilities such as
 `package_manager:<name>`, `os_like:debian`, `dpkg`, `package:curl`,
 `service_manager:systemd`, `root_sudo`, and the observed `network_egress`
