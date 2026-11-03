@@ -36,10 +36,8 @@ def _job(account_id=None):
     }
 
 
-def _inventory(account_id=None):
+def _inventory():
     installation = {"installation_id": "installation-1", "dns_name": "customer.example"}
-    if account_id is not None:
-        installation["account_id"] = account_id
     return {
         "installation": installation,
         "capabilities": [{
@@ -62,7 +60,7 @@ def test_own_identity_remains_backward_compatible_without_tenant():
 
 
 def test_managed_tenant_is_preserved_and_must_match_admitted_uid():
-    job = validate_generic_command_job(_job("tenant-a"), inventory=_inventory("tenant-a"))
+    job = validate_generic_command_job(_job("tenant-a"), inventory=_inventory())
     assert job["installation"]["account_id"] == "tenant-a"
     assert validate_managed_installation_tenant(
         job["installation"],
@@ -84,19 +82,24 @@ def test_cross_tenant_job_is_rejected_before_execution_contract():
         raise AssertionError("cross-tenant job was accepted")
 
 
-def test_inventory_and_job_tenants_must_be_identical():
+def test_public_inventory_omits_tenant_and_local_state_rejects_cross_tenant():
+    job = validate_generic_command_job(_job("tenant-b"), inventory=_inventory())
     try:
-        validate_generic_command_job(_job("tenant-b"), inventory=_inventory("tenant-a"))
+        validate_managed_installation_tenant(
+            job["installation"],
+            installation_ids={"instance.uid": "installation-1"},
+            managed_instances={"instance.uid": {"account_id": "tenant-a"}},
+        )
     except GenericCommandContractError as exc:
         assert str(exc) == "portal_mcd_managed_tenant_binding_invalid"
     else:
-        raise AssertionError("cross-tenant inventory/job pair was accepted")
+        raise AssertionError("cross-tenant job was accepted by local managed state")
 
 
 def test_managed_host_scope_is_rejected_before_execution():
     for scope in ("host", None):
         job = _job("tenant-a")
-        inventory = _inventory("tenant-a")
+        inventory = _inventory()
         if scope is None:
             job["command"].pop("target_scope")
             inventory["capabilities"][0]["commands"][0].pop("target_scope")

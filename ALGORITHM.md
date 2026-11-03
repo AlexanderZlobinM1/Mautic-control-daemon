@@ -1869,11 +1869,13 @@ script, argv, executable, sudo, пароль, ключ, token и подпись 
 использует локальные typed primitives; arbitrary shell route отсутствует.
 
 Каждая команда inventory также имеет `target_scope`: `host` для общих
-хостовых наблюдений и `instance` для операции конкретного Mautic-инстанса.
-Эта metadata не подменяет tenant binding: managed job обязан содержать
+хостовых операций и наблюдений и `instance` для операции конкретного
+Mautic-инстанса. Публичный capabilities wire содержит в `installation` ровно
+`installation_id` и `dns_name`; tenant coordinate туда не входит и не участвует
+в self-digest. Instance-scoped managed job обязан отдельно содержать
 `account_id`, совпадающий с admitted managed instance, и явный
-`target_scope=instance`;
-отсутствующее, неизвестное или `host` значение отклоняется до enqueue/handler.
+`target_scope=instance`. Host-scoped job, включая cache sync, tenant field не
+несёт: он связан agent/installation и не может вызвать instance semantics.
 В целевом Portal 1.7 wire MCD публикует `target_scope` сразу в первом
 capabilities payload и пересчитывает digest по этому полному payload; ACK
 фиксирует доставленную ревизию, но не является переключателем формата.
@@ -1947,15 +1949,17 @@ terminal `create`/`recreate`, чей ownership receipt совпадает со s
 DNS, root, DB/user, vhost paths, plan hash и artifact binding. `preflight` и
 `cleanup_owned` сами по себе регистрацию не разрешают.
 
-Managed generic jobs carry the tenant `account_id` inside the installation
-binding. MCD admits that value only when it exactly matches the
+Instance-scoped managed generic jobs carry the tenant `account_id` inside the
+job installation binding. MCD admits that value only when it exactly matches the
 `managed_instances[instance_uid].account_id` material imported from the
 server-issued carrier, the installation ID resolves to that same native UID,
-and the published capability inventory carries the same value. This check is
-performed before any generic handler or typed Mautic command runs. Own jobs
+and the advertised command is instance-scoped. The public capability inventory
+always has the exact two-field installation identity and never carries tenant
+metadata. This local-state check is performed before any instance handler or
+typed Mautic command runs; host-scoped jobs carry no tenant field. Own jobs
 remain backward-compatible with the existing host account binding. The
-server-side Portal flow owns provider account references and injects the
-tenant account into the job; the customer response never contains the
+server-side Portal flow owns provider account references and injects the tenant
+account only into instance jobs; the customer response never contains the
 provider credential. Evidence: `tests/test_managed_tenant_contract.py`,
 `tests/test_managed_portal_identity.py`, and the redacted live managed
 `mautic_version` receipt.

@@ -121,6 +121,24 @@ def test_generic_binding_fields_are_an_atomic_pair():
         validate_generic_command_job(job)
 
 
+def test_capability_inventory_digest_excludes_managed_tenant_coordinate():
+    from mcd_agent.commercial_generic import validate_capability_inventory
+
+    inventory = _inventory()
+    inventory["installation"]["account_id"] = "tenant-must-not-be-public"
+    inventory["inventory_sha256"] = capability_inventory_digest(
+        {key: value for key, value in inventory.items() if key != "inventory_sha256"}
+    )
+    with pytest.raises(ValueError, match="portal_mcd_capability_inventory_digest_invalid"):
+        validate_capability_inventory(inventory)
+
+    inventory["installation"].pop("account_id")
+    inventory["inventory_sha256"] = capability_inventory_digest(
+        {key: value for key, value in inventory.items() if key != "inventory_sha256"}
+    )
+    assert "account_id" not in validate_capability_inventory(inventory)["installation"]
+
+
 def test_inventory_rescan_terminal_survives_restart_without_rescanning(tmp_path):
     from mcd_agent.commercial_primitives import build_capability_inventory, execute_generic_primitive
 

@@ -609,11 +609,6 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
                     dns_name=dns_name,
                     config=local_cfg,
                 )
-                if state.get("ownership") == "sales_snap_managed":
-                    account_id = str(registration.get("account_id") or "").strip()
-                    if not account_id:
-                        raise ValueError("commercial_managed_tenant_binding_missing")
-                    inventory["installation"]["account_id"] = account_id
                 inventory["capabilities"].append(mautic_version_capability())
                 inventory["capabilities"].sort(key=lambda item: item["capability_id"])
                 inventory.pop("inventory_sha256", None)

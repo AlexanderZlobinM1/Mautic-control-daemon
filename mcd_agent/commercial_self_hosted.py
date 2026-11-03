@@ -1731,7 +1731,8 @@ class SelfHostedPortalWorker:
             job = validate_generic_command_job(command, inventory=inventory)
         except Exception as exc:
             return self._terminalize_generic_failure(job, cursor_next=cursor_next, reason=str(exc)[:120])
-        if self.executor.state.get("ownership") == "sales_snap_managed":
+        if (self.executor.state.get("ownership") == "sales_snap_managed"
+                and job["command"]["target_scope"] == "instance"):
             try:
                 validate_managed_installation_tenant(
                     job["installation"],

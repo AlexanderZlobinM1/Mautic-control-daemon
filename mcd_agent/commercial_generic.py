@@ -68,6 +68,18 @@ def _identity(value: object, code: str) -> dict[str, Any]:
     return result
 
 
+def _capability_identity(value: object, code: str) -> dict[str, Any]:
+    """Normalize the public capability coordinate to its exact wire contract."""
+    item = _obj(value, code)
+    return _identity(
+        {
+            "installation_id": item.get("installation_id"),
+            "dns_name": item.get("dns_name"),
+        },
+        code,
+    )
+
+
 def validate_managed_installation_tenant(
     installation: Mapping[str, Any],
     *,
@@ -161,7 +173,7 @@ def validate_capability_inventory(value: object) -> dict[str, Any]:
     keys = [f"{entry['capability_id']}:{entry['version']}" for entry in capabilities]
     if len(set(keys)) != len(keys) or keys != sorted(keys):
         raise _error("portal_mcd_capability_inventory_invalid")
-    result = {"schema": CAPABILITY_INVENTORY_SCHEMA, "contract_version": CONTRACT_VERSION, "request_id": _text(item.get("request_id"), "portal_mcd_capability_inventory_invalid"), "installation": _identity(item.get("installation"), "portal_mcd_capability_inventory_invalid"), "observed_at": _text(item.get("observed_at"), "portal_mcd_capability_inventory_invalid"), "capabilities": capabilities, "inventory_sha256": _sha(item.get("inventory_sha256"), "portal_mcd_capability_inventory_digest_invalid")}
+    result = {"schema": CAPABILITY_INVENTORY_SCHEMA, "contract_version": CONTRACT_VERSION, "request_id": _text(item.get("request_id"), "portal_mcd_capability_inventory_invalid"), "installation": _capability_identity(item.get("installation"), "portal_mcd_capability_inventory_invalid"), "observed_at": _text(item.get("observed_at"), "portal_mcd_capability_inventory_invalid"), "capabilities": capabilities, "inventory_sha256": _sha(item.get("inventory_sha256"), "portal_mcd_capability_inventory_digest_invalid")}
     unsigned = dict(result)
     unsigned.pop("inventory_sha256")
     if result["inventory_sha256"] != capability_inventory_digest(unsigned):
@@ -216,9 +228,10 @@ def validate_generic_command_job(value: object, inventory: Mapping[str, Any] | N
                 or advertised.get("binding_schema") != result["command"].get("binding_schema")
                 or advertised.get("binding_sha256") != result["command"].get("binding_sha256")):
             raise _error("portal_mcd_generic_command_not_advertised")
-        advertised_installation = inventory.get("installation")
-        if isinstance(advertised_installation, Mapping) and advertised_installation.get("account_id") != result["installation"].get("account_id"):
-            raise _error("portal_mcd_managed_tenant_binding_invalid")
+        # Capability inventory is a public host/installation coordinate and
+        # deliberately omits tenant identity. Managed instance jobs are bound
+        # to the local tenant record by the worker after this advertisement
+        # check; host-scoped jobs remain tenant-independent.
     if installation.get("account_id") and result["command"]["target_scope"] != "instance":
         raise _error("portal_mcd_managed_scope_forbidden")
     return result
