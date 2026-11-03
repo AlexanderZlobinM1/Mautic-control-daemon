@@ -1180,7 +1180,7 @@ cycle без ручного `segments:update`, profile/capacity/data changes. Ad
 | Portal-only external-operation cache sync consumes a transient one-time grant before durable storage, verifies the complete closure/binding preimage, preserves unrelated cache rows and activates the manifest last | `mcd_agent/external_operation_cache.py`, `mcd_agent/commercial_self_hosted.py`, `mcd_agent/daemon.py` | `tests/test_connected_host_lifecycle.py`, `tests/test_commercial_generic.py` grant non-persistence/replay evidence; MCC 3.2.1 closure `sha256:ca8140086414c3cee58b5431dc652a7933b599f56c85a62a6514bcd934ac3e70` |
 | connected-host lifecycle is an exact host-scoped external binding with preflight/create/receipt-owned cleanup/recreate; stable target UID forbids `@host`, exact binding/artifact/profile pins are checked before the existing offline-only runner, and only create/recreate ownership receipts authorize Portal projection | `mcd_agent/connected_host_lifecycle.py`, `mcd_agent/commercial_primitives.py`, `mcd_agent/commercial_generic.py` | `tests/test_connected_host_lifecycle.py`, `tests/test_commercial_generic.py`; binding `sha256:79d7ba83ba2bfab1acc01ab237bd6ad30276f3f3597fec26086b608ad784798f` |
 | connected-host source export resolves all local paths/DB access inside MCD, admits only exact installation+operation identities, delegates archive semantics to the immutable external artifact, validates regular-file pins and supports secret-free read-only `rollback=not_needed` framing/idempotent replay | `mcd_agent/connected_host_source_export.py`, `mcd_agent/custom_scripts.py`, `mcd_agent/external_operation_cache.py`, `mcd_agent/commercial_self_hosted.py` | `tests/test_connected_host_source_export.py`; closure `sha256:627783f0311aba277289ed1d99e040270de7e1e133c41371b0735277952b92b9`, binding `sha256:e7105ddb31a01185784e4e7d66e3e688e39d03fcc5b3ac2db89a4819b9ad42d2` |
-| connected-host prepare/pre-clean accepts only stable UID/DNS/policy strings, resolves exact local legacy identity inside MCD without secrets, admits one immutable external binding, and proves certificate/unrelated-boundary preservation plus command-specific post-state before success | `mcd_agent/connected_host_prerequisites.py`, `mcd_agent/external_operation_cache.py`, `mcd_agent/commercial_primitives.py`, `mcd_agent/instance_delete.py` | `tests/test_connected_host_prerequisites.py`, `tests/test_instance_delete_cli.py`; MCC revision `1.0.5`, closure `sha256:ad4ecf473da01734b7c68742b2980253756b4499209195e224949e03301454c2`, binding `sha256:14b8ac72b4f9f7b0e14f213ef887d2f027dea2c8c4ec0f39bd04e5b6a25f6272` |
+| connected-host prepare/pre-clean accepts only stable UID/DNS/policy strings, resolves exact local legacy identity inside MCD without secrets, admits one immutable external binding, and proves certificate/unrelated-boundary preservation plus command-specific post-state before success | `mcd_agent/connected_host_prerequisites.py`, `mcd_agent/external_operation_cache.py`, `mcd_agent/commercial_primitives.py`, `mcd_agent/instance_delete.py` | `tests/test_connected_host_prerequisites.py`, `tests/test_instance_delete_cli.py`; MCC revision `1.0.6`, closure `sha256:4eb676da655913a625a26ac8260031eeb272766d3c75ab01d6b9d58ec87e17bd`, binding `sha256:b7feaa9c6e221f5b9da31e24a284e16a804340a8ef0a33e3598df07d3df4a7a3` |
 | host-first Portal registration binds an activated MCD host before any Mautic instance exists; request contains only local DNS identity/display name, and the response must create a passive host installation with an active empty-inventory connection | `mcd_agent/commercial_portal.py`, `mcd_agent/commercial_host_registration.py`, `mcd_agent/cli.py` | `tests/test_commercial_portal.py`, redacted `portal-mcd-host-register-response-v1` |
 | self-hosted v2.1 candidate jobs may omit stage metadata for a whole external composition; supplied `stage_selection` must structurally match `execution.stage`, without embedded stage-name/order recipes; existing receipts remain | `mcd_agent/commercial_portal.py`, `mcd_agent/commercial_self_hosted.py`, `mcd_agent/scenario_launcher.py` | `tests/test_commercial_self_hosted_v2.py`, redacted stage/terminal receipts |
 | manual existing commercial-key fallback keeps pending/active/disconnected state idempotently | `mcd_agent/commercial_manual_activation.py`, `mcd_agent/commercial_portal.py`, `mcd_agent/daemon.py` | `tests/test_commercial_manual_activation.py`, redacted `mcd-commercial-manual-activation-receipt-v1` |
@@ -2026,7 +2026,7 @@ certificate. Простая декларация списка «preserved» бе
 в общий `mautic_host_prerequisites_external_operation_failed`; произвольный
 stdout или невалидные поля в receipt не проходят.
 
-Revision `1.0.5` оставляет этот public failure contract неизменным и хранит
+Revision `1.0.6` оставляет этот public failure contract неизменным и хранит
 подробности компенсации только в mode-0600 private artifact receipt. До первой
 target mutation recipe fail-closed проверяет отсутствие target vhost и
 доступность private receipt root, включая replay. HTTP-01 выполняется внутри
@@ -2038,21 +2038,23 @@ profile-pinned dual-stack UFW window: lock и process-start-bound holders
 certificate paths является `not_needed`, а не ложной ошибкой rollback.
 
 UFW сохраняет `comment` в `user.rules` и `user6.rules` как hex-представление
-UTF-8 marker. Поэтому revision `1.0.5` проверяет ожидаемый hex marker отдельно
+UTF-8 marker. Поэтому revision `1.0.6` проверяет ожидаемый hex marker отдельно
 в каждом семействе и fail-closed откатывает окно, если отсутствует хотя бы одна
 запись. Plaintext marker не считается доказательством правила. Revision `1.0.4`
-остаётся неизменной историей: её plaintext-проверка могла ложно сообщить
+остаётся историей с plaintext-проверкой, а revision `1.0.5` — историей с
+ошибочно double-escaped `\\s` в raw regex. Обе могли ложно сообщить
 `ufw_dual_stack_rule_missing`, но уже созданные tagged rules при этом удалялись
-с восстановлением точных baseline hashes.
+с восстановлением точных baseline hashes. В `1.0.6` single-escaped `\s`
+проверен на точных IPv4/IPv6 tuple-строках UFW 0.36.2.
 
-Выбранная immutable revision для этого контракта — MCC `1.0.5`: closure
-`sha256:ad4ecf473da01734b7c68742b2980253756b4499209195e224949e03301454c2`
-(50600 bytes), binding
-`sha256:14b8ac72b4f9f7b0e14f213ef887d2f027dea2c8c4ec0f39bd04e5b6a25f6272`,
-executable `e4d7bf7acbc4d73be40e9d80d1a44c298a59c75a330c15560f1b85efe5000f10`
-и profile `fdf10a4d2344ffcc7fe23d849e32477e96dbbddac673e4d1c354e5792bbadc96`.
-Published revisions `1.0.3` и `1.0.4` остаются неизменной историей и не
-переиспользуются для исправленного artifact/profile.
+Выбранная immutable revision для этого контракта — MCC `1.0.6`: closure
+`sha256:4eb676da655913a625a26ac8260031eeb272766d3c75ab01d6b9d58ec87e17bd`
+(50581 bytes), binding
+`sha256:b7feaa9c6e221f5b9da31e24a284e16a804340a8ef0a33e3598df07d3df4a7a3`,
+executable `111272af7fdfabd8d739648149dd7ba02870ff01cd1e6e99d319056c1a08c774`
+и profile `057a8df6fcbe11e86e3acfe6309593afa16e75cc8563d6fe94dd2e733ccc8ba9`.
+Published revisions `1.0.3`, `1.0.4` и `1.0.5` остаются неизменной историей и
+не переиспользуются для исправленного artifact/profile.
 Независимый admission обязан выполнить полный
 `stage_transient_delivery → sync_binding → installed_binding` на этих байтах;
 совпадение только catalog metadata недостаточно. Rejected revision `1.0.2`

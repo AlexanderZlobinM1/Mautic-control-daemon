@@ -32,7 +32,7 @@ def deterministic_tar(files):
     return out.getvalue()
 
 
-def build_closure(tmp_path: Path, revision: str = "1.0.5"):
+def build_closure(tmp_path: Path, revision: str = "1.0.6"):
     cfg = SimpleNamespace(custom_cache_dir=str(tmp_path / "custom"))
     root = Path(cfg.custom_cache_dir)
     root.mkdir(parents=True, exist_ok=True)
@@ -197,31 +197,31 @@ def test_cache_sync_admits_exact_prerequisites_binding(tmp_path):
 
 
 def test_cache_sync_atomically_activates_new_revision_and_preserves_history(tmp_path):
-    cfg, old_command, old_closure, _old_binding_sha = build_closure(tmp_path, "1.0.4")
+    cfg, old_command, old_closure, _old_binding_sha = build_closure(tmp_path, "1.0.5")
     old_job = stage_transient_delivery(
         old_command, config=cfg, downloader=lambda **_kwargs: old_closure,
     )
-    with patch.object(prerequisites, "CATALOG_ITEM_REVISION", "1.0.4"):
+    with patch.object(prerequisites, "CATALOG_ITEM_REVISION", "1.0.5"):
         assert sync_binding(old_job, config=cfg)["status"] == "succeeded"
     before = json.loads((Path(cfg.custom_cache_dir) / "manifest.json").read_text())
     old_selector = before["active_bindings"][prerequisites.BINDING_SCHEMA]
     old_identity = Path(cfg.custom_cache_dir) / old_selector["cache_file"]
     old_identity_bytes = old_identity.read_bytes()
 
-    cfg, new_command, new_closure, new_binding_sha = build_closure(tmp_path, "1.0.5")
+    cfg, new_command, new_closure, new_binding_sha = build_closure(tmp_path, "1.0.6")
     new_job = stage_transient_delivery(
         new_command, config=cfg, downloader=lambda **_kwargs: new_closure,
     )
     assert sync_binding(new_job, config=cfg) == {
         "status": "succeeded",
         "catalog_item_id": prerequisites.CATALOG_ITEM_ID,
-        "catalog_item_revision": "1.0.5",
+        "catalog_item_revision": "1.0.6",
         "binding_schema": prerequisites.BINDING_SCHEMA,
         "binding_sha256": new_binding_sha,
         "closure_digest": new_command["input"]["closure_digest"],
     }
     admitted = prerequisites.installed_binding(cfg)
-    assert admitted["catalog_item_revision"] == "1.0.5"
+    assert admitted["catalog_item_revision"] == "1.0.6"
     assert admitted["binding_sha256"] == new_binding_sha
 
     manifest_path = Path(cfg.custom_cache_dir) / "manifest.json"
@@ -230,8 +230,8 @@ def test_cache_sync_atomically_activates_new_revision_and_preserves_history(tmp_
         row["key"] for row in manifest["items"]
         if row.get("key", "").startswith("mautic-connected-host-prerequisites-v")
     ] == [
-        "mautic-connected-host-prerequisites-v1.0.4",
         "mautic-connected-host-prerequisites-v1.0.5",
+        "mautic-connected-host-prerequisites-v1.0.6",
     ]
     assert len([
         row for row in manifest["operation_bindings"]
@@ -252,14 +252,14 @@ def test_cache_sync_atomically_activates_new_revision_and_preserves_history(tmp_
 
 
 def test_cache_sync_revision_drift_fails_before_active_selector_changes(tmp_path):
-    cfg, old_command, old_closure, _old_binding_sha = build_closure(tmp_path, "1.0.4")
+    cfg, old_command, old_closure, _old_binding_sha = build_closure(tmp_path, "1.0.5")
     old_job = stage_transient_delivery(
         old_command, config=cfg, downloader=lambda **_kwargs: old_closure,
     )
-    with patch.object(prerequisites, "CATALOG_ITEM_REVISION", "1.0.4"):
+    with patch.object(prerequisites, "CATALOG_ITEM_REVISION", "1.0.5"):
         assert sync_binding(old_job, config=cfg)["status"] == "succeeded"
 
-    cfg, new_command, new_closure, _new_binding_sha = build_closure(tmp_path, "1.0.5")
+    cfg, new_command, new_closure, _new_binding_sha = build_closure(tmp_path, "1.0.6")
     with tarfile.open(fileobj=io.BytesIO(new_closure), mode="r:gz") as archive:
         incoming_manifest = json.load(archive.extractfile("manifest.json"))
     identity_sha = next(
@@ -367,7 +367,7 @@ def test_preclean_replay_uses_operation_bound_secret_free_tombstone(tmp_path):
     )
     job = {"installation": {"installation_id": "control-1", "dns_name": "control.example.com"}}
     binding = {
-        "catalog_item_revision": "1.0.5",
+        "catalog_item_revision": "1.0.6",
         "artifact_sha256": "c" * 64,
         "profile_sha256": "d" * 64,
         "binding_sha256": "sha256:" + "b" * 64,
@@ -431,7 +431,7 @@ def test_preclean_absent_target_without_matching_tombstone_fails_closed(tmp_path
         config_file_path=str(config_file),
     )
     binding = {
-        "catalog_item_revision": "1.0.5",
+        "catalog_item_revision": "1.0.6",
         "artifact_sha256": "c" * 64,
         "profile_sha256": "d" * 64,
         "binding_sha256": "sha256:" + "b" * 64,
@@ -459,7 +459,7 @@ def test_preclean_absent_target_without_matching_tombstone_fails_closed(tmp_path
 
 def test_preclean_result_requires_equal_certificate_and_boundary_hashes():
     binding = {
-        "catalog_item_revision": "1.0.5",
+        "catalog_item_revision": "1.0.6",
         "artifact_sha256": "c" * 64,
         "profile_sha256": "d" * 64,
         "binding_sha256": "sha256:" + "b" * 64,
@@ -473,7 +473,7 @@ def test_preclean_result_requires_equal_certificate_and_boundary_hashes():
         "mutation_started": True, "rollback": "not_needed",
         "artifact_binding": {
             "catalog_item_id": prerequisites.CATALOG_ITEM_ID,
-            "catalog_item_revision": "1.0.5", "artifact_sha256": "c" * 64,
+            "catalog_item_revision": "1.0.6", "artifact_sha256": "c" * 64,
             "profile_sha256": "d" * 64, "binding_sha256": "sha256:" + "b" * 64,
         },
         "preserved_boundaries": {
@@ -511,7 +511,7 @@ def test_execute_passes_only_mcd_resolved_context_to_existing_runner():
         "binding_sha256": "sha256:" + "b" * 64,
         "artifact_sha256": "c" * 64,
         "profile_sha256": "d" * 64,
-        "catalog_item_revision": "1.0.5",
+        "catalog_item_revision": "1.0.6",
     }
     operation_input = input_map()
     context = {
@@ -529,7 +529,7 @@ def test_execute_passes_only_mcd_resolved_context_to_existing_runner():
         "source_export_roots": [],
         "artifact_binding": {
             "catalog_item_id": prerequisites.CATALOG_ITEM_ID,
-            "catalog_item_revision": "1.0.5",
+            "catalog_item_revision": "1.0.6",
             "artifact_sha256": "c" * 64,
             "profile_sha256": "d" * 64,
             "binding_sha256": "sha256:" + "b" * 64,
@@ -543,7 +543,7 @@ def test_execute_passes_only_mcd_resolved_context_to_existing_runner():
         "mutation_started": True, "rollback": "not_needed",
         "artifact_binding": {
             "catalog_item_id": prerequisites.CATALOG_ITEM_ID,
-            "catalog_item_revision": "1.0.5", "artifact_sha256": "c" * 64,
+            "catalog_item_revision": "1.0.6", "artifact_sha256": "c" * 64,
             "profile_sha256": "d" * 64, "binding_sha256": "sha256:" + "b" * 64,
         },
         "preserved_boundaries": {
@@ -601,7 +601,7 @@ def test_execute_preserves_valid_external_failure_evidence():
         "binding_sha256": "sha256:" + "b" * 64,
         "artifact_sha256": "c" * 64,
         "profile_sha256": "d" * 64,
-        "catalog_item_revision": "1.0.5",
+        "catalog_item_revision": "1.0.6",
     }
     operation_input = input_map()
     nested = {
@@ -652,7 +652,7 @@ def test_execute_reduces_invalid_external_failure_output():
         "binding_sha256": "sha256:" + "b" * 64,
         "artifact_sha256": "c" * 64,
         "profile_sha256": "d" * 64,
-        "catalog_item_revision": "1.0.5",
+        "catalog_item_revision": "1.0.6",
     }
     operation_input = input_map()
     job = {
@@ -680,7 +680,7 @@ def test_execute_preserves_bounded_pre_execution_operation_code():
         "binding_sha256": "sha256:" + "b" * 64,
         "artifact_sha256": "c" * 64,
         "profile_sha256": "d" * 64,
-        "catalog_item_revision": "1.0.5",
+        "catalog_item_revision": "1.0.6",
     }
     job = {
         "installation": {"installation_id": "control-1", "dns_name": "control.example.com"},
@@ -752,7 +752,7 @@ def test_generic_runner_serializes_exact_resolved_operation_context(tmp_path):
         "source_export_roots": [],
         "artifact_binding": {
             "catalog_item_id": prerequisites.CATALOG_ITEM_ID,
-            "catalog_item_revision": "1.0.5",
+            "catalog_item_revision": "1.0.6",
             "artifact_sha256": digest,
             "profile_sha256": "b" * 64,
             "binding_sha256": "sha256:" + "c" * 64,
