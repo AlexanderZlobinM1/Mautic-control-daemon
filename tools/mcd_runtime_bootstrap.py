@@ -949,13 +949,29 @@ def _systemd_dropin_path(systemd_dir: Path, service_name: str) -> Path:
     return systemd_dir / f"{service_name}.service.d" / SERVICE_DROPIN_NAME
 
 
-def _write_systemd_dropin(systemd_dir: Path, service_name: str, install_dir: Path) -> tuple[Path, bytes | None]:
+def _systemd_quote(value: Path | str) -> str:
+    text = str(value)
+    if "\n" in text or "\r" in text or "\0" in text:
+        raise BridgeError("systemd unit value contains a forbidden control character")
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _write_systemd_dropin(
+    systemd_dir: Path,
+    service_name: str,
+    install_dir: Path,
+    config: Path,
+) -> tuple[Path, bytes | None]:
     path = _systemd_dropin_path(systemd_dir, service_name)
     previous = path.read_bytes() if path.exists() else None
     path.parent.mkdir(parents=True, exist_ok=True)
+    python = _venv_python(install_dir)
     path.write_text(
         "[Service]\n"
+        "ExecStart=\n"
+        f"ExecStart={_systemd_quote(python)} -I -B -m mcd_agent run --config {_systemd_quote(config)}\n"
         f"WorkingDirectory={install_dir}\n"
+        f"Environment={_systemd_quote('MCD_CONFIG=' + str(config))}\n"
         "KillMode=process\n",
         encoding="utf-8",
     )
@@ -970,8 +986,72 @@ def _restore_dropin(path: Path, previous: bytes | None) -> None:
         path.write_bytes(previous)
 
 
+def _retire_obsolete_dev_migration_dropin(
+    systemd_dir: Path,
+    service_name: str,
+    install_dir: Path,
+) -> tuple[Path | None, bytes | None]:
+    path = systemd_dir / f"{service_name}.service.d" / "98-mcd-active-runtime-migration.conf"
+    if not path.exists():
+        return None, None
+    previous = path.read_bytes()
+    text = previous.decode("utf-8", errors="replace")
+    required = (f"{install_dir}-dev-1.7/", "mcd-two-tenant-fixture/mcd.toml")
+    if not all(marker in text for marker in required):
+        raise BridgeError(f"refusing to retire unrecognized service drop-in: {path}")
+    path.unlink()
+    return path, previous
+
+
 def _systemd_reload(systemctl: str) -> None:
     _run([systemctl, "daemon-reload"], cwd=Path("/"))
+
+
+def _canonical_service_readback(
+    systemctl: str,
+    service_name: str,
+    install_dir: Path,
+    config: Path,
+) -> dict[str, Any]:
+    cat = _run([systemctl, "cat", service_name], cwd=Path("/"), check=False)
+    show = _run(
+        [
+            systemctl,
+            "show",
+            service_name,
+            "--property=ExecStart",
+            "--property=WorkingDirectory",
+            "--property=KillMode",
+            "--property=Environment",
+            "--no-pager",
+        ],
+        cwd=Path("/"),
+        check=False,
+    )
+    if cat.returncode != 0 or show.returncode != 0:
+        raise BridgeError(f"cannot read canonical systemd service: {service_name}")
+    unit_text = str(cat.stdout or "")
+    effective = str(show.stdout or "")
+    forbidden = (f"{install_dir}-dev-1.7", "mcd-two-tenant-fixture", "fixture/mcd.toml")
+    if any(marker in unit_text or marker in effective for marker in forbidden):
+        raise BridgeError("canonical systemd service retains a development fixture reference")
+    expected_python = str(_venv_python(install_dir))
+    expected_config = str(config)
+    checks = {
+        "exec_python": expected_python in effective,
+        "exec_config": f"--config {expected_config}" in effective,
+        "working_directory": f"WorkingDirectory={install_dir}" in effective,
+        "kill_mode": "KillMode=process" in effective,
+    }
+    if not all(checks.values()):
+        raise BridgeError(f"canonical systemd service mismatch: {checks}")
+    return {
+        "exec_python": expected_python,
+        "config": expected_config,
+        "working_directory": str(install_dir),
+        "kill_mode": "process",
+        "development_fixture_refs": 0,
+    }
 
 
 def _restart_and_health(systemctl: str, service_name: str, timeout_sec: int) -> dict[str, Any]:
@@ -1156,6 +1236,9 @@ def bridge(args: argparse.Namespace) -> dict[str, Any]:
     before_scheduler = _scheduler_status(install_dir, config)
     systemd_path: Path | None = None
     previous_dropin: bytes | None = None
+    obsolete_dropin_path: Path | None = None
+    obsolete_dropin_previous: bytes | None = None
+    canonical_service: dict[str, Any] | None = None
     switched = False
     old_source_moved = False
     migration_complete = False
@@ -1217,7 +1300,17 @@ def bridge(args: argparse.Namespace) -> dict[str, Any]:
                 config_migration = _migrate_runtime_config_includes(config, install_dir, runtime_dir)
 
                 if not args.no_systemd:
-                    systemd_path, previous_dropin = _write_systemd_dropin(systemd_dir, args.service_name, install_dir)
+                    systemd_path, previous_dropin = _write_systemd_dropin(
+                        systemd_dir,
+                        args.service_name,
+                        install_dir,
+                        config,
+                    )
+                    obsolete_dropin_path, obsolete_dropin_previous = _retire_obsolete_dev_migration_dropin(
+                        systemd_dir,
+                        args.service_name,
+                        install_dir,
+                    )
                 if not args.no_systemd:
                     _systemd_reload(args.systemctl)
 
@@ -1236,6 +1329,21 @@ def bridge(args: argparse.Namespace) -> dict[str, Any]:
                 service_result: dict[str, Any] = {"skipped": True}
                 if not args.no_systemd:
                     service_result = _restart_and_health(args.systemctl, args.service_name, args.health_timeout_sec)
+                    systemd_path.unlink()
+                    _systemd_reload(args.systemctl)
+                    canonical_service = _canonical_service_readback(
+                        args.systemctl,
+                        args.service_name,
+                        install_dir,
+                        config,
+                    )
+                    service_result = _restart_and_health(args.systemctl, args.service_name, args.health_timeout_sec)
+                    canonical_service = _canonical_service_readback(
+                        args.systemctl,
+                        args.service_name,
+                        install_dir,
+                        config,
+                    )
 
                 post_scheduler = _scheduler_status(install_dir, config)
                 post_import = _install_runtime_probe(install_dir, target)
@@ -1270,10 +1378,15 @@ def bridge(args: argparse.Namespace) -> dict[str, Any]:
                     },
                     "service": {
                         "systemd": not bool(args.no_systemd),
-                        "dropin": str(systemd_path) if systemd_path else "",
+                        "dropin": "",
+                        "transition_dropin_retired": str(systemd_path) if systemd_path else "",
+                        "obsolete_dev_dropin_retired": (
+                            str(obsolete_dropin_path) if obsolete_dropin_path else ""
+                        ),
                         "working_directory": str(install_dir),
                         "kill_mode": "process",
                         "health": service_result,
+                        "canonical_readback": canonical_service,
                     },
                     "scheduler_barrier_created": bool(barrier_created),
                     "rollback_source_retained": False,
@@ -1292,6 +1405,8 @@ def bridge(args: argparse.Namespace) -> dict[str, Any]:
                     os.replace(old_src, original_dir)
                 if systemd_path is not None:
                     _restore_dropin(systemd_path, previous_dropin)
+                    if obsolete_dropin_path is not None:
+                        _restore_dropin(obsolete_dropin_path, obsolete_dropin_previous)
                     if not args.no_systemd:
                         _systemd_reload(args.systemctl)
                 if legacy_runtime_snapshot is not None:

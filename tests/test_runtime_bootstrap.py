@@ -80,6 +80,69 @@ def test_bridge_removes_only_stale_mcd_distribution_metadata(tmp_path: Path) -> 
     assert unrelated.is_dir()
 
 
+def test_runtime_dropin_overrides_stale_execstart_and_config_environment(tmp_path: Path) -> None:
+    bridge = _load_bridge()
+    install = tmp_path / "install root"
+    config = install / "etc" / "mcd.toml"
+    python = install / "venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    config.parent.mkdir(parents=True)
+    python.touch()
+    config.write_text("[config]\n", encoding="utf-8")
+    systemd = tmp_path / "systemd"
+
+    path, previous = bridge._write_systemd_dropin(systemd, "mcd", install, config)
+
+    assert previous is None
+    assert path.name == bridge.SERVICE_DROPIN_NAME
+    assert path.read_text(encoding="utf-8") == (
+        "[Service]\n"
+        "ExecStart=\n"
+        f'ExecStart="{python}" -I -B -m mcd_agent run --config "{config}"\n'
+        f"WorkingDirectory={install}\n"
+        f'Environment="MCD_CONFIG={config}"\n'
+        "KillMode=process\n"
+    )
+
+
+def test_bridge_retires_only_recognized_dev_migration_dropin(tmp_path: Path) -> None:
+    bridge = _load_bridge()
+    install = tmp_path / "mcd"
+    path = tmp_path / "systemd" / "mcd.service.d" / "98-mcd-active-runtime-migration.conf"
+    path.parent.mkdir(parents=True)
+    payload = (
+        "[Service]\nExecStart=\n"
+        f"ExecStart={install}-dev-1.7/venv/bin/python -m mcd_agent run "
+        f"--config {install}-dev-1.7/var/mcd-two-tenant-fixture/mcd.toml\n"
+    ).encode()
+    path.write_bytes(payload)
+
+    retired, previous = bridge._retire_obsolete_dev_migration_dropin(
+        tmp_path / "systemd", "mcd", install
+    )
+
+    assert retired == path
+    assert previous == payload
+    assert not path.exists()
+
+
+def test_bridge_refuses_to_retire_foreign_same_named_dropin(tmp_path: Path) -> None:
+    bridge = _load_bridge()
+    install = tmp_path / "mcd"
+    path = tmp_path / "systemd" / "mcd.service.d" / "98-mcd-active-runtime-migration.conf"
+    path.parent.mkdir(parents=True)
+    path.write_text("[Service]\nEnvironment=FOREIGN=1\n", encoding="utf-8")
+
+    try:
+        bridge._retire_obsolete_dev_migration_dropin(tmp_path / "systemd", "mcd", install)
+    except bridge.BridgeError as exc:
+        assert "unrecognized service drop-in" in str(exc)
+    else:
+        raise AssertionError("foreign drop-in must not be removed")
+
+    assert path.is_file()
+
+
 def test_bridge_successful_replay_is_read_only_and_hash_bound(tmp_path: Path) -> None:
     bridge = _load_bridge()
     install = tmp_path / "install"

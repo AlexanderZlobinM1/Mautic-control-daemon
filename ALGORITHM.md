@@ -3089,6 +3089,14 @@ include graph, поэтому secret-bearing `mcd.local.toml` остаётся �
 полем `agent_source_revision`. Поле `agent_source_version` не переиспользуется:
 оно сохраняет прежнюю семантику версии explicit source tree, а source-free
 runtime не ищет checkout и не зависит от `<install>/src`.
+Runtime bridge использует самый приоритетный owned systemd drop-in только как
+атомарный transition: в нём полный canonical `ExecStart` с фактическим
+`config_file_path` и тот же `MCD_CONFIG`. Узнаваемый старый
+`98-mcd-active-runtime-migration.conf` удаляется только при точном совпадении
+его dev-fixture markers. После первого health временный drop-in удаляется,
+canonical base unit перечитывается через systemd и повторно проходит restart /
+health; итоговый effective service не содержит `<install>-dev-1.7` или fixture
+refs. Ошибка возвращает byte-for-byte оба прежних drop-in вместе с runtime.
 
 Первое применение cfg при отсутствии explicit runtime setting берёт только
 ref из verified ready manifest рядом с managed venv и предварительно готовит
