@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -185,6 +186,45 @@ class InstanceDeleteCliTests(unittest.TestCase):
         self.assertEqual(order, ["mail", "db", "files"])
         self.assertEqual(result["deleted"]["local_mail"], ["shop.example.com"])
 
+    def test_delete_preserves_certificate_when_explicitly_requested(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "public_html"
+            root.mkdir()
+            plan = instance_delete.InstanceDeletePlan(
+                root=root,
+                local_php=None,
+                domains=["shop.example.com"],
+                nginx_paths=[],
+                db_name="",
+                db_host="",
+                db_port="",
+                db_user="",
+                db_password="",
+                delete_files=False,
+                delete_vhost=True,
+                delete_db=False,
+            )
+            with (
+                patch.object(instance_delete, "build_delete_plan", return_value=plan),
+                patch.object(instance_delete.os, "geteuid", return_value=0),
+                patch.object(instance_delete, "_remove_nginx_configs_safely", return_value=set()),
+                patch("mcd_agent.local_mail.disable_local_mail", return_value={"already_disabled": True}),
+                patch.object(instance_delete, "_remove_dedicated_certificate") as remove_certificate,
+                patch("mcd_agent.inventory.InstanceInventory.rescan", return_value=0),
+            ):
+                result = instance_delete.delete_instance_artifacts(
+                    SimpleNamespace(state_db_path=str(Path(tmp) / "state.db")),
+                    root=str(root),
+                    domains=["shop.example.com"],
+                    delete_vhost=True,
+                    preserve_certificates=True,
+                    yes=True,
+                )
+
+        remove_certificate.assert_not_called()
+        self.assertEqual(result["deleted"]["certificates"], [])
+        self.assertIn("certificate preserved by request: shop.example.com", result["warnings"])
+
     def test_delete_can_use_absolute_root_after_inventory_row_is_gone(self) -> None:
         cfg = SimpleNamespace(state_db_path="/tmp/mcd-state.db")
         root = "/var/www/ss/public_html"
@@ -208,6 +248,8 @@ class InstanceDeleteCliTests(unittest.TestCase):
 
     def test_instance_delete_main_allows_missing_absolute_root(self) -> None:
         calls: list[dict[str, object]] = []
+        stdout = io.StringIO()
+        stderr = io.StringIO()
 
         def select_root(_cfg: object, root: str | None, **kwargs: object) -> str:
             calls.append({"root": root, **kwargs})
@@ -220,19 +262,24 @@ class InstanceDeleteCliTests(unittest.TestCase):
                 "--root",
                 "/var/www/ss/public_html",
                 "--delete-files",
+                "--preserve-certificates",
                 "--yes",
                 "--json",
             ]),
             patch.object(cli, "load_config", return_value=SimpleNamespace(state_db_path="/tmp/mcd-state.db")),
-            patch.object(cli, "maybe_notify_update", return_value=None),
+            patch.object(cli, "maybe_notify_update", return_value="new version available"),
             patch.object(cli, "_select_root_for_ops", side_effect=select_root),
-            patch.object(cli, "delete_instance_artifacts", return_value={"status": "ok"}),
+            patch.object(cli, "delete_instance_artifacts", return_value={"status": "ok"}) as delete_call,
             patch.object(cli, "_push_state_after_change"),
-            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
         ):
             self.assertEqual(cli.main(), 0)
 
         self.assertEqual(calls, [{"root": "/var/www/ss/public_html", "allow_missing_absolute": True}])
+        self.assertTrue(delete_call.call_args.kwargs["preserve_certificates"])
+        self.assertEqual(json.loads(stdout.getvalue()), {"status": "ok"})
+        self.assertIn("NOTICE: new version available", stderr.getvalue())
 
     def test_delete_plan_uses_inventory_db_when_local_php_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

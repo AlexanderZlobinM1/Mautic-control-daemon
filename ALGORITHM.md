@@ -1180,6 +1180,7 @@ cycle без ручного `segments:update`, profile/capacity/data changes. Ad
 | Portal-only external-operation cache sync consumes a transient one-time grant before durable storage, verifies the complete closure/binding preimage, preserves unrelated cache rows and activates the manifest last | `mcd_agent/external_operation_cache.py`, `mcd_agent/commercial_self_hosted.py`, `mcd_agent/daemon.py` | `tests/test_connected_host_lifecycle.py`, `tests/test_commercial_generic.py` grant non-persistence/replay evidence; MCC 3.2.1 closure `sha256:ca8140086414c3cee58b5431dc652a7933b599f56c85a62a6514bcd934ac3e70` |
 | connected-host lifecycle is an exact host-scoped external binding with preflight/create/receipt-owned cleanup/recreate; stable target UID forbids `@host`, exact binding/artifact/profile pins are checked before the existing offline-only runner, and only create/recreate ownership receipts authorize Portal projection | `mcd_agent/connected_host_lifecycle.py`, `mcd_agent/commercial_primitives.py`, `mcd_agent/commercial_generic.py` | `tests/test_connected_host_lifecycle.py`, `tests/test_commercial_generic.py`; binding `sha256:79d7ba83ba2bfab1acc01ab237bd6ad30276f3f3597fec26086b608ad784798f` |
 | connected-host source export resolves all local paths/DB access inside MCD, admits only exact installation+operation identities, delegates archive semantics to the immutable external artifact, validates regular-file pins and supports secret-free read-only `rollback=not_needed` framing/idempotent replay | `mcd_agent/connected_host_source_export.py`, `mcd_agent/custom_scripts.py`, `mcd_agent/external_operation_cache.py`, `mcd_agent/commercial_self_hosted.py` | `tests/test_connected_host_source_export.py`; closure `sha256:627783f0311aba277289ed1d99e040270de7e1e133c41371b0735277952b92b9`, binding `sha256:e7105ddb31a01185784e4e7d66e3e688e39d03fcc5b3ac2db89a4819b9ad42d2` |
+| connected-host prepare/pre-clean accepts only stable UID/DNS/policy strings, resolves exact local legacy identity inside MCD without secrets, admits one immutable external binding, and proves certificate/unrelated-boundary preservation plus command-specific post-state before success | `mcd_agent/connected_host_prerequisites.py`, `mcd_agent/external_operation_cache.py`, `mcd_agent/commercial_primitives.py`, `mcd_agent/instance_delete.py` | `tests/test_connected_host_prerequisites.py`, `tests/test_instance_delete_cli.py`; MCC revision `1.0.3`, closure `sha256:48e9c0a3d44238a09636d9fdb9c1078342c5fef84b5cecaea577c00dc8a0ba56`, binding `sha256:59cae10656de0de427349dfa6003a47b100511fb15d48d3e7fe7ef7f26e7569b` |
 | host-first Portal registration binds an activated MCD host before any Mautic instance exists; request contains only local DNS identity/display name, and the response must create a passive host installation with an active empty-inventory connection | `mcd_agent/commercial_portal.py`, `mcd_agent/commercial_host_registration.py`, `mcd_agent/cli.py` | `tests/test_commercial_portal.py`, redacted `portal-mcd-host-register-response-v1` |
 | self-hosted v2.1 candidate jobs may omit stage metadata for a whole external composition; supplied `stage_selection` must structurally match `execution.stage`, without embedded stage-name/order recipes; existing receipts remain | `mcd_agent/commercial_portal.py`, `mcd_agent/commercial_self_hosted.py`, `mcd_agent/scenario_launcher.py` | `tests/test_commercial_self_hosted_v2.py`, redacted stage/terminal receipts |
 | manual existing commercial-key fallback keeps pending/active/disconnected state idempotently | `mcd_agent/commercial_manual_activation.py`, `mcd_agent/commercial_portal.py`, `mcd_agent/daemon.py` | `tests/test_commercial_manual_activation.py`, redacted `mcd-commercial-manual-activation-receipt-v1` |
@@ -1971,6 +1972,66 @@ Read-only terminal frame вправе иметь `rollback=not_needed`; framing 
 operation ID обязан вернуть те же pins, а mismatch/extra input завершается до
 source mutation. DEV46 cleanup запрещён до независимой проверки reversible
 export и restore-readability.
+
+Host preparation и первый cleanup legacy-инстанса идут отдельной capability
+`mautic_host_prerequisites/1.0`, а не частным helper или прямым SSH. Portal
+передаёт только exact six-string map: `operation_id`, стабильный
+`target_instance_uid` без `@host`, `target_dns`, DNS policy и обязательный
+`preserve_certificate=true`. Для `prepare_create` MCD требует отсутствие target
+в inventory; первый `preclean_legacy` требует ровно одну строку, одновременно
+совпавшую по UID и DNS. До внешней mutation MCD атомарно сохраняет mode-0600
+operation-ID-bound tombstone без секретов: стабильный UID/DNS, фактические
+root/domains/DB name/user, independently admitted artifact binding и полный
+список уже проверенных source-export roots. Повтор после удаления допускается
+только по точному tombstone того же operation ID, UID/DNS, binding и неизменному
+списку archive roots; отсутствие или конфликт закрываются ошибкой. Внешний
+recipe получает private secret-free context с active mcd-cli/config,
+`target_inventory.status=present|absent`, фактическими root/DB identity,
+`source_export_roots` и admitted artifact binding. Caller не передаёт OS path,
+argv, DB fact или credential; системные пути, parent policy, nginx/certbot и
+порядок компенсаций остаются в подписанном profile/artifact.
+
+Каждая команда имеет ровно один `(component, operation)` binding существующего
+generic runner. Внутренний recipe вправе переиспользовать внешние blocks в одном
+immutable executable, но не рекурсивно dispatch-ить другую composition.
+Admission recompute-проверяет binding identity, executable/profile bytes,
+operation bindings и exact input contract до изменения live manifest. Public
+terminal result обязан точно связать operation/UID/DNS/artifact binding,
+certificate before/after disposition, unrelated-boundary digest и полный
+command-specific post-state. `prepare_create` доказывает parent/certificate,
+удаление temporary vhost, `nginx -t` и DNS observation; `preclean_legacy`
+доказывает отсутствие только target root/vhost/DB/user/inventory при сохранённом
+certificate. Простая декларация списка «preserved» без before/after evidence не
+считается receipt.
+
+Выбранная immutable revision для этого контракта — MCC `1.0.3`: closure
+`sha256:48e9c0a3d44238a09636d9fdb9c1078342c5fef84b5cecaea577c00dc8a0ba56`
+(46976 bytes), binding
+`sha256:59cae10656de0de427349dfa6003a47b100511fb15d48d3e7fe7ef7f26e7569b`,
+executable `5895730b1ab5550a3196886228b30064c8e014c97cdd65a87e38d392a1dd627a`
+и profile `592f3f6be9838c5bcf04a1354b37d7b1520ca0fa54cd3b0fc0a4a52e328c36a9`.
+Независимый admission обязан выполнить полный
+`stage_transient_delivery → sync_binding → installed_binding` на этих байтах;
+совпадение только catalog metadata недостаточно. Rejected revision `1.0.2`
+остаётся неизменной и не допускается к публикации.
+
+Legacy deletion вызывается внешним recipe только через существующий
+`mcd-cli instance-delete --config <config> --root <root> --domain <domain> ...
+--db-name <db> --delete-files --delete-vhost --delete-db
+--preserve-certificates --yes --json`. `instance-delete` не принимает
+`--instance-uid`: identity разрешается MCD заранее, а recipe использует только
+полученные private facts. Флаг preservation безусловно запрещает certificate
+cleanup, не меняя прежнее поведение вызовов без него. JSON mode оставляет stdout
+одним JSON document (update notice уходит в stderr), поэтому wrapper fail-closed
+проверяет реальные `status/plan/deleted/warnings/instances`, independently
+проверяет все пары `files.tar.gz`/`database.sql.gz` из `source_export_roots`
+до и после cleanup и затем выполняет read-only
+`mcd-cli instances list --instance-uid ... --json`: только exit `2` с JSON `[]`
+является row-level доказательством отсутствия. Прямое чтение или изменение MCD
+inventory/state DB внешним recipe запрещено. Повтор для уже отсутствующего
+target остаётся идемпотентным только через operation-bound tombstone, scoped
+absence, `DROP ... IF EXISTS` и rescan; ownership receipt задним числом не
+синтезируется.
 
 Instance-scoped managed generic jobs carry the tenant `account_id` inside the
 job installation binding. MCD admits that value only when it exactly matches the

@@ -301,6 +301,8 @@ def sync_binding(job: Mapping[str, Any], *, config: Any) -> Mapping[str, Any]:
                 from mcd_agent.connected_host_lifecycle import installed_binding
             elif value["binding_schema"] == "mcd-mautic-connected-host-source-export-binding-v1":
                 from mcd_agent.connected_host_source_export import installed_binding
+            elif value["binding_schema"] == "mcd-mautic-connected-host-prerequisites-binding-v1":
+                from mcd_agent.connected_host_prerequisites import installed_binding
             else:
                 raise _fail("external_operation_cache_binding_schema_unsupported")
             admitted = installed_binding(SimpleNamespace(custom_cache_dir=str(validation_root)))

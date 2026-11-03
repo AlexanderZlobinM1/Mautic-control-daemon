@@ -625,7 +625,10 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
                     return {"status": "failed", "reason": "commercial_inventory_installation_binding_missing"}
                 capability_id = str((job.get("capability") or {}).get("capability_id") or "")
                 local_cfg = None
-                if capability_id in {"external_operation_cache", "mautic_lifecycle", "mautic_source_export"}:
+                if capability_id in {
+                    "external_operation_cache", "mautic_lifecycle", "mautic_source_export",
+                    "mautic_host_prerequisites",
+                }:
                     local_cfg = load_config(config.config_file_path, allow_recover_from_mcc=False)
                 return execute_generic_primitive(
                     job,

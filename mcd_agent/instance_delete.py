@@ -613,6 +613,7 @@ def delete_instance_artifacts(
     delete_files: bool = False,
     delete_vhost: bool = False,
     delete_db: bool = False,
+    preserve_certificates: bool = False,
     yes: bool = False,
     dry_run: bool = False,
 ) -> dict[str, Any]:
@@ -688,6 +689,9 @@ def delete_instance_artifacts(
         if not plan.nginx_paths:
             result["warnings"].append("no matching nginx vhost files found")
         for domain in plan.domains:
+            if preserve_certificates:
+                result["warnings"].append(f"certificate preserved by request: {domain}")
+                continue
             if domain not in retained_certificates:
                 rc, dump = _run(["nginx", "-T"], timeout_sec=30)
                 if rc != 0:

@@ -1033,7 +1033,7 @@ def run_configured_external_operation(
             value = {name: getattr(config, name, None) for name in declared}
             if any(not hasattr(config, name) for name in declared):
                 return 2, "custom_operation_mapping_runtime_mapping_invalid"
-        elif source == "mcd_resolved_source_installation_context":
+        elif source in {"mcd_resolved_operation_context", "mcd_resolved_source_installation_context"}:
             expected_schema = spec.get("schema")
             if (not isinstance(resolved_context, dict)
                     or not isinstance(expected_schema, str)
