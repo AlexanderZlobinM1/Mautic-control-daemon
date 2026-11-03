@@ -7,6 +7,31 @@ cycles. Локальная unit-матрица не использует product
 owner-labelled disposable M6/M7 sandbox, штатные Mautic commands, exact
 package/runtime SHA и реальный MCC/package/install receipt.
 
+## Connected-host prerequisites gate
+
+1. MCD допускает только immutable MCC revision `1.0.7` с exact closure
+   `sha256:064ad78086e71120185d3c10aa485078c2bad1b341bd65801cb2a6bb25d80e63`
+   и binding
+   `sha256:64ee3aa0923fca19d28160a3479dedab7822182a4d5e004a771b127bb62ce05c`.
+   Обязателен полный локальный проход
+   `stage_transient_delivery -> sync_binding -> installed_binding`; проверка
+   одних catalog metadata не считается admission.
+2. Native fixtures обязаны покрыть стандартные Certbot live symlinks в точный
+   `archive/<dns>`, broken/escape/mixed-generation ссылки, новый сертификат и
+   existing certificate. Вне exact archive target ни один symlink не допускается.
+3. После HTTP-01 temporary vhost отсутствует, `nginx -t` проходит, firewall
+   восстановлен, а renewal config указывает на существующий стабильный webroot,
+   confined к managed parent. Stale `.mcd-prerequisite-*` reference блокирует
+   `noop` и требует bounded repair.
+4. Public success receipt содержит exact `post_state.renewal` с полями
+   `config_path`, `webroot_path`, `webroot_exists`,
+   `confined_to_managed_parent`, `stale_temporary_reference_absent`; MCD
+   отвергает missing/extra/false fields и webroot вне reported parent.
+5. Любая ошибка после первой mutation, включая финальный postcheck и renewal
+   repair, остаётся внутри единого compensation path. Fixture доказывает
+   rollback certificate/vhost/root/firewall/renewal boundaries; только повтор
+   полностью валидного состояния возвращает честный `noop`.
+
 ## Mandatory self-update lifecycle gate
 
 1. Живой обычный PHP/Mautic console worker не блокирует self-update. Тест

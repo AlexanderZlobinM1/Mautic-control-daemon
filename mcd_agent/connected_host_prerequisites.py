@@ -31,7 +31,7 @@ BINDING_SCHEMA = "mcd-mautic-connected-host-prerequisites-binding-v1"
 CAPABILITY_ID = "mautic_host_prerequisites"
 CAPABILITY_VERSION = "1.0"
 CATALOG_ITEM_ID = "mcc.scenario.mautic-connected-host-prerequisites"
-CATALOG_ITEM_REVISION = "1.0.6"
+CATALOG_ITEM_REVISION = "1.0.7"
 COMPONENT = CAPABILITY_ID
 CONTEXT_SCHEMA = "mcd-mautic-connected-host-prerequisites-local-context-v1"
 FRAME_SCHEMA = "mcd-self-hosted-executable-output-v1"
@@ -657,16 +657,21 @@ def _validate_result(command_id: str, operation_input: Mapping[str, str], bindin
     post_state = result["post_state"]
     if command_id == "prepare_create":
         if set(post_state) != {
-            "managed_root_parent", "certificate", "temporary_vhost_absent", "nginx_valid", "dns",
+            "managed_root_parent", "certificate", "renewal", "temporary_vhost_absent", "nginx_valid", "dns",
         }:
             raise _fail("mautic_host_prerequisites_result_invalid")
         parent = post_state["managed_root_parent"]
         material = post_state["certificate"]
+        renewal = post_state["renewal"]
         dns = post_state["dns"]
+        parent_path = Path(str(parent.get("path") or "")) if isinstance(parent, Mapping) else Path()
+        renewal_config = Path(str(renewal.get("config_path") or "")) if isinstance(renewal, Mapping) else Path()
+        renewal_webroot = Path(str(renewal.get("webroot_path") or "")) if isinstance(renewal, Mapping) else Path()
         if (not isinstance(parent, Mapping)
                 or set(parent) != {"path", "exists", "owned_by_operation"}
                 or not isinstance(parent.get("path"), str)
-                or not Path(parent["path"]).is_absolute()
+                or not parent_path.is_absolute()
+                or ".." in parent_path.parts
                 or parent.get("exists") is not True
                 or not isinstance(parent.get("owned_by_operation"), bool)
                 or not isinstance(material, Mapping)
@@ -676,6 +681,22 @@ def _validate_result(command_id: str, operation_input: Mapping[str, str], bindin
                 or _SHA.fullmatch(str(material.get("privkey_sha256") or "")) is None
                 or material.get("covers_target_dns") is not True
                 or material.get("current") is not True
+                or not isinstance(renewal, Mapping)
+                or set(renewal) != {
+                    "config_path", "webroot_path", "webroot_exists",
+                    "confined_to_managed_parent", "stale_temporary_reference_absent",
+                }
+                or not isinstance(renewal.get("config_path"), str)
+                or not renewal_config.is_absolute()
+                or ".." in renewal_config.parts
+                or not isinstance(renewal.get("webroot_path"), str)
+                or not renewal_webroot.is_absolute()
+                or ".." in renewal_webroot.parts
+                or renewal_webroot == parent_path
+                or parent_path not in renewal_webroot.parents
+                or renewal.get("webroot_exists") is not True
+                or renewal.get("confined_to_managed_parent") is not True
+                or renewal.get("stale_temporary_reference_absent") is not True
                 or post_state.get("temporary_vhost_absent") is not True
                 or post_state.get("nginx_valid") is not True
                 or not isinstance(dns, Mapping)

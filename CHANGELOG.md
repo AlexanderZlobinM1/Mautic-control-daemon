@@ -10,6 +10,11 @@
   after complete binding/artifact/profile verification, execute them through the
   existing offline runner, and reject host-qualified instance UIDs such as
   `uid@host`.
+- Admit connected-host prerequisites revision 1.0.7 only. Require explicit
+  renewal evidence in prepare receipts, confine the stable challenge webroot to
+  the managed parent, and reject stale temporary renewal paths before success.
+  The external artifact owns Certbot symlink validation and post-mutation
+  compensation; MCD independently validates the exact public result contract.
 - Preserve production custom-manifest v1 group rows and multi-entrypoint bundle
   rows while append-only merging an external-operation binding closure.
 - NOT READY: remaining embedded implementations/callers, external replacement
