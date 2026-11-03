@@ -34,6 +34,7 @@ CATALOG_ITEM_ID = "mcc.scenario.mautic-connected-host-prerequisites"
 CATALOG_ITEM_REVISION = "1.0.3"
 COMPONENT = CAPABILITY_ID
 CONTEXT_SCHEMA = "mcd-mautic-connected-host-prerequisites-local-context-v1"
+FRAME_SCHEMA = "mcd-self-hosted-executable-output-v1"
 RESULT_SCHEMA = "mcd-mautic-connected-host-prerequisites-v1"
 TOMBSTONE_SCHEMA = "mcd-mautic-connected-host-prerequisites-tombstone-v1"
 
@@ -673,6 +674,56 @@ def _validate_result(command_id: str, operation_input: Mapping[str, str], bindin
     return dict(result)
 
 
+def _validate_failure_frame(
+    command_id: str,
+    operation_input: Mapping[str, str],
+    output: str,
+) -> dict[str, Any] | None:
+    """Keep bounded external failure evidence instead of reducing it to one code."""
+    try:
+        frame = json.loads(output)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(frame, Mapping) or set(frame) != {
+        "schema", "contract_version", "frame_type", "status", "exit_code",
+        "completed", "total", "rollback", "result", "error_code",
+    }:
+        return None
+    nested = frame.get("result")
+    if not isinstance(nested, Mapping) or set(nested) != {
+        "schema", "contract_version", "status", "operation", "operation_id",
+        "error_code", "mutation_started", "rollback",
+    }:
+        return None
+    error_code = nested.get("error_code")
+    operation_id = nested.get("operation_id")
+    exit_code = frame.get("exit_code")
+    if (
+        frame.get("schema") != FRAME_SCHEMA
+        or frame.get("contract_version") != "1.0"
+        or frame.get("frame_type") != "result"
+        or frame.get("status") != "failed"
+        or isinstance(exit_code, bool)
+        or not isinstance(exit_code, int)
+        or exit_code == 0
+        or frame.get("completed") != 0
+        or frame.get("total") != 1
+        or frame.get("error_code") != error_code
+        or frame.get("rollback") != nested.get("rollback")
+        or nested.get("schema") != RESULT_SCHEMA
+        or nested.get("contract_version") != "1.0"
+        or nested.get("status") != "failed"
+        or nested.get("operation") != command_id
+        or operation_id not in {"", operation_input["operation_id"]}
+        or not isinstance(error_code, str)
+        or re.fullmatch(r"[a-z0-9][a-z0-9_.:-]{0,127}", error_code) is None
+        or not isinstance(nested.get("mutation_started"), bool)
+        or nested.get("rollback") not in {"not_attempted", "not_needed", "succeeded"}
+    ):
+        return None
+    return dict(nested)
+
+
 def execute(job: Mapping[str, Any], *, config: Any) -> Mapping[str, Any]:
     command = job.get("command")
     command_id = str((command or {}).get("command_id") or "") if isinstance(command, Mapping) else ""
@@ -697,6 +748,13 @@ def execute(job: Mapping[str, Any], *, config: Any) -> Mapping[str, Any]:
             resolved_context=context,
         )
         if rc != 0:
+            failure = _validate_failure_frame(command_id, operation_input, output)
+            if failure is not None:
+                return {
+                    "status": "failed",
+                    "reason": failure["error_code"],
+                    "host_prerequisites": failure,
+                }
             raise _fail("mautic_host_prerequisites_external_operation_failed")
         result = _validate_result(command_id, operation_input, binding, json.loads(output))
         return {"status": "succeeded", "host_prerequisites": result}

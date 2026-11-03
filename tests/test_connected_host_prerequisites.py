@@ -508,6 +508,85 @@ def test_execute_passes_only_mcd_resolved_context_to_existing_runner():
     assert run.call_args.kwargs["operation_input"] == operation_input
 
 
+def test_execute_preserves_valid_external_failure_evidence():
+    binding = {
+        "binding_schema": prerequisites.BINDING_SCHEMA,
+        "binding_sha256": "sha256:" + "b" * 64,
+        "artifact_sha256": "c" * 64,
+        "profile_sha256": "d" * 64,
+        "catalog_item_revision": "1.0.3",
+    }
+    operation_input = input_map()
+    nested = {
+        "schema": prerequisites.RESULT_SCHEMA,
+        "contract_version": "1.0",
+        "status": "failed",
+        "operation": "prepare_create",
+        "operation_id": operation_input["operation_id"],
+        "error_code": "certificate_issue_failed",
+        "mutation_started": True,
+        "rollback": "succeeded",
+    }
+    frame = {
+        "schema": prerequisites.FRAME_SCHEMA,
+        "contract_version": "1.0",
+        "frame_type": "result",
+        "status": "failed",
+        "exit_code": 70,
+        "completed": 0,
+        "total": 1,
+        "rollback": "succeeded",
+        "result": nested,
+        "error_code": "certificate_issue_failed",
+    }
+    job = {
+        "installation": {"installation_id": "control-1", "dns_name": "control.example.com"},
+        "command": {
+            "command_id": "prepare_create",
+            "binding_schema": prerequisites.BINDING_SCHEMA,
+            "binding_sha256": binding["binding_sha256"],
+        },
+        "input": operation_input,
+    }
+    with patch.object(prerequisites, "installed_binding", return_value=binding), \
+         patch.object(prerequisites, "_inventory_context", return_value={}), \
+         patch.object(prerequisites, "load_configured_profile_cache", return_value={"profile": {}}), \
+         patch.object(prerequisites, "run_configured_external_operation", return_value=(70, json.dumps(frame))):
+        assert prerequisites.execute(job, config=SimpleNamespace()) == {
+            "status": "failed",
+            "reason": "certificate_issue_failed",
+            "host_prerequisites": nested,
+        }
+
+
+def test_execute_reduces_invalid_external_failure_output():
+    binding = {
+        "binding_schema": prerequisites.BINDING_SCHEMA,
+        "binding_sha256": "sha256:" + "b" * 64,
+        "artifact_sha256": "c" * 64,
+        "profile_sha256": "d" * 64,
+        "catalog_item_revision": "1.0.3",
+    }
+    operation_input = input_map()
+    job = {
+        "installation": {"installation_id": "control-1", "dns_name": "control.example.com"},
+        "command": {
+            "command_id": "prepare_create",
+            "binding_schema": prerequisites.BINDING_SCHEMA,
+            "binding_sha256": binding["binding_sha256"],
+        },
+        "input": operation_input,
+    }
+    with patch.object(prerequisites, "installed_binding", return_value=binding), \
+         patch.object(prerequisites, "_inventory_context", return_value={}), \
+         patch.object(prerequisites, "load_configured_profile_cache", return_value={"profile": {}}), \
+         patch.object(prerequisites, "run_configured_external_operation", return_value=(70, "not-json")):
+        assert prerequisites.execute(job, config=SimpleNamespace()) == {
+            "status": "failed",
+            "reason": "mautic_host_prerequisites_external_operation_failed",
+        }
+
+
 def test_generic_runner_serializes_exact_resolved_operation_context(tmp_path):
     from mcd_agent import custom_scripts
 

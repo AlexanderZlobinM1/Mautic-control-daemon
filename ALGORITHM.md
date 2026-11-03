@@ -2004,6 +2004,14 @@ command-specific post-state. `prepare_create` доказывает parent/certif
 certificate. Простая декларация списка «preserved» без before/after evidence не
 считается receipt.
 
+Ненулевой exit внешнего prerequisite не уничтожает его terminal evidence.
+Если generic runner уже проверил корректный bounded result frame, MCD повторно
+проверяет failure-contract и сохраняет в durable generic terminal точный
+`error_code`, `mutation_started` и `rollback` из вложенного prerequisite result.
+Только отсутствующий, malformed или несогласованный failure frame сворачивается
+в общий `mautic_host_prerequisites_external_operation_failed`; произвольный
+stdout или невалидные поля в receipt не проходят.
+
 Выбранная immutable revision для этого контракта — MCC `1.0.3`: closure
 `sha256:48e9c0a3d44238a09636d9fdb9c1078342c5fef84b5cecaea577c00dc8a0ba56`
 (46976 bytes), binding
