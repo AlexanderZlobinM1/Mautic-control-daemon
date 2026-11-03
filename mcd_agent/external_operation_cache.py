@@ -157,6 +157,57 @@ def _relative(value: object, code: str) -> PurePosixPath:
     return path
 
 
+def _binding_cache_file(digest: str) -> PurePosixPath:
+    if _HEX.fullmatch(digest) is None:
+        raise _fail("external_operation_cache_resource_invalid")
+    return PurePosixPath("bindings/by-sha256") / f"{digest}.json"
+
+
+def _normalize_binding_manifest(
+    manifest: object,
+    *,
+    logical_file: PurePosixPath,
+    resource_sha256: str,
+    value: Mapping[str, Any],
+) -> tuple[dict[str, Any], PurePosixPath]:
+    if not isinstance(manifest, Mapping):
+        raise _fail("external_operation_cache_manifest_invalid")
+    normalized = dict(manifest)
+    resources = normalized.get("resources")
+    if not isinstance(resources, list) or any(not isinstance(row, Mapping) for row in resources):
+        raise _fail("external_operation_cache_manifest_invalid")
+    candidates = [
+        row for row in resources
+        if row.get("role") == "binding_identity"
+        and row.get("cache_file", row.get("file")) == logical_file.as_posix()
+        and row.get("sha256") == resource_sha256
+    ]
+    if len(candidates) != 1:
+        raise _fail("external_operation_cache_binding_identity_missing")
+    cache_file = _binding_cache_file(resource_sha256)
+    normalized_resources: list[dict[str, Any]] = []
+    for row in resources:
+        copied = dict(row)
+        if row is candidates[0]:
+            copied["file"] = logical_file.as_posix()
+            copied["cache_file"] = cache_file.as_posix()
+        normalized_resources.append(copied)
+    normalized["resources"] = normalized_resources
+
+    active = normalized.get("active_bindings", {})
+    if not isinstance(active, Mapping) or active:
+        raise _fail("external_operation_cache_manifest_invalid")
+    normalized_active = {value["binding_schema"]: {
+        "catalog_item_id": value["catalog_item_id"],
+        "catalog_item_revision": value["catalog_item_revision"],
+        "binding_sha256": value["binding_sha256"],
+        "cache_file": cache_file.as_posix(),
+        "resource_sha256": resource_sha256,
+    }}
+    normalized["active_bindings"] = normalized_active
+    return normalized, cache_file
+
+
 def _merge_manifest(existing: object, incoming: object) -> dict[str, Any]:
     if not isinstance(incoming, Mapping) or incoming.get("manifest_version") != 1:
         raise _fail("external_operation_cache_manifest_invalid")
@@ -216,9 +267,32 @@ def _merge_manifest(existing: object, incoming: object) -> dict[str, Any]:
             if prior is not None and (row.get("file"), row.get("sha256")) not in prior:
                 raise _fail("external_operation_cache_manifest_conflict")
 
+    def operation_binding_identity(row: Mapping[str, Any]) -> tuple[Any, ...]:
+        artifact = row.get("artifact")
+        if not isinstance(artifact, Mapping):
+            return (row.get("component"), row.get("operation"), None, None, None)
+        return (
+            row.get("component"), row.get("operation"),
+            artifact.get("key"), artifact.get("sha256"), artifact.get("entrypoint"),
+        )
+
     merge_rows("items", item_identity)
-    merge_rows("operation_bindings", lambda row: (row.get("component"), row.get("operation")))
+    merge_rows("operation_bindings", operation_binding_identity)
     merge_rows("resources", lambda row: (row.get("role"), row.get("cache_file", row.get("file"))))
+
+    old_active = current.get("active_bindings", {})
+    new_active = incoming.get("active_bindings", {})
+    if (not isinstance(old_active, Mapping) or not isinstance(new_active, Mapping)
+            or any(not isinstance(key, str) or not isinstance(row, Mapping) for key, row in [*old_active.items(), *new_active.items()])):
+        raise _fail("external_operation_cache_manifest_invalid")
+    active = {key: dict(row) for key, row in old_active.items()}
+    for key, row in new_active.items():
+        prior = active.get(key)
+        if prior is not None and prior.get("catalog_item_id") != row.get("catalog_item_id"):
+            raise _fail("external_operation_cache_manifest_conflict")
+        active[key] = dict(row)
+    if active:
+        current["active_bindings"] = active
     return current
 
 
@@ -257,8 +331,10 @@ def sync_binding(job: Mapping[str, Any], *, config: Any) -> Mapping[str, Any]:
             }:
                 raise _fail("external_operation_cache_descriptor_invalid")
             declared_paths = {"descriptor.json"}
-            prepared: list[tuple[Path, Path, str]] = []
+            prepared: list[tuple[Path, PurePosixPath, str, str]] = []
             incoming_manifest: dict[str, Any] | None = None
+            binding_install_path: PurePosixPath | None = None
+            binding_resource_sha256: str | None = None
             for resource in resources:
                 if not isinstance(resource, Mapping) or set(resource) != {"path", "role", "install_path", "sha256", "size_bytes"}:
                     raise _fail("external_operation_cache_resource_invalid")
@@ -273,10 +349,29 @@ def sync_binding(job: Mapping[str, Any], *, config: Any) -> Mapping[str, Any]:
                         raise _fail("external_operation_cache_resource_invalid")
                     incoming_manifest = json.loads(source.read_text(encoding="utf-8"))
                 else:
-                    prepared.append((source, _install_target(root, install_rel), resource["sha256"]))
+                    prepared.append((source, install_rel, resource["sha256"], str(resource["role"])))
+                    if resource.get("role") == "binding_identity":
+                        binding_install_path = install_rel
+                        binding_resource_sha256 = resource["sha256"]
             actual_paths = {path.relative_to(staged).as_posix() for path in staged.rglob("*") if path.is_file()}
             if actual_paths != declared_paths or incoming_manifest is None:
                 raise _fail("external_operation_cache_closure_members_invalid")
+            if binding_install_path is None or binding_resource_sha256 is None:
+                raise _fail("external_operation_cache_binding_identity_missing")
+            incoming_manifest, binding_cache_file = _normalize_binding_manifest(
+                incoming_manifest,
+                logical_file=binding_install_path,
+                resource_sha256=binding_resource_sha256,
+                value=value,
+            )
+            prepared_targets = [
+                (
+                    source,
+                    _install_target(root, binding_cache_file if role == "binding_identity" else install_rel),
+                    digest,
+                )
+                for source, install_rel, digest, role in prepared
+            ]
 
             identity_rows = [row for row in resources if isinstance(row, Mapping) and row.get("role") == "binding_identity"]
             if len(identity_rows) != 1:
@@ -292,7 +387,7 @@ def sync_binding(job: Mapping[str, Any], *, config: Any) -> Mapping[str, Any]:
             validation_root.mkdir(mode=0o700)
             validation_manifest = _merge_manifest({"manifest_version": 1, "items": []}, incoming_manifest)
             (validation_root / "manifest.json").write_bytes(_canonical(validation_manifest) + b"\n")
-            for source, live_target, _digest in prepared:
+            for source, live_target, _digest in prepared_targets:
                 relative = live_target.relative_to(root)
                 target = validation_root / relative
                 target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -321,7 +416,7 @@ def sync_binding(job: Mapping[str, Any], *, config: Any) -> Mapping[str, Any]:
                 except (OSError, UnicodeError, ValueError):
                     raise _fail("external_operation_cache_existing_manifest_invalid") from None
                 merged = _merge_manifest(existing, incoming_manifest)
-                for source, target, digest in prepared:
+                for source, target, digest in prepared_targets:
                     target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
                     if target.exists():
                         if target.is_symlink() or not target.is_file() or hashlib.sha256(target.read_bytes()).hexdigest() != digest:

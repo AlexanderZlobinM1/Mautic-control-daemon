@@ -133,12 +133,42 @@ def installed_binding(config: Any) -> dict[str, Any]:
     resources = manifest.get("resources")
     if not isinstance(resources, list):
         raise _fail("mautic_host_prerequisites_binding_resource_missing")
+    logical_identity_file = "bindings/mautic-connected-host-prerequisites-binding-v1.json"
     identity_rows = [
         row for row in resources
         if isinstance(row, Mapping)
         and row.get("role") == "binding_identity"
-        and row.get("cache_file", row.get("file")) == "bindings/mautic-connected-host-prerequisites-binding-v1.json"
+        and row.get("file") == logical_identity_file
     ]
+    active_bindings = manifest.get("active_bindings")
+    if active_bindings is not None and not isinstance(active_bindings, Mapping):
+        raise _fail("mautic_host_prerequisites_binding_resource_invalid")
+    selector = active_bindings.get(BINDING_SCHEMA) if isinstance(active_bindings, Mapping) else None
+    if selector is not None:
+        if (not isinstance(selector, Mapping)
+                or set(selector) != {
+                    "catalog_item_id", "catalog_item_revision", "binding_sha256",
+                    "cache_file", "resource_sha256",
+                }
+                or selector.get("catalog_item_id") != CATALOG_ITEM_ID
+                or selector.get("catalog_item_revision") != CATALOG_ITEM_REVISION
+                or not isinstance(selector.get("binding_sha256"), str)
+                or _SHA.fullmatch(selector["binding_sha256"]) is None
+                or not isinstance(selector.get("cache_file"), str)
+                or not isinstance(selector.get("resource_sha256"), str)
+                or _HEX.fullmatch(selector["resource_sha256"]) is None):
+            raise _fail("mautic_host_prerequisites_binding_resource_invalid")
+        identity_rows = [
+            row for row in identity_rows
+            if row.get("cache_file") == selector["cache_file"]
+            and row.get("sha256") == selector["resource_sha256"]
+            and row.get("canonical_json_sha256") == selector["binding_sha256"][7:]
+        ]
+    else:
+        identity_rows = [
+            row for row in identity_rows
+            if row.get("cache_file", row.get("file")) == logical_identity_file
+        ]
     if len(identity_rows) != 1:
         raise _fail("mautic_host_prerequisites_binding_resource_missing")
     resource = identity_rows[0]
@@ -160,6 +190,8 @@ def installed_binding(config: Any) -> dict[str, Any]:
             or hashlib.sha256(_canonical(identity)).hexdigest() != resource.get("canonical_json_sha256")
             or _SHA.fullmatch(binding_sha256) is None):
         raise _fail("mautic_host_prerequisites_binding_digest_mismatch")
+    if selector is not None and selector.get("binding_sha256") != binding_sha256:
+        raise _fail("mautic_host_prerequisites_binding_digest_mismatch")
     if (identity.get("schema") != BINDING_SCHEMA
             or identity.get("catalog_item_id") != CATALOG_ITEM_ID
             or identity.get("catalog_item_revision") != CATALOG_ITEM_REVISION):
@@ -176,12 +208,10 @@ def installed_binding(config: Any) -> dict[str, Any]:
 
     operation_bindings = identity.get("operation_bindings")
     all_manifest_bindings = manifest.get("operation_bindings")
-    manifest_bindings = [
-        row for row in all_manifest_bindings
-        if isinstance(row, Mapping) and row.get("component") == COMPONENT
-    ] if isinstance(all_manifest_bindings, list) else None
     if (not isinstance(operation_bindings, list)
-            or operation_bindings != manifest_bindings
+            or not isinstance(all_manifest_bindings, list)
+            or any(not isinstance(row, Mapping) for row in operation_bindings)
+            or any(sum(_canonical(row) == _canonical(candidate) for candidate in all_manifest_bindings if isinstance(candidate, Mapping)) != 1 for row in operation_bindings)
             or [row.get("operation") for row in operation_bindings if isinstance(row, Mapping)] != list(COMMANDS)):
         raise _fail("mautic_host_prerequisites_operation_bindings_invalid")
 

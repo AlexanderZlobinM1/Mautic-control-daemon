@@ -1928,12 +1928,18 @@ pending delivery/job digest. Рестарт поэтому никогда не �
 `sync_binding` не запускает внешний сценарий. Он проверяет gzip closure,
 закрытый список members, digest каждого resource и canonical binding preimage,
 затем append-only устанавливает executable bundle, operator profile и binding
-identity. Existing manifest entries сохраняются, включая key-less group rows и
-несколько entrypoint rows одного immutable bundle key; конфликт точного
-key/entrypoint, component/operation,
-resource или content-addressed path завершает job fail-closed. Manifest меняется
-последним: незавершённый import может оставить только неактивные digest-файлы,
-но не capability.
+identity. Binding identity физически хранится по digest, а подписанный logical
+`file` остаётся стабильным контрактным именем. Manifest сохраняет все прежние
+revision rows и чужие entries, включая key-less group rows и несколько
+entrypoint rows одного immutable bundle key; operation binding identity включает
+immutable artifact key/SHA/entrypoint. После полной проверки manifest последним
+атомарно обновляет `active_bindings[binding_schema]` на точные catalog item,
+revision, binding digest и content-addressed resource. Поэтому обычный sync
+новой revision не перезаписывает и не удаляет предыдущую, rollback revision
+может тем же путём вернуть selector, а exact replay byte-idempotent. Конфликт
+одной immutable revision, повреждённый existing manifest/resource или drift
+content-addressed path завершают job fail-closed. Незавершённый import может
+оставить только неактивные digest-файлы, но не capability.
 
 После полной проверки cache MCD добавляет host-scoped capability
 `mautic_lifecycle/1.0` с четырьмя командами: read-only `preflight` и mutating

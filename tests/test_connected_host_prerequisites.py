@@ -32,23 +32,25 @@ def deterministic_tar(files):
     return out.getvalue()
 
 
-def build_closure(tmp_path: Path):
+def build_closure(tmp_path: Path, revision: str = "1.0.4"):
     cfg = SimpleNamespace(custom_cache_dir=str(tmp_path / "custom"))
     root = Path(cfg.custom_cache_dir)
-    root.mkdir(parents=True)
-    (root / "manifest.json").write_text('{"manifest_version":1,"items":[]}\n')
+    root.mkdir(parents=True, exist_ok=True)
+    manifest_path = root / "manifest.json"
+    if not manifest_path.exists():
+        manifest_path.write_text('{"manifest_version":1,"items":[]}\n')
     profile = {
         "schema": "mcc-mautic-connected-host-prerequisites-profile-v1",
-        "version": "1.0.4",
-        "catalog_item": {"id": prerequisites.CATALOG_ITEM_ID, "revision": "1.0.4"},
+        "version": revision,
+        "catalog_item": {"id": prerequisites.CATALOG_ITEM_ID, "revision": revision},
     }
     profile_bytes = canonical(profile) + b"\n"
     profile_sha = hashlib.sha256(profile_bytes).hexdigest()
     profile_file = f"profiles/host-prerequisites-{profile_sha}.json"
-    bundle = b"fixture-host-prerequisites-bundle"
+    bundle = f"fixture-host-prerequisites-bundle-{revision}".encode()
     artifact_sha = hashlib.sha256(bundle).hexdigest()
-    key = "mautic-connected-host-prerequisites-v1.0.4"
-    entrypoint = "scenarios/host_prerequisites.py"
+    key = f"mautic-connected-host-prerequisites-v{revision}"
+    entrypoint = f"scenarios/{revision}/host_prerequisites.py"
     mapping = {
         "operator_profile_json": {"encoding": "json", "envelope_key": "profile", "source": "existing_private_operator_profile"},
         "cfg_facts_json": {"encoding": "json", "schema": prerequisites.CONTEXT_SCHEMA, "source": "mcd_resolved_operation_context"},
@@ -72,7 +74,7 @@ def build_closure(tmp_path: Path):
     identity = {
         "schema": prerequisites.BINDING_SCHEMA,
         "catalog_item_id": prerequisites.CATALOG_ITEM_ID,
-        "catalog_item_revision": "1.0.4",
+        "catalog_item_revision": revision,
         "artifact": {
             "key": key, "sha256": artifact_sha, "size_bytes": len(bundle),
             "media_type": "application/gzip", "entrypoint": entrypoint,
@@ -147,7 +149,7 @@ def build_closure(tmp_path: Path):
     descriptor = {
         "schema": "mcc-external-operation-cache-closure-v1",
         "catalog_item_id": prerequisites.CATALOG_ITEM_ID,
-        "catalog_item_revision": "1.0.4",
+        "catalog_item_revision": revision,
         "binding_schema": prerequisites.BINDING_SCHEMA,
         "binding_sha256": binding_sha,
         "install_mode": "atomic_append_only_preserve_existing",
@@ -161,7 +163,7 @@ def build_closure(tmp_path: Path):
         "command": {"command_id": "sync_binding", "version": "1.0"},
         "input": {
             "catalog_item_id": prerequisites.CATALOG_ITEM_ID,
-            "catalog_item_revision": "1.0.4",
+            "catalog_item_revision": revision,
             "closure_digest": digest, "closure_size_bytes": len(closure),
             "closure_media_type": "application/gzip",
             "binding_schema": prerequisites.BINDING_SCHEMA,
@@ -173,9 +175,9 @@ def build_closure(tmp_path: Path):
                 "role": "binding_closure", "artifact_path": "/artifacts/host-prerequisites",
                 "artifact_grant": "one-time", "artifact_digest": digest,
                 "artifact_size_bytes": len(closure), "artifact_media_type": "application/gzip",
-                "artifact_revision": "1.0.4", "trusted_catalog": {
+                "artifact_revision": revision, "trusted_catalog": {
                     "source": "mcc", "transport": "portal_authenticated_catalog", "status": "active",
-                    "revision": "1.0.4", "artifact_digest": digest,
+                    "revision": revision, "artifact_digest": digest,
                 },
             }],
         },
@@ -192,6 +194,91 @@ def test_cache_sync_admits_exact_prerequisites_binding(tmp_path):
     assert [item["command_id"] for item in admitted["capability"]["commands"]] == [
         "prepare_create", "preclean_legacy",
     ]
+
+
+def test_cache_sync_atomically_activates_new_revision_and_preserves_history(tmp_path):
+    cfg, old_command, old_closure, _old_binding_sha = build_closure(tmp_path, "1.0.3")
+    old_job = stage_transient_delivery(
+        old_command, config=cfg, downloader=lambda **_kwargs: old_closure,
+    )
+    with patch.object(prerequisites, "CATALOG_ITEM_REVISION", "1.0.3"):
+        assert sync_binding(old_job, config=cfg)["status"] == "succeeded"
+    before = json.loads((Path(cfg.custom_cache_dir) / "manifest.json").read_text())
+    old_selector = before["active_bindings"][prerequisites.BINDING_SCHEMA]
+    old_identity = Path(cfg.custom_cache_dir) / old_selector["cache_file"]
+    old_identity_bytes = old_identity.read_bytes()
+
+    cfg, new_command, new_closure, new_binding_sha = build_closure(tmp_path, "1.0.4")
+    new_job = stage_transient_delivery(
+        new_command, config=cfg, downloader=lambda **_kwargs: new_closure,
+    )
+    assert sync_binding(new_job, config=cfg) == {
+        "status": "succeeded",
+        "catalog_item_id": prerequisites.CATALOG_ITEM_ID,
+        "catalog_item_revision": "1.0.4",
+        "binding_schema": prerequisites.BINDING_SCHEMA,
+        "binding_sha256": new_binding_sha,
+        "closure_digest": new_command["input"]["closure_digest"],
+    }
+    admitted = prerequisites.installed_binding(cfg)
+    assert admitted["catalog_item_revision"] == "1.0.4"
+    assert admitted["binding_sha256"] == new_binding_sha
+
+    manifest_path = Path(cfg.custom_cache_dir) / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    assert [
+        row["key"] for row in manifest["items"]
+        if row.get("key", "").startswith("mautic-connected-host-prerequisites-v")
+    ] == [
+        "mautic-connected-host-prerequisites-v1.0.3",
+        "mautic-connected-host-prerequisites-v1.0.4",
+    ]
+    assert len([
+        row for row in manifest["operation_bindings"]
+        if row.get("component") == prerequisites.COMPONENT
+    ]) == 4
+    identity_rows = [
+        row for row in manifest["resources"]
+        if row.get("role") == "binding_identity"
+        and row.get("file") == "bindings/mautic-connected-host-prerequisites-binding-v1.json"
+    ]
+    assert len(identity_rows) == 2
+    assert len({row["cache_file"] for row in identity_rows}) == 2
+    assert old_identity.read_bytes() == old_identity_bytes
+
+    before_repeat = manifest_path.read_bytes()
+    assert sync_binding(new_job, config=cfg)["status"] == "succeeded"
+    assert manifest_path.read_bytes() == before_repeat
+
+
+def test_cache_sync_revision_drift_fails_before_active_selector_changes(tmp_path):
+    cfg, old_command, old_closure, _old_binding_sha = build_closure(tmp_path, "1.0.3")
+    old_job = stage_transient_delivery(
+        old_command, config=cfg, downloader=lambda **_kwargs: old_closure,
+    )
+    with patch.object(prerequisites, "CATALOG_ITEM_REVISION", "1.0.3"):
+        assert sync_binding(old_job, config=cfg)["status"] == "succeeded"
+
+    cfg, new_command, new_closure, _new_binding_sha = build_closure(tmp_path, "1.0.4")
+    with tarfile.open(fileobj=io.BytesIO(new_closure), mode="r:gz") as archive:
+        incoming_manifest = json.load(archive.extractfile("manifest.json"))
+    identity_sha = next(
+        row["sha256"] for row in incoming_manifest["resources"]
+        if row.get("role") == "binding_identity"
+    )
+    conflict = Path(cfg.custom_cache_dir) / "bindings" / "by-sha256" / f"{identity_sha}.json"
+    conflict.parent.mkdir(parents=True, exist_ok=True)
+    conflict.write_bytes(b"content-addressed drift")
+    manifest_path = Path(cfg.custom_cache_dir) / "manifest.json"
+    before = manifest_path.read_bytes()
+
+    new_job = stage_transient_delivery(
+        new_command, config=cfg, downloader=lambda **_kwargs: new_closure,
+    )
+    assert sync_binding(new_job, config=cfg) == {
+        "status": "failed", "reason": "external_operation_cache_install_conflict",
+    }
+    assert manifest_path.read_bytes() == before
 
 
 def input_map(**changes):
