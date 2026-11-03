@@ -1,0 +1,75 @@
+{
+  "schema": "mcd-portal-inventory-semantic-projection-fixture-v1",
+  "snapshot": {
+    "schema": "portal-mcd-inventory-snapshot-v1",
+    "contract_version": "1.0",
+    "request_id": "transport-only",
+    "snapshot_revision": "6",
+    "observed_at": "2026-11-03T05:00:00Z",
+    "complete": true,
+    "binding": {
+      "agent_id": "agent-1",
+      "installation_id": "installation-1",
+      "commercial_key_id": "key-1",
+      "identity_kind": "dns",
+      "local_identity": "mautic.example.com"
+    },
+    "installation": {
+      "installation_id": "installation-1",
+      "local_identity": "mautic.example.com",
+      "display_name": "mautic.example.com"
+    },
+    "host": {"mcd_version": "1.7.0.dev0", "profile": "passive"},
+    "applicability_facts": {"os_id": "ubuntu", "architecture": "amd64"},
+    "instances": [
+      {
+        "instance_id": "mautic.example.com",
+        "display_name": "mautic.example.com",
+        "root": "/var/www/mautic.example.com/project",
+        "mautic_version": "7.2.0",
+        "status": "active",
+        "capabilities": [],
+        "settings": {"values": {}, "revision": 0},
+        "identity_source": "portal_registration",
+        "local_identity": "mautic.example.com",
+        "source_instance_id": "mautic.example.com"
+      }
+    ]
+  },
+  "expected_projection": {
+    "schema": "portal-mcd-inventory-snapshot-v1",
+    "contract_version": "1.0",
+    "complete": true,
+    "binding": {
+      "agent_id": "agent-1",
+      "installation_id": "installation-1",
+      "commercial_key_id": "key-1",
+      "identity_kind": "dns",
+      "local_identity": "mautic.example.com"
+    },
+    "host": {"mcd_version": "1.7.0.dev0", "profile": "passive"},
+    "applicability_facts": {"os_id": "ubuntu", "architecture": "amd64"},
+    "instances": [
+      {
+        "instance_id": "mautic.example.com",
+        "display_name": "mautic.example.com",
+        "root": "/var/www/mautic.example.com/project",
+        "mautic_version": "7.2.0",
+        "status": "active",
+        "capabilities": [],
+        "settings": {"values": {}, "revision": 0}
+      }
+    ]
+  },
+  "dev46_acceptance": {
+    "local_rich_semantic_sha256": "sha256:c28bd536065fb54e68bf8909cddaf766bb69a956f078b2c11e30b1995c47e93f",
+    "portal_revision": "6",
+    "portal_semantic_sha256": "sha256:8236335f85c8f0ccb85af057f46cf5b1833fdba0e68f4ebbfd9b72f9f3027083",
+    "excluded_paths": [
+      "/installation",
+      "/instances/*/identity_source",
+      "/instances/*/local_identity",
+      "/instances/*/source_instance_id"
+    ]
+  }
+}

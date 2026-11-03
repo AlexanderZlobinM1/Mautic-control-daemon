@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sales-snap.com/contracts/portal-mcd-dns-agent-cutover-v1.json",
+  "title": "Portal MCD DNS agent endpoint cutover request v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "contract_version",
+    "request_id",
+    "idempotency_key",
+    "previous_portal_api_base",
+    "target_portal_api_base",
+    "pre_state",
+    "pre_state_sha256"
+  ],
+  "properties": {
+    "schema": {"const": "portal-mcd-dns-agent-cutover-request-v1"},
+    "contract_version": {"const": "1.0"},
+    "request_id": {"type": "string", "minLength": 1, "maxLength": 191},
+    "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 191},
+    "previous_portal_api_base": {"type": "string", "format": "uri", "pattern": "^https://"},
+    "target_portal_api_base": {"type": "string", "format": "uri", "pattern": "^https://"},
+    "pre_state": {"$ref": "#/$defs/pre_state"},
+    "pre_state_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  },
+  "$defs": {
+    "pre_state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "account_id",
+        "commercial_key_id",
+        "agent_id",
+        "identity_kind",
+        "local_identity",
+        "agent_status",
+        "installations",
+        "pending_receipt_ids"
+      ],
+      "properties": {
+        "account_id": {"type": "string", "minLength": 1, "maxLength": 191},
+        "commercial_key_id": {"type": "string", "minLength": 1, "maxLength": 191},
+        "agent_id": {"type": "string", "minLength": 1, "maxLength": 191},
+        "identity_kind": {"const": "dns"},
+        "local_identity": {"type": "string", "format": "hostname"},
+        "agent_status": {"enum": ["active", "passive"]},
+        "installations": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/installation"}
+        },
+        "pending_receipt_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 255}
+        }
+      }
+    },
+    "installation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["installation_id", "local_identity", "display_name", "status", "connection"],
+      "properties": {
+        "installation_id": {"type": "string", "minLength": 1, "maxLength": 191},
+        "local_identity": {"type": "string", "format": "hostname"},
+        "display_name": {"type": "string", "minLength": 1, "maxLength": 255},
+        "status": {"enum": ["active", "passive"]},
+        "connection": {"$ref": "#/$defs/connection"}
+      }
+    },
+    "connection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "channel_contract",
+        "cursor",
+        "next_command_cursor",
+        "last_inventory_revision",
+        "inventory_semantic_sha256"
+      ],
+      "properties": {
+        "status": {"enum": ["active", "offline"]},
+        "channel_contract": {"const": "1.0"},
+        "cursor": {"type": "integer", "minimum": 0},
+        "next_command_cursor": {"type": "integer", "minimum": 0},
+        "last_inventory_revision": {"type": "string", "pattern": "^(0|[1-9][0-9]*)$"},
+        "inventory_semantic_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      }
+    }
+  }
+}

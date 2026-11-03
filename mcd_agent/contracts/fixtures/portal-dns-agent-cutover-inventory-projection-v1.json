@@ -1,0 +1,264 @@
+{
+  "schema": "portal-mcd-inventory-snapshot-v1",
+  "contract_version": "1.0",
+  "request_id": "inventory-6-35f62c74eb7d32402ddaece76bf1b8c3ccc30aa7cad86f727d7c45209ba2cec5",
+  "binding": {
+    "agent_id": "agent_304d7a4d-ded5-4bbc-bd8c-74e82aa5f609",
+    "installation_id": "installation_3668c563-cafd-4fb6-80ce-dae9c8eb6e5e",
+    "identity_kind": "dns",
+    "local_identity": "mautic.zlobin.com",
+    "commercial_key_id": "commercial_key_a73dbe7d-4497-4165-8489-673c9392a9fa"
+  },
+  "snapshot_revision": "6",
+  "observed_at": "2026-11-03T04:35:56Z",
+  "complete": true,
+  "host": {
+    "mcd_version": "1.7.0.dev0",
+    "profile": "passive",
+    "service_status": "active",
+    "scheduler_paused": false,
+    "settings": {
+      "values": {
+        "mcd_auto_update_enabled": false,
+        "mcd_update_policy": "off",
+        "state_backend": "sqlite",
+        "universal_workload_resource_ref": {
+          "catalog": {
+            "path": "profiles/universal-workload/1.0.1/catalog.json",
+            "sha256": "ee833a365f13fed28f83f542a475772e1dd52b98bcfcff077556b72ae3dbae39",
+            "size_bytes": 4067
+          },
+          "file": "resources/universal-workload-b9b654166906b03b439f0db285da3a2fc2a678cfb62db0167f0a82c262f7b5db.tar.gz",
+          "files": [
+            {
+              "path": "profiles/universal-workload/1.0.1/catalog.json",
+              "sha256": "ee833a365f13fed28f83f542a475772e1dd52b98bcfcff077556b72ae3dbae39",
+              "size_bytes": 4067
+            },
+            {
+              "path": "profiles/universal-workload/1.0.1/hardware-recommendations.json",
+              "sha256": "164c29c23a320f6f05babf8eb2f7dda33a423f21ff0ac1a1141edad4f9e49bbc",
+              "size_bytes": 1735
+            },
+            {
+              "path": "profiles/universal-workload/1.0.1/profiles/farm-hiload.json",
+              "sha256": "24e4435e176cc5c74c5c6f3924c30d5877da033e579cd1694144f596d0cfbe6d",
+              "size_bytes": 1580
+            },
+            {
+              "path": "profiles/universal-workload/1.0.1/profiles/farm-maxi.json",
+              "sha256": "dfa7416403a39d4837b78c48c99447f97d35fcf94d1fa30213753ed297cd2d4b",
+              "size_bytes": 1577
+            },
+            {
+              "path": "profiles/universal-workload/1.0.1/profiles/farm-midi.json",
+              "sha256": "d4be7d45952aae2bee44740e065f213045daf1dac42a1e73b1e12765cc5851a0",
+              "size_bytes": 1577
+            },
+            {
+              "path": "profiles/universal-workload/1.0.1/profiles/farm-mini.json",
+              "sha256": "feb222b0fa9d078b5e69f5d61d1e3e9a3f6e8c7daf2a51d0d959899ed34d892d",
+              "size_bytes": 1577
+            },
+            {
+              "path": "profiles/universal-workload/1.0.1/profiles/farm-tiny.json",
+              "sha256": "613c2f677cf126e34ae147b73f6c7a7d8e15a2d1f5323d7262c9c8d2468b3cff",
+              "size_bytes": 1577
+            },
+            {
+              "path": "profiles/universal-workload/1.0.1/profiles/farm-ultra.json",
+              "sha256": "7a0ca90db7951d114e005b20b82f819d4b66ce88d4db2023b2fa54cd436bfba4",
+              "size_bytes": 1581
+            },
+            {
+              "path": "profiles/universal-workload/1.0.1/profiles/farm.json",
+              "sha256": "7456c3850fcd348a5f267000313ac6922b146bde6786db908143cac0894d8292",
+              "size_bytes": 1572
+            },
+            {
+              "path": "profiles/universal-workload/1.0.1/profiles/hiload.json",
+              "sha256": "949b1ab4c341e28dc47b6029e3455886b75140e136a0d49e63e3d2e1751d0ae6",
+              "size_bytes": 1575
+            },
+            {
+              "path": "profiles/universal-workload/1.0.1/profiles/maxi.json",
+              "sha256": "64e5540a42b117101b5b973c21a32acca3ca64b992cd320d5a7fc22fe3680b67",
+              "size_bytes": 1573
+            },
+            {
+              "path": "profiles/universal-workload/1.0.1/profiles/midi.json",
+              "sha256": "c65a02ed6447dd1316724f24e95192e26b49276b562123dc611c90aff85eb31e",
+              "size_bytes": 1573
+            },
+            {
+              "path": "profiles/universal-workload/1.0.1/profiles/mini.json",
+              "sha256": "dd063879c80387336cb3cc1966b8e4568c224bb51b8a9b03d9ee71b24b291626",
+              "size_bytes": 1574
+            },
+            {
+              "path": "profiles/universal-workload/1.0.1/profiles/passive.json",
+              "sha256": "a55bd068ce07cb4a807ccea45c5b7e2e356b4232a0ee74a631a3bee070245e0e",
+              "size_bytes": 1580
+            },
+            {
+              "path": "profiles/universal-workload/1.0.1/profiles/tiny.json",
+              "sha256": "6bd3c397e2bf78c82d24f7c516f572c2c5d652773495da3b69709616d41f813b",
+              "size_bytes": 1573
+            },
+            {
+              "path": "profiles/universal-workload/1.0.1/profiles/ultra.json",
+              "sha256": "b0a760a557e697dfd86f116631504638c18bac5c84c49f7a7545b0c045efd801",
+              "size_bytes": 1576
+            },
+            {
+              "path": "profiles/universal-workload/1.0.1/provenance.json",
+              "sha256": "d0efcab28db04813ad58bedab96926e0cc3a0ad884ad942a317aad235f193f17",
+              "size_bytes": 1669
+            },
+            {
+              "path": "profiles/universal-workload/1.0.1/schemas/catalog.schema.json",
+              "sha256": "c7cd865dbab0788d14a85df968fe565c01ff737aec30c301636721e10f767733",
+              "size_bytes": 6915
+            },
+            {
+              "path": "profiles/universal-workload/1.0.1/schemas/hardware-recommendations.schema.json",
+              "sha256": "ee55b7cfa639d3353b49b0498457ac35889f32f3c59f885f00524f24556664f4",
+              "size_bytes": 1637
+            },
+            {
+              "path": "profiles/universal-workload/1.0.1/schemas/profile.schema.json",
+              "sha256": "50a66cef57e312c24c5bd8d5d86cbc006bdd9d6aef47a35284c1b1a18ee063c2",
+              "size_bytes": 4429
+            },
+            {
+              "path": "profiles/universal-workload/1.0.1/settings-authority-contract.json",
+              "sha256": "7b8984a56917d93df50347e71aa406fb839879c40ffc611ff8d921bacdc75416",
+              "size_bytes": 1776
+            }
+          ],
+          "key": "universal-workload-b9b654166906b03b439f0db285da3a2fc2a678cfb62db0167f0a82c262f7b5db",
+          "resource_root": "profiles/universal-workload/1.0.1",
+          "schema": "mcc-universal-workload-resource-ref-v1",
+          "sha256": "b9b654166906b03b439f0db285da3a2fc2a678cfb62db0167f0a82c262f7b5db",
+          "size_bytes": 6451
+        }
+      },
+      "revision": 0,
+      "etag": "sha256:debafbf3b3d7e6c3b82fab2287d1c64681b531c58fd2210f2c3a2fb7f8ef2962",
+      "sync": {
+        "desired_state_sync_protocol": 3,
+        "pending_intent": null,
+        "conflict": null
+      }
+    }
+  },
+  "applicability_facts": {
+    "schema": "mcd-portal-applicability-facts-v1",
+    "contract_version": "1.0",
+    "facts": {
+      "os_id": "ubuntu",
+      "os_version": "24.04",
+      "architecture": "amd64",
+      "package_manager": "apt-get",
+      "capabilities": [
+        "mcd_passive_activation_v1",
+        "package_manager.query",
+        "portal_scenario_execution_v1"
+      ],
+      "target_kind": "existing_server",
+      "detector_schema": "mcd-scenario-detector-v1",
+      "classification_reason": "existing_server_markers:mautic_installation,web_server,database,cache,php_runtime",
+      "classification_evidence": {
+        "contract_version": "1.0",
+        "excluded_from_classification": [
+          "mcd.service"
+        ],
+        "probes": {
+          "cache": {
+            "active": true,
+            "installed": true,
+            "markers": [
+              "binary:redis-server",
+              "path:/etc/redis",
+              "path:/etc/redis/redis.conf",
+              "service:redis",
+              "service:redis-server"
+            ]
+          },
+          "database": {
+            "active": true,
+            "installed": true,
+            "markers": [
+              "binary:mariadb",
+              "binary:mariadbd",
+              "binary:mysql",
+              "binary:mysqld",
+              "path:/etc/mysql",
+              "service:mariadb",
+              "service:mysql",
+              "service:mysqld"
+            ]
+          },
+          "mautic_installation": {
+            "active": false,
+            "installed": true,
+            "markers": [
+              "path:/var/www/mautic.zlobin.com/project/bin/console"
+            ]
+          },
+          "php_runtime": {
+            "active": true,
+            "installed": true,
+            "markers": [
+              "binary:php",
+              "path:/etc/php",
+              "path:/usr/lib/php",
+              "service:php8.5-fpm"
+            ]
+          },
+          "web_server": {
+            "active": true,
+            "installed": true,
+            "markers": [
+              "binary:nginx",
+              "path:/etc/apache2",
+              "path:/etc/nginx",
+              "service:nginx"
+            ]
+          }
+        },
+        "schema": "mcd-host-classification-evidence-v1"
+      }
+    },
+    "facts_digest": "sha256:e92cfdc33f5b73bed610c29f29e7d99a924be1e018c1a8571429a0c955827b85"
+  },
+  "instances": [
+    {
+      "instance_id": "mautic.zlobin.com",
+      "display_name": "mautic.zlobin.com",
+      "root": "/var/www/mautic.zlobin.com/project",
+      "mautic_version": "7.2.2",
+      "status": "active",
+      "capabilities": [],
+      "settings": {
+        "values": {},
+        "revision": 0,
+        "etag": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "sync": {
+          "desired_state_sync_protocol": 3,
+          "pending_intent": null,
+          "conflict": null
+        }
+      },
+      "identity_source": "dns_registration",
+      "local_identity": "mautic.zlobin.com",
+      "source_instance_id": "mautic.zlobin.com"
+    }
+  ],
+  "installation": {
+    "installation_id": "installation_3668c563-cafd-4fb6-80ce-dae9c8eb6e5e",
+    "local_identity": "mautic.zlobin.com",
+    "display_name": "mautic.zlobin.com",
+    "status": "active"
+  }
+}

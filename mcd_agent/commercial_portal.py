@@ -258,6 +258,54 @@ def inventory_durable_hash(inventory: Mapping[str, Any]) -> str:
     return _sha256(canonical_json(canonical_inventory_content(inventory)))
 
 
+def inventory_semantic_content(inventory: Mapping[str, Any]) -> dict[str, Any]:
+    """Return inventory facts without transport fields or the monotonic counter."""
+    content = canonical_inventory_content(inventory)
+    content.pop("snapshot_revision", None)
+    return content
+
+
+def inventory_semantic_hash(inventory: Mapping[str, Any]) -> str:
+    """Hash inventory facts independently of transport identity and revision."""
+    return _sha256(canonical_json(inventory_semantic_content(inventory)))
+
+
+PORTAL_INVENTORY_LOCAL_PROVENANCE_FIELDS = frozenset(
+    {"identity_source", "local_identity", "source_instance_id"}
+)
+PORTAL_INVENTORY_LOCAL_TOP_LEVEL_FIELDS = frozenset({"installation"})
+
+
+def portal_inventory_semantic_content(inventory: Mapping[str, Any]) -> dict[str, Any]:
+    """Project inventory to the published Portal snapshot shape before hashing."""
+    content = inventory_semantic_content(inventory)
+    # ``installation`` is an agent-local registration descriptor. The
+    # published Portal snapshot stores its canonical binding separately and
+    # does not retain this compatibility projection.
+    for field in PORTAL_INVENTORY_LOCAL_TOP_LEVEL_FIELDS:
+        content.pop(field, None)
+    instances = content.get("instances")
+    if isinstance(instances, list):
+        normalized = []
+        for item in instances:
+            if not isinstance(item, Mapping):
+                raise ValueError("commercial_inventory_instances_invalid")
+            normalized.append(
+                {
+                    key: value
+                    for key, value in item.items()
+                    if key not in PORTAL_INVENTORY_LOCAL_PROVENANCE_FIELDS
+                }
+            )
+        content["instances"] = normalized
+    return content
+
+
+def portal_inventory_semantic_hash(inventory: Mapping[str, Any]) -> str:
+    """Hash the exact normalized inventory shape accepted and stored by Portal."""
+    return _sha256(canonical_json(portal_inventory_semantic_content(inventory)))
+
+
 def _valid_inventory_hash(value: object) -> bool:
     text = str(value or "")
     return len(text) == 71 and text.startswith("sha256:") and all(char in "0123456789abcdef" for char in text[7:])
@@ -850,6 +898,11 @@ class CommercialState:
             row = db.execute("SELECT value FROM commercial_meta WHERE key=?", (key,)).fetchone()
         return json.loads(row[0]) if row else None
 
+    def contains(self, key: str) -> bool:
+        with self._connect() as db:
+            row = db.execute("SELECT 1 FROM commercial_meta WHERE key=?", (str(key),)).fetchone()
+        return row is not None
+
     def put(self, key: str, value: Any) -> None:
         with self._connect() as db:
             db.execute("INSERT INTO commercial_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, json.dumps(value, ensure_ascii=True, sort_keys=True)))
@@ -866,6 +919,58 @@ class CommercialState:
                     "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                     (str(key), json.dumps(value, ensure_ascii=True, sort_keys=True)),
                 )
+
+    def compare_and_swap_many(
+        self,
+        expected: Mapping[str, Any],
+        values: Mapping[str, Any],
+        *,
+        delete_keys: tuple[str, ...] = (),
+    ) -> bool:
+        """Atomically replace related values only when every decoded value matches."""
+        with self._connect(timeout=30) as db:
+            db.execute("BEGIN IMMEDIATE")
+            for key, expected_value in expected.items():
+                row = db.execute("SELECT value FROM commercial_meta WHERE key=?", (str(key),)).fetchone()
+                current = json.loads(row[0]) if row else None
+                if current != expected_value:
+                    return False
+            for key in delete_keys:
+                db.execute("DELETE FROM commercial_meta WHERE key=?", (str(key),))
+            for key, value in values.items():
+                db.execute(
+                    "INSERT INTO commercial_meta(key,value) VALUES(?,?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (str(key), json.dumps(value, ensure_ascii=True, sort_keys=True)),
+                )
+        return True
+
+    def compare_and_swap(self, key: str, expected: Any, value: Any) -> bool:
+        """Atomically replace one state value only when its decoded value matches."""
+        return self.compare_and_swap_many({key: expected}, {key: value})
+
+    def continuity_digest(self, *, exclude_meta_keys: tuple[str, ...] = ()) -> str:
+        """Hash all durable commercial state except explicitly mutable metadata."""
+        excluded = {str(key) for key in exclude_meta_keys}
+        with self._connect(timeout=30) as db:
+            meta = [
+                [str(key), str(value)]
+                for key, value in db.execute("SELECT key,value FROM commercial_meta ORDER BY key")
+                if str(key) not in excluded
+            ]
+            nonces = [list(row) for row in db.execute("SELECT nonce,seen_at FROM commercial_nonces ORDER BY nonce")]
+            receipts = [list(row) for row in db.execute("SELECT job_id,payload FROM commercial_receipts ORDER BY job_id")]
+            usage = [list(row) for row in db.execute("SELECT metric,value FROM commercial_usage_sequences ORDER BY metric")]
+        return hashlib.sha256(
+            canonical_json(
+                {
+                    "commercial_meta": meta,
+                    "commercial_nonces": nonces,
+                    "commercial_receipts": receipts,
+                    "commercial_usage_sequences": usage,
+                }
+            )
+        ).hexdigest()
 
     def delete(self, key: str) -> None:
         with self._connect() as db:

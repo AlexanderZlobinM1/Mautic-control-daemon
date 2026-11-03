@@ -1773,6 +1773,45 @@ callers and the actual state sender, proving payload/auth preservation. Live
 acceptance requires standard unmodified CLI and genuine HTTPS heartbeat; a
 diagnostic header probe alone is not an installed fix or registration receipt.
 
+### DNS-bound Portal endpoint cutover
+
+У уже зарегистрированного DNS-bound агента endpoint нельзя менять повторной
+activation или replay enrollment material: activation создаёт новую identity,
+а enrollment сохраняет immutable binding. Для переноса существующей связи MCD
+использует только `mcd-commercial-endpoint-cutover` и контракт
+`portal-mcd-dns-agent-cutover-request-v1`. В запрос входят существующие
+`account_id`, `commercial_key_id`, `agent_id`, точные installation/domain,
+ACK cursors, inventory revisions, pending receipt IDs и SHA-256 публичной
+pre-state проекции; credential остаётся только Bearer transport secret и не
+попадает в payload, receipt или журнал.
+
+Новый endpoint обязан быть HTTPS DNS endpoint. Portal сначала аутентифицирует
+существующий credential и подтверждает exact binding/cursor continuity без
+replay или collision. MCD принимает только typed response с теми же IDs,
+installations, ACK cursor, request/idempotency keys и `no_replay=true`.
+
+Inventory revision допускает только semantic reconciliation. MCD и Portal
+сравнивают SHA-256 canonical inventory без `request_id`, `observed_at` и
+`snapshot_revision`, после published Portal projection: локальный top-level
+`installation` descriptor и instance provenance `identity_source`,
+`local_identity`, `source_instance_id` не входят в сохранённый Portal snapshot.
+Richer local inventory при этом не переписывается. Если content hash одинаков,
+локальный revision counter
+может быть поднят до подтверждённого Portal floor; durable payload facts не
+меняются, а receipt содержит pre/post counters и неизменный semantic hash.
+Разный hash fail-closed требует отдельного authenticated inventory adopt и не
+разрешает endpoint switch.
+
+После первого подтверждения MCD одним compare-and-swap меняет
+`portal_api_base` и, только при доказанном semantic equality, inventory revision
+metadata. Затем он повторяет тот же идемпотентный authenticated probe и сверяет
+continuity digest всей остальной commercial state, включая poll requests,
+очереди и receipts. Ошибка postcheck атомарно возвращает старый endpoint и
+inventory counters; mismatch, downgrade, concurrent state change или
+невозможный rollback завершаются fail-closed. Повторный запуск выполняет те же
+сетевые проверки и возвращает idempotent receipt. Контракт и rollback проверяются
+`tests/test_commercial_endpoint_cutover.py`.
+
 ### OWH-AUTO и generic command broker Portal↔MCD
 
 Автоматическая первая установка OWH является отдельным self-hosted потоком.
