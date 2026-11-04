@@ -536,10 +536,19 @@ config на его profile baseline и только после этого при
 6. Release packaging and self-update use a detached runtime payload. The
    production archive contains the installed `mcd_agent` runtime package,
    resources, requirements, wheel and `mcd-runtime-manifest.json`, but no
-   checkout docs/tests/build files or `.git` data. The source checkout is
-   retained only as bounded `src`/`src.next` staging or rollback material;
-   after runtime import/smoke, systemd verification and adoption proof it is
-   not an active production runtime or duplicate test tree. The manifest binds
+   checkout docs/tests/build files or `.git` data. A fresh host never creates
+   `/opt/mcd/src`: the external family wrapper prepares only the declared
+   venv/config/cache/service prerequisites and invokes the exact detached
+   bridge with `--fresh-install`. The bridge verifies the archive and manifest,
+   installs/imports the wheel from `site-packages`, preseeds the exact selected
+   universal workload object into the configured cache, atomically activates
+   `/opt/mcd/runtime`, and proves a complete configuration load before it may
+   emit PASS. The external wrapper then owns service provisioning/start and
+   must prove a stable active PID, zero restarts and scheduler/health readiness
+   before the enclosing installation receipt can succeed. Import-only success,
+   a passive receipt with a failed service, or an installed `src` tree is a
+   failed bootstrap. A legacy checkout may exist only as bounded migration
+   staging/rollback material and is removed after verified activation. The manifest binds
    payload hashes while an external receipt binds archive/source/wheel
    identity, avoiding self-referential provenance. See
    `docs/mcd-update-invariants-v1.md` for the release evidence contract. A

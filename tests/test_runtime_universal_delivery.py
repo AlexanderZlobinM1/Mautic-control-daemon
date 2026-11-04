@@ -102,3 +102,11 @@ def test_runtime_bridge_qa_supplies_explicit_cache_for_selected_universal_resour
         and node.func.id == 'SimpleNamespace'
     ]
     assert any(any(keyword.arg == 'custom_cache_dir' for keyword in node.keywords) for node in namespaces)
+
+
+def test_runtime_bridge_qa_covers_clean_root_runtime_activation():
+    source = (Path(__file__).parents[1] / 'tools/runtime_bridge_qa.py').read_text()
+    assert 'bridge.fresh_install(fresh_args)' in source
+    assert '(fresh_install / "src").exists()' in source
+    assert 'ready_for_service_start' in source
+    assert 'config_readiness' in source

@@ -574,12 +574,25 @@ def _install_runtime(install_dir: Path, stage: Path, manifest: dict[str, Any], *
         )
     if Path(imported_path).resolve() != expected_path:
         raise BridgeError(f"installed runtime path mismatch expected={expected_path} imported={imported_path}")
+    resource_cache: dict[str, Any] = {"status": "not_required"}
     if manifest.get("universal_workload_resource_ref") is not None:
-        _run([str(python), "-I", "-c",
-              "import sys;from mcd_agent.universal_workload import preseed_runtime_workload_resources;"
-              "preseed_runtime_workload_resources(runtime_dir=sys.argv[1],cache_dir=sys.argv[2],"
-              "expected_manifest_sha256=sys.argv[3])",
+        preseed = _run([str(python), "-I", "-c",
+              "import json,sys;from mcd_agent.universal_workload import preseed_runtime_workload_resources;"
+              "print(json.dumps(preseed_runtime_workload_resources(runtime_dir=sys.argv[1],cache_dir=sys.argv[2],"
+              "expected_manifest_sha256=sys.argv[3]),sort_keys=True))",
               str(stage), str(custom_cache_dir), _sha256(stage / MANIFEST_NAME)], cwd=Path("/"))
+        try:
+            resource_cache = json.loads((preseed.stdout or "").strip().splitlines()[-1])
+        except Exception as exc:
+            raise BridgeError("selected universal resource preseed returned invalid output") from exc
+        ref = manifest["universal_workload_resource_ref"]
+        cached = Path(str(resource_cache.get("cache_path") or "")).resolve()
+        cache_root = Path(custom_cache_dir).resolve()
+        if (resource_cache.get("status") != "ok" or resource_cache.get("key") != ref["key"]
+                or resource_cache.get("sha256") != ref["sha256"]
+                or not cached.is_file() or cached.is_symlink()
+                or cache_root not in cached.parents or _sha256(cached) != ref["sha256"]):
+            raise BridgeError("selected universal resource preseed verification failed")
     return {
         "package_version": package_version,
         "imported_version": imported_version,
@@ -587,6 +600,7 @@ def _install_runtime(install_dir: Path, stage: Path, manifest: dict[str, Any], *
         "site_dir": str(site_dir.resolve()),
         "removed_metadata": json.dumps(removed_metadata, ensure_ascii=True),
         "removed_shadow_hooks": json.dumps(removed_hooks, ensure_ascii=True),
+        "resource_cache": json.dumps(resource_cache, ensure_ascii=True, sort_keys=True),
     }
 
 
@@ -1454,6 +1468,166 @@ def _install_runtime_probe(install_dir: Path, target: str) -> dict[str, str]:
     return {"metadata_version": lines[-3], "imported_version": lines[-2], "imported_path": str(Path(lines[-1]).resolve())}
 
 
+def _fresh_config_readiness(install_dir: Path, config: Path, cache_dir: Path) -> dict[str, Any]:
+    """Prove the installed package can load its complete fresh-host config.
+
+    Import/version checks alone do not exercise profile application.  The
+    universal workload selection is consumed during config loading, so this
+    probe must pass before an external wrapper may create/start the service or
+    publish a successful bootstrap receipt.
+    """
+    python = _venv_python(install_dir)
+    code = (
+        "import json,sys;"
+        "from mcd_agent.config import load_config;"
+        "from mcd_agent.universal_workload import required_workload_resource;"
+        "cfg=load_config(sys.argv[1],allow_recover_from_mcc=False);"
+        "resource=required_workload_resource(cfg);"
+        "print(json.dumps({'status':'ok','cache_dir':cfg.custom_cache_dir,"
+        "'profile_name':cfg.profile_name,'resource_root':resource['root']},sort_keys=True))"
+    )
+    probe = _run([str(python), "-I", "-c", code, str(config)], cwd=Path("/"))
+    try:
+        payload = json.loads((probe.stdout or "").strip().splitlines()[-1])
+    except Exception as exc:
+        raise BridgeError("fresh runtime config readiness returned invalid output") from exc
+    if (not isinstance(payload, dict) or payload.get("status") != "ok"
+            or Path(str(payload.get("cache_dir") or "")).resolve() != cache_dir.resolve()
+            or not str(payload.get("profile_name") or "").strip()
+            or not str(payload.get("resource_root") or "").strip()):
+        raise BridgeError("fresh runtime config readiness failed")
+    return payload
+
+
+def fresh_install(args: argparse.Namespace) -> dict[str, Any]:
+    """Install one immutable runtime into an otherwise empty managed prefix.
+
+    The external family wrapper owns the venv/config/cache path and service
+    provisioning.  This generic bridge owns archive verification, wheel
+    installation, exact selected-data cache preparation and activation under
+    ``runtime``.  It never creates a development/source tree.
+    """
+    install_dir = Path(args.install_dir).resolve()
+    archive = Path(args.archive).resolve()
+    config = Path(args.config or (install_dir / "etc" / "mcd.toml")).resolve()
+    runtime_dir = install_dir / "runtime"
+    legacy_dir = install_dir / "src"
+    custom_cache_arg = getattr(args, "custom_cache_dir", None)
+    if not archive.is_file():
+        raise BridgeError(f"runtime archive not found: {archive}")
+    archive_sha256 = _sha256(archive)
+    if args.expected_archive_sha256 and archive_sha256.lower() != args.expected_archive_sha256.lower():
+        raise BridgeError(
+            f"runtime archive SHA mismatch expected={args.expected_archive_sha256} actual={archive_sha256}"
+        )
+    if custom_cache_arg is None:
+        raise BridgeError("fresh runtime install requires an explicit custom cache directory")
+    custom_cache_dir = Path(custom_cache_arg).resolve()
+    if (not install_dir.is_dir() or install_dir.is_symlink() or not config.is_file()
+            or config.is_symlink() or not custom_cache_dir.is_dir() or custom_cache_dir.is_symlink()):
+        raise BridgeError("fresh runtime install requires a prepared managed prefix, config and cache")
+    _venv_python(install_dir)
+    replay = _successful_replay(install_dir, archive_sha256, str(args.expected_target or "").strip())
+    if replay is not None:
+        replay["config_readiness"] = _fresh_config_readiness(install_dir, config, custom_cache_dir)
+        return replay
+    if legacy_dir.exists() or runtime_dir.exists():
+        raise BridgeError("fresh runtime install requires an empty managed prefix with no source/runtime tree")
+
+    updates_dir = install_dir / "var" / "updates"
+    updates_dir.mkdir(parents=True, exist_ok=True)
+    stage = updates_dir / f"runtime.next-fresh-{os.getpid()}-{time.time_ns()}"
+    package_snapshot: Path | None = None
+    activated = False
+    cached_path: Path | None = None
+    cached_before = False
+    completed = False
+    with _exclusive_lock(install_dir / "var" / "mcd-self-update.lock"):
+        try:
+            manifest = _extract_archive(archive, stage)
+            target = str(manifest.get("version") or "").strip()
+            if args.expected_target and target != args.expected_target:
+                raise BridgeError(f"runtime target mismatch expected={args.expected_target} actual={target}")
+            manifest_sha256 = _sha256(stage / MANIFEST_NAME)
+            if (args.expected_manifest_sha256
+                    and manifest_sha256.lower() != args.expected_manifest_sha256.lower()):
+                raise BridgeError(
+                    "runtime manifest SHA mismatch "
+                    f"expected={args.expected_manifest_sha256} actual={manifest_sha256}"
+                )
+            ref = manifest.get("universal_workload_resource_ref")
+            if ref is not None:
+                selected = _universal_selected_resource(ref)
+                cached_path = (
+                    custom_cache_dir / "downloads" / selected["key"]
+                    / f"{selected['key']}-{selected['sha256']}.tar.gz"
+                )
+                cached_before = cached_path.is_file()
+
+            package_snapshot = _snapshot_legacy_runtime_package(install_dir)
+            package_result = _install_runtime(
+                install_dir, stage, manifest, custom_cache_dir=custom_cache_dir
+            )
+            os.replace(stage, runtime_dir)
+            activated = True
+            import_probe = _install_runtime_probe(install_dir, target)
+            config_probe = _fresh_config_readiness(install_dir, config, custom_cache_dir)
+            if legacy_dir.exists():
+                raise BridgeError("fresh runtime install created a forbidden source tree")
+            receipt = {
+                "schema": RECEIPT_SCHEMA,
+                "status": "success",
+                "bridge": "fresh-runtime-only",
+                "target": target,
+                "archive": str(archive),
+                "archive_sha256": archive_sha256,
+                "manifest_sha256": _sha256(runtime_dir / MANIFEST_NAME),
+                "before": {"source_path": None, "fresh_prefix": True},
+                "after": {
+                    "source_version": target,
+                    "source_path": str(runtime_dir),
+                    "installed": package_result,
+                    "import_probe": import_probe,
+                    "config_readiness": config_probe,
+                },
+                "service": {
+                    "systemd": False,
+                    "external_wrapper_required": True,
+                    "ready_for_service_start": True,
+                },
+                "rollback_source_retained": False,
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+            }
+            receipt_path = _write_receipt(install_dir, receipt)
+            receipt["receipt"] = str(receipt_path)
+            _write_receipt(install_dir, receipt)
+            completed = True
+            return receipt
+        except Exception:
+            if activated and runtime_dir.exists():
+                shutil.rmtree(runtime_dir, ignore_errors=True)
+            if package_snapshot is not None:
+                try:
+                    _restore_legacy_runtime_package(install_dir, package_snapshot)
+                except Exception:
+                    pass
+            if cached_path is not None and not cached_before:
+                cached_path.unlink(missing_ok=True)
+                for parent in (cached_path.parent, cached_path.parent.parent):
+                    try:
+                        parent.rmdir()
+                    except OSError:
+                        pass
+            raise
+        finally:
+            if stage.exists():
+                shutil.rmtree(stage, ignore_errors=True)
+            if package_snapshot is not None and package_snapshot.exists():
+                shutil.rmtree(package_snapshot, ignore_errors=True)
+            if not completed:
+                (install_dir / "var" / "runtime-bootstrap-receipt.json").unlink(missing_ok=True)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--install-dir", default="/opt/mcd")
@@ -1478,6 +1652,11 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="DEV only: install a different runtime manifest at the same version; exact target/archive/manifest pins are mandatory",
     )
+    parser.add_argument(
+        "--fresh-install",
+        action="store_true",
+        help="Install into a prepared empty prefix; service provisioning remains external",
+    )
     parser.add_argument("--custom-cache-dir", type=Path, help="Explicit existing data cache for a selected universal resource")
     parser.add_argument("--json", action="store_true")
     return parser
@@ -1497,7 +1676,7 @@ def main(argv: list[str] | None = None) -> int:
         print("--no-systemd is restricted to --sandbox", file=sys.stderr)
         return 2
     try:
-        result = bridge(args)
+        result = fresh_install(args) if args.fresh_install else bridge(args)
     except Exception as exc:
         payload = {"schema": RECEIPT_SCHEMA, "status": "failed", "reason": str(exc)}
         print(json.dumps(payload, ensure_ascii=True, indent=2))

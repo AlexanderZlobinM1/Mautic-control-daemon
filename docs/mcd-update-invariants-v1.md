@@ -173,6 +173,18 @@ For a host still running a pre-runtime-only updater, the handoff additionally
 requires the `mcd-runtime-bridge-qa-v1` disposable receipt and the live bridge
 receipt before the normal targeted self-update sequence can continue.
 
+For a clean host, the same detached bridge is the only runtime installer. The
+external family wrapper may prepare the venv, configuration, explicit cache
+directory and service definition, but it must invoke `--fresh-install` before
+starting the service. The fresh bridge receipt is valid only when the runtime
+is active under `/opt/mcd/runtime`, imports from managed `site-packages`, the
+selected universal workload object is present under the configured cache with
+its exact digest, and a complete offline config/profile load succeeds. The
+fresh path must never create `/opt/mcd/src`. Service start and the enclosing
+installation receipt remain external-wrapper responsibilities and require a
+stable active PID, zero restarts and successful scheduler/health readback; an
+import-only or passive-but-failed service is not success.
+
 The user-facing algorithm in [`ALGORITHM.md`](../ALGORITHM.md) is the detailed
 scheduler contract. Changes to this file require matching source/tests and a
 new immutable candidate; writing the rule alone never closes the task.

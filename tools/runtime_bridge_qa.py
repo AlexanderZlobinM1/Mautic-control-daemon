@@ -187,6 +187,44 @@ def main(argv: list[str] | None = None) -> int:
     worker: subprocess.Popen[str] | None = None
     with tempfile.TemporaryDirectory(prefix="mcd-runtime-bridge-qa-") as tmp:
         root = Path(tmp)
+        fresh_install = root / "fresh-install"
+        (fresh_install / "var").mkdir(parents=True)
+        (fresh_install / "etc").mkdir()
+        fresh_cache = root / "fresh-cache"
+        fresh_cache.mkdir()
+        (fresh_install / "etc" / "mcd.toml").write_text(
+            "[config]\nschema_version = 2\n"
+            "[profile]\nname = \"passive\"\n"
+            f"[custom]\ncache_dir = {json.dumps(str(fresh_cache))}\n"
+            "[runtime]\nstate_backend = \"sqlite\"\n"
+            f"state_db_path = {json.dumps(str(fresh_install / 'var' / 'mcd-state.db'))}\n",
+            encoding="utf-8",
+        )
+        _run([args.python, "-m", "venv", str(fresh_install / "venv")])
+        fresh_args = SimpleNamespace(
+            install_dir=str(fresh_install),
+            archive=str(archive),
+            config=str(fresh_install / "etc" / "mcd.toml"),
+            expected_archive_sha256=archive_sha256,
+            expected_manifest_sha256=archive_metadata["manifest_sha256"],
+            expected_target=expected_target,
+            custom_cache_dir=fresh_cache,
+        )
+        fresh_receipt = bridge.fresh_install(fresh_args)
+        fresh_replay = bridge.fresh_install(fresh_args)
+        fresh_installed = fresh_receipt.get("after", {}).get("installed", {})
+        fresh_resource = json.loads(str(fresh_installed.get("resource_cache") or "{}"))
+        if (fresh_receipt.get("bridge") != "fresh-runtime-only"
+                or not fresh_receipt.get("service", {}).get("ready_for_service_start")
+                or (fresh_install / "src").exists()
+                or not (fresh_install / "runtime" / "mcd-runtime-manifest.json").is_file()
+                or fresh_resource.get("status") != "ok"
+                or fresh_receipt.get("after", {}).get("config_readiness", {}).get("status") != "ok"
+                or not fresh_replay.get("idempotent_replay")
+                or fresh_replay.get("config_readiness", {}).get("status") != "ok"
+                or not Path(str(fresh_resource.get("cache_path") or "")).is_file()):
+            raise RuntimeError(f"fresh clean-root runtime contract failed: {fresh_receipt}")
+
         install = root / "install"
         (install / "var").mkdir(parents=True)
         (install / "etc").mkdir()
@@ -516,6 +554,7 @@ def main(argv: list[str] | None = None) -> int:
                 "cron_version_regression_test": "tests/test_mode_cron_wrappers.py",
             },
             "bridge_self_contained": bridge_self_contained,
+            "fresh_install": fresh_receipt,
             "bridge_receipt": receipt,
             "taskstore_preserved": preserved,
             "worker_pid_preserved": worker.poll() is None,
