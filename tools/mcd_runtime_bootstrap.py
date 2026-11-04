@@ -14,8 +14,9 @@ The bridge is deliberately fail-closed:
 * it takes the same durable MCD update lease and scheduler admission barrier;
 * an unreadable/active backup lock aborts before mutation;
 * the wheel is installed and imported from the managed venv before restart;
-* ``/opt/mcd/src`` is switched atomically and remains as bounded rollback
-  material until the supervisor is healthy;
+* a legacy ``/opt/mcd/src`` or already active ``/opt/mcd/runtime`` layout is
+  switched atomically and remains bounded rollback material until the
+  supervisor is healthy;
 * the supervisor uses ``WorkingDirectory=/opt/mcd`` and ``KillMode=process``;
 * failure restores the old source, managed-venv package and running service,
   even when the legacy source has no ``pyproject.toml``.
@@ -760,6 +761,16 @@ def _write_receipt(install_dir: Path, payload: dict[str, Any]) -> Path:
     return path
 
 
+def _active_source_layout(install_dir: Path) -> tuple[Path, Path, Path]:
+    """Select the active source/runtime layout without inventing a fallback."""
+    legacy_dir = install_dir / "src"
+    runtime_dir = install_dir / "runtime"
+    if runtime_dir.exists() and legacy_dir.exists():
+        raise BridgeError("parallel legacy src requires audited retirement before runtime activation")
+    active_dir = runtime_dir if runtime_dir.is_dir() else legacy_dir
+    return active_dir, legacy_dir, runtime_dir
+
+
 def _successful_replay(
     install_dir: Path,
     archive_sha256: str,
@@ -788,7 +799,11 @@ def _successful_replay(
     target = str(payload.get("target") or "").strip()
     if not target or (expected_target and target != expected_target):
         return None
-    source_manifest = install_dir / "src" / MANIFEST_NAME
+    try:
+        active_dir, _legacy_dir, _runtime_dir = _active_source_layout(install_dir)
+    except BridgeError:
+        return None
+    source_manifest = active_dir / MANIFEST_NAME
     if not source_manifest.is_file():
         return None
     try:
@@ -824,7 +839,8 @@ def bridge(args: argparse.Namespace) -> dict[str, Any]:
     replay = _successful_replay(install_dir, actual_archive_sha, str(args.expected_target or "").strip())
     if replay is not None:
         return replay
-    src_dir = install_dir / "src"
+    src_dir, legacy_dir, runtime_dir = _active_source_layout(install_dir)
+    original_dir = src_dir
     if not src_dir.is_dir():
         raise BridgeError(f"legacy source directory not found: {src_dir}")
     if not (src_dir / "mcd_agent" / "__init__.py").is_file():
@@ -841,8 +857,11 @@ def bridge(args: argparse.Namespace) -> dict[str, Any]:
 
     updates_dir = install_dir / "var" / "updates"
     updates_dir.mkdir(parents=True, exist_ok=True)
-    stage = updates_dir / f"src.next-bridge-{os.getpid()}-{time.time_ns()}"
-    old_src = updates_dir / f"src.prev-bridge-{int(time.time())}"
+    runtime_layout = original_dir == runtime_dir
+    stage_name = "runtime.next" if runtime_layout else "src.next"
+    rollback_name = "runtime.prev" if runtime_layout else "src.prev"
+    stage = updates_dir / f"{stage_name}-bridge-{os.getpid()}-{time.time_ns()}"
+    old_src = updates_dir / f"{rollback_name}-bridge-{int(time.time())}"
     state_path = install_dir / "var" / STATE_NAME
     before_state = _state_read(state_path)
     before_state_bytes = state_path.read_bytes() if state_path.is_file() else None
@@ -884,7 +903,9 @@ def bridge(args: argparse.Namespace) -> dict[str, Any]:
                     raise BridgeError(f"rollback source path already exists: {old_src}")
                 os.replace(src_dir, old_src)
                 old_source_moved = True
-                os.replace(stage, src_dir)
+                destination_dir = runtime_dir if runtime_layout else legacy_dir
+                os.replace(stage, destination_dir)
+                src_dir = destination_dir
                 switched = True
 
                 if not args.no_systemd:
@@ -913,7 +934,11 @@ def bridge(args: argparse.Namespace) -> dict[str, Any]:
                 receipt = {
                     "schema": RECEIPT_SCHEMA,
                     "status": "success",
-                    "bridge": "legacy-source-to-runtime-only",
+                    "bridge": (
+                        "runtime-to-runtime"
+                        if runtime_layout
+                        else "legacy-source-to-runtime-only"
+                    ),
                     "target": target,
                     "archive": str(archive),
                     "archive_sha256": _sha256(archive),

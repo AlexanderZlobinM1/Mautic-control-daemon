@@ -80,6 +80,19 @@ def test_bridge_removes_only_stale_mcd_distribution_metadata(tmp_path: Path) -> 
     assert unrelated.is_dir()
 
 
+def test_bridge_selects_runtime_only_layout_without_legacy_source(tmp_path: Path) -> None:
+    bridge = _load_bridge()
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+
+    active, legacy, observed_runtime = bridge._active_source_layout(tmp_path)
+
+    assert active == runtime
+    assert observed_runtime == runtime
+    assert legacy == tmp_path / "src"
+    assert not legacy.exists()
+
+
 def test_bridge_successful_replay_is_read_only_and_hash_bound(tmp_path: Path) -> None:
     bridge = _load_bridge()
     install = tmp_path / "install"

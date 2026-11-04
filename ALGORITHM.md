@@ -501,6 +501,10 @@ config на его profile baseline и только после этого при
    its SHA-256, source commit, runtime archive SHA, runtime manifest SHA, and
    bridge-QA sidecar SHA. The host accepts it only after exact SHA checks and
    runs the bridge locally; the runtime archive remains unchanged.
+   The bridge admits either the legacy `src` layout or an already active
+   `runtime` layout, but rejects both together; an existing runtime-only host
+   therefore receives a normal pinned forward update without a source-tree
+   fallback or symlink.
    The sidecar must accept the complete valid split TOML graph, including
    array-of-table sections, while never writing configuration.
    The MCD runtime always supplies an MCD-owned default
