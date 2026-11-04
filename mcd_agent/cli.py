@@ -2803,7 +2803,7 @@ def main() -> int:
                 print(f"instance-delete error: {e}")
             return 1
         if not bool(args.dry_run):
-            _push_state_after_change(cfg, "instance-delete")
+            _push_state_after_change(load_config(args.config), "instance-delete")
         return 0 if str(payload.get("status", "")).lower() in {"ok", "warning", "planned"} else 1
 
     if args.cmd == "admin:reset-password":

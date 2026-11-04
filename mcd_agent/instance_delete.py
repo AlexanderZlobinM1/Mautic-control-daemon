@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import hashlib
+import json
 import os
 import re
 import shutil
 import shlex
+import sqlite3
 import subprocess
 import tempfile
 import time
@@ -376,6 +379,182 @@ def _inventory_db_for_root(cfg: AgentConfig | None, root: Path) -> DBConfig | No
     return None
 
 
+def _inventory_uids_for_root(cfg: AgentConfig | None, root: Path) -> list[str]:
+    state_db_path = str(getattr(cfg, "state_db_path", "") or "").strip()
+    if not state_db_path:
+        return []
+    try:
+        from mcd_agent.inventory import InstanceInventory
+
+        return sorted({
+            str(inst.instance_uid or "").strip()
+            for inst in InstanceInventory(state_db_path).list_instances()
+            if Path(inst.root).resolve(strict=False) == root and str(inst.instance_uid or "").strip()
+        })
+    except Exception:
+        return []
+
+
+def _scrub_exact_instance_keys(value: Any, identities: set[str]) -> tuple[Any, bool]:
+    if isinstance(value, dict):
+        changed = False
+        cleaned: dict[Any, Any] = {}
+        for key, child in value.items():
+            if str(key) in identities:
+                changed = True
+                continue
+            next_child, child_changed = _scrub_exact_instance_keys(child, identities)
+            cleaned[key] = next_child
+            changed = changed or child_changed
+        return cleaned, changed
+    if isinstance(value, list):
+        changed = False
+        cleaned_list: list[Any] = []
+        for child in value:
+            next_child, child_changed = _scrub_exact_instance_keys(child, identities)
+            cleaned_list.append(next_child)
+            changed = changed or child_changed
+        return cleaned_list, changed
+    return value, False
+
+
+def _target_occurrences(raw: str, identities: set[str]) -> int:
+    text = str(raw or "").lower()
+    return sum(text.count(identity.lower()) for identity in identities)
+
+
+def _target_owned_runtime_key(key: str, identities: set[str]) -> bool:
+    clean = str(key or "")
+    return any(clean == f"plugin_inventory:{identity}" for identity in identities)
+
+
+def _canonical_state_projection(
+    rows: list[tuple[str, str, str]], identities: set[str]
+) -> tuple[list[tuple[str, str, str]], dict[tuple[str, str], str], list[tuple[str, str]], int]:
+    projection: list[tuple[str, str, str]] = []
+    updates: dict[tuple[str, str], str] = {}
+    deletes: list[tuple[str, str]] = []
+    refs = 0
+    for table, key, raw in rows:
+        refs += _target_occurrences(key, identities) + _target_occurrences(raw, identities)
+        if table == "runtime_sync" and _target_owned_runtime_key(key, identities):
+            deletes.append((table, key))
+            continue
+        try:
+            decoded = json.loads(raw)
+        except (TypeError, ValueError):
+            decoded = raw
+        cleaned, changed = _scrub_exact_instance_keys(decoded, identities)
+        clean_raw = (
+            json.dumps(cleaned, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+            if changed
+            else raw
+        )
+        if _target_occurrences(key, identities) or _target_occurrences(clean_raw, identities):
+            raise RuntimeError(f"unsupported target state reference remains in {table}.{key}")
+        projection.append((table, key, clean_raw))
+        if changed:
+            updates[(table, key)] = clean_raw
+    projection.sort()
+    deletes.sort()
+    return projection, updates, deletes, refs
+
+
+def _state_rows(db: sqlite3.Connection) -> list[tuple[str, str, str]]:
+    rows: list[tuple[str, str, str]] = []
+    existing = {
+        str(row[0])
+        for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    if "runtime_sync" in existing:
+        rows.extend(
+            ("runtime_sync", str(key), str(payload))
+            for key, payload in db.execute("SELECT key,payload_json FROM runtime_sync")
+        )
+    if "commercial_meta" in existing:
+        rows.extend(
+            ("commercial_meta", str(key), str(value))
+            for key, value in db.execute("SELECT key,value FROM commercial_meta")
+        )
+    return rows
+
+
+def _cleanup_instance_state(cfg: AgentConfig, identities: list[str]) -> dict[str, Any]:
+    exact = {str(value or "").strip() for value in identities if str(value or "").strip()}
+    path = Path(str(getattr(cfg, "state_db_path", "") or "").strip())
+    if not exact or not path.is_file() or path.is_symlink():
+        return {"status": "skipped", "identities": sorted(exact), "target_refs_before": 0, "target_refs_after": 0}
+
+    db = sqlite3.connect(str(path), timeout=30)
+    try:
+        db.execute("PRAGMA busy_timeout=30000")
+        db.execute("PRAGMA secure_delete=ON")
+        before_rows = _state_rows(db)
+        projection, updates, deletes, refs_before = _canonical_state_projection(before_rows, exact)
+        before_digest = hashlib.sha256(
+            json.dumps(projection, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+
+        db.execute("BEGIN IMMEDIATE")
+        now = time.time()
+        for (table, key), value in updates.items():
+            if table == "runtime_sync":
+                db.execute(
+                    "UPDATE runtime_sync SET payload_json=?,updated_at=? WHERE key=?",
+                    (value, now, key),
+                )
+            else:
+                db.execute("UPDATE commercial_meta SET value=? WHERE key=?", (value, key))
+        for table, key in deletes:
+            db.execute(f'DELETE FROM "{table}" WHERE key=?', (key,))
+
+        after_rows = _state_rows(db)
+        after_projection, _unused_updates, _unused_deletes, refs_after = _canonical_state_projection(after_rows, exact)
+        after_digest = hashlib.sha256(
+            json.dumps(after_projection, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        if refs_after != 0 or before_digest != after_digest:
+            raise RuntimeError("target state cleanup did not preserve the unrelated projection")
+        db.commit()
+
+        checkpoint_before = list(db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone() or ())
+        db.execute("VACUUM")
+        checkpoint_after = list(db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone() or ())
+        if not checkpoint_after or int(checkpoint_after[0]) != 0:
+            raise RuntimeError("target state WAL checkpoint remained busy")
+    finally:
+        db.close()
+
+    physical: dict[str, int] = {}
+    for suffix, label in (("", "db"), ("-wal", "wal"), ("-shm", "shm")):
+        item = Path(str(path) + suffix)
+        raw = item.read_bytes() if item.exists() else b""
+        physical[label] = sum(raw.lower().count(identity.lower().encode("utf-8")) for identity in exact)
+    if any(physical.values()):
+        raise RuntimeError("target state bytes remain after checkpoint and vacuum")
+    return {
+        "status": "ok",
+        "identities": sorted(exact),
+        "target_refs_before": refs_before,
+        "target_refs_after": refs_after,
+        "table_rows_before": {
+            table: sum(1 for row_table, _key, _raw in before_rows if row_table == table)
+            for table in ("runtime_sync", "commercial_meta")
+        },
+        "table_rows_after": {
+            table: sum(1 for row_table, _key, _raw in after_rows if row_table == table)
+            for table in ("runtime_sync", "commercial_meta")
+        },
+        "updated_keys": sorted(key for _table, key in updates),
+        "deleted_keys": sorted(key for _table, key in deletes),
+        "unrelated_projection_sha256": after_digest,
+        "unrelated_preserved": True,
+        "checkpoint_before": checkpoint_before,
+        "checkpoint_after": checkpoint_after,
+        "physical_target_refs": physical,
+    }
+
+
 def build_delete_plan(
     *,
     cfg: AgentConfig | None = None,
@@ -690,6 +869,7 @@ def delete_instance_artifacts(
         delete_vhost=delete_vhost,
         delete_db=delete_db,
     )
+    instance_identities = sorted(set(_inventory_uids_for_root(cfg, plan.root) + list(plan.domains)))
     result: dict[str, Any] = {
         "status": "planned" if dry_run else "ok",
         "plan": _plan_public(plan),
@@ -799,6 +979,8 @@ def delete_instance_artifacts(
         print(f"Rescan complete: {count} instances")
     except Exception as exc:
         result["warnings"].append(f"inventory rescan failed: {exc}")
+    if plan.delete_files and plan.delete_vhost and plan.delete_db:
+        result["state_cleanup"] = _cleanup_instance_state(cfg, instance_identities)
     if result["warnings"]:
         result["status"] = "warning"
     return result

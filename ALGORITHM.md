@@ -12,6 +12,16 @@ success object on stdout. A failed operation emits no success object and exits
 nonzero. This framing is the supported MCC parser boundary; retained inventory
 or manual target repair is never accepted as proof of a fresh installation.
 
+A full `instance-delete` captures the bare stable UID before removing the
+inventory row. After target-owned files, vhost, certificate, database and user
+are gone, it removes only exact UID/domain keys from mutable runtime and
+commercial projections in one SQLite transaction. Unknown reference shapes
+fail closed. The cleaned projection must retain the same digest for all
+unrelated data, and secure-delete plus WAL checkpoint/VACUUM must leave zero
+target bytes in the database, WAL and SHM before the command succeeds. The CLI
+reloads configuration after this cleanup before its immediate state push, so a
+stale pre-delete in-memory snapshot cannot recreate removed instance settings.
+
 Для Mautic patch lifecycle канонический порядок фаз внутри upgrade barrier:
 `before_campaign_trigger` -> `before_campaign_execution` ->
 `before_background_imports`. `before_campaign_trigger` является отдельной
