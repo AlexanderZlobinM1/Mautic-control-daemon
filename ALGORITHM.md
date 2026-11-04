@@ -271,6 +271,9 @@ acceptance: принятые host-поля сохраняются в reconciliat
 instance-поля продолжают сравниваться по собственным revision/metadata.
 Иначе отсутствие несвязанной instance row превращало принятые host omissions
 в чередующиеся default-push и poll без фактического изменения настроек.
+Local winner отправляется обратно только при доказанном metadata-событии
+`source=mcd`; сохранённый `source=mcc` receipt, даже с обычным event ID, не
+становится новой локальной правкой и не эхоится в MCC.
 
 Пустой instance-scoped map и отсутствие такого map в canonical desired-state
 эквивалентны: оба состояния содержат ноль UID-строк и не являются изменением

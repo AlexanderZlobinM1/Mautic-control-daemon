@@ -1814,6 +1814,7 @@ def _resolve_runtime_snapshots(
                 resolved[local_path] = deepcopy(local_fields[local_path])
                 local_event = bool(
                     local_stamp
+                    and str(local_stamp.get("source", "")).strip().lower() == "mcd"
                     and (
                         _runtime_metadata_number(local_stamp.get("updated_at")) > 0
                         or not str(local_stamp.get("event_id", "")).startswith("bootstrap:")
@@ -1829,9 +1830,10 @@ def _resolve_runtime_snapshots(
                 ):
                     local_push.append(local_path)
             elif local_stamp and local_stamp.get("tombstone") and remote_present:
-                if _runtime_metadata_number(local_stamp.get("updated_at")) > 0 or not str(
-                    local_stamp.get("event_id", "")
-                ).startswith("bootstrap:"):
+                if str(local_stamp.get("source", "")).strip().lower() == "mcd" and (
+                    _runtime_metadata_number(local_stamp.get("updated_at")) > 0
+                    or not str(local_stamp.get("event_id", "")).startswith("bootstrap:")
+                ):
                     local_push.append(local_path or (scope, key, local_uid))
     resolved_meta["clock"] = max(
         _runtime_metadata_revision(local_meta.get("clock"), 0),

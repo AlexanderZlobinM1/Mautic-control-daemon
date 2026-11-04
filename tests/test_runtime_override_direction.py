@@ -1183,6 +1183,35 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
         self.assertNotIn("message_queue_instance_settings", merged)
         self.assertFalse(daemon._accepted_runtime_response_matches(store, response))
 
+    def test_mcc_stamped_local_winner_is_not_echoed_as_an_mcd_edit(self) -> None:
+        local = {"jobs_max_workers": 2}
+        metadata = daemon._runtime_metadata_for_snapshot(
+            {},
+            local,
+            source="mcc",
+            revision=6,
+        )
+        daemon._runtime_metadata_set(
+            metadata,
+            "host",
+            "jobs_max_workers",
+            daemon._runtime_metadata_stamp(
+                source="mcc",
+                revision=6,
+                event_id="mcc:host::jobs_max_workers:6",
+            ),
+        )
+
+        resolved = daemon._resolve_runtime_snapshots(
+            local,
+            {},
+            metadata,
+            {},
+        )
+
+        self.assertEqual(resolved["runtime"], local)
+        self.assertEqual(resolved["local_push"], [])
+
     def test_empty_instance_maps_omitted_by_mcc_do_not_queue_a_local_delta(self) -> None:
         class MemoryStore:
             def __init__(self):
