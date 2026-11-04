@@ -280,6 +280,9 @@ Local winner отправляется обратно только при док�
 как массив. Whitelist file при активном profile guard `disable_whitelist`
 наблюдается как `profile_locked/whitelist_disabled`, а не как ложный reject:
 профиль намеренно делает путь неэффективным.
+Ready-runtime default templates хранят container settings в нативном TOML-типе
+(`cluster_replica_freshness_checks = []`), поэтому чистая установка не создаёт
+строковый legacy-value и не нуждается в последующей repair-правке.
 
 Пустой instance-scoped map и отсутствие такого map в canonical desired-state
 эквивалентны: оба состояния содержат ноль UID-строк и не являются изменением

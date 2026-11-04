@@ -36,6 +36,18 @@ from mcd_agent import daemon
 
 
 class RuntimeOverrideDirectionTests(unittest.TestCase):
+    def test_operator_template_uses_typed_replica_freshness_array(self) -> None:
+        import tomllib
+        from pathlib import Path
+
+        template = tomllib.loads(
+            (Path(__file__).parents[1] / "etc/mcd-agent.operator.example.toml").read_text(
+                encoding="utf-8"
+            )
+        )
+
+        self.assertEqual(template["runtime"]["cluster_replica_freshness_checks"], [])
+
     def test_179_key_runtime_observation_is_deterministically_chunked(self) -> None:
         keys = {f"runtime_key_{index}": index for index in range(179)}
         observation = {
