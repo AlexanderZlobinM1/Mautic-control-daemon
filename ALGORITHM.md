@@ -3111,6 +3111,11 @@ defaults от bootstrap-присутствия desired не заполняют.
 именно канонический post-write snapshot из MCC, включая сохранённые
 operator-owned values, и только его делает новым local baseline. Такой
 ответ не может превратиться в новую local edit и повторный push на следующем poll.
+Profile-derived/operator-owned keys, которые MCC осознанно не вернул в
+canonical post-write snapshot, остаются эффективными локальными
+значениями, но их submitted edit stamp терминализуется как
+accepted omission. Отсутствующее remote field не удаляется и не
+публикуется повторно без нового локального изменения.
 Split-config определяется самим `[include].files`, а не наличием
 необязательного comment-marker. Runtime/profile writer всегда пишет в
 последний include (обычно `mcd.local.toml`); runtime keys, ошибочно

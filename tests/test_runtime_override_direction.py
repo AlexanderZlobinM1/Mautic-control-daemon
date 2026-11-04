@@ -1021,6 +1021,67 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
         )
         self.assertIsNotNone(daemon._read_local_runtime_push_pending(store))
 
+    def test_accepted_omission_retains_effective_value_without_republishing_it(self) -> None:
+        class MemoryStore:
+            def __init__(self):
+                self.values = {}
+
+            def get_runtime_sync(self, key):
+                return self.values.get(key)
+
+            def put_runtime_sync(self, key, value):
+                self.values[key] = dict(value)
+
+        store = MemoryStore()
+        submitted = {
+            "mcd_update_policy": "off",
+            "jobs_max_workers": 2,
+        }
+        submitted_metadata = daemon._runtime_metadata_empty()
+        submitted_metadata = daemon._record_local_runtime_changes(
+            submitted_metadata,
+            {},
+            submitted,
+            event_ts=123.0,
+        )
+        accepted = {
+            "status": "ok",
+            "desired_state": {
+                "revision": 8,
+                "runtime_overrides": {"mcd_update_policy": "off"},
+            },
+            "runtime_overrides": {"mcd_update_policy": "off"},
+        }
+
+        self.assertTrue(
+            daemon._store_desired_runtime_push_result(
+                store,
+                accepted,
+                accepted_runtime=submitted,
+                runtime_metadata=submitted_metadata,
+            )
+        )
+        metadata = store.values[daemon._LOCAL_RUNTIME_METADATA_KEY]
+        stamp = metadata["host"]["jobs_max_workers"]
+        self.assertEqual(stamp["source"], "mcc")
+        self.assertEqual(stamp["updated_at"], 0.0)
+        self.assertTrue(stamp["event_id"].startswith("bootstrap:mcc:accepted-omission:"))
+
+        remote_metadata = daemon._runtime_metadata_for_snapshot(
+            {},
+            {"mcd_update_policy": "off"},
+            source="mcc",
+            revision=8,
+        )
+        resolved = daemon._resolve_runtime_snapshots(
+            submitted,
+            {"mcd_update_policy": "off"},
+            metadata,
+            remote_metadata,
+        )
+        self.assertEqual(resolved["runtime"], submitted)
+        self.assertNotIn(("host", "jobs_max_workers", ""), resolved["local_push"])
+
     def test_accepted_canonical_snapshot_is_materialized_before_local_baseline(self) -> None:
         from copy import deepcopy
         from pathlib import Path

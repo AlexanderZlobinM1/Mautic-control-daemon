@@ -3076,7 +3076,8 @@ def _store_desired_runtime_push_result(
     if not isinstance(pushed_runtime, dict):
         pushed_runtime = deepcopy(dict(accepted_runtime)) if isinstance(accepted_runtime, Mapping) else {}
     accepted_runtime_hint = deepcopy(dict(accepted_runtime)) if isinstance(accepted_runtime, Mapping) else {}
-    accepted_snapshot = merge_instance_desired_states(pushed_runtime, pushed_instances)
+    canonical_response_snapshot = merge_instance_desired_states(pushed_runtime, pushed_instances)
+    accepted_snapshot = deepcopy(canonical_response_snapshot)
     accepted_snapshot = _merge_missing_runtime_values(accepted_snapshot, accepted_runtime_hint)
     store.put_runtime_sync("mcc_runtime", accepted_snapshot)
     pushed_metadata = pushed.get("runtime_metadata")
@@ -3090,6 +3091,26 @@ def _store_desired_runtime_push_result(
         source="mcc" if isinstance(pushed_metadata, Mapping) else "mcd",
         revision=revision,
     )
+    # MCC may intentionally omit profile-derived or operator-owned values
+    # while accepting the rest of a host write. Retain those effective local
+    # values, but terminalize their submitted edit stamps: otherwise every
+    # later poll sees a recent local event against an absent remote field and
+    # republishes the same value forever.
+    canonical_paths = set(_runtime_snapshot_fields(canonical_response_snapshot))
+    accepted_paths = set(_runtime_snapshot_fields(accepted_snapshot))
+    for scope, key, uid in sorted(accepted_paths - canonical_paths):
+        _runtime_metadata_set(
+            accepted_metadata,
+            scope,
+            key,
+            _runtime_metadata_stamp(
+                source="mcc",
+                revision=revision,
+                updated_at=0.0,
+                event_id=f"bootstrap:mcc:accepted-omission:{scope}:{uid}:{key}:{revision}",
+            ),
+            uid,
+        )
     store.put_runtime_sync(_MCC_RUNTIME_METADATA_KEY, accepted_metadata)
     store.put_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY, accepted_metadata)
     store.put_runtime_sync(
