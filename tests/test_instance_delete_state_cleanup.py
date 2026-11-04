@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from mcd_agent import instance_delete
+from mcd_agent.config import runtime_overrides_from_config_file
 
 
 TARGET = "fresh.example.invalid"
@@ -24,6 +25,14 @@ def _db(path: Path) -> sqlite3.Connection:
 
 def test_cleanup_removes_exact_target_state_and_physical_wal_bytes(tmp_path):
     path = tmp_path / "mcd-state.db"
+    config_path = tmp_path / "mcd.toml"
+    config_path.write_text(
+        "[runtime]\n"
+        f'message_queue_instance_settings = {{ "{TARGET}" = {{ workers = 2 }}, '
+        f'"{KEEP}" = {{ workers = 7, sentinel = "config-preserve" }} }}\n'
+        "jobs_max_workers = 9\n",
+        encoding="utf-8",
+    )
     db = _db(path)
     local_runtime = {
         "message_queue_instance_settings": {
@@ -68,7 +77,7 @@ def test_cleanup_removes_exact_target_state_and_physical_wal_bytes(tmp_path):
     db.close()
 
     result = instance_delete._cleanup_instance_state(
-        SimpleNamespace(state_db_path=str(path)), [TARGET]
+        SimpleNamespace(state_db_path=str(path), config_file_path=str(config_path)), [TARGET]
     )
 
     assert result["status"] == "ok"
@@ -76,6 +85,15 @@ def test_cleanup_removes_exact_target_state_and_physical_wal_bytes(tmp_path):
     assert result["target_refs_after"] == 0
     assert result["physical_target_refs"] == {"db": 0, "wal": 0, "shm": 0}
     assert result["unrelated_preserved"] is True
+    assert result["config_cleanup"]["status"] == "ok"
+    assert result["config_cleanup"]["target_refs_before"] == 1
+    assert result["config_cleanup"]["target_refs_after"] == 0
+    assert runtime_overrides_from_config_file(str(config_path)) == {
+        "jobs_max_workers": 9,
+        "message_queue_instance_settings": {
+            KEEP: {"sentinel": "config-preserve", "workers": 7}
+        },
+    }
     assert result["deleted_keys"] == [f"plugin_inventory:{TARGET}"]
     assert result["updated_keys"] == [
         "commercial_standalone_settings_snapshot_v1",

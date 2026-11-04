@@ -15,7 +15,11 @@ import time
 from typing import Any
 from urllib.parse import urlparse
 
-from mcd_agent.config import AgentConfig
+from mcd_agent.config import (
+    AgentConfig,
+    runtime_overrides_from_config_file,
+    upsert_runtime_values,
+)
 from mcd_agent.localphp import parse_local_php
 from mcd_agent.models import DBConfig
 
@@ -479,11 +483,55 @@ def _state_rows(db: sqlite3.Connection) -> list[tuple[str, str, str]]:
     return rows
 
 
+def _cleanup_instance_runtime_config(cfg: AgentConfig, identities: set[str]) -> dict[str, Any]:
+    config_path = str(getattr(cfg, "config_file_path", "") or "").strip()
+    if not config_path:
+        return {"status": "skipped", "target_refs_before": 0, "target_refs_after": 0}
+    current = runtime_overrides_from_config_file(config_path)
+    cleaned: dict[str, Any] = {}
+    updates: dict[str, Any] = {}
+    refs_before = _target_occurrences(
+        json.dumps(current, ensure_ascii=True, sort_keys=True), identities
+    )
+    for key, value in current.items():
+        next_value, changed = _scrub_exact_instance_keys(value, identities)
+        cleaned[str(key)] = next_value
+        if changed:
+            updates[str(key)] = next_value
+    if _target_occurrences(json.dumps(cleaned, ensure_ascii=True, sort_keys=True), identities):
+        raise RuntimeError("unsupported target runtime-config reference remains")
+    expected_digest = hashlib.sha256(
+        json.dumps(cleaned, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    mutable_path, changed = upsert_runtime_values(config_path, updates)
+    observed = runtime_overrides_from_config_file(config_path)
+    refs_after = _target_occurrences(
+        json.dumps(observed, ensure_ascii=True, sort_keys=True), identities
+    )
+    observed_digest = hashlib.sha256(
+        json.dumps(observed, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    if refs_after or observed_digest != expected_digest:
+        raise RuntimeError("target runtime-config cleanup did not preserve the unrelated projection")
+    return {
+        "status": "ok",
+        "path": mutable_path,
+        "changed": bool(changed),
+        "updated_keys": sorted(updates),
+        "target_refs_before": refs_before,
+        "target_refs_after": refs_after,
+        "unrelated_projection_sha256": observed_digest,
+        "unrelated_preserved": True,
+    }
+
+
 def _cleanup_instance_state(cfg: AgentConfig, identities: list[str]) -> dict[str, Any]:
     exact = {str(value or "").strip() for value in identities if str(value or "").strip()}
     path = Path(str(getattr(cfg, "state_db_path", "") or "").strip())
     if not exact or not path.is_file() or path.is_symlink():
         return {"status": "skipped", "identities": sorted(exact), "target_refs_before": 0, "target_refs_after": 0}
+
+    config_cleanup = _cleanup_instance_runtime_config(cfg, exact)
 
     db = sqlite3.connect(str(path), timeout=30)
     try:
@@ -535,6 +583,7 @@ def _cleanup_instance_state(cfg: AgentConfig, identities: list[str]) -> dict[str
     return {
         "status": "ok",
         "identities": sorted(exact),
+        "config_cleanup": config_cleanup,
         "target_refs_before": refs_before,
         "target_refs_after": refs_after,
         "table_rows_before": {
