@@ -1192,6 +1192,13 @@ terminalization MCD удерживает claim только bounded grace window
 последнего независимо подтверждённого process/DB heartbeat. Один лишь
 persisted marker эту window не продлевает. Error не блокирует независимые
 items, но учитывается failure cooldown и receipt.
+Для Mautic 4–6 dependency guard вычисляется по полному pending projection
+persisted cycle, даже когда volatile planner rings уже пусты. Если parent
+находится в failure cooldown, его незавершённые descendants остаются blocked,
+но другие независимые parents той же связной closure исключают blocked IDs при
+выборе owner и продолжают `claim -> start -> terminal` в свободных slots.
+Blocked parent не может монополизировать owner всей closure и остановить
+независимую часть очереди.
 Цикл terminal, когда каждый его item находится в `done` или terminal error и
 нет running/claimed работы.
 

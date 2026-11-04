@@ -20,6 +20,7 @@ from mcd_agent.daemon import (
     _segment_cycle_claim,
     _segment_cycle_pending_order,
     _segment_cycle_pending_ids,
+    _segment_dependency_blocked_ids_for_cycle,
     _segment_cycle_release,
     _segment_cycle_running,
     _segment_cycle_terminal,
@@ -103,6 +104,101 @@ class SegmentLivenessTests(unittest.TestCase):
             )
             lazy_cfg = load_config(str(config_path), allow_recover_from_mcc=False)
             self.assertTrue(lazy_cfg.segment_lazy_update_enabled)
+
+    def test_persisted_m4_cycle_propagates_blocked_parent_to_dependent_child(self) -> None:
+        cycle = {
+            "schema": "mcd-segment-cycle-v1",
+            "status": "active",
+            "items": [150, 151, 152, 153],
+            "follow_up": [],
+            "claimed": [],
+            "running": [],
+            "done": [151],
+            "errors": [],
+        }
+
+        blocked = _segment_dependency_blocked_ids_for_cycle(
+            root="/var/www/ss/public_html",
+            cycle_state=cycle,
+            planner_candidate_ids=set(),
+            parents_by_child={153: {150, 151, 152}},
+            running={},
+            recently_finished={151},
+        )
+
+        self.assertEqual(blocked, {153})
+
+    def test_m4_blocked_parent_does_not_strand_independent_parent_in_same_closure(self) -> None:
+        root = "/var/www/ss/public_html"
+        context = {
+            "schema": "mcd-segment-dispatch-context-v1",
+            "mautic_major": 4,
+            "parents_by_child": {"153": [150, 151, 152]},
+            "children_by_parent": {"150": [153], "151": [153], "152": [153]},
+        }
+        cycle = {
+            "schema": "mcd-segment-cycle-v1",
+            "status": "active",
+            "items": [150, 151, 152, 153],
+            "follow_up": [],
+            "important_items": [],
+            "remaining_items": [150, 151, 152, 153],
+            "claimed": [],
+            "running": [],
+            "done": [151],
+            "errors": [],
+        }
+
+        class Store:
+            def __init__(self) -> None:
+                self.payloads = {
+                    daemon._segment_dispatch_context_key(root): context,
+                    daemon._segment_cycle_key(root): cycle,
+                }
+
+            def get_runtime_sync(self, key: str) -> dict[str, object] | None:
+                return self.payloads.get(key)
+
+            def put_runtime_sync(self, key: str, payload: dict[str, object]) -> None:
+                self.payloads[key] = payload
+
+        claimed: list[int] = []
+        config = SimpleNamespace(command_timeout_sec=3600, segment_full_scan_interval_sec=0)
+        ring = deque([150, 152, 153])
+
+        with patch.object(daemon, "_scheduler_segment_entity_allowed", return_value=True), patch.object(
+            daemon,
+            "_submit_if_slot",
+            return_value=True,
+        ) as submit:
+            launched = _fill_from_ring(
+                ring=ring,
+                ring_limit=8,
+                total_limit=8,
+                root=root,
+                task_type="segment",
+                running={},
+                ring_entities={150, 152, 153},
+                config=config,
+                store=Store(),
+                popens={},
+                build_args=lambda sid: ["php", "bin/console", "mautic:segments:update", "-i", str(sid)],
+                blocked_entities={150, 153},
+                admission_claim=lambda sid: claimed.append(int(sid)) or True,
+                remove_on_launch=True,
+                bypass_repeat_guard_entities={150, 152, 153},
+                bypass_baseline_admission=True,
+                max_launches=1,
+            )
+
+        self.assertEqual(launched, 1)
+        self.assertEqual(claimed, [152])
+        self.assertEqual(submit.call_args.kwargs["entity_id"], 152)
+        self.assertEqual(
+            submit.call_args.kwargs["args"],
+            ["php", "bin/console", "mautic:segments:update", "-i", "152"],
+        )
+        self.assertEqual(list(ring), [153, 150])
 
     def test_mixed_instance_lazy_policy_uses_uid_aliases_and_host_fallback(self) -> None:
         config = SimpleNamespace(

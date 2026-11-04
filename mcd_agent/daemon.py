@@ -214,6 +214,7 @@ from mcd_agent.segment_recurring_priority import state_key as recurring_priority
 from mcd_agent.segment_recurring_priority import state_payload as recurring_priority_state_payload
 from mcd_agent.segment_sql_auto import DetectedSQLSegmentRule, detect_auto_sql_segment_rules
 from mcd_agent.segment_dependencies import (
+    dependent_segment_closure,
     dependency_segment_closure,
     dependency_execution_chains,
     dependency_expanded_segment_plan,
@@ -5273,6 +5274,28 @@ def _segment_cycle_pending_ids(state: Mapping[str, object] | None) -> set[int]:
         _normalize_segment_ids(state.get("running"))
     )
     return items - finished - active
+
+
+def _segment_dependency_blocked_ids_for_cycle(
+    *,
+    root: str,
+    cycle_state: Mapping[str, object] | None,
+    planner_candidate_ids: Iterable[int],
+    parents_by_child: dict[int, set[int]],
+    running: dict[str, "RunningTask"],
+    recently_finished: set[int],
+) -> set[int]:
+    """Apply dependency blocking to durable pending work after admission."""
+
+    candidates = set(_normalize_segment_ids(planner_candidate_ids))
+    candidates.update(_segment_cycle_pending_ids(cycle_state))
+    return segment_dependency_blocked_ids(
+        root=root,
+        candidate_ids=candidates,
+        parents_by_child=parents_by_child,
+        running=running,
+        recently_finished=recently_finished,
+    )
 
 
 def _segment_cycle_pending_order(
@@ -11377,10 +11400,30 @@ def _fill_from_ring(
         scans -= 1
         chain_ids = [int(eid)]
         if task_type == "segment":
+            blocked_chain_ids = set(_normalize_segment_ids(blocked_entities))
+            if blocked_chain_ids:
+                try:
+                    _context, _major, _parents, children_by_parent = _segment_dispatch_context_parts(
+                        store,
+                        root,
+                    )
+                    blocked_chain_ids.update(
+                        dependent_segment_closure(blocked_chain_ids, children_by_parent)
+                    )
+                except Exception:
+                    pass
+            if int(eid) in blocked_chain_ids:
+                ring.rotate(-1)
+                continue
+            chain_candidates = [
+                int(candidate_id)
+                for candidate_id in ring
+                if int(candidate_id) not in blocked_chain_ids
+            ]
             chain_ids = _segment_chain_from_dispatch_context(
                 store,
                 root,
-                list(ring),
+                chain_candidates,
                 int(eid),
             )
             # The topological owner is the only ring entry allowed to start
@@ -23585,17 +23628,31 @@ def run_loop(
                     root,
                     ",".join(str(sid) for sid in terminalized_data_errors),
                 )
-            _refresh_scheduler_important_root(
-                store,
-                root,
-                blocked_ids=segment_blocked_ids,
-            )
             persisted_pending_cycle_order = _segment_cycle_pending_order(
                 segment_cycle_payload,
                 excluded_ids=sql_managed_segment_ids | static_lane_owned_ids,
             )
             persisted_pending_cycle_ids = set(persisted_pending_cycle_order)
             eligible_pending_cycle_ids = _segment_cycle_pending_ids(segment_cycle_payload)
+            segment_blocked_ids |= _segment_dependency_blocked_ids_for_cycle(
+                root=root,
+                cycle_state=segment_cycle_payload,
+                planner_candidate_ids=(
+                    set(seg_prio_set)
+                    | set(seg_reg_set)
+                    | set(seg_sql_active)
+                    | set(seg_sql_long_active)
+                ),
+                parents_by_child=dependency_parents_for_root,
+                running=running,
+                recently_finished=_recent_finished_segment_ids(root, now),
+            )
+            segment_blocked_ids.difference_update(terminalized_data_errors)
+            _refresh_scheduler_important_root(
+                store,
+                root,
+                blocked_ids=segment_blocked_ids,
+            )
             segment_cycle_ids = set(
                 _normalize_segment_ids(
                     [
