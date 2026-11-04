@@ -3131,6 +3131,12 @@ write, а принятый результат помечает локальны�
 его changes/idempotency. Adoption/migration patches (включая message queue)
 перед каждым merge получают текущую desired revision и один раз повторяют
 fetch/write после conflict; независимые desired keys при этом не заменяются.
+Если после restart локальный retry cursor всё ещё `queued`, но MCD уже успешно
+применил и ACK-нул более новую canonical desired revision, этот локальный cursor
+также терминализируется как `superseded` и очищает changes/idempotency. Это не
+заменяет MCC-owned lifecycle durable server intents: тот же canonical ACK
+является штатным сигналом MCC для server-side terminal/supersede, без ручной
+правки таблицы и без нового transport/credential слоя.
 Verified initial `universal_workload_resource_ref` остаётся bootstrap-событием
 без ложного operator timestamp, но при отсутствии remote value/tombstone один
 раз seed-ится в desired через тот же revisioned rebase. Остальные профильные

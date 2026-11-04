@@ -162,6 +162,50 @@ def test_daemon_v3_queued_intent_falls_back_to_revisioned_rebase(monkeypatch):
     assert result["reason"] == "runtime_sync_v3_queued_requires_revisioned_rebase"
 
 
+def test_newer_canonical_ack_supersedes_stale_local_queued_intent():
+    store = Store({
+        "mcc_runtime_sync_v3": {
+            "schema": "mcd-runtime-sync-v3-state-v1",
+            "status": "queued",
+            "base_revision": 6,
+            "base": {"jobs_max_workers": 1},
+            "changes": {"jobs_max_workers": 2},
+            "idempotency_key": "mcd-v3-old",
+        },
+    })
+
+    changed = daemon._runtime_sync_v3_supersede_after_canonical_ack(
+        store,
+        {"revision": 7, "runtime_overrides": {"jobs_max_workers": 1}},
+    )
+
+    assert changed is True
+    state = store.get_runtime_sync("mcc_runtime_sync_v3")
+    assert state["status"] == "superseded"
+    assert state["superseded_by"] == "newer_canonical_desired_ack"
+    assert state["superseded_revision"] == 7
+    assert state["base_revision"] == 7
+    assert state["changes"] == {}
+    assert state["idempotency_key"] == ""
+
+
+def test_canonical_ack_does_not_supersede_same_or_newer_local_intent():
+    original = {
+        "schema": "mcd-runtime-sync-v3-state-v1",
+        "status": "queued",
+        "base_revision": 7,
+        "changes": {"jobs_max_workers": 2},
+        "idempotency_key": "mcd-v3-current",
+    }
+    store = Store({"mcc_runtime_sync_v3": original})
+
+    assert daemon._runtime_sync_v3_supersede_after_canonical_ack(
+        store,
+        {"revision": 7},
+    ) is False
+    assert store.get_runtime_sync("mcc_runtime_sync_v3") == original
+
+
 def test_runtime_patch_fetches_revision_and_retries_without_dropping_independent_key(monkeypatch):
     cfg = SimpleNamespace()
     calls = []

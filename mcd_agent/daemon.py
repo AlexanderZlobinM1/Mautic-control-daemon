@@ -881,6 +881,47 @@ def _runtime_sync_v3_mark(store: object, state: Mapping[str, Any]) -> None:
         logging.warning("runtime-sync-v3 state persistence failed")
 
 
+def _runtime_sync_v3_supersede_after_canonical_ack(
+    store: object,
+    desired_state: object,
+) -> bool:
+    """Retire a queued local intent once a newer canonical revision is ACKed.
+
+    MCC owns the durable server-side intent lifecycle. This marker only
+    prevents an old host-side retry cursor from surviving a successful
+    pull/apply/ACK of a newer canonical desired revision (for example after a
+    package restart). The normal MCC ACK remains the server reconciliation
+    signal; no intent row is edited locally or out of band.
+    """
+    state = _runtime_sync_v3_state(store)
+    if str(state.get("status") or "").strip().lower() != "queued":
+        return False
+    if not isinstance(desired_state, Mapping):
+        return False
+    revision = desired_state.get("revision")
+    base_revision = state.get("base_revision")
+    if (
+        not isinstance(revision, int)
+        or isinstance(revision, bool)
+        or not isinstance(base_revision, int)
+        or isinstance(base_revision, bool)
+        or revision <= base_revision
+    ):
+        return False
+    state.update(
+        {
+            "status": "superseded",
+            "superseded_by": "newer_canonical_desired_ack",
+            "superseded_revision": int(revision),
+            "base_revision": int(revision),
+            "changes": {},
+            "idempotency_key": "",
+        }
+    )
+    _runtime_sync_v3_mark(store, state)
+    return True
+
+
 def _runtime_sync_v3_attempt(
     config: AgentConfig,
     store: object,
@@ -21005,15 +21046,24 @@ def run_loop(
                         if isinstance(desired_state_runtime, dict)
                         else overrides_raw if isinstance(overrides_raw, dict) else {}
                     )
-                    for failure in acknowledge_desired_runtime_states(
+                    ack_failures = acknowledge_desired_runtime_states(
                         config,
                         store,
                         desired_state=desired_state,
                         host_runtime=desired_host_runtime,
                         instance_states=instance_states,
                         runtime_fingerprint=fp,
-                    ):
+                    )
+                    for failure in ack_failures:
                         logging.warning("runtime desired-state acknowledgement failed: %s", failure)
+                    if not ack_failures and _runtime_sync_v3_supersede_after_canonical_ack(
+                        store,
+                        desired_state,
+                    ):
+                        logging.info(
+                            "runtime-sync-v3 queued local intent superseded by canonical desired ACK revision=%s",
+                            desired_state.get("revision") if isinstance(desired_state, Mapping) else "-",
+                        )
                     startup_runtime_sync_pending = False
                     last_runtime_overrides_error = ""
                     next_runtime_overrides_poll_at = now + poll_interval
