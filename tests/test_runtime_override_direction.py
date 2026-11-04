@@ -1141,6 +1141,98 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             store.put_runtime_sync("local_runtime", canonical)
             self.assertIsNone(daemon._queue_local_runtime_delta(store, local_runtime_overrides(reloaded)))
 
+    def test_empty_instance_maps_omitted_by_mcc_do_not_queue_a_local_delta(self) -> None:
+        class MemoryStore:
+            def __init__(self):
+                baseline = {
+                    "mcd_update_policy": "off",
+                    "campaign_whitelist_instance_settings": {},
+                    "empty_leads_cleanup_instance_settings": {},
+                    "monitored_email_parser_instance_settings": {},
+                    "page_hits_orphan_cleanup_instance_settings": {},
+                    "plugin_operation_instance_settings": {},
+                    "segment_recurring_priority_v1": {},
+                    "segment_whitelist_instance_settings": {},
+                }
+                self.values = {
+                    "local_runtime": baseline,
+                    daemon._LOCAL_RUNTIME_PUSH_PENDING_KEY: {
+                        "previous": baseline,
+                        "current": {"mcd_update_policy": "off"},
+                    },
+                }
+
+            def get_runtime_sync(self, key):
+                return self.values.get(key)
+
+            def put_runtime_sync(self, key, value):
+                self.values[key] = dict(value)
+
+            def delete_runtime_sync(self, keys):
+                for key in keys:
+                    self.values.pop(key, None)
+                return 1
+
+        store = MemoryStore()
+        local_projection = {"mcd_update_policy": "off"}
+
+        pending = daemon._queue_local_runtime_delta(
+            store,
+            local_projection,
+            allow_unproven=True,
+        )
+
+        self.assertIsNone(pending)
+        self.assertEqual(store.values["local_runtime"], local_projection)
+        self.assertNotIn(daemon._LOCAL_RUNTIME_PUSH_PENDING_KEY, store.values)
+
+    def test_accepted_empty_instance_maps_use_concrete_file_projection_as_baseline(self) -> None:
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        class MemoryStore:
+            def __init__(self, values=None):
+                self.values = dict(values or {})
+
+            def get_runtime_sync(self, key):
+                return self.values.get(key)
+
+            def put_runtime_sync(self, key, value):
+                self.values[key] = dict(value)
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "mcd.toml"
+            path.write_text('[runtime]\nmcd_update_policy = "off"\n', encoding="utf-8")
+            cfg = load_config(str(path), allow_recover_from_mcc=False)
+            canonical = {
+                "mcd_update_policy": "off",
+                "segment_recurring_priority_v1": {},
+                "campaign_whitelist_instance_settings": {},
+            }
+            store = MemoryStore({
+                daemon._LOCAL_RUNTIME_ACCEPTED_KEY: {"runtime": canonical},
+            })
+
+            reloaded, baseline = daemon._materialize_accepted_runtime_snapshot(
+                cfg,
+                store,
+                canonical,
+            )
+
+            self.assertEqual(baseline, {"mcd_update_policy": "off"})
+            self.assertEqual(local_runtime_overrides(reloaded), baseline)
+
+    def test_missing_empty_instance_map_is_not_runtime_snapshot_loss(self) -> None:
+        self.assertFalse(
+            daemon._runtime_snapshot_loss_detected(
+                {"mcd_update_policy": "off"},
+                {
+                    "mcd_update_policy": "off",
+                    "segment_recurring_priority_v1": {},
+                },
+            )
+        )
+
     def test_poll_requests_local_and_host_qualified_instance_uid_aliases(self) -> None:
         cfg = SimpleNamespace(mcc_url="https://mcc.example", mcc_token="token")
         identity = {

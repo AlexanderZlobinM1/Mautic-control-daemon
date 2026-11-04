@@ -1298,6 +1298,21 @@ def _runtime_snapshot_from_fields(fields: Mapping[tuple[str, str, str], Any]) ->
     return runtime
 
 
+def _runtime_snapshots_semantically_equal(
+    left: Mapping[str, Any],
+    right: Mapping[str, Any],
+) -> bool:
+    """Compare runtime intent, ignoring empty instance-map containers.
+
+    Instance-scoped settings have meaning only through their UID rows.  An
+    absent map and an empty map therefore describe the same runtime intent.
+    Keeping this comparison at the flattened field boundary prevents a
+    canonical MCC response that omits empty maps from becoming a synthetic
+    local edit on the next daemon tick.
+    """
+    return _runtime_snapshot_fields(left) == _runtime_snapshot_fields(right)
+
+
 def _merge_missing_runtime_values(
     current_runtime: Mapping[str, Any],
     fallback_runtime: Mapping[str, Any],
@@ -1346,6 +1361,8 @@ def _runtime_snapshot_loss_detected(
     for raw_key, durable_value in durable.items():
         key = str(raw_key)
         if key not in current:
+            if _is_instance_runtime_map_key(key) and isinstance(durable_value, Mapping) and not durable_value:
+                continue
             return True
         current_value = current.get(key)
         if _is_instance_runtime_map_key(key) and isinstance(durable_value, Mapping):
@@ -2233,9 +2250,19 @@ def _queue_local_runtime_delta(
     metadata_raw = store.get_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY)
     metadata = _runtime_metadata_for_snapshot(metadata_raw, baseline, source="mcd")
     pending = _read_local_runtime_push_pending(store)
-    if current == baseline:
+    if _runtime_snapshots_semantically_equal(current, baseline):
+        # Normalize the durable baseline to the actual file projection.  MCC
+        # commonly omits empty per-instance maps from its canonical desired
+        # response, while an accepted compatibility echo may still contain
+        # them.  They must not alternate between an empty-map push and an
+        # absent-map push forever.
+        if current != baseline:
+            store.put_runtime_sync("local_runtime", current)
         store.put_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY, metadata)
-        if pending is not None and pending["current"] != current:
+        if pending is not None and (
+            _runtime_snapshots_semantically_equal(pending["previous"], pending["current"])
+            or not _runtime_snapshots_semantically_equal(pending["current"], current)
+        ):
             _clear_local_runtime_push_pending(store)
             pending = None
         return pending
@@ -3193,8 +3220,11 @@ def _materialize_accepted_runtime_snapshot(
     if not canonical:
         canonical = deepcopy(dict(fallback_runtime))
     current = local_runtime_overrides(config)
-    if current == canonical:
-        return config, canonical
+    if _runtime_snapshots_semantically_equal(current, canonical):
+        # Return the concrete local projection as the baseline.  Empty
+        # instance maps accepted but omitted by MCC carry no UID fields and
+        # are semantically identical to absence in the split runtime file.
+        return config, current
     metadata = store.get_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY) or {}
     _persist_resolved_runtime_to_config(
         config,
