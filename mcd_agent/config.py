@@ -1593,11 +1593,11 @@ def persist_profile_runtime_values(config_path: str, profile_name: str, updates:
             os.replace(temporary, p)
         finally:
             Path(temporary).unlink(missing_ok=True)
-    migrated = _remove_split_entrypoint_runtime_values(config_path, set(updates) | set(removals))
+    migrated = retire_split_entrypoint_runtime_values(config_path, set(updates) | set(removals))
     return str(p), bool(changed or migrated)
 
 
-def _remove_split_entrypoint_runtime_values(config_path: str, keys: set[str]) -> int:
+def retire_split_entrypoint_runtime_values(config_path: str, keys: set[str]) -> int:
     """Retire runtime values accidentally written below a split entrypoint.
 
     The last include is the effective mutable layer. Keeping the same key in
@@ -1618,7 +1618,7 @@ def _remove_split_entrypoint_runtime_values(config_path: str, keys: set[str]) ->
 
 def upsert_runtime_values(config_path: str, updates: dict[str, object]) -> tuple[str, bool]:
     path, changed = upsert_section_values(config_path, "runtime", updates)
-    migrated = _remove_split_entrypoint_runtime_values(config_path, set(updates))
+    migrated = retire_split_entrypoint_runtime_values(config_path, set(updates))
     return path, bool(changed or migrated)
 
 
@@ -1641,7 +1641,7 @@ def remove_runtime_values(config_path: str, keys: set[str]) -> tuple[str, bool]:
         updated, removed = _remove_section_keys_text(text, "runtime", set(keys))
         if removed > 0:
             path.write_text(updated, encoding="utf-8")
-    migrated = _remove_split_entrypoint_runtime_values(config_path, set(keys))
+    migrated = retire_split_entrypoint_runtime_values(config_path, set(keys))
     return str(path), bool(removed or migrated)
 
 

@@ -43,6 +43,7 @@ from mcd_agent.config import (
     reapply_profile_authority,
     recover_config_from_mcc,
     remove_runtime_values,
+    retire_split_entrypoint_runtime_values,
     runtime_remote_allowed_keys,
     runtime_effective_map,
     upsert_runtime_values,
@@ -2107,6 +2108,8 @@ def _persist_resolved_runtime_to_config(
         removals.discard(resource_key)
     if profile_name is not None:
         persist_profile_runtime_values(config.config_file_path, profile_name, updates, removals)
+        if full_snapshot:
+            retire_split_entrypoint_runtime_values(config.config_file_path, set(resolved))
         return
     if updates:
         try:
@@ -2130,6 +2133,13 @@ def _persist_resolved_runtime_to_config(
                 )
         except Exception as exc:
             logging.warning("runtime-overrides explicit tombstone persistence failed: %s", exc)
+    if full_snapshot:
+        retired = retire_split_entrypoint_runtime_values(config.config_file_path, set(resolved))
+        if retired:
+            logging.info(
+                "runtime-overrides retired misplaced split-entrypoint keys: count=%s",
+                retired,
+            )
 
 
 def _runtime_reconciliation_previous(

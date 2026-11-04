@@ -2,7 +2,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from mcd_agent.config import _load_toml_with_includes, upsert_runtime_values, upsert_section_values
+from mcd_agent.config import (
+    _load_toml_with_includes,
+    retire_split_entrypoint_runtime_values,
+    upsert_runtime_values,
+    upsert_section_values,
+)
 from mcd_agent.mode import _resolve_mutable_config_path as resolve_mode_mutable_config_path
 
 
@@ -68,6 +73,19 @@ class SplitConfigPrecedenceTests(unittest.TestCase):
                 "off",
             )
             self.assertEqual(resolve_mode_mutable_config_path(str(root)).resolve(), local.resolve())
+
+            root_text = root.read_text(encoding="utf-8").replace(
+                '[runtime]\n',
+                '[runtime]\nmessage_queue_instance_settings = { "one.example" = { enabled = false } }\n',
+                1,
+            )
+            root.write_text(root_text, encoding="utf-8")
+            retired = retire_split_entrypoint_runtime_values(
+                str(root),
+                {"mcd_update_policy", "message_queue_instance_settings"},
+            )
+            self.assertEqual(retired, 1)
+            self.assertNotIn("message_queue_instance_settings", root.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
