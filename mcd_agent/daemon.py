@@ -3047,8 +3047,6 @@ def _canonicalize_accepted_runtime_push(
     if str(result.get("status", "")).strip().lower() != "ok":
         return result
     state = result.get("desired_state")
-    if isinstance(state, Mapping) and isinstance(state.get("runtime_overrides"), dict):
-        return result
     accepted_revision = state.get("revision") if isinstance(state, Mapping) else None
     if not isinstance(accepted_revision, int) or isinstance(accepted_revision, bool):
         return result

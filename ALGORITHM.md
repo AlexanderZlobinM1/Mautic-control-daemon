@@ -3119,9 +3119,10 @@ accepted omission. Отсутствующее remote field не удаляетс
 Canonical post-write map всегда берётся из `desired_state.runtime_overrides`;
 верхний `runtime_overrides` может быть compatibility echo отправленного
 payload и не может подменять canonical acceptance.
-Если write-response вернул только revision и echo, MCD немедленно
-выполняет revision-checked desired readback и подставляет его canonical map
-в acceptance/metadata path; stale или incomplete readback не объявляется canonical.
+После каждого принятого write MCD немедленно выполняет
+revision-checked desired readback и подставляет его canonical map в
+acceptance/metadata path: write-response может содержать echo даже в
+`desired_state.runtime_overrides`. Stale или incomplete readback не объявляется canonical.
 Split-config определяется самим `[include].files`, а не наличием
 необязательного comment-marker. Runtime/profile writer всегда пишет в
 последний include (обычно `mcd.local.toml`); runtime keys, ошибочно

@@ -203,7 +203,7 @@ def test_accepted_write_echo_is_replaced_by_canonical_readback(monkeypatch):
     submitted = {"mcd_update_policy": "off", "jobs_max_workers": 2}
     pushed = {
         "status": "ok",
-        "desired_state": {"revision": 8},
+        "desired_state": {"revision": 8, "runtime_overrides": submitted},
         "runtime_overrides": submitted,
     }
     monkeypatch.setattr(
