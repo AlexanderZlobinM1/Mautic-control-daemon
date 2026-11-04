@@ -213,7 +213,7 @@ def main(argv: list[str] | None = None) -> int:
         fresh_receipt = bridge.fresh_install(fresh_args)
         fresh_replay = bridge.fresh_install(fresh_args)
         fresh_installed = fresh_receipt.get("after", {}).get("installed", {})
-        fresh_resource = json.loads(str(fresh_installed.get("resource_cache") or "{}"))
+        fresh_resource = fresh_installed.get("resource_cache") or {}
         if (fresh_receipt.get("bridge") != "fresh-runtime-only"
                 or not fresh_receipt.get("service", {}).get("ready_for_service_start")
                 or (fresh_install / "src").exists()

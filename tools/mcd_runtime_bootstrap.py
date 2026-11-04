@@ -507,7 +507,7 @@ def _restore_legacy_runtime_package(install_dir: Path, snapshot: Path) -> None:
 
 
 def _install_runtime(install_dir: Path, stage: Path, manifest: dict[str, Any], *,
-                     custom_cache_dir: Path | None = None) -> dict[str, str]:
+                     custom_cache_dir: Path | None = None) -> dict[str, Any]:
     if manifest.get("universal_workload_resource_ref") is not None or manifest.get("dependency_wheelhouse") is not None:
         _validate_manifest(stage)
     if manifest.get("universal_workload_resource_ref") is not None:
@@ -600,7 +600,7 @@ def _install_runtime(install_dir: Path, stage: Path, manifest: dict[str, Any], *
         "site_dir": str(site_dir.resolve()),
         "removed_metadata": json.dumps(removed_metadata, ensure_ascii=True),
         "removed_shadow_hooks": json.dumps(removed_hooks, ensure_ascii=True),
-        "resource_cache": json.dumps(resource_cache, ensure_ascii=True, sort_keys=True),
+        "resource_cache": resource_cache,
     }
 
 
