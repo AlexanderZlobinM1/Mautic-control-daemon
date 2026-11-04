@@ -3070,9 +3070,12 @@ def _store_desired_runtime_push_result(
     if isinstance(pushed_instances, dict):
         state_for_store["instance_desired_states"] = deepcopy(pushed_instances)
     store.put_runtime_sync("mcc_runtime_desired_state", state_for_store)
-    pushed_runtime = pushed.get("runtime_overrides")
+    # The top-level map may be a compatibility echo of the submitted payload.
+    # The desired envelope is MCC's canonical post-write result and therefore
+    # has precedence when the server retained/omitted authoritative fields.
+    pushed_runtime = state.get("runtime_overrides") if isinstance(state.get("runtime_overrides"), dict) else None
     if not isinstance(pushed_runtime, dict):
-        pushed_runtime = state.get("runtime_overrides") if isinstance(state.get("runtime_overrides"), dict) else None
+        pushed_runtime = pushed.get("runtime_overrides")
     if not isinstance(pushed_runtime, dict):
         pushed_runtime = deepcopy(dict(accepted_runtime)) if isinstance(accepted_runtime, Mapping) else {}
     accepted_runtime_hint = deepcopy(dict(accepted_runtime)) if isinstance(accepted_runtime, Mapping) else {}

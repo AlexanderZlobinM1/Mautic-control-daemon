@@ -1050,7 +1050,9 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
                 "revision": 8,
                 "runtime_overrides": {"mcd_update_policy": "off"},
             },
-            "runtime_overrides": {"mcd_update_policy": "off"},
+            # Compatibility echo is not the canonical result: MCC omitted
+            # the profile-derived value from the desired envelope.
+            "runtime_overrides": submitted,
         }
 
         self.assertTrue(

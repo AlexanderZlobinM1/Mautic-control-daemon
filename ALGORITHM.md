@@ -3116,6 +3116,9 @@ canonical post-write snapshot, остаются эффективными лок�
 значениями, но их submitted edit stamp терминализуется как
 accepted omission. Отсутствующее remote field не удаляется и не
 публикуется повторно без нового локального изменения.
+Canonical post-write map всегда берётся из `desired_state.runtime_overrides`;
+верхний `runtime_overrides` может быть compatibility echo отправленного
+payload и не может подменять canonical acceptance.
 Split-config определяется самим `[include].files`, а не наличием
 необязательного comment-marker. Runtime/profile writer всегда пишет в
 последний include (обычно `mcd.local.toml`); runtime keys, ошибочно
