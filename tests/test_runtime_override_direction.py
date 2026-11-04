@@ -2207,6 +2207,25 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
         self.assertNotIn("scheduler_host_max_parallel", deleted["runtime"])
         self.assertIn(("host", "scheduler_host_max_parallel", ""), deleted["remote_tombstones"])
 
+    def test_bootstrap_workload_ref_seeds_missing_desired_without_promoting_other_defaults(self) -> None:
+        ref = {"schema": "mcc-universal-workload-resource-ref-v1", "sha256": "a" * 64}
+        local = {
+            "universal_workload_resource_ref": ref,
+            "scheduler_host_max_parallel": 12,
+        }
+        local_metadata = daemon._runtime_metadata_for_snapshot({}, local, source="mcd")
+
+        resolved = daemon._resolve_runtime_snapshots(
+            local,
+            {},
+            local_metadata,
+            daemon._runtime_metadata_empty(),
+        )
+
+        self.assertEqual(resolved["runtime"]["universal_workload_resource_ref"], ref)
+        self.assertIn(("host", "universal_workload_resource_ref", ""), resolved["local_push"])
+        self.assertNotIn(("host", "scheduler_host_max_parallel", ""), resolved["local_push"])
+
     def test_runtime_metadata_and_recovered_instance_row_survive_restart_and_push_once(self) -> None:
         from pathlib import Path
         from tempfile import TemporaryDirectory

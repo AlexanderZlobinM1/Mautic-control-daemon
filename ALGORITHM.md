@@ -3097,6 +3097,16 @@ Runtime bridge использует самый приоритетный owned sy
 canonical base unit перечитывается через systemd и повторно проходит restart /
 health; итоговый effective service не содержит `<install>-dev-1.7` или fixture
 refs. Ошибка возвращает byte-for-byte оба прежних drop-in вместе с runtime.
+Durable runtime sync не считает `queued` v3 intent завершённым навсегда: тот же
+локальный snapshot переходит к существующему fetch→rebase→revisioned desired
+write, а принятый результат помечает локальный intent `superseded` и очищает
+его changes/idempotency. Adoption/migration patches (включая message queue)
+перед каждым merge получают текущую desired revision и один раз повторяют
+fetch/write после conflict; независимые desired keys при этом не заменяются.
+Verified initial `universal_workload_resource_ref` остаётся bootstrap-событием
+без ложного operator timestamp, но при отсутствии remote value/tombstone один
+раз seed-ится в desired через тот же revisioned rebase. Остальные профильные
+defaults от bootstrap-присутствия desired не заполняют.
 
 Первое применение cfg при отсутствии explicit runtime setting берёт только
 ref из verified ready manifest рядом с managed venv и предварительно готовит

@@ -137,3 +137,63 @@ def test_daemon_v3_conflict_is_durable_and_does_not_choose_a_winner(monkeypatch)
     assert result["handled"] is True
     assert result["status"] == "conflict"
     assert store.get_runtime_sync("mcc_runtime_sync_v3")["status"] == "conflict"
+
+
+def test_daemon_v3_queued_intent_falls_back_to_revisioned_rebase(monkeypatch):
+    current = {"message_queue_instance_settings": {"uid-1": {"enabled": True}}, "new_key": 7}
+    store = Store({
+        "mcc_runtime": {"message_queue_instance_settings": {}},
+        "mcc_runtime_desired_state": {"revision": 2},
+        "mcc_runtime_sync_v3": {
+            "status": "queued",
+            "current_digest": daemon.overrides_fingerprint(current),
+            "base_revision": 0,
+            "base": {},
+            "changes": current,
+            "idempotency_key": "old-intent",
+        },
+    })
+    cfg = SimpleNamespace(mcc_host_name="host-a")
+
+    result = daemon._runtime_sync_v3_attempt(cfg, store, current)
+
+    assert result["handled"] is False
+    assert result["status"] == "queued"
+    assert result["reason"] == "runtime_sync_v3_queued_requires_revisioned_rebase"
+
+
+def test_runtime_patch_fetches_revision_and_retries_without_dropping_independent_key(monkeypatch):
+    cfg = SimpleNamespace()
+    calls = []
+    fetches = iter([
+        {"status": "ok", "desired_state": {"revision": 2}},
+        {"status": "ok", "desired_state": {"revision": 3}},
+    ])
+    monkeypatch.setattr(daemon, "fetch_runtime_overrides", lambda *args, **kwargs: next(fetches))
+
+    def push(_cfg, patch, **kwargs):
+        calls.append((dict(patch), dict(kwargs)))
+        if len(calls) == 1:
+            return {"status": "conflict", "reason": "stale_desired_revision"}
+        return {
+            "status": "ok",
+            "desired_state": {
+                "revision": 4,
+                "runtime_overrides": {
+                    "universal_workload_resource_ref": {"sha256": "a" * 64},
+                    **patch,
+                },
+            },
+        }
+
+    monkeypatch.setattr(daemon, "push_runtime_overrides", push)
+    result = daemon._push_runtime_patch_with_rebase(
+        cfg,
+        {"message_queue_instance_settings": {"uid-1": {"enabled": True}}},
+        [],
+    )
+
+    assert result["status"] == "ok"
+    assert [item[1]["desired_state_revision"] for item in calls] == [2, 3]
+    assert all(item[1]["merge"] is True and item[1]["target"] == "desired" for item in calls)
+    assert "universal_workload_resource_ref" in result["desired_state"]["runtime_overrides"]

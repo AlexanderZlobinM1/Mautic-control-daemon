@@ -906,7 +906,11 @@ def _runtime_sync_v3_attempt(
         str(state.get("status") or "").strip().lower() == "queued"
         and str(state.get("current_digest") or "") == current_digest
     ):
-        return {"handled": True, "status": "queued", "response": {"status": "queued", "v3_supported": True}}
+        return {
+            "handled": False,
+            "status": "queued",
+            "reason": "runtime_sync_v3_queued_requires_revisioned_rebase",
+        }
     key = str(state.get("idempotency_key") or "")
     if not key or str(state.get("current_digest") or "") != current_digest:
         key = _runtime_sync_v3_intent_id(
@@ -958,7 +962,11 @@ def _runtime_sync_v3_attempt(
     if status in {"queued", "idempotent"}:
         next_state["status"] = "queued"
         _runtime_sync_v3_mark(store, next_state)
-        return {"handled": True, "status": "queued", "response": {"status": "queued", "v3_supported": True}}
+        return {
+            "handled": False,
+            "status": "queued",
+            "reason": "runtime_sync_v3_queued_requires_revisioned_rebase",
+        }
     next_state["status"] = "error"
     next_state["reason"] = response.get("reason", "runtime_sync_v3_failed")
     _runtime_sync_v3_mark(store, next_state)
@@ -1793,7 +1801,12 @@ def _resolve_runtime_snapshots(
                         or not str(local_stamp.get("event_id", "")).startswith("bootstrap:")
                     )
                 )
-                if local_event and (
+                bootstrap_closure_seed = bool(
+                    key == "universal_workload_resource_ref"
+                    and not remote_present
+                    and not (remote_stamp and remote_stamp.get("tombstone"))
+                )
+                if (local_event or bootstrap_closure_seed) and (
                     not remote_present or remote_fields.get(remote_path) != local_fields[local_path]
                 ):
                     local_push.append(local_path)
@@ -2975,6 +2988,42 @@ def _push_local_runtime_change(
     )
     result = dict(rebased)
     result["_local_rebase_attempted"] = True
+    return result
+
+
+def _push_runtime_patch_with_rebase(
+    config: AgentConfig,
+    patch: Mapping[str, Any],
+    installs: list[object],
+) -> dict[str, Any]:
+    """Merge one host patch against MCC's current desired revision."""
+    instance_uids = sorted(
+        {
+            str(getattr(inst, "instance_uid", "") or "").strip()
+            for inst in installs
+            if str(getattr(inst, "instance_uid", "") or "").strip()
+        }
+    )
+    last: dict[str, Any] = {"status": "error", "reason": "runtime_patch_not_attempted"}
+    for _attempt in range(2):
+        fresh = fetch_runtime_overrides(config, instance_uids=instance_uids)
+        if str(fresh.get("status", "")).strip().lower() != "ok":
+            return fresh
+        desired_state = fresh.get("desired_state")
+        revision = desired_state.get("revision") if isinstance(desired_state, Mapping) else None
+        if not isinstance(revision, int) or isinstance(revision, bool):
+            return {"status": "error", "reason": "desired_state_revision_missing"}
+        last = push_runtime_overrides(
+            config,
+            dict(patch),
+            merge=True,
+            target="desired",
+            desired_state_revision=revision,
+        )
+        if str(last.get("status", "")).strip().lower() != "conflict":
+            return last
+    result = dict(last)
+    result["_runtime_patch_rebase_attempted"] = True
     return result
 
 
@@ -20297,6 +20346,29 @@ def run_loop(
                     runtime_metadata=push_metadata,
                 )
                 if accepted:
+                    queued_v3 = _runtime_sync_v3_state(store)
+                    if str(queued_v3.get("status") or "").strip().lower() == "queued":
+                        accepted_state = pushed.get("desired_state")
+                        accepted_revision = (
+                            accepted_state.get("revision")
+                            if isinstance(accepted_state, Mapping)
+                            else None
+                        )
+                        queued_v3.update(
+                            {
+                                "status": "superseded",
+                                "superseded_by": "revisioned_v2_rebase",
+                                "superseded_revision": (
+                                    int(accepted_revision)
+                                    if isinstance(accepted_revision, int)
+                                    and not isinstance(accepted_revision, bool)
+                                    else None
+                                ),
+                                "changes": {},
+                                "idempotency_key": "",
+                            }
+                        )
+                        _runtime_sync_v3_mark(store, queued_v3)
                     local_runtime_push_accepted_this_tick = True
                     after_push_runtime = local_runtime_overrides(config)
                     store.put_runtime_sync("local_runtime", local_runtime_to_push)
@@ -22761,11 +22833,10 @@ def run_loop(
                         next_settings[instance_key] = block
                         changed_settings = True
                 if changed_settings:
-                    pushed = push_runtime_overrides(
+                    pushed = _push_runtime_patch_with_rebase(
                         config,
                         {"plugin_operation_instance_settings": next_settings},
-                        merge=True,
-                        target="desired",
+                        installs,
                     )
                     if str(pushed.get("status", "")).lower() == "ok":
                         config.plugin_operation_instance_settings = next_settings
@@ -22823,11 +22894,10 @@ def run_loop(
                     config = _with_message_queue_instance_settings(config, next_settings)
                     settings_to_push = next_settings
                 if settings_to_push is not None:
-                    pushed = push_runtime_overrides(
+                    pushed = _push_runtime_patch_with_rebase(
                         config,
                         {"message_queue_instance_settings": settings_to_push},
-                        merge=True,
-                        target="desired",
+                        installs,
                     )
                     if str(pushed.get("status", "")).lower() == "ok":
                         config = _with_message_queue_instance_settings(config, settings_to_push)
