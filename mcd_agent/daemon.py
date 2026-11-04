@@ -3037,6 +3037,56 @@ def _push_runtime_patch_with_rebase(
     return result
 
 
+def _canonicalize_accepted_runtime_push(
+    config: AgentConfig,
+    pushed: Mapping[str, Any],
+    installs: list[object],
+) -> dict[str, Any]:
+    """Read back MCC canonical desired state when a write response only echoes input."""
+    result = dict(pushed)
+    if str(result.get("status", "")).strip().lower() != "ok":
+        return result
+    state = result.get("desired_state")
+    if isinstance(state, Mapping) and isinstance(state.get("runtime_overrides"), dict):
+        return result
+    accepted_revision = state.get("revision") if isinstance(state, Mapping) else None
+    if not isinstance(accepted_revision, int) or isinstance(accepted_revision, bool):
+        return result
+    instance_uids = sorted(
+        {
+            str(getattr(inst, "instance_uid", "") or "").strip()
+            for inst in installs
+            if str(getattr(inst, "instance_uid", "") or "").strip()
+        }
+    )
+    fresh = fetch_runtime_overrides(config, instance_uids=instance_uids)
+    if str(fresh.get("status", "")).strip().lower() != "ok":
+        result["_canonical_readback"] = "unavailable"
+        return result
+    fresh_state = fresh.get("desired_state")
+    fresh_revision = fresh_state.get("revision") if isinstance(fresh_state, Mapping) else None
+    fresh_runtime = fresh.get("runtime_overrides")
+    if (
+        not isinstance(fresh_revision, int)
+        or isinstance(fresh_revision, bool)
+        or fresh_revision < accepted_revision
+        or not isinstance(fresh_runtime, dict)
+    ):
+        result["_canonical_readback"] = "stale_or_incomplete"
+        return result
+    canonical_state = dict(fresh_state)
+    canonical_state["runtime_overrides"] = deepcopy(fresh_runtime)
+    result["desired_state"] = canonical_state
+    result["runtime_overrides"] = deepcopy(fresh_runtime)
+    if isinstance(fresh.get("instance_desired_states"), dict):
+        result["instance_desired_states"] = deepcopy(fresh["instance_desired_states"])
+    for metadata_key in ("runtime_metadata", "field_metadata"):
+        if isinstance(fresh.get(metadata_key), dict):
+            result[metadata_key] = deepcopy(fresh[metadata_key])
+    result["_canonical_readback"] = "ok"
+    return result
+
+
 def _store_desired_runtime_push_result(
     store: object,
     pushed: Mapping[str, Any],
@@ -20407,6 +20457,7 @@ def run_loop(
                         instance_revisions=known_instance_revisions,
                         runtime_metadata=push_metadata,
                     )
+                pushed = _canonicalize_accepted_runtime_push(config, pushed, installs)
                 p_status = str(pushed.get("status", "")).strip().lower()
                 accepted = p_status == "ok" and _store_desired_runtime_push_result(
                     store,

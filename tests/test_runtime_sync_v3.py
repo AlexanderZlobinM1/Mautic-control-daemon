@@ -197,3 +197,28 @@ def test_runtime_patch_fetches_revision_and_retries_without_dropping_independent
     assert [item[1]["desired_state_revision"] for item in calls] == [2, 3]
     assert all(item[1]["merge"] is True and item[1]["target"] == "desired" for item in calls)
     assert "universal_workload_resource_ref" in result["desired_state"]["runtime_overrides"]
+
+
+def test_accepted_write_echo_is_replaced_by_canonical_readback(monkeypatch):
+    submitted = {"mcd_update_policy": "off", "jobs_max_workers": 2}
+    pushed = {
+        "status": "ok",
+        "desired_state": {"revision": 8},
+        "runtime_overrides": submitted,
+    }
+    monkeypatch.setattr(
+        daemon,
+        "fetch_runtime_overrides",
+        lambda *_args, **_kwargs: {
+            "status": "ok",
+            "desired_state": {"revision": 8},
+            "runtime_overrides": {"mcd_update_policy": "off"},
+            "instance_desired_states": {},
+        },
+    )
+
+    result = daemon._canonicalize_accepted_runtime_push(SimpleNamespace(), pushed, [])
+
+    assert result["_canonical_readback"] == "ok"
+    assert result["runtime_overrides"] == {"mcd_update_policy": "off"}
+    assert result["desired_state"]["runtime_overrides"] == {"mcd_update_policy": "off"}
