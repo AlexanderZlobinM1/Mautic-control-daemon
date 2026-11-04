@@ -1141,6 +1141,48 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             store.put_runtime_sync("local_runtime", canonical)
             self.assertIsNone(daemon._queue_local_runtime_delta(store, local_runtime_overrides(reloaded)))
 
+    def test_matching_host_revision_retains_host_acceptance_with_partial_instance_readback(self) -> None:
+        class MemoryStore:
+            def __init__(self):
+                self.values = {
+                    daemon._LOCAL_RUNTIME_ACCEPTED_KEY: {
+                        "host_revision": 6,
+                        "instance_revisions": {
+                            "one.example": 2,
+                            "two.example": 2,
+                        },
+                        "runtime": {
+                            "mcd_update_policy": "off",
+                            "jobs_max_workers": 2,
+                            "message_queue_instance_settings": {
+                                "one.example": {"enabled": False},
+                                "two.example": {"enabled": False},
+                            },
+                        },
+                    }
+                }
+
+            def get_runtime_sync(self, key):
+                return self.values.get(key)
+
+        store = MemoryStore()
+        response = {
+            "desired_state": {"revision": 6},
+            "instance_desired_states": {
+                "two.example": {"revision": 2, "runtime_overrides": {}},
+            },
+        }
+
+        merged = daemon._merge_accepted_host_runtime_for_matching_revision(
+            store,
+            response,
+            {"mcd_update_policy": "off"},
+        )
+
+        self.assertEqual(merged["jobs_max_workers"], 2)
+        self.assertNotIn("message_queue_instance_settings", merged)
+        self.assertFalse(daemon._accepted_runtime_response_matches(store, response))
+
     def test_empty_instance_maps_omitted_by_mcc_do_not_queue_a_local_delta(self) -> None:
         class MemoryStore:
             def __init__(self):

@@ -2049,6 +2049,46 @@ def _accepted_runtime_response_matches(store: object, response: Mapping[str, Any
     return True
 
 
+def _merge_accepted_host_runtime_for_matching_revision(
+    store: object,
+    response: Mapping[str, Any],
+    remote_runtime: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Retain accepted host fields when an instance readback is incomplete.
+
+    MCC can return the accepted host revision together with only the instance
+    rows requested/available in that poll.  A missing instance revision must
+    not invalidate the already accepted host result: doing so drops accepted
+    host omissions from the next baseline and makes defaults alternate into a
+    new local push.  Instance rows remain under their own revision/metadata
+    reconciliation and are not filled by this host-only guard.
+    """
+    try:
+        accepted = store.get_runtime_sync(_LOCAL_RUNTIME_ACCEPTED_KEY)
+    except Exception:
+        return deepcopy(dict(remote_runtime))
+    if not isinstance(accepted, dict):
+        return deepcopy(dict(remote_runtime))
+    desired = response.get("desired_state")
+    response_revision = desired.get("revision") if isinstance(desired, Mapping) else None
+    accepted_revision = accepted.get("host_revision")
+    if (
+        not isinstance(accepted_revision, int)
+        or isinstance(accepted_revision, bool)
+        or response_revision != accepted_revision
+    ):
+        return deepcopy(dict(remote_runtime))
+    accepted_runtime = accepted.get("runtime")
+    if not isinstance(accepted_runtime, Mapping):
+        return deepcopy(dict(remote_runtime))
+    accepted_host_runtime = {
+        str(key): deepcopy(value)
+        for key, value in accepted_runtime.items()
+        if not _is_instance_runtime_map_key(key)
+    }
+    return _merge_missing_runtime_values(remote_runtime, accepted_host_runtime)
+
+
 def _clear_local_runtime_accepted(store: object) -> None:
     try:
         delete = getattr(store, "delete_runtime_sync", None)
@@ -2258,6 +2298,7 @@ def _queue_local_runtime_delta(
         # absent-map push forever.
         if current != baseline:
             store.put_runtime_sync("local_runtime", current)
+            metadata = _runtime_metadata_for_snapshot(metadata, current, source="mcd")
         store.put_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY, metadata)
         if pending is not None and (
             _runtime_snapshots_semantically_equal(pending["previous"], pending["current"])
@@ -2648,6 +2689,11 @@ def _bootstrap_remote_runtime_before_local_baseline(
     previous_mcc_runtime = store.get_runtime_sync("mcc_runtime")
     previous_mcc_runtime = previous_mcc_runtime if isinstance(previous_mcc_runtime, dict) else {}
     accepted_runtime: Mapping[str, Any] = {}
+    remote_runtime = _merge_accepted_host_runtime_for_matching_revision(
+        store,
+        response,
+        remote_runtime,
+    )
     if _accepted_runtime_response_matches(store, response):
         accepted_raw = store.get_runtime_sync(_LOCAL_RUNTIME_ACCEPTED_KEY)
         accepted_runtime = (
@@ -20411,7 +20457,11 @@ def run_loop(
                 if local_runtime == previous_local_runtime:
                     last_local_runtime_fp = local_fp
                 else:
-                    pending_local_runtime = _queue_local_runtime_delta(store, local_runtime, allow_unproven=True)
+                    pending_local_runtime = _queue_local_runtime_delta(
+                        store,
+                        local_runtime,
+                        allow_unproven=True,
+                    )
                     local_runtime_push_pending = pending_local_runtime is not None
             if pending_local_runtime is not None:
                 previous_local_runtime = pending_local_runtime["previous"]
@@ -20601,7 +20651,11 @@ def run_loop(
             # arrive after the normal local-change block above; queue it
             # durably before the poll may refresh the baseline.
             pre_poll_runtime = local_runtime_overrides(config)
-            if _queue_local_runtime_delta(store, pre_poll_runtime, allow_unproven=False) is not None:
+            if _queue_local_runtime_delta(
+                store,
+                pre_poll_runtime,
+                allow_unproven=False,
+            ) is not None:
                 local_runtime_push_pending = True
         if config.mcc_url and config.mcc_token and (
             (startup_runtime_sync_pending or runtime_overrides_sync_requested or should_runtime_poll)
@@ -20626,7 +20680,11 @@ def run_loop(
                 # applying/persisting that response until the local delta is
                 # accepted.
                 during_poll_runtime = local_runtime_overrides(config)
-                if _queue_local_runtime_delta(store, during_poll_runtime, allow_unproven=False) is not None:
+                if _queue_local_runtime_delta(
+                    store,
+                    during_poll_runtime,
+                    allow_unproven=False,
+                ) is not None:
                     local_runtime_push_pending = True
                     status = "deferred_local_delta"
             if status == "ok" and not local_runtime_push_pending:
@@ -20657,6 +20715,11 @@ def run_loop(
                     previous_mcc_runtime = previous_mcc_runtime if isinstance(previous_mcc_runtime, dict) else {}
                     accepted_runtime: Mapping[str, Any] = {}
                     instance_states = ro.get("instance_desired_states")
+                    remote_runtime = _merge_accepted_host_runtime_for_matching_revision(
+                        store,
+                        ro,
+                        remote_runtime,
+                    )
                     if _accepted_runtime_response_matches(store, ro):
                         accepted_raw = store.get_runtime_sync(_LOCAL_RUNTIME_ACCEPTED_KEY)
                         accepted_runtime = (
@@ -20869,7 +20932,11 @@ def run_loop(
                     # unchanged. A file edit after the earlier race check
                     # must never be absorbed into the new baseline.
                     late_local_runtime = local_runtime_overrides(config)
-                    if _queue_local_runtime_delta(store, late_local_runtime, allow_unproven=False) is not None:
+                    if _queue_local_runtime_delta(
+                        store,
+                        late_local_runtime,
+                        allow_unproven=False,
+                    ) is not None:
                         local_runtime_push_pending = True
                     if fp != last_runtime_overrides_fp and not local_runtime_push_pending:
                         _persist_resolved_runtime_to_config(

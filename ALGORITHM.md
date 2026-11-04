@@ -264,6 +264,14 @@ Startup-флаг и ручной poll-trigger сбрасываются, а сл�
 Таким образом, durable pending сохраняется при реальном втором локальном
 изменении, а независимые изменения MCC будут приняты следующим штатным poll.
 
+Host revision и instance revisions подтверждаются независимо. Если MCC
+возвращает уже принятую host revision, но в этом poll присутствует только
+часть instance rows, неполный instance readback не отменяет canonical host
+acceptance: принятые host-поля сохраняются в reconciliation baseline, а
+instance-поля продолжают сравниваться по собственным revision/metadata.
+Иначе отсутствие несвязанной instance row превращало принятые host omissions
+в чередующиеся default-push и poll без фактического изменения настроек.
+
 Пустой instance-scoped map и отсутствие такого map в canonical desired-state
 эквивалентны: оба состояния содержат ноль UID-строк и не являются изменением
 настроек. MCC вправе не возвращать пустые контейнеры. MCD сравнивает такие
