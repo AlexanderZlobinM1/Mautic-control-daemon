@@ -3602,7 +3602,7 @@ def main() -> int:
         cfg = load_config(args.config)
         note = maybe_notify_update(cfg)
         if note:
-            print(f"NOTICE: {note}")
+            print(f"NOTICE: {note}", file=sys.stderr if bool(args.json) else sys.stdout)
         if bool(args.json):
             with contextlib.redirect_stdout(sys.stderr):
                 result = install_from_image(
@@ -3626,9 +3626,17 @@ def main() -> int:
                 own_mail=bool(args.own_mail),
                 mail_profile_id=str(args.mail_profile_id or "").strip() or None,
             )
-        if bool(args.json):
-            print(json.dumps(result, ensure_ascii=True, indent=2))
         _push_state_after_change(cfg, "mautic-image-install")
+        if bool(args.json):
+            print(
+                json.dumps(
+                    result,
+                    ensure_ascii=True,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                )
+            )
         return 0
 
     if args.cmd == "local-mail":

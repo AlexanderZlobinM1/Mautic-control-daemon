@@ -4,6 +4,14 @@
 фактическую схему после исправления admission и должен обновляться вместе с
 кодом, тестами и runtime receipt. Документ не является разрешением на
 
+`mcd-cli mautic-image install --json` keeps installer progress, notices and
+diagnostics on stderr. A successful operation first completes production cache
+warmup, local TLS/login verification, inventory rescan and the ordinary
+immediate state-push attempt, then emits exactly one compact canonical JSON
+success object on stdout. A failed operation emits no success object and exits
+nonzero. This framing is the supported MCC parser boundary; retained inventory
+or manual target repair is never accepted as proof of a fresh installation.
+
 Для Mautic patch lifecycle канонический порядок фаз внутри upgrade barrier:
 `before_campaign_trigger` -> `before_campaign_execution` ->
 `before_background_imports`. `before_campaign_trigger` является отдельной
