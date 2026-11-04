@@ -1456,8 +1456,6 @@ def _resolve_mutable_config_path(path: str) -> Path:
         text = p.read_text(encoding="utf-8")
     except Exception:
         return p
-    if "MCD_CONFIG_ENTRYPOINT v1" not in text:
-        return p
     try:
         root = tomllib.loads(text)
     except Exception:
@@ -1580,26 +1578,48 @@ def persist_profile_runtime_values(config_path: str, profile_name: str, updates:
     if removals:
         text2, _ = _remove_section_keys_text(text2, "runtime", removals)
     text2 = _upsert_section_values_text(text2, "profile", {"name": profile_name})
-    if text2 == text:
-        return str(p), False
-    p.parent.mkdir(parents=True, exist_ok=True)
-    before = p.stat() if p.exists() else None
-    fd, temporary = tempfile.mkstemp(prefix="." + p.name + ".", dir=p.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            if before is not None:
-                os.fchmod(stream.fileno(), before.st_mode & 0o7777)
-                if os.geteuid() == 0:
-                    os.fchown(stream.fileno(), before.st_uid, before.st_gid)
-            stream.write(text2); stream.flush(); os.fsync(stream.fileno())
-        os.replace(temporary, p)
-    finally:
-        Path(temporary).unlink(missing_ok=True)
-    return str(p), True
+    changed = text2 != text
+    if changed:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        before = p.stat() if p.exists() else None
+        fd, temporary = tempfile.mkstemp(prefix="." + p.name + ".", dir=p.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                if before is not None:
+                    os.fchmod(stream.fileno(), before.st_mode & 0o7777)
+                    if os.geteuid() == 0:
+                        os.fchown(stream.fileno(), before.st_uid, before.st_gid)
+                stream.write(text2); stream.flush(); os.fsync(stream.fileno())
+            os.replace(temporary, p)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
+    migrated = _remove_split_entrypoint_runtime_values(config_path, set(updates) | set(removals))
+    return str(p), bool(changed or migrated)
+
+
+def _remove_split_entrypoint_runtime_values(config_path: str, keys: set[str]) -> int:
+    """Retire runtime values accidentally written below a split entrypoint.
+
+    The last include is the effective mutable layer. Keeping the same key in
+    the public entrypoint is ambiguous and can resurrect stale state if an
+    include is replaced, so every normal write also completes this bounded
+    migration for the keys it owns.
+    """
+    root = Path(config_path)
+    mutable = _resolve_mutable_config_path(config_path)
+    if not keys or mutable == root or not root.exists():
+        return 0
+    text = root.read_text(encoding="utf-8")
+    updated, removed = _remove_section_keys_text(text, "runtime", keys)
+    if removed > 0:
+        root.write_text(updated, encoding="utf-8")
+    return removed
 
 
 def upsert_runtime_values(config_path: str, updates: dict[str, object]) -> tuple[str, bool]:
-    return upsert_section_values(config_path, "runtime", updates)
+    path, changed = upsert_section_values(config_path, "runtime", updates)
+    migrated = _remove_split_entrypoint_runtime_values(config_path, set(updates))
+    return path, bool(changed or migrated)
 
 
 def persist_profile_authority(config_path: str, profile_name: str) -> tuple[str, bool]:
@@ -1613,14 +1633,16 @@ def persist_profile_authority(config_path: str, profile_name: str) -> tuple[str,
 
 def remove_runtime_values(config_path: str, keys: set[str]) -> tuple[str, bool]:
     path = _resolve_mutable_config_path(config_path)
-    if not path.exists() or not keys:
+    if not keys:
         return str(path), False
-    text = path.read_text(encoding="utf-8")
-    updated, removed = _remove_section_keys_text(text, "runtime", set(keys))
-    if removed <= 0:
-        return str(path), False
-    path.write_text(updated, encoding="utf-8")
-    return str(path), True
+    removed = 0
+    if path.exists():
+        text = path.read_text(encoding="utf-8")
+        updated, removed = _remove_section_keys_text(text, "runtime", set(keys))
+        if removed > 0:
+            path.write_text(updated, encoding="utf-8")
+    migrated = _remove_split_entrypoint_runtime_values(config_path, set(keys))
+    return str(path), bool(removed or migrated)
 
 
 def _remove_section_keys_text(text: str, section: str, keys: set[str]) -> tuple[str, int]:

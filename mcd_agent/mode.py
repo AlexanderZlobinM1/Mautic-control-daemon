@@ -955,8 +955,6 @@ def _resolve_mutable_config_path(config_path: str) -> Path:
         text = p.read_text(encoding="utf-8")
     except Exception:
         return p
-    if "MCD_CONFIG_ENTRYPOINT v1" not in text:
-        return p
     try:
         raw = tomllib.loads(text)
     except Exception:

@@ -2,7 +2,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from mcd_agent.config import _load_toml_with_includes, upsert_section_values
+from mcd_agent.config import _load_toml_with_includes, upsert_runtime_values, upsert_section_values
+from mcd_agent.mode import _resolve_mutable_config_path as resolve_mode_mutable_config_path
 
 
 class SplitConfigPrecedenceTests(unittest.TestCase):
@@ -33,9 +34,40 @@ class SplitConfigPrecedenceTests(unittest.TestCase):
                 str(local), "runtime", {"segment_limit": 7}
             )
 
-            self.assertEqual(path, str(local))
+            self.assertEqual(Path(path).resolve(), local.resolve())
             self.assertFalse(changed)
             self.assertEqual(local.read_text(encoding="utf-8"), original)
+
+    def test_unmarked_split_entrypoint_writes_local_and_retires_misplaced_runtime(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "mcd.toml"
+            local = Path(tmp) / "mcd.local.toml"
+            root.write_text(
+                '[runtime]\n'
+                'mcd_update_policy = "approved"\n\n'
+                '# MCC-managed public MCD root entrypoint.\n'
+                '[include]\nfiles = ["system.toml", "mcd.local.toml"]\n',
+                encoding="utf-8",
+            )
+            (Path(tmp) / "system.toml").write_text(
+                '[runtime]\nmcd_update_policy = "approved"\n',
+                encoding="utf-8",
+            )
+            local.write_text('[profile]\nname = "passive"\n', encoding="utf-8")
+
+            path, changed = upsert_runtime_values(
+                str(root),
+                {"mcd_update_policy": "off"},
+            )
+
+            self.assertEqual(Path(path).resolve(), local.resolve())
+            self.assertTrue(changed)
+            self.assertNotIn("mcd_update_policy", root.read_text(encoding="utf-8"))
+            self.assertEqual(
+                _load_toml_with_includes(str(root))["runtime"]["mcd_update_policy"],
+                "off",
+            )
+            self.assertEqual(resolve_mode_mutable_config_path(str(root)).resolve(), local.resolve())
 
 
 if __name__ == "__main__":

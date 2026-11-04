@@ -3111,6 +3111,11 @@ defaults от bootstrap-присутствия desired не заполняют.
 именно канонический post-write snapshot из MCC, включая сохранённые
 operator-owned values, и только его делает новым local baseline. Такой
 ответ не может превратиться в новую local edit и повторный push на следующем poll.
+Split-config определяется самим `[include].files`, а не наличием
+необязательного comment-marker. Runtime/profile writer всегда пишет в
+последний include (обычно `mcd.local.toml`); runtime keys, ошибочно
+оказавшиеся в public entrypoint, удаляются той же штатной записью только для
+её owned keys. Никакая ручная чистка хоста не требуется.
 
 Первое применение cfg при отсутствии explicit runtime setting берёт только
 ref из verified ready manifest рядом с managed venv и предварительно готовит
