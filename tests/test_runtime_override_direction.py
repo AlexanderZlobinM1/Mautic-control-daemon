@@ -1021,6 +1021,63 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
         )
         self.assertIsNotNone(daemon._read_local_runtime_push_pending(store))
 
+    def test_accepted_canonical_snapshot_is_materialized_before_local_baseline(self) -> None:
+        from copy import deepcopy
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        class MemoryStore:
+            def __init__(self, values=None):
+                self.values = dict(values or {})
+
+            def get_runtime_sync(self, key):
+                return self.values.get(key)
+
+            def put_runtime_sync(self, key, value):
+                self.values[key] = dict(value)
+
+            def delete_runtime_sync(self, keys):
+                for key in keys:
+                    self.values.pop(key, None)
+                return 1
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "mcd.toml"
+            path.write_text(
+                '[runtime]\n'
+                'mcd_update_policy = "approved"\n'
+                'message_queue_instance_settings = { "one.example" = { enabled = false, interval_sec = 60 } }\n',
+                encoding="utf-8",
+            )
+            cfg = load_config(str(path), allow_recover_from_mcc=False)
+            submitted = local_runtime_overrides(cfg)
+            canonical = deepcopy(submitted)
+            canonical["mcd_update_policy"] = "off"
+            canonical["message_queue_instance_settings"] = {
+                "one.example": {"enabled": False, "interval_sec": 60},
+                "two.example": {"enabled": False, "interval_sec": 60},
+            }
+            store = MemoryStore({
+                daemon._LOCAL_RUNTIME_ACCEPTED_KEY: {"runtime": canonical},
+                daemon._LOCAL_RUNTIME_METADATA_KEY: daemon._runtime_metadata_empty(),
+            })
+
+            reloaded, accepted = daemon._materialize_accepted_runtime_snapshot(
+                cfg,
+                store,
+                submitted,
+            )
+
+            self.assertEqual(accepted, canonical)
+            self.assertEqual(reloaded.mcd_update_policy, "off")
+            self.assertEqual(
+                reloaded.message_queue_instance_settings,
+                canonical["message_queue_instance_settings"],
+            )
+            self.assertEqual(local_runtime_overrides(reloaded), canonical)
+            store.put_runtime_sync("local_runtime", canonical)
+            self.assertIsNone(daemon._queue_local_runtime_delta(store, local_runtime_overrides(reloaded)))
+
     def test_poll_requests_local_and_host_qualified_instance_uid_aliases(self) -> None:
         cfg = SimpleNamespace(mcc_url="https://mcc.example", mcc_token="token")
         identity = {

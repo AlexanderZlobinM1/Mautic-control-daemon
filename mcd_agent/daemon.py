@@ -3094,6 +3094,41 @@ def _store_desired_runtime_push_result(
     return True
 
 
+def _materialize_accepted_runtime_snapshot(
+    config: AgentConfig,
+    store: object,
+    fallback_runtime: Mapping[str, Any],
+) -> tuple[AgentConfig, dict[str, Any]]:
+    """Persist MCC's canonical post-write snapshot before refreshing baseline.
+
+    MCC may retain an operator-owned value while accepting unrelated host
+    changes. Treating the submitted snapshot as the new local baseline would
+    make the retained value look like a fresh local edit on every poll. The
+    accepted response is the canonical write result, so materialize all of it
+    through the normal config writer and return that exact baseline.
+    """
+    canonical = _accepted_local_runtime_snapshot(store)
+    if not canonical:
+        canonical = deepcopy(dict(fallback_runtime))
+    current = local_runtime_overrides(config)
+    if current == canonical:
+        return config, canonical
+    metadata = store.get_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY) or {}
+    _persist_resolved_runtime_to_config(
+        config,
+        current,
+        canonical,
+        metadata if isinstance(metadata, Mapping) else {},
+        full_snapshot=True,
+    )
+    reloaded = load_config(config.config_file_path, allow_recover_from_mcc=False)
+    applied = apply_remote_overrides(reloaded, canonical)
+    next_config = applied.get("config")
+    if isinstance(next_config, AgentConfig):
+        config = next_config
+    return config, canonical
+
+
 _CAMPAIGN_EMAIL_COUNTER_RECONCILE_RECENT_SEC = 14 * 86400
 _CAMPAIGN_EMAIL_COUNTER_RECONCILE_DEFER_LOG_SEC = 15 * 60
 # Avoid spending an entire scheduler pass probing stale audit candidates.
@@ -20346,6 +20381,12 @@ def run_loop(
                     runtime_metadata=push_metadata,
                 )
                 if accepted:
+                    config, local_runtime_to_push = _materialize_accepted_runtime_snapshot(
+                        config,
+                        store,
+                        local_runtime_to_push,
+                    )
+                    pusher.cfg = config
                     queued_v3 = _runtime_sync_v3_state(store)
                     if str(queued_v3.get("status") or "").strip().lower() == "queued":
                         accepted_state = pushed.get("desired_state")

@@ -3107,6 +3107,10 @@ Verified initial `universal_workload_resource_ref` остаётся bootstrap-с
 без ложного operator timestamp, но при отсутствии remote value/tombstone один
 раз seed-ится в desired через тот же revisioned rebase. Остальные профильные
 defaults от bootstrap-присутствия desired не заполняют.
+После любой принятой desired-записи MCD материализует в mutable config
+именно канонический post-write snapshot из MCC, включая сохранённые
+operator-owned values, и только его делает новым local baseline. Такой
+ответ не может превратиться в новую local edit и повторный push на следующем poll.
 
 Первое применение cfg при отсутствии explicit runtime setting берёт только
 ref из verified ready manifest рядом с managed venv и предварительно готовит
