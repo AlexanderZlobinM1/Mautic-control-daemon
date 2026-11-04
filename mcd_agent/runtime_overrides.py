@@ -357,6 +357,15 @@ def normalize_runtime_override_payload(
     """
 
     normalized = dict(runtime) if isinstance(runtime, dict) else {}
+    replica_checks_key = "cluster_replica_freshness_checks"
+    replica_checks = normalized.get(replica_checks_key)
+    if isinstance(replica_checks, str):
+        try:
+            decoded_replica_checks = json.loads(replica_checks)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            decoded_replica_checks = None
+        if isinstance(decoded_replica_checks, list):
+            normalized[replica_checks_key] = decoded_replica_checks
     if _SPECIAL_RING_RUNTIME_KEY not in normalized:
         return normalized, []
     special = normalized.pop(_SPECIAL_RING_RUNTIME_KEY)
@@ -781,6 +790,10 @@ def runtime_key_observation(
             status, origin, reason = "rejected", "none", "unsupported_key"
         elif key not in runtime_remote_allowed_keys():
             status, origin, reason = "rejected", "none", "remote_blocked"
+        elif key in {"segment_whitelist_file", "campaign_whitelist_file"} and bool(
+            getattr(cfg, "disable_whitelist", False)
+        ):
+            status, origin, reason = "profile_locked", "profile", "whitelist_disabled"
         elif key in _PROFILE_LOCKED_RUNTIME_KEYS and profile not in {"", "custom"}:
             status, origin, reason = "profile_locked", "profile", "profile_authority"
         elif effective_value == desired:

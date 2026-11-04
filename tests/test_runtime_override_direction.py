@@ -309,6 +309,49 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             "jobs_max_workers": 6,
         })
 
+    def test_runtime_observation_normalizes_legacy_json_replica_checks(self) -> None:
+        cfg = SimpleNamespace(
+            profile_name="custom",
+            cluster_replica_freshness_checks=[],
+            config_file_path="",
+        )
+
+        observed = runtime_key_observation(
+            cfg,
+            {"cluster_replica_freshness_checks": "[]"},
+            revision=6,
+            source="mcc",
+        )
+
+        row = observed["keys"]["cluster_replica_freshness_checks"]
+        self.assertEqual(row["status"], "unchanged")
+        self.assertEqual(row["desired"], [])
+        self.assertEqual(row["effective"], [])
+
+    def test_disabled_whitelist_paths_are_profile_locked_in_observation(self) -> None:
+        cfg = SimpleNamespace(
+            profile_name="passive",
+            disable_whitelist=True,
+            segment_whitelist_file=None,
+            campaign_whitelist_file=None,
+            config_file_path="",
+        )
+
+        observed = runtime_key_observation(
+            cfg,
+            {
+                "segment_whitelist_file": "/etc/mcd/segment-whitelist.txt",
+                "campaign_whitelist_file": "/etc/mcd/campaign-whitelist.txt",
+            },
+            revision=6,
+            source="mcc",
+        )
+
+        for key in ("segment_whitelist_file", "campaign_whitelist_file"):
+            row = observed["keys"][key]
+            self.assertEqual(row["status"], "profile_locked")
+            self.assertEqual(row["reason"], "whitelist_disabled")
+
     def test_host_ack_projects_sparse_instance_map_without_default_rows(self) -> None:
         cfg = SimpleNamespace(
             profile_name="custom",

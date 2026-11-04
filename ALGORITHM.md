@@ -274,6 +274,11 @@ instance-поля продолжают сравниваться по собст�
 Local winner отправляется обратно только при доказанном metadata-событии
 `source=mcd`; сохранённый `source=mcc` receipt, даже с обычным event ID, не
 становится новой локальной правкой и не эхоится в MCC.
+Перед apply и ACK MCD одинаково нормализует поддерживаемые legacy wire-кодеки;
+в частности JSON-массив replica freshness checks, пришедший строкой, читается
+как массив. Whitelist file при активном profile guard `disable_whitelist`
+наблюдается как `profile_locked/whitelist_disabled`, а не как ложный reject:
+профиль намеренно делает путь неэффективным.
 
 Пустой instance-scoped map и отсутствие такого map в canonical desired-state
 эквивалентны: оба состояния содержат ноль UID-строк и не являются изменением
