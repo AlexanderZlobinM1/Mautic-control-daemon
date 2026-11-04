@@ -590,8 +590,10 @@ def _install_runtime(install_dir: Path, stage: Path, manifest: dict[str, Any], *
         cache_root = Path(custom_cache_dir).resolve()
         if (resource_cache.get("status") != "ok" or resource_cache.get("key") != ref["key"]
                 or resource_cache.get("sha256") != ref["sha256"]
+                or resource_cache.get("size_bytes") != ref["size_bytes"]
                 or not cached.is_file() or cached.is_symlink()
-                or cache_root not in cached.parents or _sha256(cached) != ref["sha256"]):
+                or cache_root not in cached.parents or cached.stat().st_size != ref["size_bytes"]
+                or _sha256(cached) != ref["sha256"]):
             raise BridgeError("selected universal resource preseed verification failed")
     return {
         "package_version": package_version,
@@ -1484,7 +1486,10 @@ def _fresh_config_readiness(install_dir: Path, config: Path, cache_dir: Path) ->
         "cfg=load_config(sys.argv[1],allow_recover_from_mcc=False);"
         "resource=required_workload_resource(cfg);"
         "print(json.dumps({'status':'ok','cache_dir':cfg.custom_cache_dir,"
-        "'profile_name':cfg.profile_name,'resource_root':resource['root']},sort_keys=True))"
+        "'profile_name':cfg.profile_name,'resource_root':resource['root'],"
+        "'resource_key':cfg.universal_workload_resource_ref['key'],"
+        "'resource_sha256':cfg.universal_workload_resource_ref['sha256'],"
+        "'resource_size_bytes':cfg.universal_workload_resource_ref['size_bytes']},sort_keys=True))"
     )
     probe = _run([str(python), "-I", "-c", code, str(config)], cwd=Path("/"))
     try:
@@ -1494,7 +1499,11 @@ def _fresh_config_readiness(install_dir: Path, config: Path, cache_dir: Path) ->
     if (not isinstance(payload, dict) or payload.get("status") != "ok"
             or Path(str(payload.get("cache_dir") or "")).resolve() != cache_dir.resolve()
             or not str(payload.get("profile_name") or "").strip()
-            or not str(payload.get("resource_root") or "").strip()):
+            or not str(payload.get("resource_root") or "").strip()
+            or not re.fullmatch(r"[A-Za-z0-9_.-]+", str(payload.get("resource_key") or ""))
+            or not re.fullmatch(r"[0-9a-f]{64}", str(payload.get("resource_sha256") or ""))
+            or type(payload.get("resource_size_bytes")) is not int
+            or payload["resource_size_bytes"] < 0):
         raise BridgeError("fresh runtime config readiness failed")
     return payload
 

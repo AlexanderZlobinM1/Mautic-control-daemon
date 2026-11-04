@@ -155,7 +155,13 @@ def preseed_runtime_workload_resources(*, runtime_dir: str | Path, cache_dir: st
         verify_universal_workload_archive(cached.read_bytes(), selected)
     else:
         cached = preseed_universal_workload_resource(config, ref, (runtime / ref["file"]).read_bytes())
-    return {"status": "ok", "key": ref["key"], "sha256": ref["sha256"], "cache_path": str(cached)}
+    return {
+        "status": "ok",
+        "key": ref["key"],
+        "sha256": ref["sha256"],
+        "size_bytes": ref["size_bytes"],
+        "cache_path": str(cached),
+    }
 
 
 def resolve_universal_workload_reference(*, runtime_settings: dict[str, Any], config: Any,

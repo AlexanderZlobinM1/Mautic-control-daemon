@@ -127,6 +127,7 @@ def test_runtime_preseed_before_configuration_uses_verified_payload_and_existing
     digest = hashlib.sha256((stage / 'mcd-runtime-manifest.json').read_bytes()).hexdigest()
     result = preseed_runtime_workload_resources(runtime_dir=stage, cache_dir=cache_dir, expected_manifest_sha256=digest)
     assert result['status'] == 'ok' and result['key'] == ref['key']
+    assert result['size_bytes'] == ref['size_bytes']
     from pathlib import Path
     target = Path(result['cache_path']); assert target.read_bytes() == cached.read_bytes()
     before = (target.stat().st_mtime_ns, target.stat().st_mode)
