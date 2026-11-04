@@ -145,6 +145,7 @@ from mcd_agent.runtime_overrides import (
     instance_desired_states,
     local_runtime_overrides,
     merge_instance_desired_states,
+    normalize_runtime_override_payload,
     normalize_segment_special_rings,
     overrides_fingerprint,
     push_runtime_sync_v3,
@@ -2709,6 +2710,7 @@ def _bootstrap_remote_runtime_before_local_baseline(
         response,
         (accepted_runtime, previous_mcc_runtime),
     )
+    remote_runtime, _ = normalize_runtime_override_payload(remote_runtime)
 
     # During the first start after an MCD package/source transition, the
     # mutable include may contain a reset snapshot that was self-stamped by
@@ -20735,6 +20737,7 @@ def run_loop(
                         ro,
                         (accepted_runtime, previous_mcc_runtime),
                     )
+                    remote_runtime, _ = normalize_runtime_override_payload(remote_runtime)
                     current_local_runtime = local_runtime_overrides(config)
                     local_runtime_was_reset = _runtime_snapshot_loss_detected(
                         current_local_runtime,
