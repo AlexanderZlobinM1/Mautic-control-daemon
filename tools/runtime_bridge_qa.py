@@ -252,6 +252,8 @@ def main(argv: list[str] | None = None) -> int:
         task.row_id = store.add_running(task)
         store.close()
 
+        custom_cache_dir = root / "custom-cache"
+        custom_cache_dir.mkdir()
         args_ns = SimpleNamespace(
             install_dir=str(install),
             archive=str(archive),
@@ -265,6 +267,7 @@ def main(argv: list[str] | None = None) -> int:
             health_timeout_sec=10,
             no_systemd=True,
             sandbox=True,
+            custom_cache_dir=custom_cache_dir,
         )
         receipt = bridge.bridge(args_ns)
         # Simulate a former bridge that put the exact same ready artifact in src.

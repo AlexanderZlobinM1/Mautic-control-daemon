@@ -89,3 +89,16 @@ def test_transport_bridge_rejects_missing_preseed_target_before_pip(tmp_path, mo
     monkeypatch.setattr(bridge, '_run', lambda *a, **kw: pytest.fail('invalid bootstrap reached pip'))
     with pytest.raises(RuntimeError, match='explicit custom cache directory'):
         bridge._install_runtime(tmp_path / 'fresh-install', stage, json.loads((stage / 'mcd-runtime-manifest.json').read_text()))
+
+
+def test_runtime_bridge_qa_supplies_explicit_cache_for_selected_universal_resource():
+    import ast
+    path = Path(__file__).parents[1] / 'tools/runtime_bridge_qa.py'
+    tree = ast.parse(path.read_text())
+    namespaces = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == 'SimpleNamespace'
+    ]
+    assert any(any(keyword.arg == 'custom_cache_dir' for keyword in node.keywords) for node in namespaces)
