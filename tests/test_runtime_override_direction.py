@@ -1800,6 +1800,59 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
         self.assertEqual(acknowledge.call_args.kwargs["scope_key"], qualified_uid)
         self.assertEqual(acknowledge.call_args.kwargs["revision"], 17)
 
+    def test_nested_desired_state_replaces_stale_materialized_runtime_map(self) -> None:
+        base_uid = "electronic.sales-snap.com"
+        qualified_uid = f"{base_uid}@MauticFarm-02"
+        cfg = SimpleNamespace(mcc_url="https://mcc.example", mcc_token="token")
+        response = {
+            "status": "ok",
+            # This is the host's older materialized/effective projection.
+            "runtime_overrides": {
+                "segment_priority_instance_settings": {
+                    qualified_uid: {"segments": [23, 86]},
+                },
+            },
+            "instance_desired_states": {},
+            # MCC's canonical desired envelope contains the newer operator
+            # change that must be adopted by MCD.
+            "desired_state": {
+                "revision": 204,
+                "runtime_overrides": {
+                    "segment_priority_instance_settings": {
+                        qualified_uid: {"segments": [23, 86]},
+                    },
+                    "segment_super_priority_instance_settings": {
+                        qualified_uid: {"segments": [93, 94]},
+                    },
+                    "segment_recurring_priority_v1": {
+                        qualified_uid: {
+                            "segments": [{"id": 86, "max_interval_sec": 60}],
+                        },
+                    },
+                },
+            },
+        }
+        identity = {
+            "effective_hostname": "MauticFarm-02",
+            "effective_mcc_host_name": "MauticFarm-02",
+            "local_hostname": "MauticFarm-02",
+            "configured_host_name": "",
+        }
+        with patch(
+            "mcd_agent.runtime_overrides.resolve_agent_identity",
+            return_value=identity,
+        ), patch("mcd_agent.runtime_overrides._post_json", return_value=response):
+            fetched = fetch_runtime_overrides(cfg, instance_uids=[base_uid])
+
+        self.assertEqual(
+            fetched["runtime_overrides"]["segment_super_priority_instance_settings"][qualified_uid],
+            {"segments": [93, 94]},
+        )
+        self.assertEqual(
+            fetched["runtime_overrides"]["segment_priority_instance_settings"][qualified_uid],
+            {"segments": [23, 86]},
+        )
+
     def test_instance_state_uses_uid_and_reapplies_after_root_move(self) -> None:
         inst = SimpleNamespace(
             instance_uid="app.sales-snap.com",
