@@ -259,6 +259,16 @@ Startup-флаг и ручной poll-trigger сбрасываются, а сл�
 Таким образом, durable pending сохраняется при реальном втором локальном
 изменении, а независимые изменения MCC будут приняты следующим штатным poll.
 
+`local_runtime_push_pending` является field-scoped очередью, а не глобальным
+барьером для MCC. Если её push временно завершается ошибкой, следующий poll
+всё равно читает canonical desired state MCC и применяет remote winners по
+независимым host/instance-полям; локальные winners остаются в durable
+`previous/current` и продолжают собственный retry/rebase/ACK-путь. Baseline для
+такого pending продвигается по remote winners, поэтому уже применённые MCC
+значения не классифицируются повторно как локальная правка. ACK отправляется
+по каждому scope отдельно: успешное подтверждение electronic instance не
+блокируется несвязанным host push.
+
 ## 1. Область и границы
 
 Планирование выполняется по каждому instance root, но capacity и защита

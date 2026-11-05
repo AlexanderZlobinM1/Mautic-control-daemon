@@ -2388,6 +2388,68 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
         )
         self.assertFalse(resolved["local_push"])
 
+    def test_pending_local_delta_baseline_advances_independent_remote_winner(self) -> None:
+        uid = "electronic.sales-snap.com@MauticFarm-02"
+        local_uid = "message.sales-snap.com@MauticFarm-02"
+        baseline = {
+            "segment_super_priority_instance_settings": {uid: {"segments": []}},
+            "plugin_operation_instance_settings": {local_uid: {"enabled": False}},
+        }
+        current = {
+            **baseline,
+            "plugin_operation_instance_settings": {local_uid: {"enabled": True}},
+        }
+        remote = {
+            "segment_super_priority_instance_settings": {uid: {"segments": [93, 94]}},
+            "plugin_operation_instance_settings": {local_uid: {"enabled": False}},
+        }
+        local_metadata = daemon._runtime_metadata_empty()
+        daemon._runtime_metadata_set(
+            local_metadata,
+            "instance",
+            "plugin_operation_instance_settings",
+            daemon._runtime_metadata_stamp(
+                source="mcd", updated_at=100.0, revision=1, event_id="mcd:local"
+            ),
+            local_uid,
+        )
+        remote_metadata = daemon._runtime_metadata_empty()
+        daemon._runtime_metadata_set(
+            remote_metadata,
+            "instance",
+            "segment_super_priority_instance_settings",
+            daemon._runtime_metadata_stamp(
+                source="mcc", updated_at=200.0, revision=204, event_id="mcc:electronic"
+            ),
+            uid,
+        )
+        resolution = daemon._resolve_runtime_snapshots(
+            current,
+            remote,
+            local_metadata,
+            remote_metadata,
+        )
+        self.assertIn(
+            ("instance", "plugin_operation_instance_settings", local_uid),
+            resolution["local_push"],
+        )
+        self.assertIn(
+            ("instance", "segment_super_priority_instance_settings", uid),
+            resolution["remote_wins"],
+        )
+
+        previous = daemon._runtime_reconciliation_previous(
+            baseline,
+            current,
+            remote,
+            resolution,
+        )
+        self.assertEqual(
+            previous["segment_super_priority_instance_settings"][uid],
+            {"segments": [93, 94]},
+        )
+        self.assertNotIn("plugin_operation_instance_settings", previous)
+
     def test_runtime_metadata_and_recovered_instance_row_survive_restart_and_push_once(self) -> None:
         from pathlib import Path
         from tempfile import TemporaryDirectory
