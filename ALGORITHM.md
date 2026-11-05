@@ -1583,6 +1583,11 @@ MCC применяется на хосте. Отсутствие поля в ч�
 обновляет baseline без повторной отправки того же состояния как новой локальной
 правки.
 
+Если canonical `desired_state` не содержит собственного `updated_at`, MCD использует
+его `modified_at`, затем transport-level `updated_at`/`runtime_overrides_updated_at`.
+Это не позволяет старому локальному tombstone победить более новую запись MCC только
+из-за отсутствующего времени внутри вложенного envelope.
+
 Embedded Forms reconciles the effective `form_embed_instance_settings` after
 runtime adoption, independently of desired-state ACK delivery. A changed policy
 or inventory applies immediately; `runtime-overrides trigger` also reconciles

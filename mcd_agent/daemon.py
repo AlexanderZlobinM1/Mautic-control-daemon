@@ -1812,7 +1812,12 @@ def _runtime_metadata_from_response(
     metadata = _runtime_metadata_empty()
     desired = response.get("desired_state")
     host_revision = desired.get("revision") if isinstance(desired, dict) else 0
-    host_updated_at = desired.get("updated_at") if isinstance(desired, dict) else response.get("updated_at")
+    host_updated_at = (
+        desired.get("updated_at")
+        or (desired.get("modified_at") if isinstance(desired, dict) else None)
+        or response.get("updated_at")
+        or response.get("runtime_overrides_updated_at")
+    )
     raw_metadata = response.get("runtime_metadata")
     if raw_metadata is None:
         raw_metadata = response.get("field_metadata", response.get("runtime_overrides_metadata"))
