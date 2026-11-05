@@ -45,6 +45,16 @@ def test_target_version_rejects_conflicting_release_metadata_and_stable_lock(tmp
     assert v1._target_version(tmp_path) is None
 
 
+def test_target_version_for_composer_prefers_installed_lock_over_stale_metadata(tmp_path):
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "release_metadata.json").write_text('{"version":"6.0.9"}')
+    (tmp_path / "composer.lock").write_text(
+        '{"packages":[{"name":"mautic/core-lib","version":"6.0.10"}]}'
+    )
+    assert v1._target_version(tmp_path) is None
+    assert v1._target_version(tmp_path, prefer_lock=True) == "6.0.10"
+
+
 def test_target_version_rejects_malformed_or_missing_metadata(tmp_path):
     (tmp_path / "app").mkdir()
     (tmp_path / "app" / "release_metadata.json").write_text('{"version":', encoding="utf-8")

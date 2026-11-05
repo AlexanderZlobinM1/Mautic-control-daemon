@@ -54,7 +54,7 @@ def rejected_preflight(run_id: str | None, reason: str) -> dict[str, Any]:
             "rollback_reason": None, "pre_patch_hashes": {}, "post_patch_hashes": {}, "restore_hashes": {}, "restored": []}
 
 
-def _target_version(root: Path) -> str | None:
+def _target_version(root: Path, *, prefer_lock: bool = False) -> str | None:
     lock_versions: set[str] = set()
     metadata_versions: set[str] = set()
     for prefix in ("", "docroot/", "public/"):
@@ -77,6 +77,13 @@ def _target_version(root: Path) -> str | None:
                         metadata_versions.add(version)
         except (ValueError, KeyError, TypeError, AttributeError) as exc:
             raise PatchPlanError("invalid_version_metadata") from exc
+
+    if prefer_lock and len(lock_versions) == 1:
+        # Composer owns the installed package set.  A Composer update can
+        # replace the lock/package while retaining the application's release
+        # metadata file from the previous tree; treating that stale metadata
+        # as authoritative rejects an otherwise exact staged target.
+        return lock_versions.pop()
 
     # Official ZIP releases carry the authoritative version in the root
     # app/release_metadata.json. Composer's 6.0.0-dev package marker is a
