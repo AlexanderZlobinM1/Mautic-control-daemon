@@ -1724,6 +1724,82 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             5,
         )
 
+    def test_qualified_inventory_requests_base_alias_and_maps_base_response_to_exact_uid(self) -> None:
+        base_uid = "electronic.sales-snap.com"
+        qualified_uid = f"{base_uid}@MauticFarm-02"
+        cfg = SimpleNamespace(mcc_url="https://mcc.example", mcc_token="token")
+        response = {
+            "status": "ok",
+            "runtime_overrides": {},
+            # Older MCC desired rows can still be keyed by the stable/base UID.
+            "instance_desired_states": {
+                base_uid: {
+                    "revision": 17,
+                    "runtime_overrides": {
+                        "segment_super_priority_instance_settings": {
+                            "segments": [93, 94],
+                            "slots_override": 1,
+                        },
+                    },
+                },
+            },
+            "desired_state": {"revision": 22},
+        }
+        identity = {
+            "effective_hostname": "MauticFarm-02",
+            "effective_mcc_host_name": "MauticFarm-02",
+            "local_hostname": "MauticFarm-02",
+            "configured_host_name": "",
+        }
+        with patch(
+            "mcd_agent.runtime_overrides.resolve_agent_identity",
+            return_value=identity,
+        ), patch("mcd_agent.runtime_overrides._post_json", return_value=response) as post:
+            fetched = fetch_runtime_overrides(cfg, instance_uids=[qualified_uid])
+
+        self.assertEqual(
+            post.call_args.args[1]["instance_uids"],
+            [base_uid, qualified_uid],
+        )
+        self.assertEqual(list(fetched["instance_desired_states"]), [qualified_uid])
+        self.assertEqual(fetched["instance_desired_states"][qualified_uid]["revision"], 17)
+        merged = merge_instance_desired_states(
+            fetched["runtime_overrides"],
+            fetched["instance_desired_states"],
+        )
+        self.assertEqual(
+            merged["segment_super_priority_instance_settings"][qualified_uid],
+            {"segments": [93, 94], "slots_override": 1},
+        )
+
+        class MemoryStore:
+            def __init__(self) -> None:
+                self.values: dict[str, object] = {}
+
+            def get_runtime_sync(self, key: str) -> object:
+                return self.values.get(key)
+
+            def put_runtime_sync(self, key: str, value: object) -> None:
+                self.values[key] = value
+
+        store = MemoryStore()
+        with patch(
+            "mcd_agent.runtime_overrides.acknowledge_runtime_state",
+            return_value={"status": "ok"},
+        ) as acknowledge:
+            failures = acknowledge_desired_runtime_states(
+                cfg,
+                store,
+                desired_state=None,
+                host_runtime={},
+                instance_states=fetched["instance_desired_states"],
+                runtime_fingerprint="electronic-super-priority",
+            )
+
+        self.assertEqual(failures, [])
+        self.assertEqual(acknowledge.call_args.kwargs["scope_key"], qualified_uid)
+        self.assertEqual(acknowledge.call_args.kwargs["revision"], 17)
+
     def test_instance_state_uses_uid_and_reapplies_after_root_move(self) -> None:
         inst = SimpleNamespace(
             instance_uid="app.sales-snap.com",
