@@ -2336,6 +2336,58 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
         self.assertNotIn("scheduler_host_max_parallel", deleted["runtime"])
         self.assertIn(("host", "scheduler_host_max_parallel", ""), deleted["remote_tombstones"])
 
+    def test_desired_state_metadata_falls_back_to_response_timestamp(self) -> None:
+        uid = "electronic.sales-snap.com@MauticFarm-02"
+        runtime = {
+            "segment_super_priority_instance_settings": {
+                uid: {"segments": [93, 94]},
+            },
+        }
+        response = {
+            "updated_at": "2026-11-05 10:28:44",
+            "desired_state": {
+                "revision": 204,
+                "updated_at": None,
+                "runtime_overrides": runtime,
+            },
+        }
+        remote_metadata = daemon._runtime_metadata_from_response(response, runtime, {})
+        stamp = daemon._runtime_metadata_get(
+            remote_metadata,
+            "instance",
+            "segment_super_priority_instance_settings",
+            uid,
+        )
+        self.assertIsNotNone(stamp)
+        self.assertGreater(stamp["updated_at"], 0)
+        self.assertEqual(stamp["revision"], 204)
+
+        local_metadata = daemon._runtime_metadata_empty()
+        daemon._runtime_metadata_set(
+            local_metadata,
+            "instance",
+            "segment_super_priority_instance_settings",
+            daemon._runtime_metadata_stamp(
+                source="mcd",
+                updated_at=1793090529.0,
+                revision=7134,
+                event_id="mcd:7134",
+                tombstone=True,
+            ),
+            uid,
+        )
+        resolved = daemon._resolve_runtime_snapshots(
+            {},
+            runtime,
+            local_metadata,
+            remote_metadata,
+        )
+        self.assertEqual(
+            resolved["runtime"]["segment_super_priority_instance_settings"][uid],
+            {"segments": [93, 94]},
+        )
+        self.assertFalse(resolved["local_push"])
+
     def test_runtime_metadata_and_recovered_instance_row_survive_restart_and_push_once(self) -> None:
         from pathlib import Path
         from tempfile import TemporaryDirectory
