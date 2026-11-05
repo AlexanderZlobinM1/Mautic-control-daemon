@@ -2100,26 +2100,44 @@ def _runtime_reconciliation_previous(
     remote: Mapping[str, Any],
     resolution: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Make a pending local delta for fields where local LWW won."""
-    previous = deepcopy(dict(baseline))
-    local_fields = _runtime_snapshot_fields(current)
+    """Build a baseline that keeps local winners pending but accepts MCC winners.
+
+    A pending local delta is field-scoped. Keeping the old implementation's
+    complete pre-poll baseline made every unrelated MCC winner look like a new
+    local edit on the next tick, while the global pending flag blocked the poll
+    altogether. The baseline therefore removes local-push fields, but advances
+    every remote winner to the value that was just applied (or removes an
+    explicit remote tombstone).
+    """
+    previous_fields = _runtime_snapshot_fields(baseline)
     remote_fields = _runtime_snapshot_fields(remote)
+
+    def remove_logical(path: tuple[str, str, str]) -> None:
+        logical = _runtime_logical_path(path)
+        for candidate in list(previous_fields):
+            if _runtime_logical_path(candidate) == logical:
+                previous_fields.pop(candidate, None)
+
+    def remote_path_for(path: tuple[str, str, str]) -> tuple[str, str, str] | None:
+        logical = _runtime_logical_path(path)
+        matches = [candidate for candidate in remote_fields if _runtime_logical_path(candidate) == logical]
+        return matches[0] if len(matches) == 1 else None
+
     for path in resolution.get("local_push", []):
-        scope, key, uid = path
-        entries = previous.get(key) if scope == "instance" else None
-        if scope == "host":
-            previous.pop(key, None)
+        if isinstance(path, (tuple, list)) and len(path) == 3:
+            remove_logical((str(path[0]), str(path[1]), str(path[2])))
+
+    for path in resolution.get("remote_wins", []):
+        if not isinstance(path, (tuple, list)) or len(path) != 3:
             continue
-        if isinstance(entries, dict):
-            next_entries = dict(entries)
-            for entry_uid in list(next_entries):
-                if str(entry_uid) == uid or str(entry_uid).split("@", 1)[0] == uid.split("@", 1)[0]:
-                    next_entries.pop(entry_uid, None)
-            if next_entries:
-                previous[key] = next_entries
-            else:
-                previous.pop(key, None)
-    return previous
+        remote_path = remote_path_for((str(path[0]), str(path[1]), str(path[2])))
+        if remote_path is None:
+            remove_logical((str(path[0]), str(path[1]), str(path[2])))
+            continue
+        remove_logical(remote_path)
+        previous_fields[remote_path] = deepcopy(remote_fields[remote_path])
+
+    return _runtime_snapshot_from_fields(previous_fields)
 
 
 def _persist_recovered_instance_runtime(
@@ -20345,6 +20363,7 @@ def run_loop(
         runtime_poll_enabled = bool(getattr(config, "mcc_runtime_overrides_poll_enabled", False))
         should_runtime_poll = runtime_poll_enabled and now >= next_runtime_overrides_poll_at
         v3_conflict_active = _runtime_sync_v3_conflict_active(_runtime_sync_v3_state(store))
+        pending_before_runtime_poll = local_runtime_push_pending
         if config.mcc_url and config.mcc_token and not local_runtime_push_pending and not v3_conflict_active:
             # Re-sample immediately before the remote fetch. A file edit can
             # arrive after the normal local-change block above; queue it
@@ -20355,7 +20374,6 @@ def run_loop(
         if config.mcc_url and config.mcc_token and (
             (startup_runtime_sync_pending or runtime_overrides_sync_requested or should_runtime_poll)
             and not local_runtime_push_accepted_this_tick
-            and not local_runtime_push_pending
         ):
             ro = fetch_runtime_overrides(
                 config,
@@ -20369,16 +20387,21 @@ def run_loop(
                 logging.warning("runtime-sync-v3 conflict remains unresolved; holding ambiguous runtime keys")
             elif _runtime_sync_v3_conflict_active(v3_state):
                 _runtime_sync_v3_mark(store, {"schema": "mcd-runtime-sync-v3-state-v1", "status": "resolved", "resolved_revision": ro.get("desired_state", {}).get("revision") if isinstance(ro.get("desired_state"), Mapping) else None})
-            if status == "ok" and not local_runtime_push_pending:
+            if status == "ok":
                 # Re-sample after the network round trip as well. If the
-                # operator edited runtime while MCC was responding, defer
-                # applying/persisting that response until the local delta is
-                # accepted.
+                # operator edited runtime while MCC was responding and there
+                # was no already durable delta, defer applying/persisting that
+                # response until the new local delta is accepted. An existing
+                # unrelated pending delta is field-scoped and must not block
+                # independent MCC winners from being applied.
                 during_poll_runtime = local_runtime_overrides(config)
-                if _queue_local_runtime_delta(store, during_poll_runtime, allow_unproven=False) is not None:
+                if (
+                    _queue_local_runtime_delta(store, during_poll_runtime, allow_unproven=False) is not None
+                    and not pending_before_runtime_poll
+                ):
                     local_runtime_push_pending = True
                     status = "deferred_local_delta"
-            if status == "ok" and not local_runtime_push_pending:
+            if status == "ok":
                 backup_sync = ro.get("backup_profile_sync")
                 if isinstance(backup_sync, dict):
                     config, backup_sync_result = backup_profile_apply_sync(config, backup_sync)
@@ -20457,16 +20480,20 @@ def run_loop(
                         store.put_runtime_sync("local_runtime", previous)
                         store.put_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY, local_metadata)
                         local_runtime_push_pending = True
-                        status = "deferred_local_delta"
                     else:
                         if _runtime_metadata_has_accepted(store):
                             _clear_local_runtime_accepted(store)
-                        ro["_mcd_remote_runtime"] = remote_runtime
-                        ro["_mcd_remote_metadata"] = remote_metadata
-                        ro["_mcd_resolved_runtime"] = resolution["runtime"]
-                        ro["_mcd_resolved_metadata"] = resolution["metadata"]
-                        store.put_runtime_sync("mcc_runtime", remote_runtime)
-                        store.put_runtime_sync(_MCC_RUNTIME_METADATA_KEY, remote_metadata)
+                    # The canonical MCC snapshot is durable even when one or
+                    # more unrelated local fields remain pending. Applying
+                    # the resolved runtime here keeps remote winners (for
+                    # example an electronic instance lane) independent from
+                    # the local retry queue.
+                    ro["_mcd_remote_runtime"] = remote_runtime
+                    ro["_mcd_remote_metadata"] = remote_metadata
+                    ro["_mcd_resolved_runtime"] = resolution["runtime"]
+                    ro["_mcd_resolved_metadata"] = resolution["metadata"]
+                    store.put_runtime_sync("mcc_runtime", remote_runtime)
+                    store.put_runtime_sync(_MCC_RUNTIME_METADATA_KEY, remote_metadata)
             if status == "ok":
                 overrides_raw = ro.get("runtime_overrides")
                 instance_states = ro.get("instance_desired_states")
@@ -20665,32 +20692,31 @@ def run_loop(
                             "unsupported_keys": unsupported_keys,
                         },
                     )
-                if not local_runtime_push_pending:
-                    # ACK the complete MCC-requested host map, including
-                    # operator-owned structured keys. Chunking bounds the
-                    # transport; projecting to desired_state.runtime_overrides
-                    # here would silently drop keys that MCC still expects.
-                    desired_state_runtime = (
-                        desired_state.get("runtime_overrides")
-                        if isinstance(desired_state, dict)
-                        else None
-                    )
-                    # ACK evidence must describe the canonical desired
-                    # envelope; effective values are read back from config.
-                    desired_host_runtime = (
-                        desired_state_runtime
-                        if isinstance(desired_state_runtime, dict)
-                        else overrides_raw if isinstance(overrides_raw, dict) else {}
-                    )
-                    for failure in acknowledge_desired_runtime_states(
-                        config,
-                        store,
-                        desired_state=desired_state,
-                        host_runtime=desired_host_runtime,
-                        instance_states=instance_states,
-                        runtime_fingerprint=fp,
-                    ):
-                        logging.warning("runtime desired-state acknowledgement failed: %s", failure)
+                # ACK each scope after applying the resolved snapshot, even
+                # when an unrelated local delta remains pending. MCC can then
+                # observe the independently applied instance lane while the
+                # local delta continues through its own retry/rebase path.
+                desired_state_runtime = (
+                    desired_state.get("runtime_overrides")
+                    if isinstance(desired_state, dict)
+                    else None
+                )
+                # ACK evidence must describe the canonical desired envelope;
+                # effective values are read back from config.
+                desired_host_runtime = (
+                    desired_state_runtime
+                    if isinstance(desired_state_runtime, dict)
+                    else overrides_raw if isinstance(overrides_raw, dict) else {}
+                )
+                for failure in acknowledge_desired_runtime_states(
+                    config,
+                    store,
+                    desired_state=desired_state,
+                    host_runtime=desired_host_runtime,
+                    instance_states=instance_states,
+                    runtime_fingerprint=fp,
+                ):
+                    logging.warning("runtime desired-state acknowledgement failed: %s", failure)
                     startup_runtime_sync_pending = False
                     last_runtime_overrides_error = ""
                     next_runtime_overrides_poll_at = now + poll_interval
