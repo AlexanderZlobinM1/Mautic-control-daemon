@@ -550,6 +550,19 @@ def fetch_runtime_overrides(cfg: AgentConfig, *, instance_uids: list[str] | None
     try:
         out = _post_json(url, payload, cfg.mcc_token, timeout_sec=12)
         out.setdefault("status", "error")
+        # MCC may return the materialized/effective host map at the top level
+        # while carrying the newer canonical desired map in the nested
+        # desired_state envelope.  The latter is authoritative for adoption;
+        # otherwise a stale effective map can make a newer desired change look
+        # already applied and it never reaches the local runtime include.
+        desired_state = out.get("desired_state")
+        if isinstance(desired_state, dict):
+            desired_runtime = desired_state.get("runtime_overrides")
+            if isinstance(desired_runtime, dict):
+                out["runtime_overrides"] = desired_runtime
+            desired_instances = desired_state.get("instance_desired_states")
+            if isinstance(desired_instances, dict):
+                out["instance_desired_states"] = desired_instances
         if not isinstance(out.get("runtime_overrides"), dict):
             out["runtime_overrides"] = {}
         backup_sync = out.get("backup_profile_sync")
