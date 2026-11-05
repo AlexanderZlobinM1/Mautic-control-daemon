@@ -1614,6 +1614,13 @@ central, host, group metadata, and both values durably; non-ambiguous fields
 may be projected, but ambiguous fields remain held and are never resolved by
 last-writer-wins. Restart and Portal/MCC outage retry the same idempotency key.
 
+Instance runtime polling always requests both the stable/base UID and the
+exact host-qualified UID. If MCC returns a desired row under the base UID,
+MCD may bind it to the one unambiguous requested qualified UID for that host;
+apply and receipt ACK then use that exact qualified scope. This preserves
+Super-priority/priority changes made through an older or base-UID MCC UI
+without allowing a row from another host to be guessed or merged.
+
 An operator resolution is accepted only after a newer canonical snapshot is
 read back with `source=sync_v3_operator_resolution`; the conflict hold is then
 cleared and the ordinary apply/ACK path verifies the actual local state. The
