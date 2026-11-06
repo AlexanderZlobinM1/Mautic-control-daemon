@@ -23,6 +23,17 @@ MCC через существующий `record_mautic_patch_evidence`; stdout m
 успех без фактической проверки. Повторный запуск использует тот же immutable
 plan и остаётся идемпотентным.
 
+Для v3 fixed-gate проверка после `git apply` сохраняет fail-closed правило
+для смешанного или неполного состояния. Узкое исключение допускается только
+для `exact_count` vulnerable-needle, который остаётся в результате потому,
+что тот же текст добавлен строкой `+` в объявленном wrapper-патче: все fixed
+gates должны совпасть, каждый оставшийся vulnerable needle должен быть
+подтверждён added-line payload, а `path_state`/`sha256` и произвольные mixed
+состояния не получают такого обхода. Gate rows сохраняют literal `needle`,
+`expected` и `actual`; при отказе receipt содержит эти наблюдения, completed
+records и canonical plan binding, чтобы evidence-проверка могла отличить
+допустимое перекрытие от `patch_fixed_gate_failed`.
+
 Разрешение Mautic application root для Composer split-layout проверяет сначала
 project root с `composer.json` и `bin/console`, затем `docroot/` или `public/` с
 валидированными `app/` и `plugins/`. Если в project root остался только
@@ -258,6 +269,16 @@ Startup-флаг и ручной poll-trigger сбрасываются, а сл�
 по обычному `mcc_push_interval_sec` (с теми же границами 15--300 секунд).
 Таким образом, durable pending сохраняется при реальном втором локальном
 изменении, а независимые изменения MCC будут приняты следующим штатным poll.
+
+`local_runtime_push_pending` является field-scoped очередью, а не глобальным
+барьером для MCC. Если её push временно завершается ошибкой, следующий poll
+всё равно читает canonical desired state MCC и применяет remote winners по
+независимым host/instance-полям; локальные winners остаются в durable
+`previous/current` и продолжают собственный retry/rebase/ACK-путь. Baseline для
+такого pending продвигается по remote winners, поэтому уже применённые MCC
+значения не классифицируются повторно как локальная правка. ACK отправляется
+по каждому scope отдельно: успешное подтверждение electronic instance не
+блокируется несвязанным host push.
 
 ## 1. Область и границы
 
@@ -501,6 +522,10 @@ config на его profile baseline и только после этого при
    its SHA-256, source commit, runtime archive SHA, runtime manifest SHA, and
    bridge-QA sidecar SHA. The host accepts it only after exact SHA checks and
    runs the bridge locally; the runtime archive remains unchanged.
+   The bridge admits either the legacy `src` layout or an already active
+   `runtime` layout, but rejects both together; an existing runtime-only host
+   therefore receives a normal pinned forward update without a source-tree
+   fallback or symlink.
    The sidecar must accept the complete valid split TOML graph, including
    array-of-table sections, while never writing configuration.
    The MCD runtime always supplies an MCD-owned default
@@ -1122,6 +1147,13 @@ terminalization MCD удерживает claim только bounded grace window
 последнего независимо подтверждённого process/DB heartbeat. Один лишь
 persisted marker эту window не продлевает. Error не блокирует независимые
 items, но учитывается failure cooldown и receipt.
+Для Mautic 4–6 dependency guard вычисляется по полному pending projection
+persisted cycle, даже когда volatile planner rings уже пусты. Если parent
+находится в failure cooldown, его незавершённые descendants остаются blocked,
+но другие независимые parents той же связной closure исключают blocked IDs при
+выборе owner и продолжают `claim -> start -> terminal` в свободных slots.
+Blocked parent не может монополизировать owner всей closure и остановить
+независимую часть очереди.
 Цикл terminal, когда каждый его item находится в `done` или terminal error и
 нет running/claimed работы.
 
@@ -1572,6 +1604,11 @@ MCC применяется на хосте. Отсутствие поля в ч�
 обновляет baseline без повторной отправки того же состояния как новой локальной
 правки.
 
+Если canonical `desired_state` не содержит собственного `updated_at`, MCD использует
+его `modified_at`, затем transport-level `updated_at`/`runtime_overrides_updated_at`.
+Это не позволяет старому локальному tombstone победить более новую запись MCC только
+из-за отсутствующего времени внутри вложенного envelope.
+
 Embedded Forms reconciles the effective `form_embed_instance_settings` after
 runtime adoption, independently of desired-state ACK delivery. A changed policy
 or inventory applies immediately; `runtime-overrides trigger` also reconciles
@@ -1602,6 +1639,13 @@ then acknowledged by the normal chunked ACK. A `conflict` stores base,
 central, host, group metadata, and both values durably; non-ambiguous fields
 may be projected, but ambiguous fields remain held and are never resolved by
 last-writer-wins. Restart and Portal/MCC outage retry the same idempotency key.
+
+Instance runtime polling always requests both the stable/base UID and the
+exact host-qualified UID. If MCC returns a desired row under the base UID,
+MCD may bind it to the one unambiguous requested qualified UID for that host;
+apply and receipt ACK then use that exact qualified scope. This preserves
+Super-priority/priority changes made through an older or base-UID MCC UI
+without allowing a row from another host to be guessed or merged.
 
 An operator resolution is accepted only after a newer canonical snapshot is
 read back with `source=sync_v3_operator_resolution`; the conflict hold is then

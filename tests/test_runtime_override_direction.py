@@ -1724,6 +1724,135 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             5,
         )
 
+    def test_qualified_inventory_requests_base_alias_and_maps_base_response_to_exact_uid(self) -> None:
+        base_uid = "electronic.sales-snap.com"
+        qualified_uid = f"{base_uid}@MauticFarm-02"
+        cfg = SimpleNamespace(mcc_url="https://mcc.example", mcc_token="token")
+        response = {
+            "status": "ok",
+            "runtime_overrides": {},
+            # Older MCC desired rows can still be keyed by the stable/base UID.
+            "instance_desired_states": {
+                base_uid: {
+                    "revision": 17,
+                    "runtime_overrides": {
+                        "segment_super_priority_instance_settings": {
+                            "segments": [93, 94],
+                            "slots_override": 1,
+                        },
+                    },
+                },
+            },
+            "desired_state": {"revision": 22},
+        }
+        identity = {
+            "effective_hostname": "MauticFarm-02",
+            "effective_mcc_host_name": "MauticFarm-02",
+            "local_hostname": "MauticFarm-02",
+            "configured_host_name": "",
+        }
+        with patch(
+            "mcd_agent.runtime_overrides.resolve_agent_identity",
+            return_value=identity,
+        ), patch("mcd_agent.runtime_overrides._post_json", return_value=response) as post:
+            fetched = fetch_runtime_overrides(cfg, instance_uids=[qualified_uid])
+
+        self.assertEqual(
+            post.call_args.args[1]["instance_uids"],
+            [base_uid, qualified_uid],
+        )
+        self.assertEqual(list(fetched["instance_desired_states"]), [qualified_uid])
+        self.assertEqual(fetched["instance_desired_states"][qualified_uid]["revision"], 17)
+        merged = merge_instance_desired_states(
+            fetched["runtime_overrides"],
+            fetched["instance_desired_states"],
+        )
+        self.assertEqual(
+            merged["segment_super_priority_instance_settings"][qualified_uid],
+            {"segments": [93, 94], "slots_override": 1},
+        )
+
+        class MemoryStore:
+            def __init__(self) -> None:
+                self.values: dict[str, object] = {}
+
+            def get_runtime_sync(self, key: str) -> object:
+                return self.values.get(key)
+
+            def put_runtime_sync(self, key: str, value: object) -> None:
+                self.values[key] = value
+
+        store = MemoryStore()
+        with patch(
+            "mcd_agent.runtime_overrides.acknowledge_runtime_state",
+            return_value={"status": "ok"},
+        ) as acknowledge:
+            failures = acknowledge_desired_runtime_states(
+                cfg,
+                store,
+                desired_state=None,
+                host_runtime={},
+                instance_states=fetched["instance_desired_states"],
+                runtime_fingerprint="electronic-super-priority",
+            )
+
+        self.assertEqual(failures, [])
+        self.assertEqual(acknowledge.call_args.kwargs["scope_key"], qualified_uid)
+        self.assertEqual(acknowledge.call_args.kwargs["revision"], 17)
+
+    def test_nested_desired_state_replaces_stale_materialized_runtime_map(self) -> None:
+        base_uid = "electronic.sales-snap.com"
+        qualified_uid = f"{base_uid}@MauticFarm-02"
+        cfg = SimpleNamespace(mcc_url="https://mcc.example", mcc_token="token")
+        response = {
+            "status": "ok",
+            # This is the host's older materialized/effective projection.
+            "runtime_overrides": {
+                "segment_priority_instance_settings": {
+                    qualified_uid: {"segments": [23, 86]},
+                },
+            },
+            "instance_desired_states": {},
+            # MCC's canonical desired envelope contains the newer operator
+            # change that must be adopted by MCD.
+            "desired_state": {
+                "revision": 204,
+                "runtime_overrides": {
+                    "segment_priority_instance_settings": {
+                        qualified_uid: {"segments": [23, 86]},
+                    },
+                    "segment_super_priority_instance_settings": {
+                        qualified_uid: {"segments": [93, 94]},
+                    },
+                    "segment_recurring_priority_v1": {
+                        qualified_uid: {
+                            "segments": [{"id": 86, "max_interval_sec": 60}],
+                        },
+                    },
+                },
+            },
+        }
+        identity = {
+            "effective_hostname": "MauticFarm-02",
+            "effective_mcc_host_name": "MauticFarm-02",
+            "local_hostname": "MauticFarm-02",
+            "configured_host_name": "",
+        }
+        with patch(
+            "mcd_agent.runtime_overrides.resolve_agent_identity",
+            return_value=identity,
+        ), patch("mcd_agent.runtime_overrides._post_json", return_value=response):
+            fetched = fetch_runtime_overrides(cfg, instance_uids=[base_uid])
+
+        self.assertEqual(
+            fetched["runtime_overrides"]["segment_super_priority_instance_settings"][qualified_uid],
+            {"segments": [93, 94]},
+        )
+        self.assertEqual(
+            fetched["runtime_overrides"]["segment_priority_instance_settings"][qualified_uid],
+            {"segments": [23, 86]},
+        )
+
     def test_instance_state_uses_uid_and_reapplies_after_root_move(self) -> None:
         inst = SimpleNamespace(
             instance_uid="app.sales-snap.com",
@@ -2206,6 +2335,120 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
         )
         self.assertNotIn("scheduler_host_max_parallel", deleted["runtime"])
         self.assertIn(("host", "scheduler_host_max_parallel", ""), deleted["remote_tombstones"])
+
+    def test_desired_state_metadata_falls_back_to_response_timestamp(self) -> None:
+        uid = "electronic.sales-snap.com@MauticFarm-02"
+        runtime = {
+            "segment_super_priority_instance_settings": {
+                uid: {"segments": [93, 94]},
+            },
+        }
+        response = {
+            "updated_at": "2026-11-05 10:28:44",
+            "desired_state": {
+                "revision": 204,
+                "updated_at": None,
+                "runtime_overrides": runtime,
+            },
+        }
+        remote_metadata = daemon._runtime_metadata_from_response(response, runtime, {})
+        stamp = daemon._runtime_metadata_get(
+            remote_metadata,
+            "instance",
+            "segment_super_priority_instance_settings",
+            uid,
+        )
+        self.assertIsNotNone(stamp)
+        self.assertGreater(stamp["updated_at"], 0)
+        self.assertEqual(stamp["revision"], 204)
+
+        local_metadata = daemon._runtime_metadata_empty()
+        daemon._runtime_metadata_set(
+            local_metadata,
+            "instance",
+            "segment_super_priority_instance_settings",
+            daemon._runtime_metadata_stamp(
+                source="mcd",
+                updated_at=1793090529.0,
+                revision=7134,
+                event_id="mcd:7134",
+                tombstone=True,
+            ),
+            uid,
+        )
+        resolved = daemon._resolve_runtime_snapshots(
+            {},
+            runtime,
+            local_metadata,
+            remote_metadata,
+        )
+        self.assertEqual(
+            resolved["runtime"]["segment_super_priority_instance_settings"][uid],
+            {"segments": [93, 94]},
+        )
+        self.assertFalse(resolved["local_push"])
+
+    def test_pending_local_delta_baseline_advances_independent_remote_winner(self) -> None:
+        uid = "electronic.sales-snap.com@MauticFarm-02"
+        local_uid = "message.sales-snap.com@MauticFarm-02"
+        baseline = {
+            "segment_super_priority_instance_settings": {uid: {"segments": []}},
+            "plugin_operation_instance_settings": {local_uid: {"enabled": False}},
+        }
+        current = {
+            **baseline,
+            "plugin_operation_instance_settings": {local_uid: {"enabled": True}},
+        }
+        remote = {
+            "segment_super_priority_instance_settings": {uid: {"segments": [93, 94]}},
+            "plugin_operation_instance_settings": {local_uid: {"enabled": False}},
+        }
+        local_metadata = daemon._runtime_metadata_empty()
+        daemon._runtime_metadata_set(
+            local_metadata,
+            "instance",
+            "plugin_operation_instance_settings",
+            daemon._runtime_metadata_stamp(
+                source="mcd", updated_at=100.0, revision=1, event_id="mcd:local"
+            ),
+            local_uid,
+        )
+        remote_metadata = daemon._runtime_metadata_empty()
+        daemon._runtime_metadata_set(
+            remote_metadata,
+            "instance",
+            "segment_super_priority_instance_settings",
+            daemon._runtime_metadata_stamp(
+                source="mcc", updated_at=200.0, revision=204, event_id="mcc:electronic"
+            ),
+            uid,
+        )
+        resolution = daemon._resolve_runtime_snapshots(
+            current,
+            remote,
+            local_metadata,
+            remote_metadata,
+        )
+        self.assertIn(
+            ("instance", "plugin_operation_instance_settings", local_uid),
+            resolution["local_push"],
+        )
+        self.assertIn(
+            ("instance", "segment_super_priority_instance_settings", uid),
+            resolution["remote_wins"],
+        )
+
+        previous = daemon._runtime_reconciliation_previous(
+            baseline,
+            current,
+            remote,
+            resolution,
+        )
+        self.assertEqual(
+            previous["segment_super_priority_instance_settings"][uid],
+            {"segments": [93, 94]},
+        )
+        self.assertNotIn("plugin_operation_instance_settings", previous)
 
     def test_runtime_metadata_and_recovered_instance_row_survive_restart_and_push_once(self) -> None:
         from pathlib import Path

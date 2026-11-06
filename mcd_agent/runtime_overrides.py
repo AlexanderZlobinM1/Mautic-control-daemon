@@ -133,11 +133,14 @@ def _matching_instance_entry(entries: dict[str, Any], keys: list[str]) -> str | 
 
 
 def _canonical_instance_uids(instance_uids: list[str], *, host_name: str = "") -> list[str]:
-    """Return local UIDs plus one host-qualified compatibility alias.
+    """Return base and exact host-qualified aliases for every local UID.
 
     Inventory keeps the stable local UID, while older/current MCC desired
     rows may be addressed by the immutable ``<uid>@<mcc-host>`` key.  Send
-    both forms without inventing a host or binding the code to a domain.
+    both forms even when inventory already contains the qualified form. This
+    lets MCC resolve a desired row written by an older/base-UID UI and lets
+    the response normalizer attach it back to the exact host-qualified row.
+    Never invent a second host-qualified alias for an already-qualified UID.
     """
     canonical: list[str] = []
     host = str(host_name or "").strip()
@@ -145,9 +148,15 @@ def _canonical_instance_uids(instance_uids: list[str], *, host_name: str = "") -
         uid = str(raw_uid or "").strip()
         if not uid:
             continue
-        canonical.append(uid)
-        if host and "@" not in uid:
-            canonical.append(f"{uid}@{host}")
+        if "@" in uid:
+            base_uid = uid.split("@", 1)[0].strip()
+            if base_uid:
+                canonical.append(base_uid)
+            canonical.append(uid)
+        else:
+            canonical.append(uid)
+            if host:
+                canonical.append(f"{uid}@{host}")
     return list(dict.fromkeys(canonical))
 
 
@@ -219,6 +228,19 @@ def normalize_instance_desired_state_rows(
             )
 
         uid, state, _position = max(rows, key=rank)
+        # A base-UID response is still the same instance when the request
+        # contains exactly one host-qualified alias for that base. Preserve
+        # the exact scope key for apply and receipt ACK; otherwise a base row
+        # can be silently treated as an unrelated sparse instance and the
+        # MCC UI change never reaches the selected host.
+        qualified_requested = [
+            candidate
+            for candidate in requested
+            if candidate.split("@", 1)[0] == uid.split("@", 1)[0]
+            and "@" in candidate
+        ]
+        if len(qualified_requested) == 1:
+            uid = qualified_requested[0]
         out[uid] = state
     return out
 
@@ -528,6 +550,19 @@ def fetch_runtime_overrides(cfg: AgentConfig, *, instance_uids: list[str] | None
     try:
         out = _post_json(url, payload, cfg.mcc_token, timeout_sec=12)
         out.setdefault("status", "error")
+        # MCC may return the materialized/effective host map at the top level
+        # while carrying the newer canonical desired map in the nested
+        # desired_state envelope.  The latter is authoritative for adoption;
+        # otherwise a stale effective map can make a newer desired change look
+        # already applied and it never reaches the local runtime include.
+        desired_state = out.get("desired_state")
+        if isinstance(desired_state, dict):
+            desired_runtime = desired_state.get("runtime_overrides")
+            if isinstance(desired_runtime, dict):
+                out["runtime_overrides"] = desired_runtime
+            desired_instances = desired_state.get("instance_desired_states")
+            if isinstance(desired_instances, dict):
+                out["instance_desired_states"] = desired_instances
         if not isinstance(out.get("runtime_overrides"), dict):
             out["runtime_overrides"] = {}
         backup_sync = out.get("backup_profile_sync")

@@ -1220,8 +1220,10 @@ def _prepare_patch_target_stage(config, root: str, current: str, target: str, mo
                 archive.extractall(stage_root)
         else:
             raise RuntimeError("Unsupported target stage install type")
-    staged = TargetStage(root, plan, prepare, _target_version, application_root, facts_provider=facts_provider,
+    read_version = (lambda candidate: _target_version(candidate, prefer_lock=True)) if mode == "composer" else _target_version
+    staged = TargetStage(root, plan, prepare, read_version, application_root, facts_provider=facts_provider,
                          defer_conditions=True)
+    staged.read_version = read_version
     staged.target_package_sha256 = package_identity["sha256"]
     return staged
 
@@ -2453,7 +2455,7 @@ def run_upgrade_apply(
                 if target_stage is not None:
                     from mcd_agent.mautic_patch_plan import _target_version
                     from mcd_agent.mautic_patch_stage import application_root
-                    staged_evidence = target_stage.verify_live(source_root, validated_patch_plan, _target_version)
+                    staged_evidence = target_stage.verify_live(source_root, validated_patch_plan, target_stage.read_version)
                     print("MCD_PATCH_TARGET_EVIDENCE=" + json.dumps(staged_evidence, sort_keys=True))
                     source_root = str(application_root(source_root))
                 if validated_patch_plan.get("schema") == "mcd-mautic-patch-plan-v3":
@@ -2551,7 +2553,7 @@ def run_upgrade_apply(
         if target_stage is not None:
             from mcd_agent.mautic_patch_plan import _target_version
             target_stage.verify_original(_resolve_composer_project_root(install_root) if chosen_mode == "composer" else install_root,
-                                         validated_patch_plan, _target_version)
+                                         validated_patch_plan, target_stage.read_version)
         if cross_line:
             require_live_release_authorization()
         if mcc_preflighted_single_instance and not cross_line:

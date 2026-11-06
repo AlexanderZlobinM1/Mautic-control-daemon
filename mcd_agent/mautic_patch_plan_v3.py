@@ -120,7 +120,7 @@ def _gate(root: Path, gate: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
             actual = 0 if gate.get("allow_missing_path") is True else None
         else:
             actual = value.count(gate["needle"].encode("utf-8"))
-        row.update(expected=gate["expected_count"], actual=actual)
+        row.update(needle=gate["needle"], expected=gate["expected_count"], actual=actual)
         return actual == gate["expected_count"], row
     raise PatchPlanV3Error("patch_gate_kind_unsupported")
 
@@ -146,13 +146,40 @@ def _record_state(root: Path, record: dict[str, Any]) -> tuple[str, list[dict[st
     vulnerable = bool(groups["vulnerable"]) and all(groups["vulnerable"])
     fixed = bool(groups["fixed"]) and all(groups["fixed"])
     # A complete group is eligible only when no gate in the opposite group
-    # matches.  Otherwise a partially mixed source could be mistaken for an
+    # matches. Otherwise a partially mixed source could be mistaken for an
     # already-fixed or candidate state, depending on which group is complete.
     if vulnerable and not fixed_match:
         return "candidate", rows
     if fixed and not vulnerable_match:
         return "already", rows
     return "ambiguous", rows
+
+
+def _fixed_state_after_overlap(record: dict[str, Any], payload: bytes, gates: list[dict[str, Any]]) -> bool:
+    """Accept fixed gates when a vulnerable needle is reintroduced by a wrapper patch."""
+    vulnerable = [row for row in gates if row["group"] == "vulnerable"]
+    fixed = [row for row in gates if row["group"] == "fixed"]
+    if not vulnerable or not fixed or all(_gate_row_matches(row) for row in vulnerable):
+        return False
+    if not all(_gate_row_matches(row) for row in fixed):
+        return False
+    added = b"\n".join(line[1:] for line in payload.splitlines() if line.startswith(b"+") and not line.startswith(b"+++"))
+    matched_vulnerable = [row for row in vulnerable if _gate_row_matches(row)]
+    return bool(matched_vulnerable) and all(
+        row["kind"] == "exact_count" and row["actual"] == row["expected"]
+        and row["needle"].encode("utf-8") in added
+        for row in matched_vulnerable
+    )
+
+
+def _gate_row_matches(row: dict[str, Any]) -> bool:
+    if row["kind"] == "exact_count":
+        return row["actual"] == row["expected"]
+    if row["kind"] == "path_state":
+        return row["actual_state"] == row["expected_state"]
+    if row["kind"] == "sha256":
+        return row["actual_sha256"] == row["expected_sha256"]
+    return False
 
 
 def _patch_paths(payload: bytes, declared: list[str]) -> list[str]:
@@ -325,6 +352,8 @@ def _simulate_inner(root: Path, plan: dict[str, Any], phase: str | None, temp: P
             elif changed_mode:
                 modes[relative] = int(changed_mode.group(1), 8) & 0o777
         after_state, after_gates = _record_state(temp, record)
+        if after_state != "already" and _fixed_state_after_overlap(record, payload, after_gates):
+            after_state = "already"
         if after_state != "already":
             shutil.rmtree(temp, ignore_errors=True)
             raise PatchPlanV3Error(

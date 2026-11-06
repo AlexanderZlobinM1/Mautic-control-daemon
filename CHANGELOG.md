@@ -1,3 +1,10 @@
+## 1.6.50 - 2026-11-04
+
+- Allow the detached runtime bridge to update an already runtime-only host
+  layout when the legacy source tree has been retired. Preserve fail-closed
+  rejection of parallel `src` and `runtime` layouts and add a regression for
+  runtime-only activation.
+
 ## 1.6.38 - 2026-10-31
 
 - Preserve MCD workload profile overrides, cron and profile events when only
