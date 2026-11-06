@@ -23,6 +23,17 @@ MCC через существующий `record_mautic_patch_evidence`; stdout m
 успех без фактической проверки. Повторный запуск использует тот же immutable
 plan и остаётся идемпотентным.
 
+Для v3 fixed-gate проверка после `git apply` сохраняет fail-closed правило
+для смешанного или неполного состояния. Узкое исключение допускается только
+для `exact_count` vulnerable-needle, который остаётся в результате потому,
+что тот же текст добавлен строкой `+` в объявленном wrapper-патче: все fixed
+gates должны совпасть, каждый оставшийся vulnerable needle должен быть
+подтверждён added-line payload, а `path_state`/`sha256` и произвольные mixed
+состояния не получают такого обхода. Gate rows сохраняют literal `needle`,
+`expected` и `actual`; при отказе receipt содержит эти наблюдения, completed
+records и canonical plan binding, чтобы evidence-проверка могла отличить
+допустимое перекрытие от `patch_fixed_gate_failed`.
+
 Upgrade maintenance fencing is a cross-process admission barrier, not only a
 marker file. The upgrade owner acquires the exclusive
 `maintenance.dispatch.fence.lock` beside `scheduler.pause` before publishing
