@@ -205,6 +205,35 @@ class MauticPatchPlanV3Tests(unittest.TestCase):
         self.assertEqual(raised.exception.evidence["completed"], [])
         self.assertEqual(self.source.read_bytes(), b"before\n")
 
+    def test_patch_accepts_vulnerable_marker_reintroduced_by_fixed_wrapper(self):
+        plan = _plan()
+        path = "docroot/app/fixture.txt"
+        self.source.write_bytes(b"shared\nlegacy-only\n")
+        plan["patches"][0]["source_paths"] = [path]
+        plan["patches"][0]["gate_logic"] = "vulnerable_all; fixed_all; mixed_or_unknown=error"
+        plan["patches"][0]["gate"] = [
+            {"group": "vulnerable", "kind": "exact_count", "path": path, "needle": "shared", "expected_count": 1},
+            {"group": "vulnerable", "kind": "exact_count", "path": path, "needle": "legacy-only", "expected_count": 1},
+            {"group": "fixed", "kind": "exact_count", "path": path, "needle": "wrapper shared", "expected_count": 1},
+            {"group": "fixed", "kind": "exact_count", "path": path, "needle": "fixed-a", "expected_count": 1},
+        ]
+        patch_bytes = (
+            b"diff --git a/docroot/app/fixture.txt b/docroot/app/fixture.txt\n"
+            b"--- a/docroot/app/fixture.txt\n"
+            b"+++ b/docroot/app/fixture.txt\n"
+            b"@@ -1,2 +1,2 @@\n"
+            b"-shared\n"
+            b"-legacy-only\n"
+            b"+wrapper shared\n"
+            b"+fixed-a\n"
+        )
+        plan["payloads"][0]["path"] = "fixtures/overlap.patch"
+        plan["patches"][0]["payload_path"] = "fixtures/overlap.patch"
+        _payload(plan, patch_bytes)
+        result = executor.execute(str(self.root), plan)
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(self.source.read_bytes(), b"wrapper shared\nfixed-a\n")
+
     def test_declared_legacy_backup_is_read_only_until_safe_generic_rollback(self):
         plan = _plan()
         self.source.write_bytes(b"after\n")
