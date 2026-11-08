@@ -158,6 +158,22 @@ def _rollback_readback(systemctl: str, service: str) -> dict[str, object]:
     }
 
 
+_ENABLED_STATES = {"enabled", "enabled-runtime", "static", "alias", "indirect", "generated"}
+
+
+def _ensure_service_enabled(systemctl: str, service: str) -> str:
+    observed = _run([systemctl, "is-enabled", service], check=False)
+    state = (observed.stdout or observed.stderr or "").strip()
+    if observed.returncode == 0 and state in _ENABLED_STATES:
+        return state
+    _run([systemctl, "enable", service])
+    verified = _run([systemctl, "is-enabled", service], check=False)
+    verified_state = (verified.stdout or verified.stderr or "").strip()
+    if verified.returncode != 0 or verified_state not in _ENABLED_STATES:
+        raise RepairError(f"{service} is not enabled after repair: {verified_state or 'disabled'}")
+    return verified_state
+
+
 def _atomic_write(path: Path, content: str, mode: int = 0o644) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, raw = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
@@ -178,6 +194,10 @@ def _health(systemctl: str, service: str, timeout: int) -> dict[str, str]:
     while time.monotonic() < deadline:
         active = _run([systemctl, "is-active", "--quiet", service], check=False)
         if active.returncode == 0:
+            enabled = _run([systemctl, "is-enabled", service], check=False)
+            enabled_state = (enabled.stdout or enabled.stderr or "").strip()
+            if enabled.returncode != 0 or enabled_state not in _ENABLED_STATES:
+                raise RepairError(f"{service} is not enabled after repair: {enabled_state or 'disabled'}")
             values = {
                 "ActiveState": _show(systemctl, service, "ActiveState"),
                 "SubState": _show(systemctl, service, "SubState"),
@@ -185,6 +205,7 @@ def _health(systemctl: str, service: str, timeout: int) -> dict[str, str]:
                 "WorkingDirectory": _show(systemctl, service, "WorkingDirectory"),
                 "ExecStart": _show(systemctl, service, "ExecStart"),
                 "KillMode": _show(systemctl, service, "KillMode"),
+                "UnitFileState": enabled_state,
             }
             if values["WorkingDirectory"] != "/opt/mcd":
                 raise RepairError(f"unexpected WorkingDirectory={values['WorkingDirectory']!r}")
@@ -230,6 +251,7 @@ def repair(
     try:
         _atomic_write(dropin, content)
         _run([systemctl, "daemon-reload"])
+        enabled_state = _ensure_service_enabled(systemctl, service)
         _run([systemctl, "restart", service])
         after = _health(systemctl, service, timeout)
         runtime_after = _runtime_probe(venv_python, install_dir, expected_runtime_version)
@@ -242,6 +264,7 @@ def repair(
             "dropin": str(dropin),
             "before": before,
             "after": after,
+            "enabled": enabled_state,
             "runtime_before": runtime_before,
             "runtime_after": runtime_after,
             "scheduler_before": scheduler_before,

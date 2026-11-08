@@ -538,6 +538,13 @@ config на его profile baseline и только после этого при
    derives a stable `mcd-agent-<sha256>` identity from the canonical MCC host
    name (or local hostname in standalone mode). The value is stable across
    restart and is sent together with the host fingerprint and result key.
+   Every normal state callback, runtime-overrides poll/push and self-update
+   check also sends the running package identity in `agent_version`,
+   `agent_running_version`, and `agent_installed_version`; MCC derives its
+   host projection only from that callback/cache and never performs a direct
+   host read for version, health, profile, config or instances. A first
+   callback after self-update is not suppressed by stale local projection
+   state.
    MCD unwraps the MCC state response before processing its control envelope
    and persists a matching key ACK even when the response carries no control
    commands; command-envelope validation remains independent and invalid
@@ -609,6 +616,14 @@ config на его profile baseline и только после этого при
    orphaned `mcd-update-admission` flag снимается только если owner не жив и
    source/update lease свободен; `paused` и прочие manual/maintenance flags
    не трогаются recovery-кодом.
+   MCC plugin/job admission must not strand a stale MCD runtime. When the
+   signed standard MCD plan carries the explicit
+   `mcc_update_admission_disabled` reason, the agent may apply that MCD plan
+   first (only with auto-update enabled and a complete package URL/target),
+   after which normal downstream admission can resume. The production unit
+   is required to be both `enabled` and `active`; repair verifies and restores
+   enablement before restart and records that state for reboot-persistence
+   evidence. No `/opt/mcd/src` checkout is created or used.
 7. Обязательная и неотменяемая граница self-update: живой обычный PHP/Mautic console process
    (`segments`, `campaigns`, `import` и любой другой application command) не
    является blocker-ом. Он должен пережить restart/reinstall MCD, сохранить
@@ -1261,11 +1276,17 @@ projected into generic runtime overrides. MCD advertises and consumes
 V1 projection matches MCC `canonical_mcd_profile`: remove `settings`, map its
 backup enabled/schedule values, and preserve all other requested fields,
 including `remote_root_dir`, authentication and declared `source`. MCD verifies
-each requested field against actual candidate values without injecting unrelated
-defaults or local-storage provenance. Schedule values affect the candidate
-immediately; an older DB profile must not overwrite the new candidate during
-verification. Unknown fields or mismatched actual values fail before profile
-mutation. After persistence, MCD rereads the stored effective values and returns
+known requested fields against actual candidate values without injecting
+unrelated defaults or local-storage provenance. Schedule values affect the
+candidate immediately; an older DB profile must not overwrite the new candidate
+during verification. Unknown fields in an apply request remain a strict
+unsupported-field error. For the outbound state callback, however, fields
+owned by a newer MCC/runtime that this agent cannot materialize are preserved
+verbatim, transported unchanged and never projected into local config or
+compared against invented defaults; they must not crash or erase the callback.
+Known fields whose actual values do not match still fail before profile
+mutation.
+After persistence, MCD rereads the stored effective values and returns
 masked `effective_profile`, `effective_sha256`, the epoch and `status`.
 The transport hash covers the original envelope profile; the effective hash
 covers the canonical projection before credential masking. `ok` requires the
@@ -1275,7 +1296,8 @@ canonical shape, without injecting defaults/provenance as a false same-epoch
 conflict. Invalid/nonfinite epochs are rejected. Evidence:
 `test_backup_profile_v1_readback` includes the exact published MCC hash fixture,
 real temporary DB/config/crypto round trips, schedule adoption, old-state races,
-and negative checks that never apply unknown or unverifiable values.
+forward-compatible opaque-field preservation, state-push crash-loop protection,
+and negative checks for unsupported or known-but-unverifiable values.
 Schema, validation,
 apply, or readback mismatch returns `unsynced` or `error` and does not claim a
 successful sync. The legacy `backup_profile` telemetry field remains for older

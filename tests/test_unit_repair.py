@@ -39,7 +39,7 @@ class UnitRepairTests(unittest.TestCase):
                 repair_module, "_runtime_probe", return_value={"metadata_version": "1.6.40", "imported_version": "1.6.40", "imported_path": str(install / "venv" / "lib" / "mcd_agent" / "__init__.py")}
             ), patch.object(repair_module, "_scheduler_status", return_value={"paused": False, "running_tasks": 0, "tracked_running_tasks": 0, "external_running_tasks": 0}), patch.object(
                 repair_module, "_health", return_value={"ActiveState": "active", "SubState": "running"}
-            ):
+            ), patch.object(repair_module, "_ensure_service_enabled", return_value="enabled"):
                 result = repair_module.repair(
                     install_dir=install, service="mcd", systemctl="systemctl",
                     systemd_dir=systemd, timeout=1, allow_nonproduction=True,
@@ -60,6 +60,32 @@ class UnitRepairTests(unittest.TestCase):
                     systemd_dir=systemd, timeout=1, allow_nonproduction=True,
                 )
 
+    def test_service_enable_is_repaired_and_verified(self) -> None:
+        calls = []
+
+        class Result:
+            def __init__(self, returncode: int, stdout: str = '', stderr: str = '') -> None:
+                self.returncode = returncode
+                self.stdout = stdout
+                self.stderr = stderr
+
+        responses = iter([
+            Result(1, stderr='disabled'),
+            Result(0),
+            Result(0, stdout='enabled\n'),
+        ])
+        with patch.object(
+            repair_module,
+            '_run',
+            side_effect=lambda argv, **kwargs: (calls.append(argv) or next(responses)),
+        ):
+            self.assertEqual(repair_module._ensure_service_enabled('systemctl', 'mcd'), 'enabled')
+        self.assertEqual(calls, [
+            ['systemctl', 'is-enabled', 'mcd'],
+            ['systemctl', 'enable', 'mcd'],
+            ['systemctl', 'is-enabled', 'mcd'],
+        ])
+
     def test_failure_rolls_back_dropin_and_restarts_for_readback(self) -> None:
         with TemporaryDirectory() as raw:
             root = Path(raw)
@@ -71,7 +97,7 @@ class UnitRepairTests(unittest.TestCase):
                 repair_module, "_runtime_probe", return_value={"metadata_version": "1.6.40", "imported_version": "1.6.40", "imported_path": str(install / "venv" / "lib" / "mcd_agent" / "__init__.py")}
             ), patch.object(repair_module, "_scheduler_status", return_value={"paused": False, "running_tasks": 0, "tracked_running_tasks": 0, "external_running_tasks": 0}), patch.object(
                 repair_module, "_health", side_effect=repair_module.RepairError("health failed")
-            ):
+            ), patch.object(repair_module, "_ensure_service_enabled", return_value="enabled"):
                 with self.assertRaisesRegex(repair_module.RepairError, "health failed"):
                     repair_module.repair(
                         install_dir=install, service="mcd", systemctl="systemctl",

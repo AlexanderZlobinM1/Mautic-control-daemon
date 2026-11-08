@@ -2001,6 +2001,20 @@ def maybe_auto_update(cfg: AgentConfig, *, force: bool = False) -> tuple[str | N
     # queried as a release catalog and must not reserve a per-host update slot.
     decision = check_with_mcc(cfg, auto_update_enabled=(auto and not cluster_update_mode))
     status = str(decision.get("status", "")).strip().lower()
+    # A plugin/job admission gate must not strand an older MCD runtime.  MCC
+    # may explicitly return the release plan together with this reason while
+    # it is temporarily refusing downstream work; let the ordinary MCD
+    # package update repair the stale runtime first.  The decision still has
+    # to contain a complete, signed package plan and auto-update must be on.
+    admission_reason = str(decision.get("reason", "")).strip().lower()
+    if admission_reason == "mcc_update_admission_disabled" and auto:
+        target = str(decision.get("target", "")).strip()
+        package_url = str(decision.get("package_url", "")).strip()
+        if target and package_url and _semver(target) > _semver(installed_agent_version()):
+            decision = dict(decision)
+            decision["status"] = "update"
+            decision["mcd_update_admission_override"] = "stale_mcd_runtime_repair"
+            status = "update"
     retry_after = int(decision.get("retry_after_sec", 0) or 0)
     if retry_after <= 0:
         retry_after = int(cfg.mcd_update_check_interval_sec or 3600)

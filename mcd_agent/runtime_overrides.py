@@ -21,6 +21,7 @@ from mcd_agent.config import (
     runtime_supported_keys,
 )
 from mcd_agent.host_identity import resolve_agent_identity
+from mcd_agent.version_identity import agent_version_payload
 
 
 _RUNTIME_ACK_CHUNK_SCHEMA = "mcd-runtime-key-observation-chunk-v1"
@@ -541,11 +542,11 @@ def fetch_runtime_overrides(cfg: AgentConfig, *, instance_uids: list[str] | None
         "mcc_host_name": str(ident.get("effective_mcc_host_name") or ""),
         "agent_hostname": str(ident.get("local_hostname") or ""),
         "configured_host_name": str(ident.get("configured_host_name") or ""),
-        "agent_version": __version__,
         "desired_state_protocol": 1,
         "backup_profile_protocol": {"schema": "mcd-backup-profile-v1", "version": 1},
         "instance_uids": canonical_instance_uids,
     }
+    payload.update(agent_version_payload())
     url = base + "/api/v1/agent/runtime-overrides"
     try:
         out = _post_json(url, payload, cfg.mcc_token, timeout_sec=12)
@@ -625,11 +626,11 @@ def push_runtime_overrides(
         "mcc_host_name": str(ident.get("effective_mcc_host_name") or ""),
         "agent_hostname": str(ident.get("local_hostname") or ""),
         "configured_host_name": str(ident.get("configured_host_name") or ""),
-        "agent_version": __version__,
         "runtime_overrides": runtime_payload,
         "push_mode": "merge" if merge else "replace",
         "target": target_mode,
     }
+    payload.update(agent_version_payload())
     if target_mode == "desired":
         payload["desired_state_protocol"] = 1
         if isinstance(desired_state_revision, int):
@@ -685,8 +686,8 @@ def push_runtime_sync_v3(
         "mcc_host_name": str(ident.get("effective_mcc_host_name") or ""),
         "agent_hostname": str(ident.get("local_hostname") or ""),
         "configured_host_name": str(ident.get("configured_host_name") or ""),
-        "agent_version": __version__,
     }
+    payload.update(agent_version_payload())
     if semantic_conflict_groups is not None:
         payload["semantic_conflict_groups"] = semantic_conflict_groups
     try:
@@ -988,7 +989,6 @@ def acknowledge_runtime_state(
         "mcc_host_name": str(ident.get("effective_mcc_host_name") or ""),
         "agent_hostname": str(ident.get("local_hostname") or ""),
         "configured_host_name": str(ident.get("configured_host_name") or ""),
-        "agent_version": __version__,
         "desired_state_protocol": 1,
         "desired_state_ack": {
             "scope": str(scope),
@@ -999,6 +999,7 @@ def acknowledge_runtime_state(
             "observed": observed if isinstance(observed, dict) else {},
         },
     }
+    payload.update(agent_version_payload())
     try:
         out = _post_json(base + "/api/v1/agent/runtime-overrides", payload, cfg.mcc_token, timeout_sec=12)
         out.setdefault("status", "error")
