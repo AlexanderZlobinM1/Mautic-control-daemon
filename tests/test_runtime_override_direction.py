@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import socket
 import unittest
 from dataclasses import replace
 from types import SimpleNamespace
@@ -36,6 +37,50 @@ from mcd_agent import daemon
 
 
 class RuntimeOverrideDirectionTests(unittest.TestCase):
+    def test_runtime_override_timeout_is_reported_as_retryable_error(self) -> None:
+        cfg = SimpleNamespace(mcc_url="https://mcc.example", mcc_token="fixture-token")
+        identity = {
+            "effective_hostname": "host-1",
+            "effective_mcc_host_name": "MauticFarm-02",
+            "local_hostname": "host-1",
+            "configured_host_name": "MauticFarm-02",
+        }
+        with patch.object(runtime_overrides, "resolve_agent_identity", return_value=identity), patch.object(
+            runtime_overrides, "_post_json", side_effect=socket.timeout("timed out")
+        ):
+            result = push_runtime_overrides(
+                cfg,
+                {"import_stall_timeout_sec": 900},
+                target="desired",
+            )
+        self.assertEqual(result, {"status": "error", "reason": "timed out"})
+
+    def test_runtime_poll_and_local_push_advertise_installed_and_running_versions(self) -> None:
+        cfg = SimpleNamespace(mcc_url="https://mcc.example", mcc_token="fixture-token")
+        identity = {
+            "effective_hostname": "host-1",
+            "effective_mcc_host_name": "MauticFarm-02",
+            "local_hostname": "host-1",
+            "configured_host_name": "MauticFarm-02",
+        }
+        versions = {
+            "agent_version": "1.6.56",
+            "agent_running_version": "1.6.56",
+            "agent_installed_version": "1.6.56",
+        }
+        with patch.object(runtime_overrides, "resolve_agent_identity", return_value=identity), patch.object(
+            runtime_overrides, "agent_version_payload", return_value=versions
+        ), patch.object(runtime_overrides, "_post_json", return_value={"status": "ok"}) as post:
+            fetch_runtime_overrides(cfg, instance_uids=[])
+            push_runtime_overrides(cfg, {"import_stall_timeout_sec": 900}, target="desired")
+
+        fetch_payload = post.call_args_list[0].args[1]
+        push_payload = post.call_args_list[1].args[1]
+        for payload in (fetch_payload, push_payload):
+            self.assertEqual(payload["agent_version"], "1.6.56")
+            self.assertEqual(payload["agent_running_version"], "1.6.56")
+            self.assertEqual(payload["agent_installed_version"], "1.6.56")
+
     def test_179_key_runtime_observation_is_deterministically_chunked(self) -> None:
         keys = {f"runtime_key_{index}": index for index in range(179)}
         observation = {
