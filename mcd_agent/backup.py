@@ -6338,6 +6338,9 @@ def _backup_profile_readback(
             raise RuntimeError("unsupported_profile_field")
         if isinstance(value, dict):
             if not isinstance(effective[key], dict):
+                if preserve_unknown:
+                    out[key] = json.loads(json.dumps(value))
+                    continue
                 raise RuntimeError("invalid_profile_field")
             out[key] = _backup_profile_readback(value, effective[key], preserve_unknown=preserve_unknown)
         else:

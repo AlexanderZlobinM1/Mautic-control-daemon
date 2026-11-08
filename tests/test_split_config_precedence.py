@@ -23,6 +23,20 @@ class SplitConfigPrecedenceTests(unittest.TestCase):
             self.assertTrue(effective["backup"]["schedule"]["enabled"])
             self.assertEqual(effective["backup"]["schedule"]["interval_sec"], 86400)
 
+    def test_empty_optional_mcc_include_does_not_erase_entrypoint_credentials(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "mcd.toml"
+            example = Path(tmp) / "mcd-agent.system.example.toml"
+            root.write_text(
+                '[include]\nfiles = ["mcd-agent.system.example.toml"]\n\n'
+                '[mcc]\nurl = "https://mcc.example"\ntoken = "real-token"\n',
+                encoding="utf-8",
+            )
+            example.write_text('[mcc]\nurl = ""\ntoken = ""\n', encoding="utf-8")
+            effective = _load_toml_with_includes(str(root))
+            self.assertEqual(effective["mcc"]["url"], "https://mcc.example")
+            self.assertEqual(effective["mcc"]["token"], "real-token")
+
     def test_repeated_runtime_upsert_preserves_bytes(self):
         with tempfile.TemporaryDirectory() as tmp:
             local = Path(tmp) / "mcd.local.toml"
