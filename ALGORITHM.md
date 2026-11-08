@@ -538,6 +538,12 @@ config на его profile baseline и только после этого при
    derives a stable `mcd-agent-<sha256>` identity from the canonical MCC host
    name (or local hostname in standalone mode). The value is stable across
    restart and is sent together with the host fingerprint and result key.
+   Every normal state callback and self-update check also sends the running
+   package identity in `agent_version`, `agent_running_version`, and
+   `agent_installed_version`; MCC derives its host projection only from that
+   callback/cache and never performs a direct host read for version, health,
+   profile, config, or instances. A first callback after self-update is not
+   suppressed by stale local projection state.
    MCD unwraps the MCC state response before processing its control envelope
    and persists a matching key ACK even when the response carries no control
    commands; command-envelope validation remains independent and invalid
@@ -1278,9 +1284,12 @@ real temporary DB/config/crypto round trips, schedule adoption, old-state races,
 and negative checks that never apply unknown or unverifiable values.
 Schema, validation,
 apply, or readback mismatch returns `unsynced` or `error` and does not claim a
-successful sync. The legacy `backup_profile` telemetry field remains for older
-MCC/MCD versions; it is not evidence of exact synchronization. Scheduler
-semantics are unchanged.
+successful sync. Apply/readback validation remains strict, but the outbound
+state callback uses a forward-compatible readback mode: fields owned by a
+newer MCC/runtime that this agent cannot materialize are preserved verbatim,
+never dropped and never allowed to crash the state callback. The legacy
+`backup_profile` telemetry field remains for older MCC/MCD versions; it is not
+evidence of exact synchronization. Scheduler semantics are unchanged.
 
 ### Bidirectional backup-profile synchronization
 
