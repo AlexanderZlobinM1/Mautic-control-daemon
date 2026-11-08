@@ -1587,7 +1587,22 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
     out = dict(base)
     for k, v in override.items():
         if isinstance(v, dict) and isinstance(out.get(k), dict):
-            out[k] = _deep_merge(out[k], v)  # type: ignore[index]
+            nested = _deep_merge(out[k], v)  # type: ignore[index]
+            # Packaged example/system includes declare optional MCC keys as
+            # empty placeholders. They must not erase credentials supplied by
+            # the real entrypoint or an earlier include. An explicit non-empty
+            # include value remains authoritative.
+            if k == "mcc":
+                for optional in ("url", "token"):
+                    if (
+                        optional in v
+                        and isinstance(v[optional], str)
+                        and not v[optional].strip()
+                        and isinstance(out[k].get(optional), str)
+                        and out[k][optional].strip()
+                    ):
+                        nested[optional] = out[k][optional]
+            out[k] = nested
         else:
             out[k] = v
     return out

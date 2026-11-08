@@ -1308,6 +1308,9 @@ files are applied in order; the last existing local include is authoritative for
 overrides such as `[backup]` and `[backup.schedule]`. Startup and reload must
 therefore preserve `backup.enabled` and schedule enablement from the effective
 local file when the entrypoint only supplies defaults or MCC bootstrap fields.
+Packaged example/system includes may contain empty optional `[mcc] url` or
+`token` placeholders; those empty values never erase a non-empty entrypoint
+credential. A non-empty later include remains authoritative.
 
 ### Commercial Portal self-hosted scenario admission
 
