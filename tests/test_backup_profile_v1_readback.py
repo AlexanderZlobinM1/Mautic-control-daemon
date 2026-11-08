@@ -93,6 +93,17 @@ def test_unknown_profile_readback_does_not_crash_state_push(tmp_path):
     assert pushed == profile
 
 
+def test_state_readback_preserves_forward_compatible_unknown_fields(tmp_path):
+    cfg = config(tmp_path)
+    profile = {
+        'enabled': True,
+        'future_policy': {'mode': 'mcc-owned', 'revision': 3},
+    }
+    with patch.object(backup, 'backup_profile_get', return_value=profile):
+        observed = backup.backup_profile_for_push(cfg)
+    assert observed == profile
+
+
 def test_newer_request_does_not_reapply_older_db_values_to_candidate(tmp_path):
     cfg = config(tmp_path)
     with patch.object(backup, '_validate_cfg'):
