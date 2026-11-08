@@ -6241,7 +6241,11 @@ def backup_profile_for_push(config: AgentConfig) -> dict[str, Any]:
     profile = backup_profile_get(config)
     requested = canonical_backup_profile({key: value for key, value in profile.items() if not key.startswith("_")})
     if requested:
-        return _backup_profile_readback(requested, _backup_profile_effective_values(cfg, source=profile.get("source", "profile_db")))
+        return _backup_profile_readback(
+            requested,
+            _backup_profile_effective_values(cfg, source=profile.get("source", "profile_db")),
+            preserve_unknown=True,
+        )
     if not cfg.backup_enabled:
         return {"enabled": False}
     return _backup_profile_effective_values(cfg, source=profile.get("source", "profile_db" if profile else "config"))
@@ -6312,16 +6316,30 @@ def canonical_backup_profile(profile: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def _backup_profile_readback(requested: dict[str, Any], effective: dict[str, Any]) -> dict[str, Any]:
-    """Verify exactly the requested canonical fields, never echo unknowns."""
+def _backup_profile_readback(
+    requested: dict[str, Any],
+    effective: dict[str, Any],
+    *,
+    preserve_unknown: bool = False,
+) -> dict[str, Any]:
+    """Read back known fields without dropping forward-compatible fields.
+
+    Applying a profile remains strict: callers use the default and reject a
+    field that the current runtime cannot materialize. The outbound state
+    callback opts into preserving the original value so an older agent cannot
+    crash or erase a newer MCC-owned field.
+    """
     out: dict[str, Any] = {}
     for key, value in requested.items():
         if key not in effective:
+            if preserve_unknown:
+                out[key] = json.loads(json.dumps(value))
+                continue
             raise RuntimeError("unsupported_profile_field")
         if isinstance(value, dict):
             if not isinstance(effective[key], dict):
                 raise RuntimeError("invalid_profile_field")
-            out[key] = _backup_profile_readback(value, effective[key])
+            out[key] = _backup_profile_readback(value, effective[key], preserve_unknown=preserve_unknown)
         else:
             out[key] = effective[key]
     return out
