@@ -289,6 +289,33 @@ class MauticPatchPlanV3Tests(unittest.TestCase):
             executor.execute(str(self.root), dict(plan, operation="status"))
         self.assertEqual(self.source.read_bytes(), b"after\n")
 
+    def test_legacy_metadata_path_from_relocated_instance_is_bound(self):
+        plan = _plan()
+        self.source.write_bytes(b"after\n")
+        backup = self.source.with_name(self.source.name + ".mcd-import-tag-713.bak")
+        backup.write_bytes(b"before\n")
+        metadata_path = self.source.with_name(self.source.name + ".mcd-import-tag-713.json")
+        metadata_path.write_text(json.dumps({
+            "patch": "mautic-7.1.3-import-tag-detach-v1",
+            "path": "/var/www/old-instance/public_html/docroot/app/fixture.txt",
+            "original_sha256": hashlib.sha256(b"before\n").hexdigest(),
+            "patched_sha256": hashlib.sha256(b"after\n").hexdigest(),
+        }), encoding="utf-8")
+        plan["patches"][0]["legacy_state"] = {
+            "kind": "backup_file_with_metadata",
+            "backup_suffix": ".mcd-import-tag-713.bak",
+            "metadata_suffix": ".mcd-import-tag-713.json",
+            "metadata_fields": {
+                "marker": "patch",
+                "path": "path",
+                "original_sha256": "original_sha256",
+                "applied_sha256": "patched_sha256",
+            },
+            "expected_marker": "mautic-7.1.3-import-tag-detach-v1",
+        }
+        status = executor.execute(str(self.root), dict(plan, operation="status"))
+        self.assertTrue(status["patches"][0]["legacy_rollback_source_validated"])
+
 
 if __name__ == "__main__":
     unittest.main()

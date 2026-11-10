@@ -548,10 +548,22 @@ def _legacy_snapshot(root: Path, record: dict[str, Any]) -> dict[str, Any] | Non
         except (UnicodeDecodeError, ValueError) as exc:
             raise PatchPlanV3Error("legacy_state_metadata_invalid") from exc
         fields = descriptor["metadata_fields"]
+        declared_path = metadata.get(fields["path"]) if isinstance(metadata, dict) else None
+        # Legacy metadata was written before the instance was relocated and may
+        # retain the old absolute webroot.  Bind it to this instance only when
+        # its path resolves to the selected relative source path; marker and
+        # content hashes remain mandatory below.
+        path_matches = (
+            isinstance(declared_path, str)
+            and (
+                declared_path == str(source.resolve())
+                or Path(declared_path).as_posix().endswith("/" + source_rel)
+            )
+        )
         if (
             not isinstance(metadata, dict)
             or metadata.get(fields["marker"]) != descriptor["expected_marker"]
-            or metadata.get(fields["path"]) != str(source.resolve())
+            or not path_matches
             or metadata.get(fields["original_sha256"]) != original_sha
             or metadata.get(fields["applied_sha256"]) != current_sha
         ):
