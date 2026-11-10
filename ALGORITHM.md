@@ -1267,6 +1267,16 @@ QA additionally checks that the certificate-free stub validates, a broken
 foreign default blocks deletion, and repeated scoped cleanup preserves the
 default and neighboring vhost byte-for-byte.
 
+### Fail2ban nginx 4xx safety
+
+The path-agnostic `nginx-4xx-scan` jail is prohibited in production: ordinary
+client 400/403/404/444 responses must not become bans. MCD writes the managed
+disable override as `zzzz-mcd-nginx-4xx-safety.local`, lexically after
+provider/site jail files, then reloads and verifies the effective jail state.
+Auth/login and path-scoped PHP probe jails are not modified. The guard may
+release only bans owned by the disabled 4xx jail and preserves overlapping
+bans owned by other jails. This remains true after fail2ban reload/restart.
+
 ### Backup profile synchronization contract
 
 Backup profile synchronization is a separate typed contract and is never

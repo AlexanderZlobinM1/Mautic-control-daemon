@@ -11,7 +11,10 @@ from typing import Any
 
 NGINX_4XX_FILTER = Path("/etc/fail2ban/filter.d/nginx-4xx-scan.conf")
 NGINX_4XX_JAIL = "nginx-4xx-scan"
-NGINX_4XX_SAFETY_OVERRIDE = Path("/etc/fail2ban/jail.d/99-mcd-nginx-4xx-safety.local")
+# Fail2ban applies jail.d files lexicographically. The safety override must
+# sort after provider/site files (for example sales-snap-*.local), otherwise a
+# later enabled=true silently resurrects the path-agnostic jail on reload.
+NGINX_4XX_SAFETY_OVERRIDE = Path("/etc/fail2ban/jail.d/zzzz-mcd-nginx-4xx-safety.local")
 NGINX_4XX_SAFETY_MARKER = "# Managed by MCD: disable path-agnostic 4xx bans"
 
 
