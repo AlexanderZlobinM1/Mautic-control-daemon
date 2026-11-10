@@ -32,7 +32,7 @@ failregex = ^<HOST> .*"GET /(?:wp-admin|\.env) HTTP/[^\"]+" (?:403|404) \d+
     def test_disables_broad_jail_and_preserves_other_jail_bans(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             filter_path = Path(td) / "nginx-4xx-scan.conf"
-            override_path = Path(td) / "99-mcd-nginx-4xx-safety.local"
+            override_path = Path(td) / "zzzz-mcd-nginx-4xx-safety.local"
             filter_path.write_text(BROAD_FILTER, encoding="utf-8")
             responses = [
                 SimpleNamespace(returncode=0, stdout="Jail list: nginx-4xx-scan, nginx-php-probe\n", stderr=""),
@@ -69,7 +69,7 @@ failregex = ^<HOST> .*"GET /(?:wp-admin|\.env) HTTP/[^\"]+" (?:403|404) \d+
     def test_inactive_jail_does_not_reload_when_override_is_current(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             filter_path = Path(td) / "nginx-4xx-scan.conf"
-            override_path = Path(td) / "99-mcd-nginx-4xx-safety.local"
+            override_path = Path(td) / "zzzz-mcd-nginx-4xx-safety.local"
             filter_path.write_text(BROAD_FILTER, encoding="utf-8")
             override_path.write_text(
                 f"{NGINX_4XX_SAFETY_MARKER}\n[nginx-4xx-scan]\nenabled = false\n",
@@ -92,6 +92,12 @@ failregex = ^<HOST> .*"GET /(?:wp-admin|\.env) HTTP/[^\"]+" (?:403|404) \d+
         self.assertNotIn(
             ["/usr/bin/fail2ban-client", "reload"],
             [call.args[0] for call in run.call_args_list],
+        )
+
+    def test_safety_override_name_sorts_after_site_jail_files(self) -> None:
+        self.assertGreater(
+            "zzzz-mcd-nginx-4xx-safety.local",
+            "sales-snap-mauticfarm02.local",
         )
 
     def test_noop_when_filter_is_path_scoped(self) -> None:
