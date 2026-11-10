@@ -37,6 +37,20 @@ from mcd_agent import daemon
 
 
 class RuntimeOverrideDirectionTests(unittest.TestCase):
+    def test_local_push_does_not_submit_unregistered_instance_rows(self) -> None:
+        desired = {
+            "agromanija.sales-snap.com@MauticFarm-01": {"jobs_max_workers": 4},
+            "maestro.sales-snap.com@MauticFarm-01": {"jobs_max_workers": 5},
+        }
+        registered = {
+            "agromanija.sales-snap.com@MauticFarm-01": {"revision": 126},
+        }
+        filtered = daemon._filter_desired_instance_rows_to_registered(desired, registered)
+        self.assertEqual(
+            filtered,
+            {"agromanija.sales-snap.com@MauticFarm-01": {"jobs_max_workers": 4}},
+        )
+
     def test_runtime_override_timeout_is_reported_as_retryable_error(self) -> None:
         cfg = SimpleNamespace(mcc_url="https://mcc.example", mcc_token="fixture-token")
         identity = {
@@ -1470,8 +1484,8 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             {"segments": [909]},
         )
 
-    def test_last_local_instance_removal_publishes_explicit_empty_uid_row(self) -> None:
-        """A last local clear must not omit the UID and resurrect MCC state."""
+    def test_last_local_instance_removal_skips_unregistered_uid_row(self) -> None:
+        """A local clear must not create an MCC row that does not exist."""
         cfg = SimpleNamespace(mcc_url="https://mcc.example", mcc_token="token")
         install = SimpleNamespace(
             instance_uid="generic.sales-snap.com",
@@ -1507,14 +1521,8 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             )
 
         self.assertEqual(result["status"], "ok")
-        self.assertEqual(
-            push.call_args.kwargs["instance_desired_states"],
-            {qualified_uid: {}},
-        )
-        self.assertEqual(
-            push.call_args.kwargs["instance_desired_state_revisions"],
-            {qualified_uid: 7},
-        )
+        self.assertEqual(push.call_args.kwargs["instance_desired_states"], {})
+        self.assertEqual(push.call_args.kwargs["instance_desired_state_revisions"], {})
         self.assertEqual(
             push.call_args.args[1]["segment_lazy_update_instance_settings"],
             {},

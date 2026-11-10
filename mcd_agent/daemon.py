@@ -2771,6 +2771,30 @@ def _instance_state_revisions(states: object, wanted_uids: set[str]) -> dict[str
     return revisions
 
 
+def _filter_desired_instance_rows_to_registered(
+    desired_instances: Mapping[str, Any],
+    registered_states: object,
+) -> dict[str, dict[str, Any]]:
+    """Do not submit desired rows that MCC did not return as registered.
+
+    A local inventory can contain an instance before MCC has created its
+    desired-state row. Sending the locally remembered revision for that row
+    makes the whole runtime transaction fail with ``desired_state_not_found``
+    and causes a retry/CPU loop. Host-level runtime state remains valid; an
+    absent instance row must simply wait for registration.
+    """
+    if not isinstance(registered_states, dict):
+        return {}
+    filtered: dict[str, dict[str, Any]] = {}
+    for uid, value in desired_instances.items():
+        if not isinstance(value, dict):
+            continue
+        matched = _matching_instance_runtime_entry(registered_states, uid)
+        if matched is not None:
+            filtered[matched] = value
+    return filtered
+
+
 def _retry_local_runtime_push_after_conflict(
     config: AgentConfig,
     previous_local_runtime: Mapping[str, Any],
@@ -2808,14 +2832,15 @@ def _retry_local_runtime_push_after_conflict(
     desired_revision = desired_state.get("revision") if isinstance(desired_state, dict) else None
     if not isinstance(desired_revision, int):
         desired_revision = None
+    desired_instances = _filter_desired_instance_rows_to_registered(
+        desired_instances,
+        latest_instance_states,
+    )
     desired_uids = set(desired_instances)
     fresh_instance_revisions = _instance_state_revisions(
         latest_instance_states,
         desired_uids,
     )
-    for uid, revision in (instance_revisions or {}).items():
-        if uid in desired_uids and uid not in fresh_instance_revisions and isinstance(revision, int):
-            fresh_instance_revisions[str(uid)] = int(revision)
     return push_runtime_overrides(
         config,
         rebased,
@@ -2870,16 +2895,14 @@ def _push_local_runtime_change(
     )
     if not isinstance(fresh_desired_revision, int):
         fresh_desired_revision = desired_revision
+    desired_instances = _filter_desired_instance_rows_to_registered(
+        desired_instances,
+        latest_instance_states,
+    )
     fresh_instance_revisions = _instance_state_revisions(
         latest_instance_states,
         set(desired_instances),
     )
-    # A fresh canonical response supersedes the stored revision.  Keep a
-    # stored per-instance revision only for a local row absent from the
-    # response, which can occur while a newly-created install is registering.
-    for uid, revision in instance_revisions.items():
-        if uid in desired_instances and uid not in fresh_instance_revisions and isinstance(revision, int):
-            fresh_instance_revisions[str(uid)] = int(revision)
     pushed = push_runtime_overrides(
         config,
         rebased,

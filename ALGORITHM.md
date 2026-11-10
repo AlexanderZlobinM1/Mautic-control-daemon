@@ -1331,6 +1331,9 @@ files are applied in order; the last existing local include is authoritative for
 overrides such as `[backup]` and `[backup.schedule]`. Startup and reload must
 therefore preserve `backup.enabled` and schedule enablement from the effective
 local file when the entrypoint only supplies defaults or MCC bootstrap fields.
+Packaged example/system includes may contain empty optional `[mcc] url` or
+`token` placeholders; those empty values never erase a non-empty entrypoint
+credential. A non-empty later include remains authoritative.
 
 ### Commercial Portal self-hosted scenario admission
 
@@ -1635,6 +1638,15 @@ MCC применяется на хосте. Отсутствие поля в ч�
 локальным tombstone с последующей синхронизацией. После восстановления MCD
 обновляет baseline без повторной отправки того же состояния как новой локальной
 правки.
+
+При локальной правке MCD отправляет instance desired-state только для строк,
+которые MCC вернул в свежем canonical `instance_desired_states`. Локальный
+inventory может содержать уже созданный instance до регистрации его desired
+row в MCC; такая строка не получает сохранённую старую revision и не включается
+в retry payload. Она ожидает штатной регистрации, тогда как host-level
+runtime/version/health callback продолжается независимо. Это предотвращает
+`desired_state_not_found`/`stale_desired_revision` retry-loop и не удаляет
+desired state или workload.
 
 Если canonical `desired_state` не содержит собственного `updated_at`, MCD использует
 его `modified_at`, затем transport-level `updated_at`/`runtime_overrides_updated_at`.

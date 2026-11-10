@@ -1,6 +1,7 @@
 import json
 from dataclasses import replace
 from unittest.mock import patch
+import pytest
 
 from mcd_agent import backup
 from mcd_agent.config import load_config
@@ -91,6 +92,24 @@ def test_unknown_profile_readback_does_not_crash_state_push(tmp_path):
     with patch.object(backup, 'backup_profile_get', return_value=profile):
         pushed = backup.backup_profile_for_push(cfg)
     assert pushed == profile
+
+
+def test_state_readback_preserves_forward_compatible_unknown_fields(tmp_path):
+    cfg = config(tmp_path)
+    profile = {
+        'enabled': True,
+        'future_policy': {'mode': 'mcc-owned', 'revision': 3},
+    }
+    with patch.object(backup, 'backup_profile_get', return_value=profile):
+        observed = backup.backup_profile_for_push(cfg)
+    assert observed == profile
+
+
+def test_state_readback_preserves_missing_forward_compatible_sections():
+    profile = {'schedule': {'enabled': True, 'interval_sec': 3600}}
+    assert backup._backup_profile_readback(profile, {}, preserve_unknown=True) == profile
+    with pytest.raises(RuntimeError, match='unsupported_profile_field'):
+        backup._backup_profile_readback(profile, {})
 
 
 def test_newer_request_does_not_reapply_older_db_values_to_candidate(tmp_path):
