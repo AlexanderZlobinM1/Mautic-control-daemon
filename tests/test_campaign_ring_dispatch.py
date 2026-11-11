@@ -37,6 +37,7 @@ from mcd_agent.daemon import (
     _campaign_whitelist_effective_setting,
     _campaign_super_priority_effective_setting,
     _campaign_super_priority_args,
+    _merge_campaign_super_priority_ids,
     _split_campaign_circles_with_super_priority,
     _campaign_rebuild_waits_for_trigger,
     _campaign_spill_prefers_priority,
@@ -1879,6 +1880,30 @@ class CampaignRingDispatchTests(unittest.TestCase):
         self.assertEqual(super_ids, [73])
         self.assertEqual(priority, [74])
         self.assertEqual(regular, [75])
+
+    def test_campaign_super_priority_is_admitted_without_ordinary_due_row(self) -> None:
+        trigger, rebuild, missing = _merge_campaign_super_priority_ids(
+            [29],
+            [61],
+            [29, 61, 78],
+            {78},
+        )
+
+        self.assertEqual(trigger, [29, 78])
+        self.assertEqual(rebuild, [61, 78])
+        self.assertEqual(missing, [])
+
+    def test_campaign_super_priority_rejects_unpublished_operator_ids(self) -> None:
+        trigger, rebuild, missing = _merge_campaign_super_priority_ids(
+            [],
+            [],
+            [78],
+            {78, 999},
+        )
+
+        self.assertEqual(trigger, [78])
+        self.assertEqual(rebuild, [78])
+        self.assertEqual(missing, [999])
 
     def test_campaign_super_priority_runs_rebuild_before_trigger(self) -> None:
         cfg = SimpleNamespace(
