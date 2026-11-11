@@ -137,3 +137,44 @@ def test_daemon_v3_conflict_is_durable_and_does_not_choose_a_winner(monkeypatch)
     assert result["handled"] is True
     assert result["status"] == "conflict"
     assert store.get_runtime_sync("mcc_runtime_sync_v3")["status"] == "conflict"
+
+
+def test_daemon_v3_uses_canonical_mcc_host_scope_key(monkeypatch):
+    store = Store({
+        "mcc_runtime": {"a": 1},
+        "mcc_runtime_desired_state": {"revision": 4, "scope_key": "host-65-109-236-89"},
+    })
+    cfg = SimpleNamespace(mcc_host_name="")
+    seen = {}
+    monkeypatch.setattr("mcd_agent.daemon.runtime_remote_allowed_keys", lambda: {"a", "b"})
+    monkeypatch.setattr(
+        "mcd_agent.daemon.push_runtime_sync_v3",
+        lambda *args, **kwargs: seen.update(kwargs) or {"status": "queued"},
+    )
+
+    result = daemon._runtime_sync_v3_attempt(cfg, store, {"a": 2})
+
+    assert result["status"] == "queued"
+    assert seen["scope_key"] == "host-65-109-236-89"
+
+
+def test_daemon_v3_http_409_requests_snapshot_reconciliation(monkeypatch):
+    store = Store({
+        "mcc_runtime": {"a": 1},
+        "mcc_runtime_desired_state": {"revision": 4, "scope_key": "host-65"},
+    })
+    cfg = SimpleNamespace(mcc_host_name="host-65")
+    monkeypatch.setattr("mcd_agent.daemon.runtime_remote_allowed_keys", lambda: {"a"})
+    monkeypatch.setattr(
+        "mcd_agent.daemon.push_runtime_sync_v3",
+        lambda *args, **kwargs: {"status": "error", "reason": "http_409", "v3_supported": True},
+    )
+
+    result = daemon._runtime_sync_v3_attempt(cfg, store, {"a": 2})
+
+    assert result["handled"] is True
+    assert result["status"] == "transport_conflict"
+    assert result["response"]["reconcile_required"] is True
+    state = store.get_runtime_sync("mcc_runtime_sync_v3")
+    assert state["status"] == "reconcile_pending"
+    assert state["reason"] == "http_409"

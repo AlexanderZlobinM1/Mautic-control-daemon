@@ -353,6 +353,30 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
         self.assertEqual(set(ack_observed["effective_runtime"]), {"jobs_max_workers"})
         self.assertEqual(set(ack_observed["keys"]), {"jobs_max_workers"})
 
+    def test_host_ack_uses_canonical_scope_key_when_local_hostname_differs(self) -> None:
+        cfg = SimpleNamespace(mcc_url="https://mcc.example", mcc_token="token")
+        identity = {
+            "effective_hostname": "default6c",
+            "effective_mcc_host_name": "",
+            "local_hostname": "default6c",
+            "configured_host_name": "",
+        }
+        with patch(
+            "mcd_agent.runtime_overrides.resolve_agent_identity",
+            return_value=identity,
+        ), patch("mcd_agent.runtime_overrides._post_json", return_value={"status": "ok"}) as post:
+            acknowledge_runtime_state(
+                cfg,
+                scope="host",
+                scope_key="host-65-109-236-89",
+                revision=16,
+                status="rejected",
+                observed={"runtime_fingerprint": "fp", "content_sha256": "hash"},
+            )
+        payload = post.call_args.args[1]
+        assert payload["mcc_host_name"] == "host-65-109-236-89"
+        assert payload["desired_state_ack"]["scope_key"] == "host-65-109-236-89"
+
     def test_large_nested_runtime_value_uses_verifiable_canonical_digest(self) -> None:
         value = {"plugin": [{"name": "x", "payload": "z" * 300_000}]}
         evidence = _runtime_evidence_value(value)
@@ -372,7 +396,7 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             },
         )
 
-    def test_runtime_key_observation_reports_profile_lock_and_effective_readback(self) -> None:
+    def test_runtime_key_observation_reports_profile_override_mismatch(self) -> None:
         cfg = SimpleNamespace(
             profile_name="farm-hiload",
             scheduler_host_max_parallel=12,
@@ -385,9 +409,11 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             revision=91,
             source="mcc",
         )
-        self.assertEqual(observed["keys"]["scheduler_host_max_parallel"]["status"], "profile_locked")
+        self.assertEqual(observed["keys"]["scheduler_host_max_parallel"]["status"], "rejected")
+        self.assertEqual(observed["keys"]["scheduler_host_max_parallel"]["source"], "mcc")
+        self.assertEqual(observed["keys"]["scheduler_host_max_parallel"]["reason"], "effective_value_mismatch")
         self.assertEqual(observed["keys"]["scheduler_host_max_parallel"]["effective"], 12)
-        self.assertEqual(observed["keys"]["scheduler_host_max_parallel"]["source"], "profile")
+        self.assertEqual(observed["keys"]["scheduler_host_max_parallel"]["source"], "mcc")
         self.assertEqual(observed["keys"]["jobs_max_workers"]["status"], "unchanged")
         self.assertEqual(observed["keys"]["jobs_max_workers"]["effective"], 6)
         self.assertEqual(observed["keys"]["jobs_max_workers"]["revision"], 91)
@@ -413,6 +439,26 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
         row = observed["keys"]["segment_priority_instance_settings"]
         self.assertEqual(row["status"], "unchanged")
         self.assertEqual(row["effective"], {"adonis@Farm02": {"segments": [58, 59]}})
+
+    def test_host_ack_matches_legacy_whitelist_by_uid_alias(self) -> None:
+        cfg = SimpleNamespace(
+            profile_name="custom",
+            segment_priority_instance_settings={
+                "electronic@MauticFarm-01": {"segments": [23, 86]},
+            },
+        )
+        observed = runtime_overrides.runtime_key_observation(
+            cfg,
+            {
+                "segment_whitelist_instance_settings": {
+                    "electronic": {"segment_whitelist": [23, 86]},
+                },
+            },
+            revision=138,
+        )
+        row = observed["keys"]["segment_whitelist_instance_settings"]
+        self.assertEqual(row["status"], "unchanged")
+        self.assertEqual(row["effective"], {"electronic": {"segments": [23, 86]}})
 
     def test_instance_ack_preserves_already_scoped_lane_records(self) -> None:
         cfg = SimpleNamespace(
