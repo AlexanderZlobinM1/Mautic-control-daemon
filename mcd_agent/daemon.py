@@ -14351,6 +14351,12 @@ def _dispatch_campaign_super_priority_lane(
         round_id = datetime.fromtimestamp(now, tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         cycle_id_by_root[root] = round_id
         next_tick_by_root[root] = (int(now // 60) + 1) * 60
+        logging.info(
+            "[%s] campaign super-priority ring cycle started cycle_id=%s ids=%s",
+            root,
+            round_id,
+            ",".join(str(value) for value in round_ids) or "-",
+        )
         store.put_runtime_sync(
             _campaign_super_priority_cycle_key(root),
             {
@@ -17870,6 +17876,7 @@ def run_loop(
     campaign_rebuild_reg_rings: dict[str, deque[int]] = {}
     campaign_super_rings: dict[str, deque[int]] = {}
     campaign_super_candidates: dict[str, list[int]] = {}
+    campaign_super_snapshot_logged: dict[str, tuple[int, ...]] = {}
     campaign_super_next_tick: dict[str, float] = {}
     campaign_super_cycle_id: dict[str, str] = {}
     segment_prio_sets: dict[str, set[int]] = {}
@@ -23541,6 +23548,15 @@ def run_loop(
                 for value in _campaign_super_priority_effective_setting(config, super_inst)
                 if int(value) > 0
             )
+            snapshot = tuple(campaign_super_candidates[super_root])
+            if campaign_super_snapshot_logged.get(super_root) != snapshot:
+                logging.info(
+                    "[%s] campaign super-priority snapshot ids=%s cron_allowed=%s",
+                    super_root,
+                    ",".join(str(value) for value in snapshot) or "-",
+                    str(bool(cluster_cron_allowed)).lower(),
+                )
+                campaign_super_snapshot_logged[super_root] = snapshot
             _dispatch_campaign_super_priority_lane(
                 config=config,
                 store=store,

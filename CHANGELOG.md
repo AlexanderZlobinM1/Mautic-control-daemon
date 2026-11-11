@@ -1,3 +1,8 @@
+## 1.6.63 - 2026-11-11
+
+- Persist clear scheduler evidence when a campaign super-priority snapshot
+  enters its dedicated ring, including the configured IDs and cycle start.
+
 ## 1.6.62 - 2026-11-11
 
 - Dispatch the MCC-configured campaign super-priority snapshot before the
