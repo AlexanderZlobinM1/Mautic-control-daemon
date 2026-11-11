@@ -1,3 +1,9 @@
+## 1.6.61 - 2026-11-11
+
+- Run campaign super-priority directly from the MCC per-instance ring, one
+  rebuild-then-trigger worker per tick, without ordinary due queries, weights
+  or campaign budget; remove configured super IDs from regular/priority rings.
+
 ## 1.6.59 - 2026-11-11
 
 - Keep the independent campaign super-priority lane active when the legacy

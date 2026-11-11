@@ -38,8 +38,7 @@ from mcd_agent.daemon import (
     _campaign_super_priority_effective_setting,
     _campaign_super_priority_args,
     _dispatch_campaign_super_priority_lane,
-    _merge_campaign_super_priority_ids,
-    _split_campaign_circles_with_super_priority,
+    _exclude_campaign_super_priority_ids,
     _campaign_rebuild_waits_for_trigger,
     _campaign_spill_prefers_priority,
     _campaign_trigger_email_progress_sql,
@@ -286,6 +285,22 @@ class CampaignRingDispatchTests(unittest.TestCase):
                 task_type="segment_super_priority",
             )
         )
+
+    def test_campaign_super_priority_is_outside_ordinary_campaign_budget(self) -> None:
+        root = "/var/www/super"
+        running = {
+            "ordinary": SimpleNamespace(root=root, task_type="campaign_trigger", entity_id=29),
+            "super": SimpleNamespace(root=root, task_type="campaign_super_priority", entity_id=78),
+        }
+
+        self.assertEqual(daemon_mod._running_campaign_total(running, root), 1)
+        self.assertEqual(daemon_mod._scheduler_actual_work_count(running, root=root), 1)
+
+        only_super = {
+            "super": SimpleNamespace(root=root, task_type="campaign_super_priority", entity_id=78),
+        }
+        self.assertEqual(daemon_mod._running_campaign_total(only_super, root), 0)
+        self.assertEqual(daemon_mod._scheduler_actual_work_count(only_super, root=root), 0)
 
     def test_local_instance_full_yields_when_shared_host_slot_is_free(self) -> None:
         blocked_root = "/var/www/blocked"
@@ -1883,43 +1898,13 @@ class CampaignRingDispatchTests(unittest.TestCase):
 
         self.assertEqual(_campaign_super_priority_effective_setting(cfg, electronic), {78})
 
-    def test_campaign_super_priority_is_excluded_from_priority_and_regular(self) -> None:
-        super_ids, priority, regular = _split_campaign_circles_with_super_priority(
-            [73, 74, 75],
-            weights={73: 1.0, 74: 3.0, 75: 2.0},
-            whitelist={74},
-            super_priority={73},
-            priority_size=1,
-            latest_priority_ids=[],
+    def test_campaign_super_priority_ids_are_removed_from_ordinary_rings(self) -> None:
+        self.assertEqual(
+            _exclude_campaign_super_priority_ids([29, 78, 61, 78], {78}),
+            [29, 61],
         )
-
-        self.assertEqual(super_ids, [73])
-        self.assertEqual(priority, [74])
-        self.assertEqual(regular, [75])
-
-    def test_campaign_super_priority_is_admitted_without_ordinary_due_row(self) -> None:
-        trigger, rebuild, missing = _merge_campaign_super_priority_ids(
-            [29],
-            [61],
-            [29, 61, 78],
-            {78},
-        )
-
-        self.assertEqual(trigger, [29, 78])
-        self.assertEqual(rebuild, [61, 78])
-        self.assertEqual(missing, [])
-
-    def test_campaign_super_priority_rejects_unpublished_operator_ids(self) -> None:
-        trigger, rebuild, missing = _merge_campaign_super_priority_ids(
-            [],
-            [],
-            [78],
-            {78, 999},
-        )
-
-        self.assertEqual(trigger, [78])
-        self.assertEqual(rebuild, [78])
-        self.assertEqual(missing, [999])
+        self.assertEqual(_exclude_campaign_super_priority_ids([], {78}), [])
+        self.assertIsNone(_exclude_campaign_super_priority_ids(None, {78}))
 
     def test_campaign_super_priority_runs_rebuild_before_trigger(self) -> None:
         cfg = SimpleNamespace(
@@ -1937,37 +1922,34 @@ class CampaignRingDispatchTests(unittest.TestCase):
         self.assertIn("rebuild_rc", script)
         self.assertLess(script.index("mautic:campaigns:update"), script.index("mautic:campaigns:trigger"))
 
-    def test_campaign_super_priority_dispatches_during_db_pause(self) -> None:
+    def test_campaign_super_priority_dispatch_uses_only_configured_ring(self) -> None:
         root = "/var/www/electronic/public_html"
-        ring = deque()
-        candidates = {root: [78]}
+        ring: deque[int] = deque()
         next_tick: dict[str, float] = {}
         cycle_ids: dict[str, str] = {}
         store = Mock()
-        config = SimpleNamespace()
-
+        store.get_runtime_sync.return_value = {}
         with patch.object(daemon_mod, "_fill_from_ring", return_value=1) as fill:
             launched = _dispatch_campaign_super_priority_lane(
-                config=config,
+                config=SimpleNamespace(),
                 store=store,
                 running={},
                 popens={},
                 root=root,
                 super_ring=ring,
-                candidates_by_root=candidates,
+                candidates_by_root={root: [78]},
                 next_tick_by_root=next_tick,
                 cycle_id_by_root=cycle_ids,
                 cluster_cron_allowed=True,
-                now_ts=120.0,
+                now_ts=60.0,
             )
 
         self.assertEqual(launched, 1)
         self.assertEqual(list(ring), [78])
-        fill.assert_called_once()
+        self.assertEqual(next_tick[root], 120.0)
+        self.assertTrue(cycle_ids[root])
         self.assertEqual(fill.call_args.kwargs["task_type"], "campaign_super_priority")
-        self.assertEqual(fill.call_args.kwargs["total_limit"], 1)
-        self.assertEqual(next_tick[root], 180.0)
-        self.assertEqual(store.put_runtime_sync.call_count, 1)
+        self.assertTrue(fill.call_args.kwargs["bypass_baseline_admission"])
 
     def test_whitelists_are_priority_only_without_explicit_realtime(self) -> None:
         cfg = SimpleNamespace(

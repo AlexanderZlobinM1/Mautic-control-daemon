@@ -37,6 +37,17 @@ and SHA-256, and atomically compare-and-swap catalog metadata with rollback copi
 Promote only after the explicitly required source/native/channel gates pass.
 Describe baseline failures and proof limits honestly. Keep host rollout separate.
 
+## Operational root-cause gate
+
+If acceptance is blocked by an operational condition—such as host resource
+pressure, swap, storage, service state or routing—do not alter MCD behavior,
+weaken a safety guard or add a compatibility workaround to force the test
+through. Operations must diagnose and correct the condition through the
+standard host process and return before/after evidence. Only then may the
+original MCD path be tested. Change MCD only when evidence proves that the
+remaining defect is in MCD itself; operational symptoms never justify changing
+the scheduler model.
+
 ## Temporary two-line HOTFIX policy
 
 For every defect, first record applicability to both maintained 1.6 and developing
