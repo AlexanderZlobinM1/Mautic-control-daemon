@@ -1,3 +1,9 @@
+## 1.6.66 - 2026-11-11
+
+- Treat MCC HTTP 409 desired-state responses as conflicts, trigger an
+  immediate canonical remote poll, and resolve durable local deltas by the
+  existing per-field timestamp/revision metadata instead of blocking sync.
+
 ## 1.6.65 - 2026-11-11
 
 - Run each configured campaign super-priority ring in its own minute-waking

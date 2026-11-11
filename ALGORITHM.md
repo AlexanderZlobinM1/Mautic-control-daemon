@@ -253,13 +253,14 @@ MCC. После MCD update этот режим включается всегда
 сохранённый snapshot MCC. Поэтому восстановление после потери не ограничено
 стабильной частью runtime и одинаково работает до и после перезапуска.
 
-Если локальный config-файл изменился во время remote poll/apply, MCD сначала
-сохраняет пару `previous/current` в durable `local_runtime_push_pending`, а
-remote baseline не продвигает. Проверка выполняется перед fetch, после network
-round-trip и непосредственно перед baseline refresh; pending переживает restart
-и failover state backend. Только ответ MCC с принятой desired-state `revision`
-разрешает сохранить новый local baseline и удалить pending; conflict/error или
-неполный ответ оставляют delta для следующего ровно одного rebased push.
+Если настройка изменилась одновременно на MCD и MCC, MCD сначала запрашивает
+актуальное состояние MCC. Для каждого затронутого поля сравниваются время и
+номер изменения; используется более новое значение. Если новее изменение на
+MCC, MCD применяет его на хосте и больше не отправляет устаревшее локальное
+значение. Если новее изменение на MCD, MCD повторяет отправку только этого
+изменения и не затрагивает остальные настройки. Пока результат не принят,
+изменение считается незавершённым; сбой связи или неполный ответ не могут
+выдать его за успешно синхронизированное.
 
 После принятого local runtime push MCD не выполняет remote poll в том же
 main-loop tick. Принятый ответ уже является canonical результатом записи;
@@ -769,60 +770,35 @@ reconcile-ятся без потери стабильного порядка ч�
 `campaign_rebuild` и не получает отдельный третий проход. В `ring_mode =
 "single"` обе пары сворачиваются в один regular ring.
 
-`campaign_super_priority` — отдельная per-instance настройка, независимая от
-segment priority и от `campaign_whitelist`. Для каждого instance с непустым
-списком MCC создаётся собственное dedicated super-ring и один worker. Его IDs
-взаимоисключаются с campaign priority и regular; один campaign ID не может
-одновременно присутствовать в двух обычных линиях и super-ring. Dedicated
-worker не вычитает и не добавляет regular/priority capacity и не участвует в
-их host/instance budget. Super-ring не зависит от колец других instances.
+`campaign_super_priority` — отдельная настройка для каждого instance. Она не
+связана с настройками сегментов и не использует обычный список приоритетных
+или регулярных кампаний. Кампания из этого списка запускается только в
+сверхприоритетном круге, а обычная очередь её не запускает. Сверхприоритетные
+кампании не занимают и не уменьшают обычные слоты; круги разных instances
+работают независимо.
 
-Каждый минутный tick, если предыдущий круг завершён, фиксирует новый snapshot
-списка и запускает его по round-robin. Внутри snapshot каждая campaign
-последовательно выполняет `campaign_rebuild`, затем `campaign_trigger`. Если
-круг закончился раньше следующего tick, worker ждёт следующей минуты. Если
-круг не закончен, следующий tick его не сбрасывает и не создаёт дубликат:
-текущий cursor продолжает работу до конца. После финала следующего круга
-список пересобирается только из актуальной MCC-настройки; ordinary campaign
-IDs и их DB-состояние не участвуют в выборе super-кольца.
+Для каждого instance со списком сверхприоритетных кампаний свой круг начинает
+проверку каждую минуту. В начале круга запоминается текущий список кампаний и
+каждая из них по очереди выполняет сначала перестроение, затем запуск. Даже
+если кампания ничего не нашла для обработки, сама попытка считается выполненной.
+После завершения круга система ждёт следующей минуты. Если круг ещё идёт,
+новая минута его не прерывает и не запускает его повторно. После завершения
+длинного круга следующий круг начинается с ближайшей следующей минуты и уже с
+обновлённым списком.
 
-Super-priority предназначен для коротких near-real-time кампаний. Долгая
-кампания, добавленная оператором ошибочно, блокирует только super-ring своего
-instance, не regular/priority и не другие instances. Watchdog не убивает
-процесс только за длительность: он использует независимые CPU/IO и DB
-progress evidence. При явной ошибке или трёх последовательных watchdog-kill
-campaign пропускается до конца текущего круга; receipt фиксирует причину и
-alert-required состояние, а в следующем круге счётчик начинается заново.
+Сверхприоритет предназначен для коротких почти мгновенных кампаний. Ошибочно
+добавленная длинная кампания задерживает только круг своего instance и не
+останавливает обычные кампании или круги других instances. Само по себе долгое
+выполнение не считается зависанием: остановка допускается только при явном
+подтверждении блокировки. При явной ошибке или после трёх последовательных
+остановок одной кампании она пропускается до конца текущего круга, причина
+фиксируется, а владельцу отправляется уведомление, если у него указан email.
+В следующем круге счётчик остановок начинается заново.
 
-MCC UI обязан предоставлять отдельную campaign-плитку и передавать
-`campaign_super_priority_instance_settings` в MCD runtime envelope. Проверка
-на instance должна подтверждать minute tick и запуск даже при пустом результате
-Mautic-команды; это не считается отсутствием попытки.
-
-Configured campaign super-priority IDs are copied directly from the MCC
-per-instance setting into the dedicated minute ring. The ring does not query
-ordinary trigger/rebuild due rows, campaign weights, priority sizing or the
-published-campaign snapshot. Every configured ID is attempted in round-robin
-order, including an idle campaign with an empty result. Before ordinary
-trigger/rebuild planning, the same IDs are removed from both ordinary rings, so
-the standard process cannot launch them. Each configured instance owns a
-dedicated super worker with its own minute wake-up and ring state. The worker
-consumes the latest MCC snapshot and keeps its timing independent of the
-ordinary planner, dispatch projection, fairness/import ordering and per-root
-terminal gate; a long DB/planning pass for another root therefore cannot turn
-a 60-second tick into a several-minute delay. The first snapshot may start
-immediately; after that the worker schedules the next round at the next minute
-boundary, and a running round continues until its sequential rebuild→trigger
-pair finishes. The realtime whitelist compatibility block and the legacy
-global whitelist kill-switch do not suppress this explicit operator-selected
-lane.
-
-Campaign super-priority watchdogs distinguish a long worker from a blocked one.
-CPU/IO counters that remain unchanged while the process is in ordinary sleep
-are not a kill reason; termination requires stable kernel-level
-uninterruptible (`D`) process state with no independent DB activity. A long
-real Mautic operation therefore remains alive, while an explicitly blocked
-worker can still be terminated and recorded in the existing cycle receipt.
+Отдельная плитка MCC передаёт этот список для конкретного instance. Добавление
+кампании начинает действовать с нового круга. Удаление не прерывает уже
+начатую попытку, но после её завершения кампания исчезает из следующих
+кругов. Это изменение не удаляет и не меняет соседние настройки instance.
 
 Разделение на priority и regular строится из weight cache, campaign
 whitelist (`campaign_whitelist` и
