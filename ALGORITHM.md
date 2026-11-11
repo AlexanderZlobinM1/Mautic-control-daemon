@@ -767,6 +767,35 @@ reconcile-ятся без потери стабильного порядка ч�
 `campaign_rebuild` и не получает отдельный третий проход. В `ring_mode =
 "single"` обе пары сворачиваются в один regular ring.
 
+`campaign_super_priority` — отдельная per-instance настройка, независимая от
+segment priority и от `campaign_whitelist`. Для каждого instance с непустым
+списком MCC создаётся собственное dedicated super-ring и один worker. Его IDs
+взаимоисключаются с campaign priority и regular; один campaign ID не может
+одновременно присутствовать в двух обычных линиях и super-ring. Dedicated
+worker не вычитает и не добавляет regular/priority capacity и не участвует в
+их host/instance budget. Super-ring не зависит от колец других instances.
+
+Каждый минутный tick, если предыдущий круг завершён, фиксирует новый snapshot
+списка и запускает его по round-robin. Внутри snapshot каждая campaign
+последовательно выполняет `campaign_rebuild`, затем `campaign_trigger`. Если
+круг закончился раньше следующего tick, worker ждёт следующей минуты. Если
+круг не закончен, следующий tick его не сбрасывает и не создаёт дубликат:
+текущий cursor продолжает работу до конца. После финала следующего круга
+список пересобирается из MCC-настроек и текущих campaign IDs.
+
+Super-priority предназначен для коротких near-real-time кампаний. Долгая
+кампания, добавленная оператором ошибочно, блокирует только super-ring своего
+instance, не regular/priority и не другие instances. Watchdog не убивает
+процесс только за длительность: он использует независимые CPU/IO и DB
+progress evidence. При явной ошибке или трёх последовательных watchdog-kill
+campaign пропускается до конца текущего круга; receipt фиксирует причину и
+alert-required состояние, а в следующем круге счётчик начинается заново.
+
+MCC UI обязан предоставлять отдельную campaign-плитку и передавать
+`campaign_super_priority_instance_settings` в MCD runtime envelope. Проверка
+на instance должна подтверждать minute tick и запуск даже при пустом результате
+Mautic-команды; это не считается отсутствием попытки.
+
 Разделение на priority и regular строится из weight cache, campaign
 whitelist (`campaign_whitelist` и
 `campaign_whitelist_instance_settings`), `campaign_priority_size` и
