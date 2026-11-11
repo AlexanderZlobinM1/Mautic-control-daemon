@@ -2036,6 +2036,44 @@ class CampaignRingDispatchTests(unittest.TestCase):
         self.assertEqual(calls[root_electronic]["candidates_by_root"], {root_electronic: [78]})
         self.assertEqual(calls[root_other]["candidates_by_root"], {root_other: [81]})
 
+    def test_campaign_super_priority_removal_stops_future_ring_ticks(self) -> None:
+        root = "/var/www/electronic/public_html"
+        cfg = SimpleNamespace(
+            disable_whitelist=False,
+            campaign_super_priority=[],
+            campaign_super_priority_instance_settings={
+                "electronic@host": {"campaign_super_priority": [60]},
+            },
+        )
+        installs = [SimpleNamespace(root=root, instance_uid="electronic@host")]
+        loop = _CampaignSuperPriorityLoop(start=False)
+        with patch.object(daemon_mod, "_dispatch_campaign_super_priority_lane", return_value=1) as dispatch:
+            loop.update(
+                config=cfg,
+                installs=installs,
+                store=Mock(),
+                running={},
+                popens={},
+                enabled=True,
+            )
+            self.assertEqual(loop.run_once(now_ts=60.0), 1)
+            self.assertEqual(dispatch.call_count, 1)
+
+            cfg.campaign_super_priority_instance_settings = {
+                "electronic@host": {"campaign_super_priority": []},
+            }
+            loop.update(
+                config=cfg,
+                installs=installs,
+                store=Mock(),
+                running={},
+                popens={},
+                enabled=True,
+            )
+            self.assertEqual(loop.run_once(now_ts=120.0), 0)
+
+        self.assertEqual(dispatch.call_count, 1)
+
     def test_campaign_super_priority_watchdog_keeps_long_sleeping_worker(self) -> None:
         root = "/var/www/electronic/public_html"
         task = RunningTask(

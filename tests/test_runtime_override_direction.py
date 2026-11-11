@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import socket
 import unittest
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 from mcd_agent import __version__
 import mcd_agent.runtime_overrides as runtime_overrides
@@ -68,6 +70,32 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
                 target="desired",
             )
         self.assertEqual(result, {"status": "error", "reason": "timed out"})
+
+    def test_runtime_override_http_409_is_reported_as_conflict(self) -> None:
+        cfg = SimpleNamespace(
+            mcc_url="https://mcc.example",
+            mcc_token="fixture-token",
+            mcc_host_name="MauticFarm-02",
+            agent_id="",
+        )
+        with patch.object(
+            runtime_overrides,
+            "_post_json",
+            side_effect=HTTPError(
+                "https://mcc.example/api/v1/agent/runtime-overrides",
+                409,
+                "conflict",
+                {},
+                io.BytesIO(b'{"status":"conflict","code":"desired_revision_conflict"}'),
+            ),
+        ):
+            result = push_runtime_overrides(
+                cfg,
+                {"import_stall_timeout_sec": 900},
+                target="desired",
+            )
+
+        self.assertEqual(result, {"status": "conflict", "reason": "http_409"})
 
     def test_runtime_poll_and_local_push_advertise_installed_and_running_versions(self) -> None:
         cfg = SimpleNamespace(mcc_url="https://mcc.example", mcc_token="fixture-token")
@@ -1352,6 +1380,45 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             },
         )
 
+    def test_http_409_stops_local_retry_and_leaves_remote_lww_poll_path(self) -> None:
+        cfg = SimpleNamespace(mcc_url="https://mcc.example", mcc_token="token")
+        install = SimpleNamespace(
+            instance_uid="electronic.sales-snap.com",
+            root="/var/www/electronic/public_html",
+            name="electronic",
+            primary_domain="electronic.sales-snap.com",
+            domains=["electronic.sales-snap.com"],
+        )
+        fresh = {
+            "status": "ok",
+            "runtime_overrides": {},
+            "instance_desired_states": {},
+            "desired_state": {"revision": 210},
+        }
+        previous = {}
+        current = {
+            "campaign_super_priority_instance_settings": {
+                "electronic.sales-snap.com": {"campaigns": [78]},
+            },
+        }
+        with patch("mcd_agent.daemon.fetch_runtime_overrides", return_value=fresh) as fetch, patch(
+            "mcd_agent.daemon.push_runtime_overrides",
+            return_value={"status": "conflict", "reason": "http_409"},
+        ) as push:
+            result = daemon._push_local_runtime_change(
+                cfg,
+                previous,
+                current,
+                [install],
+                desired_revision=209,
+                instance_revisions={},
+            )
+
+        self.assertEqual(result["status"], "conflict")
+        self.assertEqual(result["reason"], "http_409")
+        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(push.call_count, 1)
+
     def test_local_restart_preserves_remote_special_ring_when_baseline_has_no_instance_key(self) -> None:
         cfg = SimpleNamespace(mcc_url="https://mcc.example", mcc_token="token")
         install = SimpleNamespace(
@@ -2502,6 +2569,82 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             {"segments": [93, 94]},
         )
         self.assertNotIn("plugin_operation_instance_settings", previous)
+
+    def test_newer_remote_winner_removes_stale_pending_local_delta(self) -> None:
+        class MemoryStore:
+            def __init__(self, values=None):
+                self.values = dict(values or {})
+
+            def get_runtime_sync(self, key):
+                return self.values.get(key)
+
+            def put_runtime_sync(self, key, value):
+                self.values[key] = dict(value)
+
+            def delete_runtime_sync(self, keys):
+                for key in keys:
+                    self.values.pop(key, None)
+                return 1
+
+        uid = "electronic.sales-snap.com@MauticFarm-02"
+        current = {
+            "campaign_super_priority_instance_settings": {
+                uid: {"campaigns": [78]},
+            },
+        }
+        remote = {
+            "campaign_super_priority_instance_settings": {
+                uid: {"campaigns": [78, 60]},
+            },
+        }
+        local_metadata = daemon._runtime_metadata_empty()
+        daemon._runtime_metadata_set(
+            local_metadata,
+            "instance",
+            "campaign_super_priority_instance_settings",
+            daemon._runtime_metadata_stamp(
+                source="mcd", updated_at=100.0, revision=1, event_id="mcd:old"
+            ),
+            uid,
+        )
+        remote_metadata = daemon._runtime_metadata_empty()
+        daemon._runtime_metadata_set(
+            remote_metadata,
+            "instance",
+            "campaign_super_priority_instance_settings",
+            daemon._runtime_metadata_stamp(
+                source="mcc", updated_at=200.0, revision=210, event_id="mcc:new"
+            ),
+            uid,
+        )
+        resolution = daemon._resolve_runtime_snapshots(
+            current,
+            remote,
+            local_metadata,
+            remote_metadata,
+        )
+        store = MemoryStore(
+            {
+                "local_runtime": {},
+                daemon._LOCAL_RUNTIME_PUSH_PENDING_KEY: {"previous": {}, "current": current},
+            }
+        )
+
+        remains_pending = daemon._reconcile_pending_local_runtime_after_remote(
+            store,
+            current_local_runtime=current,
+            remote_runtime=remote,
+            resolution=resolution,
+            local_metadata=local_metadata,
+        )
+
+        self.assertFalse(remains_pending)
+        self.assertIsNone(daemon._read_local_runtime_push_pending(store))
+        self.assertEqual(store.values["local_runtime"], resolution["runtime"])
+        self.assertEqual(
+            store.values["local_runtime"]["campaign_super_priority_instance_settings"][uid]["campaigns"],
+            [78, 60],
+        )
 
     def test_runtime_metadata_and_recovered_instance_row_survive_restart_and_push_once(self) -> None:
         from pathlib import Path

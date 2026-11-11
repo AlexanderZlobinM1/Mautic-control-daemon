@@ -2075,6 +2075,48 @@ def _runtime_reconciliation_previous(
     return _runtime_snapshot_from_fields(previous_fields)
 
 
+def _reconcile_pending_local_runtime_after_remote(
+    store: object,
+    *,
+    current_local_runtime: Mapping[str, Any],
+    remote_runtime: Mapping[str, Any],
+    resolution: Mapping[str, Any],
+    local_metadata: Mapping[str, Any],
+) -> bool:
+    """Keep only still-winning local fields after a remote reconciliation."""
+
+    pending_before = _read_local_runtime_push_pending(store)
+    resolved_runtime = resolution.get("runtime")
+    resolved_runtime = dict(resolved_runtime) if isinstance(resolved_runtime, Mapping) else dict(current_local_runtime)
+    if not resolution.get("local_push"):
+        if pending_before is not None:
+            _clear_local_runtime_push_pending(store)
+            store.put_runtime_sync("local_runtime", resolved_runtime)
+        return False
+
+    baseline = (
+        pending_before["previous"]
+        if pending_before is not None
+        else store.get_runtime_sync("local_runtime")
+    )
+    baseline = baseline if isinstance(baseline, dict) else {}
+    previous = _runtime_reconciliation_previous(
+        baseline,
+        current_local_runtime,
+        remote_runtime,
+        resolution,
+    )
+    next_pending = {"previous": previous, "current": deepcopy(resolved_runtime)}
+    if next_pending["previous"] == next_pending["current"]:
+        _clear_local_runtime_push_pending(store)
+        store.put_runtime_sync("local_runtime", next_pending["current"])
+        return False
+    store.put_runtime_sync(_LOCAL_RUNTIME_PUSH_PENDING_KEY, next_pending)
+    store.put_runtime_sync("local_runtime", previous)
+    store.put_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY, dict(local_metadata))
+    return True
+
+
 def _persist_recovered_instance_runtime(
     config: AgentConfig,
     current_runtime: Mapping[str, Any],
@@ -2915,6 +2957,12 @@ def _push_local_runtime_change(
     )
     if str(pushed.get("status", "")).strip().lower() != "conflict":
         return pushed
+    # A transport-level HTTP 409 has not supplied enough canonical state to
+    # safely retry the local replace payload. Let the main loop fetch MCC's
+    # current desired snapshot and apply field-level LWW first; retrying here
+    # would risk replaying an older local value over a newer remote winner.
+    if str(pushed.get("reason", "")).strip().lower() == "http_409":
+        return dict(pushed)
     rebased = _retry_local_runtime_push_after_conflict(
         config,
         previous_local_runtime,
@@ -20972,6 +21020,13 @@ def run_loop(
                         logging.warning("runtime-sync-v3 durable conflict awaiting operator resolution")
                         continue
                     local_runtime_push_pending = True
+                    # A legacy desired-state 409 is a remote revision
+                    # conflict, not a transport outage. Fetch MCC's canonical
+                    # snapshot immediately; the next poll applies field LWW
+                    # and either drops the losing local delta or retries only
+                    # the still-winning local fields.
+                    runtime_overrides_sync_requested = True
+                    next_runtime_overrides_poll_at = 0.0
                     logging.warning(
                         "runtime-overrides local change rebase failed: %s",
                         pushed.get("reason", "unknown"),
@@ -21102,26 +21157,15 @@ def run_loop(
                         local_metadata,
                         remote_metadata,
                     )
-                    if resolution.get("local_push"):
-                        baseline = store.get_runtime_sync("local_runtime")
-                        baseline = baseline if isinstance(baseline, dict) else {}
-                        previous = _runtime_reconciliation_previous(
-                            baseline,
-                            current_local_runtime,
-                            remote_runtime,
-                            resolution,
-                        )
-                        pending = {
-                            "previous": previous,
-                            "current": deepcopy(current_local_runtime),
-                        }
-                        store.put_runtime_sync(_LOCAL_RUNTIME_PUSH_PENDING_KEY, pending)
-                        store.put_runtime_sync("local_runtime", previous)
-                        store.put_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY, local_metadata)
-                        local_runtime_push_pending = True
-                    else:
-                        if _runtime_metadata_has_accepted(store):
-                            _clear_local_runtime_accepted(store)
+                    local_runtime_push_pending = _reconcile_pending_local_runtime_after_remote(
+                        store,
+                        current_local_runtime=current_local_runtime,
+                        remote_runtime=remote_runtime,
+                        resolution=resolution,
+                        local_metadata=local_metadata,
+                    )
+                    if not local_runtime_push_pending and _runtime_metadata_has_accepted(store):
+                        _clear_local_runtime_accepted(store)
                     # The canonical MCC snapshot is durable even when one or
                     # more unrelated local fields remain pending.  Applying
                     # the resolved runtime here is what keeps remote winners

@@ -648,6 +648,13 @@ def push_runtime_overrides(
         out.setdefault("status", "error")
         return out
     except HTTPError as e:
+        # MCC uses HTTP 409 for a desired-state revision/field conflict. Keep
+        # that response on the conflict path so the daemon can fetch the
+        # canonical remote snapshot and resolve the durable local delta by
+        # field metadata instead of blocking all future polls as a transport
+        # error.
+        if int(e.code) == 409:
+            return {"status": "conflict", "reason": "http_409"}
         return {"status": "error", "reason": f"http_{e.code}"}
     except URLError as e:
         return {"status": "error", "reason": f"urlerror:{e.reason}"}
