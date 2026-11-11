@@ -23525,6 +23525,36 @@ def run_loop(
             running=running,
             enabled=cluster_cron_allowed,
         )
+
+        # Super-priority is independent of the ordinary segment planner.  Do
+        # not wait for a plan refresh or let an ordinary root terminal gate
+        # hide the MCC-configured campaign ring: a continuously active
+        # segment cycle must not prevent the dedicated per-instance worker
+        # from receiving its latest direct snapshot and advancing its own
+        # minute-ticked queue.
+        for super_inst in dispatch_installs:
+            super_root = str(getattr(super_inst, "root", "") or "").strip()
+            if not super_root:
+                continue
+            campaign_super_candidates[super_root] = sorted(
+                int(value)
+                for value in _campaign_super_priority_effective_setting(config, super_inst)
+                if int(value) > 0
+            )
+            _dispatch_campaign_super_priority_lane(
+                config=config,
+                store=store,
+                running=running,
+                popens=popens,
+                root=super_root,
+                super_ring=campaign_super_rings.setdefault(super_root, deque()),
+                candidates_by_root=campaign_super_candidates,
+                next_tick_by_root=campaign_super_next_tick,
+                cycle_id_by_root=campaign_super_cycle_id,
+                cluster_cron_allowed=cluster_cron_allowed,
+                now_ts=now,
+            )
+
         for inst in _iter_instances_with_root_dispatch_gate(
             dispatch_installs,
             busy_roots=main_dispatch_busy_roots,
@@ -23568,7 +23598,6 @@ def run_loop(
             trg_reg_ring = campaign_trigger_reg_rings.setdefault(root, deque())
             reb_prio_ring = campaign_rebuild_prio_rings.setdefault(root, deque())
             reb_reg_ring = campaign_rebuild_reg_rings.setdefault(root, deque())
-            super_ring = campaign_super_rings.setdefault(root, deque())
             seg_prio_set = segment_prio_sets.setdefault(root, set())
             seg_reg_set = segment_reg_sets.setdefault(root, set())
             trg_prio_set = campaign_trigger_prio_sets.setdefault(root, set())
@@ -24927,20 +24956,6 @@ def run_loop(
                                 on_launch=_mark_segment_cycle,
                                 max_launches=spill,
                             )
-
-            _dispatch_campaign_super_priority_lane(
-                config=config,
-                store=store,
-                running=running,
-                popens=popens,
-                root=root,
-                super_ring=super_ring,
-                candidates_by_root=campaign_super_candidates,
-                next_tick_by_root=campaign_super_next_tick,
-                cycle_id_by_root=campaign_super_cycle_id,
-                cluster_cron_allowed=cluster_cron_allowed,
-                now_ts=now,
-            )
 
             _publish_monitor_cycle()
 

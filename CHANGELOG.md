@@ -1,3 +1,9 @@
+## 1.6.62 - 2026-11-11
+
+- Dispatch the MCC-configured campaign super-priority snapshot before the
+  ordinary root gate, so an active segment cycle cannot hide the dedicated
+  per-instance super ring.
+
 ## 1.6.61 - 2026-11-11
 
 - Run campaign super-priority directly from the MCC per-instance ring, one
