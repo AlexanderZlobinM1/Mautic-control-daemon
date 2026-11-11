@@ -25,6 +25,7 @@ from mcd_agent.daemon import (
     _CAMPAIGN_TRIGGER_FUTURE_WAKE,
     _CAMPAIGN_TRIGGER_FUTURE_WAKE_LOGGED,
     _CAMPAIGN_TRIGGER_STUCK_UNTIL,
+    _CampaignSuperPriorityLoop,
     _PriorityTaskExecutor,
     _TASK_LOCK_BUSY_RC,
     _campaign_pressure_active,
@@ -37,6 +38,7 @@ from mcd_agent.daemon import (
     _campaign_whitelist_effective_setting,
     _campaign_super_priority_effective_setting,
     _campaign_super_priority_args,
+    _campaign_super_priority_watchdog,
     _dispatch_campaign_super_priority_lane,
     _exclude_campaign_super_priority_ids,
     _campaign_rebuild_waits_for_trigger,
@@ -1950,6 +1952,130 @@ class CampaignRingDispatchTests(unittest.TestCase):
         self.assertTrue(cycle_ids[root])
         self.assertEqual(fill.call_args.kwargs["task_type"], "campaign_super_priority")
         self.assertTrue(fill.call_args.kwargs["bypass_baseline_admission"])
+
+    def test_campaign_super_priority_long_round_waits_for_next_minute_tick(self) -> None:
+        root = "/var/www/electronic/public_html"
+        ring: deque[int] = deque()
+        next_tick = {root: 60.0}
+        cycle_ids = {root: "20261111T000000Z"}
+        store = Mock()
+        active_cycle = {
+            "schema": "mcd-campaign-super-priority-cycle-v1",
+            "root": root,
+            "cycle_id": cycle_ids[root],
+            "status": "active",
+        }
+        completed_cycle = {**active_cycle, "status": "completed"}
+        store.get_runtime_sync.side_effect = [active_cycle, completed_cycle]
+        with patch.object(daemon_mod, "_fill_from_ring", return_value=0) as fill:
+            launched = _dispatch_campaign_super_priority_lane(
+                config=SimpleNamespace(),
+                store=store,
+                running={},
+                popens={},
+                root=root,
+                super_ring=ring,
+                candidates_by_root={root: [78]},
+                next_tick_by_root=next_tick,
+                cycle_id_by_root=cycle_ids,
+                cluster_cron_allowed=True,
+                now_ts=125.0,
+            )
+
+        self.assertEqual(launched, 0)
+        self.assertEqual(next_tick[root], 180.0)
+        fill.assert_not_called()
+
+        with patch.object(daemon_mod, "_fill_from_ring", return_value=1) as fill:
+            launched = _dispatch_campaign_super_priority_lane(
+                config=SimpleNamespace(),
+                store=store,
+                running={},
+                popens={},
+                root=root,
+                super_ring=ring,
+                candidates_by_root={root: [78]},
+                next_tick_by_root=next_tick,
+                cycle_id_by_root=cycle_ids,
+                cluster_cron_allowed=True,
+                now_ts=180.0,
+            )
+
+        self.assertEqual(launched, 1)
+        fill.assert_called_once()
+
+    def test_campaign_super_priority_has_independent_instance_workers(self) -> None:
+        root_electronic = "/var/www/electronic/public_html"
+        root_other = "/var/www/other/public_html"
+        cfg = SimpleNamespace(
+            disable_whitelist=False,
+            campaign_super_priority=[],
+            campaign_super_priority_instance_settings={
+                "electronic@host": {"campaign_super_priority": [78]},
+                "other@host": {"campaign_super_priority": [81]},
+            },
+        )
+        installs = [
+            SimpleNamespace(root=root_electronic, instance_uid="electronic@host"),
+            SimpleNamespace(root=root_other, instance_uid="other@host"),
+        ]
+        loop = _CampaignSuperPriorityLoop(start=False)
+        with patch.object(daemon_mod, "_dispatch_campaign_super_priority_lane", return_value=1) as dispatch:
+            loop.update(
+                config=cfg,
+                installs=installs,
+                store=Mock(),
+                running={},
+                popens={},
+                enabled=True,
+            )
+            self.assertEqual(loop.run_once(now_ts=60.0), 2)
+
+        calls = {call.kwargs["root"]: call.kwargs for call in dispatch.call_args_list}
+        self.assertEqual(set(calls), {root_electronic, root_other})
+        self.assertEqual(calls[root_electronic]["candidates_by_root"], {root_electronic: [78]})
+        self.assertEqual(calls[root_other]["candidates_by_root"], {root_other: [81]})
+
+    def test_campaign_super_priority_watchdog_keeps_long_sleeping_worker(self) -> None:
+        root = "/var/www/electronic/public_html"
+        task = RunningTask(
+            row_id=1,
+            root=root,
+            task_key=_task_key(root, "campaign_super_priority", 78),
+            task_type="campaign_super_priority",
+            entity_id=78,
+            command_str="php bin/console mautic:campaigns:update -i 78",
+            timeout_sec=0,
+            attempts=1,
+            started_at=1.0,
+            pid=1234,
+        )
+        running = {task.task_key: task}
+        with patch.object(
+            daemon_mod,
+            "_external_segment_process_liveness_signal",
+            return_value={"pid_alive": True, "process_group_alive": True, "process_state": "S"},
+        ), patch.object(daemon_mod, "_kill_pid") as kill:
+            killed = _campaign_super_priority_watchdog(
+                config=SimpleNamespace(
+                    campaign_trigger_progress_watchdog_grace_sec=1,
+                    campaign_trigger_progress_watchdog_interval_sec=1,
+                    campaign_trigger_progress_watchdog_stable_checks=1,
+                    segment_kill_grace_sec=10,
+                ),
+                store=Mock(),
+                running=running,
+                popens={},
+                task=task,
+                key=task.task_key,
+                db_configs_by_root={},
+                state_by_key={},
+                now_ts=10_000.0,
+            )
+
+        self.assertFalse(killed)
+        kill.assert_not_called()
+        self.assertIn(task.task_key, running)
 
     def test_whitelists_are_priority_only_without_explicit_realtime(self) -> None:
         cfg = SimpleNamespace(

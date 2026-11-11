@@ -805,12 +805,24 @@ ordinary trigger/rebuild due rows, campaign weights, priority sizing or the
 published-campaign snapshot. Every configured ID is attempted in round-robin
 order, including an idle campaign with an empty result. Before ordinary
 trigger/rebuild planning, the same IDs are removed from both ordinary rings, so
-the standard process cannot launch them. The direct super dispatch pass runs
-from the complete instance inventory, before the ordinary dispatch projection
-and before ordinary per-root terminal/lifecycle gates; an active segment cycle
-or ordinary fairness/import ordering cannot hide the dedicated campaign
-worker. The realtime whitelist compatibility block and the legacy global
-whitelist kill-switch do not suppress this explicit operator-selected lane.
+the standard process cannot launch them. Each configured instance owns a
+dedicated super worker with its own minute wake-up and ring state. The worker
+consumes the latest MCC snapshot and keeps its timing independent of the
+ordinary planner, dispatch projection, fairness/import ordering and per-root
+terminal gate; a long DB/planning pass for another root therefore cannot turn
+a 60-second tick into a several-minute delay. The first snapshot may start
+immediately; after that the worker schedules the next round at the next minute
+boundary, and a running round continues until its sequential rebuild→trigger
+pair finishes. The realtime whitelist compatibility block and the legacy
+global whitelist kill-switch do not suppress this explicit operator-selected
+lane.
+
+Campaign super-priority watchdogs distinguish a long worker from a blocked one.
+CPU/IO counters that remain unchanged while the process is in ordinary sleep
+are not a kill reason; termination requires stable kernel-level
+uninterruptible (`D`) process state with no independent DB activity. A long
+real Mautic operation therefore remains alive, while an explicitly blocked
+worker can still be terminated and recorded in the existing cycle receipt.
 
 Разделение на priority и regular строится из weight cache, campaign
 whitelist (`campaign_whitelist` и

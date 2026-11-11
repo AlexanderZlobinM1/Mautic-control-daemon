@@ -1,3 +1,11 @@
+## 1.6.65 - 2026-11-11
+
+- Run each configured campaign super-priority ring in its own minute-waking
+  worker, independent of the serialized ordinary planner pass.
+- Make the super-priority watchdog conservative for long sleeping Mautic
+  workers; only a stable uninterruptible process block without DB activity is
+  actionable.
+
 ## 1.6.64 - 2026-11-11
 
 - Drive campaign super-priority from the complete instance inventory instead

@@ -14345,17 +14345,32 @@ def _dispatch_campaign_super_priority_lane(
                     "completed_at": now,
                 },
             )
+            # A round that crossed one or more minute boundaries must not
+            # immediately start another round on completion.  Its next
+            # opportunity is the first minute tick after the actual finish;
+            # short rounds retain the boundary scheduled at round start.
+            next_tick_by_root[root] = max(
+                next_super_tick,
+                (int(now // 60) + 1) * 60,
+            )
+            next_super_tick = float(next_tick_by_root[root])
     if not super_ring and super_running == 0 and now >= next_super_tick:
         round_ids = list(dict.fromkeys(candidates_by_root.get(root, [])))
+        scheduled_tick = next_super_tick if next_super_tick > 0 else None
         super_ring.extend(round_ids)
         round_id = datetime.fromtimestamp(now, tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         cycle_id_by_root[root] = round_id
         next_tick_by_root[root] = (int(now // 60) + 1) * 60
         logging.info(
-            "[%s] campaign super-priority ring cycle started cycle_id=%s ids=%s",
+            "[%s] campaign super-priority ring cycle started cycle_id=%s ids=%s "
+            "scheduled_at=%s tick_lag_sec=%.3f worker=per_instance_minute",
             root,
             round_id,
             ",".join(str(value) for value in round_ids) or "-",
+            datetime.fromtimestamp(scheduled_tick, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            if scheduled_tick is not None
+            else "initial",
+            max(0.0, now - scheduled_tick) if scheduled_tick is not None else 0.0,
         )
         store.put_runtime_sync(
             _campaign_super_priority_cycle_key(root),
@@ -14365,6 +14380,9 @@ def _dispatch_campaign_super_priority_lane(
                 "cycle_id": round_id,
                 "status": "active",
                 "started_at": now,
+                "scheduled_at": scheduled_tick,
+                "tick_lag_sec": max(0.0, now - scheduled_tick) if scheduled_tick is not None else 0.0,
+                "worker": "per_instance_minute",
                 "planned_ids": round_ids,
                 "completed_ids": [],
                 "failed_ids": [],
@@ -14996,6 +15014,8 @@ def _import_process_liveness_signal(pid: int) -> dict[str, object]:
     try:
         stat_raw = Path(f"/proc/{int(pid)}/stat").read_text(encoding="utf-8", errors="replace")
         stat_tail = stat_raw.rsplit(")", 1)[-1].split()
+        if stat_tail:
+            signal["process_state"] = str(stat_tail[0])
         if len(stat_tail) > 12:
             signal["cpu_progress"] = (int(stat_tail[11]), int(stat_tail[12]))
     except (OSError, TypeError, ValueError, IndexError):
@@ -15809,6 +15829,188 @@ class _RecurringSegmentPriorityLoop:
             self.run_once()
 
 
+class _CampaignSuperPriorityWorker:
+    """Drive one instance's campaign super-priority ring independently."""
+
+    def __init__(
+        self,
+        root: str,
+        *,
+        stop_event: threading.Event | None = None,
+        start: bool = True,
+    ) -> None:
+        self.root = str(root or "").strip()
+        self._stop_event = stop_event
+        self._guard = threading.RLock()
+        self._wake = threading.Event()
+        self._snapshot: tuple[
+            AgentConfig,
+            object,
+            TaskStore,
+            dict[str, RunningTask],
+            dict[str, subprocess.Popen[bytes]],
+            bool,
+            tuple[int, ...],
+        ] | None = None
+        self._ring: deque[int] = deque()
+        self._next_tick_by_root: dict[str, float] = {self.root: 0.0}
+        self._cycle_id_by_root: dict[str, str] = {self.root: ""}
+        self._last_snapshot: tuple[int, ...] | None = None
+        self._thread: threading.Thread | None = None
+        if start:
+            self._thread = threading.Thread(
+                target=self._run,
+                name="mcd-campaign-super-" + hashlib.sha1(self.root.encode("utf-8")).hexdigest()[:8],
+                daemon=True,
+            )
+            self._thread.start()
+
+    def update(
+        self,
+        *,
+        config: AgentConfig,
+        inst: object,
+        store: TaskStore,
+        running: dict[str, RunningTask],
+        popens: dict[str, subprocess.Popen[bytes]],
+        enabled: bool,
+    ) -> None:
+        ids = tuple(
+            sorted(
+                int(value)
+                for value in _campaign_super_priority_effective_setting(config, inst)
+                if int(value) > 0
+            )
+        )
+        with self._guard:
+            self._snapshot = (config, inst, store, running, popens, bool(enabled), ids)
+        self._wake.set()
+
+    def disable(
+        self,
+        *,
+        config: AgentConfig,
+        store: TaskStore,
+        running: dict[str, RunningTask],
+        popens: dict[str, subprocess.Popen[bytes]],
+        enabled: bool,
+    ) -> None:
+        with self._guard:
+            if self._snapshot is None:
+                return
+            _old_config, inst, _old_store, _old_running, _old_popens, _old_enabled, _old_ids = self._snapshot
+            self._snapshot = (config, inst, store, running, popens, bool(enabled), ())
+        self._wake.set()
+
+    def run_once(self, *, now_ts: float | None = None) -> int:
+        with self._guard:
+            snapshot = self._snapshot
+        if snapshot is None:
+            return 0
+        config, inst, store, running, popens, enabled, ids = snapshot
+        root = self.root
+        if self._last_snapshot != ids:
+            if ids or self._last_snapshot:
+                logging.info(
+                    "[%s] campaign super-priority snapshot ids=%s cron_allowed=%s",
+                    root,
+                    ",".join(str(value) for value in ids) or "-",
+                    str(bool(enabled)).lower(),
+                )
+            self._last_snapshot = ids
+        if not ids and not self._ring:
+            return 0
+        # A removed setting does not cancel an already admitted current round;
+        # it only prevents a new round after that round reaches its terminal
+        # state.  This preserves the ring's frozen-snapshot contract.
+        candidates = {root: list(ids) if ids else list(self._ring)}
+        with _SCHEDULER_RUNTIME_LOCK:
+            return _dispatch_campaign_super_priority_lane(
+                config=config,
+                store=store,
+                running=running,
+                popens=popens,
+                root=root,
+                super_ring=self._ring,
+                candidates_by_root=candidates,
+                next_tick_by_root=self._next_tick_by_root,
+                cycle_id_by_root=self._cycle_id_by_root,
+                cluster_cron_allowed=enabled,
+                now_ts=float(time.time() if now_ts is None else now_ts),
+            )
+
+    def _run(self) -> None:
+        while self._stop_event is None or not self._stop_event.is_set():
+            try:
+                self.run_once()
+            except Exception as exc:
+                logging.warning("[%s] campaign super-priority worker failed: %s", self.root, exc)
+            if self._stop_event is not None:
+                self._stop_event.wait(timeout=0.25)
+            else:
+                self._wake.wait(timeout=0.25)
+            self._wake.clear()
+
+
+class _CampaignSuperPriorityLoop:
+    """Maintain one independently waking campaign super worker per instance."""
+
+    def __init__(self, *, stop_event: threading.Event | None = None, start: bool = True) -> None:
+        self._stop_event = stop_event
+        self._start = bool(start)
+        self._guard = threading.RLock()
+        self._workers: dict[str, _CampaignSuperPriorityWorker] = {}
+
+    def update(
+        self,
+        *,
+        config: AgentConfig,
+        installs: list[object],
+        store: TaskStore,
+        running: dict[str, RunningTask],
+        popens: dict[str, subprocess.Popen[bytes]],
+        enabled: bool,
+    ) -> None:
+        by_root = {
+            str(getattr(inst, "root", "") or "").strip(): inst
+            for inst in installs
+            if str(getattr(inst, "root", "") or "").strip()
+            and _campaign_super_priority_effective_setting(config, inst)
+        }
+        with self._guard:
+            for root, inst in by_root.items():
+                worker = self._workers.get(root)
+                if worker is None:
+                    worker = _CampaignSuperPriorityWorker(
+                        root,
+                        stop_event=self._stop_event,
+                        start=self._start,
+                    )
+                    self._workers[root] = worker
+                worker.update(
+                    config=config,
+                    inst=inst,
+                    store=store,
+                    running=running,
+                    popens=popens,
+                    enabled=enabled,
+                )
+            for root, worker in self._workers.items():
+                if root not in by_root:
+                    worker.disable(
+                        config=config,
+                        store=store,
+                        running=running,
+                        popens=popens,
+                        enabled=enabled,
+                    )
+
+    def run_once(self, *, now_ts: float | None = None) -> int:
+        with self._guard:
+            workers = list(self._workers.values())
+        return sum(worker.run_once(now_ts=now_ts) for worker in workers)
+
+
 def _is_running(running: dict[str, RunningTask], root: str, task_type: str, entity_id: int | None) -> bool:
     if task_type in {"segment", "segment_sql"} and entity_id is not None:
         if _segment_sql_worker_running(root, int(entity_id)):
@@ -16300,7 +16502,15 @@ def _campaign_super_priority_watchdog(
     state_by_key: dict[str, dict[str, object]],
     now_ts: float,
 ) -> bool:
-    """Kill only an inactive super-priority process, never a merely long one."""
+    """Kill only an explicitly blocked super process, never a merely long one.
+
+    A PHP/Mautic worker can legitimately spend a long time sleeping while it
+    waits on a database or external I/O operation.  Lack of changing CPU/IO
+    counters is therefore not enough to kill it.  The watchdog only takes the
+    destructive path after a stable kernel ``D`` (uninterruptible sleep)
+    observation with no active DB evidence; ordinary sleeping workers keep
+    their lease until their real process exits.
+    """
 
     if task.task_type != "campaign_super_priority" or task.entity_id is None:
         state_by_key.pop(key, None)
@@ -16335,6 +16545,13 @@ def _campaign_super_priority_watchdog(
     elif "last_progress_at" not in state:
         state["last_progress_at"] = float(task.started_at or now_ts)
 
+    # A process in ordinary sleeping state is not proof of a hang.  This is
+    # deliberately conservative: a long real Mautic operation must finish on
+    # its own, while a kernel-level uninterruptible block is actionable.
+    if str(evidence.get("process_state") or "").upper() != "D" or bool(evidence.get("db_active")):
+        state.pop("stall_observed_at", None)
+        return False
+
     grace_sec = max(30, int(getattr(config, "campaign_trigger_progress_watchdog_grace_sec", 180) or 180))
     interval_sec = max(10, int(getattr(config, "campaign_trigger_progress_watchdog_interval_sec", 60) or 60))
     stable_checks = max(1, int(getattr(config, "campaign_trigger_progress_watchdog_stable_checks", 3) or 3))
@@ -16345,6 +16562,12 @@ def _campaign_super_priority_watchdog(
     observed_at = state.get("stall_observed_at")
     if observed_at is None:
         state["stall_observed_at"] = float(now_ts)
+        logging.warning(
+            "[%s] campaign_super_priority id=%s has stable uninterruptible process state; "
+            "starting watchdog recheck",
+            task.root,
+            task.entity_id,
+        )
         return False
     if now_ts - float(observed_at) <= max(10, min(30, interval_sec)):
         return False
@@ -16380,6 +16603,7 @@ def _monitor_running(
     db_configs_by_root: dict[str, object] | None = None,
     mautic_timezones_by_root: dict[str, str | None] | None = None,
     campaign_progress_watchdog: dict[str, dict[str, object]] | None = None,
+    campaign_super_priority_watchdog: dict[str, dict[str, object]] | None = None,
     import_progress_watchdog: dict[str, dict[str, object]] | None = None,
     segment_progress_watchdog: dict[str, dict[str, object]] | None = None,
     segment_terminal_callback: Callable[[RunningTask, bool, str | None], None] | None = None,
@@ -16391,6 +16615,7 @@ def _monitor_running(
     db_configs = db_configs_by_root or {}
     tz_by_root = mautic_timezones_by_root or {}
     progress_watchdog = campaign_progress_watchdog if campaign_progress_watchdog is not None else {}
+    super_watchdog = campaign_super_priority_watchdog if campaign_super_priority_watchdog is not None else {}
     import_watchdog = import_progress_watchdog if import_progress_watchdog is not None else {}
     segment_watchdog = segment_progress_watchdog if segment_progress_watchdog is not None else {}
 
@@ -16641,6 +16866,7 @@ def _monitor_running(
             evidence={**evidence, "pid_alive": bool(pid_alive)},
         )
         progress_watchdog.pop(key, None)
+        super_watchdog.pop(key, None)
         if task.task_type == "segment":
             _mark_segment_finished(task.root, task.entity_id, now_ts=now)
         running.pop(key, None)
@@ -16681,6 +16907,7 @@ def _monitor_running(
                         )
                         _mark_segment_finished(task.root, task.entity_id, now_ts=now)
                         segment_watchdog.pop(key, None)
+                        super_watchdog.pop(key, None)
                         running.pop(key, None)
                         popens.pop(key, None)
                         continue
@@ -16754,6 +16981,7 @@ def _monitor_running(
                     now_ts=now,
                 )
                 progress_watchdog.pop(key, None)
+                super_watchdog.pop(key, None)
                 import_watchdog.pop(key, None)
                 if rc == 0 and task.task_type == "segment":
                     _mark_segment_finished(task.root, task.entity_id, now_ts=now)
@@ -16868,6 +17096,7 @@ def _monitor_running(
                 now_ts=now,
             )
             progress_watchdog.pop(key, None)
+            super_watchdog.pop(key, None)
             import_watchdog.pop(key, None)
             running.pop(key, None)
             popens.pop(key, None)
@@ -16900,7 +17129,7 @@ def _monitor_running(
             task=task,
             key=key,
             db_configs_by_root=db_configs,
-            state_by_key=segment_watchdog,
+            state_by_key=super_watchdog,
             now_ts=now,
         ):
             continue
@@ -16938,6 +17167,12 @@ def _monitor_running(
         if _plugin_operation_runtime_digest_from_task(task):
             timeout_threshold = None
 
+        # Super-priority has its own evidence-based watchdog.  It must not be
+        # killed by the generic worker/command timeout while a legitimate
+        # long-running Mautic operation is still active.
+        if task.task_type == "campaign_super_priority":
+            timeout_threshold = None
+
         if alive and (timeout_threshold is None or elapsed <= timeout_threshold):
             _segment_runtime_marker_write(store, task, status="running", now_ts=now)
             continue
@@ -16963,6 +17198,7 @@ def _monitor_running(
                     note="killed_by_timeout",
                 )
             progress_watchdog.pop(key, None)
+            super_watchdog.pop(key, None)
             import_watchdog.pop(key, None)
             running.pop(key, None)
             popens.pop(key, None)
@@ -17036,6 +17272,7 @@ def _monitor_running(
                 now_ts=now,
             )
             progress_watchdog.pop(key, None)
+            super_watchdog.pop(key, None)
             if task.task_type == "import":
                 _mark_import_settle(config, task.root, now, elapsed_sec=now - float(task.started_at))
             running.pop(key, None)
@@ -17705,6 +17942,7 @@ def run_loop(
     db_configs_by_root: dict[str, object] = {}
     mautic_timezones_by_root: dict[str, str | None] = {}
     campaign_progress_watchdog: dict[str, dict[str, object]] = {}
+    campaign_super_priority_watchdog: dict[str, dict[str, object]] = {}
     import_progress_watchdog: dict[str, dict[str, object]] = {}
     segment_progress_watchdog: dict[str, dict[str, object]] = {}
 
@@ -17874,11 +18112,6 @@ def run_loop(
     campaign_trigger_reg_rings: dict[str, deque[int]] = {}
     campaign_rebuild_prio_rings: dict[str, deque[int]] = {}
     campaign_rebuild_reg_rings: dict[str, deque[int]] = {}
-    campaign_super_rings: dict[str, deque[int]] = {}
-    campaign_super_candidates: dict[str, list[int]] = {}
-    campaign_super_snapshot_logged: dict[str, tuple[int, ...]] = {}
-    campaign_super_next_tick: dict[str, float] = {}
-    campaign_super_cycle_id: dict[str, str] = {}
     segment_prio_sets: dict[str, set[int]] = {}
     segment_reg_sets: dict[str, set[int]] = {}
     campaign_trigger_prio_sets: dict[str, set[int]] = {}
@@ -18041,6 +18274,7 @@ def run_loop(
                 db_configs_by_root=db_configs_by_root,
                 mautic_timezones_by_root=mautic_timezones_by_root,
                 campaign_progress_watchdog=campaign_progress_watchdog,
+                campaign_super_priority_watchdog=campaign_super_priority_watchdog,
                 import_progress_watchdog=import_progress_watchdog,
                 segment_progress_watchdog=segment_progress_watchdog,
                 segment_terminal_callback=_segment_terminal_callback,
@@ -18070,6 +18304,7 @@ def run_loop(
                 db_configs_by_root=db_configs_by_root,
                 mautic_timezones_by_root=mautic_timezones_by_root,
                 campaign_progress_watchdog=campaign_progress_watchdog,
+                campaign_super_priority_watchdog=campaign_super_priority_watchdog,
                 import_progress_watchdog=import_progress_watchdog,
                 segment_progress_watchdog=segment_progress_watchdog,
                 segment_terminal_callback=_segment_terminal_callback,
@@ -19460,6 +19695,20 @@ def run_loop(
         _scheduler_clear_refill_priority_notifier(_note_refill_priority)
 
     recurring_segment_priority_loop = _RecurringSegmentPriorityLoop(priority_executor)
+    campaign_super_priority_loop = _CampaignSuperPriorityLoop(
+        stop_event=_test_stop_event,
+        start=not single_cycle,
+    )
+    campaign_super_priority_loop.update(
+        config=config,
+        installs=list(installs),
+        store=store,
+        running=running,
+        popens=popens,
+        enabled=cluster_route_allows(config, "cron"),
+    )
+    if single_cycle:
+        campaign_super_priority_loop.run_once()
     priority_trigger_last_checked: dict[str, float] = {}
     priority_trigger_checked_rebuild: dict[str, float] = {}
     priority_campaign_due_ids: dict[str, list[int]] = {}
@@ -20472,6 +20721,17 @@ def run_loop(
         ).start()
 
     while _test_stop_event is None or not _test_stop_event.is_set():
+        # Refresh only the worker snapshots here; each configured instance's
+        # dedicated thread keeps ticking while this ordinary loop is busy in
+        # planning, imports or another root's database work.
+        campaign_super_priority_loop.update(
+            config=config,
+            installs=list(installs),
+            store=store,
+            running=running,
+            popens=popens,
+            enabled=cluster_route_allows(config, "cron"),
+        )
         current_commercial_mode, current_commercial_reason = _commercial_state_eligibility(config)
         if current_commercial_mode != commercial_profile_seen:
             commercial_profile_seen = current_commercial_mode
@@ -21859,16 +22119,6 @@ def run_loop(
                 segment_whitelist_for_inst = segment_priority_for_inst
                 campaign_whitelist_for_inst = _campaign_whitelist_effective_setting(config, inst)
                 campaign_super_priority_for_inst = _campaign_super_priority_effective_setting(config, inst)
-                # Super-priority is a direct MCC-configured ring. It is not
-                # discovered by ordinary due SQL and never enters the
-                # ordinary weight/priority planner. Keep its configured
-                # snapshot available even when ordinary campaign SQL is
-                # empty or delayed.
-                campaign_super_candidates[root] = sorted(
-                    int(value)
-                    for value in campaign_super_priority_for_inst
-                    if int(value) > 0
-                )
                 db = MauticDB(inst.db)
                 sql_ctx = campaign_sql_time_context(now_utc, inst.mautic_timezone, inst.mautic_major)
                 import_pending_cutoff_utc = _ensure_import_pending_cutoff_utc(
@@ -23532,43 +23782,6 @@ def run_loop(
             running=running,
             enabled=cluster_cron_allowed,
         )
-
-        # Super-priority is independent of the ordinary scheduler entirely.
-        # Use the inventory snapshot, not the ordinary dispatch projection:
-        # the latter may be reordered or reduced by import/fairness/terminal
-        # handling and must never decide whether a dedicated per-instance
-        # super worker gets its minute-ticked ring.
-        for super_inst in installs:
-            super_root = str(getattr(super_inst, "root", "") or "").strip()
-            if not super_root:
-                continue
-            campaign_super_candidates[super_root] = sorted(
-                int(value)
-                for value in _campaign_super_priority_effective_setting(config, super_inst)
-                if int(value) > 0
-            )
-            snapshot = tuple(campaign_super_candidates[super_root])
-            if campaign_super_snapshot_logged.get(super_root) != snapshot:
-                logging.info(
-                    "[%s] campaign super-priority snapshot ids=%s cron_allowed=%s",
-                    super_root,
-                    ",".join(str(value) for value in snapshot) or "-",
-                    str(bool(cluster_cron_allowed)).lower(),
-                )
-                campaign_super_snapshot_logged[super_root] = snapshot
-            _dispatch_campaign_super_priority_lane(
-                config=config,
-                store=store,
-                running=running,
-                popens=popens,
-                root=super_root,
-                super_ring=campaign_super_rings.setdefault(super_root, deque()),
-                candidates_by_root=campaign_super_candidates,
-                next_tick_by_root=campaign_super_next_tick,
-                cycle_id_by_root=campaign_super_cycle_id,
-                cluster_cron_allowed=cluster_cron_allowed,
-                now_ts=now,
-            )
 
         for inst in _iter_instances_with_root_dispatch_gate(
             dispatch_installs,
