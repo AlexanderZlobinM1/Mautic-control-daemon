@@ -484,6 +484,26 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             },
         )
 
+    def test_instance_ack_preserves_nested_plugin_operation_payload(self) -> None:
+        uid = "frusketerme.sales-snap.com@MauticFarm-01"
+        operation = "oraclehospitalitybundle:6-7:ohip_sync"
+        value = {operation: {"enabled": True, "interval_sec": 3600}}
+        cfg = SimpleNamespace(
+            profile_name="farm-midi",
+            plugin_operation_instance_settings={uid: value},
+        )
+        observed = runtime_key_observation(
+            cfg,
+            {"plugin_operation_instance_settings": value},
+            revision=126,
+            source="mcc",
+            scope_key=uid,
+        )
+        row = observed["keys"]["plugin_operation_instance_settings"]
+        self.assertEqual(row["status"], "unchanged")
+        self.assertEqual(row["desired"], value)
+        self.assertEqual(row["effective"], value)
+
     def test_instance_lazy_policy_roundtrips_through_desired_merge_and_ack(self) -> None:
         uid = "instance-c@host-a"
         merged = merge_instance_desired_states(
