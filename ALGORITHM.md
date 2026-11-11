@@ -806,10 +806,11 @@ published-campaign snapshot. Every configured ID is attempted in round-robin
 order, including an idle campaign with an empty result. Before ordinary
 trigger/rebuild planning, the same IDs are removed from both ordinary rings, so
 the standard process cannot launch them. The direct super dispatch pass runs
-before ordinary per-root terminal/lifecycle gates; an active segment cycle
-cannot hide the dedicated campaign worker. The realtime whitelist compatibility
-block and the legacy global whitelist kill-switch do not suppress this
-explicit operator-selected lane.
+from the complete instance inventory, before the ordinary dispatch projection
+and before ordinary per-root terminal/lifecycle gates; an active segment cycle
+or ordinary fairness/import ordering cannot hide the dedicated campaign
+worker. The realtime whitelist compatibility block and the legacy global
+whitelist kill-switch do not suppress this explicit operator-selected lane.
 
 Разделение на priority и regular строится из weight cache, campaign
 whitelist (`campaign_whitelist` и
