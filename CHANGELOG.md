@@ -1,3 +1,8 @@
+## 1.6.57 - 2026-11-11
+
+- Reissue the campaign super-priority ring release under a new immutable
+  version so hosts cannot reuse the stale `1.6.56` runtime artifact.
+
 ## 1.6.50 - 2026-11-04
 
 - Allow the detached runtime bridge to update an already runtime-only host
