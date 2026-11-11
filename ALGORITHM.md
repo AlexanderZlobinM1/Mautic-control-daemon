@@ -315,9 +315,11 @@ ordinary snapshot. Обе статические линии имеют собс�
 четырёх super-instance общий regular budget остаётся `8+3`, а не уменьшается до
 `8+3−4`. Super-ring может работать на каждом minute tick независимо от
 обычной очереди; `slots_override` меняет только его собственный per-instance
-лимит. Dependency closure, overlap, exact-task lock, durable claim и duplicate
-защиты сохраняются и для dedicated lane. Обычная `priority`-работа остаётся в
-shared regular accounting.
+лимит. Super-процесс не вычитает и не добавляет regular/priority capacity, не
+участвует ни в их host/instance budget, ни в reservation/accounting; его
+запущенные процессы не учитываются в обычных counters. Dependency closure,
+overlap, exact-task lock, durable claim и duplicate-защиты сохраняются и для
+dedicated lane. Обычная `priority`-работа остаётся в shared regular accounting.
 
 `super-priority` проверяется чаще `priority`; частота не меняет precedence и
 не убивает running job. Если ordinary worker свободен, независимая работа
@@ -781,7 +783,8 @@ worker не вычитает и не добавляет regular/priority capacit
 круг закончился раньше следующего tick, worker ждёт следующей минуты. Если
 круг не закончен, следующий tick его не сбрасывает и не создаёт дубликат:
 текущий cursor продолжает работу до конца. После финала следующего круга
-список пересобирается из MCC-настроек и текущих campaign IDs.
+список пересобирается только из актуальной MCC-настройки; ordinary campaign
+IDs и их DB-состояние не участвуют в выборе super-кольца.
 
 Super-priority предназначен для коротких near-real-time кампаний. Долгая
 кампания, добавленная оператором ошибочно, блокирует только super-ring своего
@@ -796,12 +799,14 @@ MCC UI обязан предоставлять отдельную campaign-пл�
 на instance должна подтверждать minute tick и запуск даже при пустом результате
 Mautic-команды; это не считается отсутствием попытки.
 
-Configured campaign super-priority IDs are admitted from the current published
-campaign snapshot independently of the ordinary trigger/rebuild due queries.
-This keeps an idle but published campaign in the minute ring; the realtime
-whitelist compatibility block is not required and does not replace the
-dedicated super worker. Unpublished or stale operator IDs are logged and are
-not launched. The legacy global whitelist kill-switch does not suppress this
+Configured campaign super-priority IDs are copied directly from the MCC
+per-instance setting into the dedicated minute ring. The ring does not query
+ordinary trigger/rebuild due rows, campaign weights, priority sizing or the
+published-campaign snapshot. Every configured ID is attempted in round-robin
+order, including an idle campaign with an empty result. Before ordinary
+trigger/rebuild planning, the same IDs are removed from both ordinary rings, so
+the standard process cannot launch them. The realtime whitelist compatibility
+block and the legacy global whitelist kill-switch do not suppress this
 explicit operator-selected lane.
 
 Разделение на priority и regular строится из weight cache, campaign

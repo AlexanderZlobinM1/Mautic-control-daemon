@@ -10092,27 +10092,20 @@ def _split_campaign_circles(
     return priority, regular
 
 
-def _split_campaign_circles_with_super_priority(
-    ids: list[int],
-    weights: dict[int, float],
-    whitelist: set[int],
+def _exclude_campaign_super_priority_ids(
+    ids: list[int] | None,
     super_priority: set[int],
-    priority_size: int,
-    latest_priority_ids: list[int],
-) -> tuple[list[int], list[int], list[int]]:
-    """Partition campaign IDs into mutually exclusive super/priority/regular lanes."""
+) -> list[int] | None:
+    """Keep configured super-priority campaigns out of ordinary rings."""
 
-    ordered_ids = list(dict.fromkeys(int(value) for value in ids if int(value) > 0))
-    super_ids = [value for value in ordered_ids if value in super_priority]
-    ordinary_ids = [value for value in ordered_ids if value not in set(super_ids)]
-    priority, regular = _split_campaign_circles(
-        ordinary_ids,
-        weights,
-        whitelist - set(super_ids),
-        priority_size,
-        [value for value in latest_priority_ids if value not in set(super_ids)],
-    )
-    return super_ids, priority, regular
+    if ids is None:
+        return None
+    excluded = {int(value) for value in super_priority if int(value) > 0}
+    return [
+        int(value)
+        for value in dict.fromkeys(ids)
+        if int(value) > 0 and int(value) not in excluded
+    ]
 
 
 def _reconcile_campaign_rings(
@@ -10165,32 +10158,6 @@ def _merge_campaign_trigger_audit_ids(due_ids: list[int], audit_ids: list[int]) 
     scheduler tick.
     """
     return list(dict.fromkeys(list(due_ids or []) + list(audit_ids or [])))
-
-
-def _merge_campaign_super_priority_ids(
-    trigger_ids: list[int],
-    rebuild_ids: list[int],
-    published_ids: list[int],
-    configured_ids: set[int],
-) -> tuple[list[int], list[int], list[int]]:
-    """Admit configured super campaigns independently of ordinary due SQL.
-
-    Super-priority is its own minute-ticked ring. It must not depend on the
-    ordinary due planner or on the campaign whitelist realtime compatibility
-    block; otherwise an idle campaign disappears from the ring and no empty
-    attempt is observed. The published snapshot remains the eligibility
-    guard, so stale or unpublished operator IDs are never launched.
-    """
-
-    published = list(dict.fromkeys(int(value) for value in published_ids if int(value) > 0))
-    configured = {int(value) for value in configured_ids if int(value) > 0}
-    eligible = [value for value in published if value in configured]
-    missing = sorted(configured - set(eligible))
-    return (
-        _merge_campaign_trigger_audit_ids(trigger_ids, eligible),
-        _merge_campaign_trigger_audit_ids(rebuild_ids, eligible),
-        missing,
-    )
 
 
 def _needs_weight_recalc(ids: list[int], cached: dict[int, float]) -> bool:
@@ -14337,6 +14304,87 @@ def _campaign_super_priority_args(config: AgentConfig, root: str, campaign_id: i
         'if [ "$trigger_rc" -ne 0 ]; then exit 101; fi; exit 0'
     )
     return ["/bin/sh", "-c", script]
+
+
+def _dispatch_campaign_super_priority_lane(
+    *,
+    config: AgentConfig,
+    store: TaskStore,
+    running: dict[str, RunningTask],
+    popens: dict[str, subprocess.Popen[bytes]],
+    root: str,
+    super_ring: deque[int],
+    candidates_by_root: Mapping[str, list[int]],
+    next_tick_by_root: dict[str, float],
+    cycle_id_by_root: dict[str, str],
+    cluster_cron_allowed: bool,
+    now_ts: float,
+) -> int:
+    """Run the direct per-instance super-priority ring.
+
+    This path deliberately does not read ordinary campaign SQL or calculate
+    weights. It only advances the MCC-configured snapshot one campaign at a
+    time. The common submit boundary still enforces duplicate/update/host
+    safety fences, while dedicated super work is outside ordinary capacity.
+    """
+
+    if not cluster_cron_allowed or not candidates_by_root.get(root):
+        return 0
+
+    now = float(now_ts)
+    super_running = _running_count(running, root, "campaign_super_priority")
+    next_super_tick = float(next_tick_by_root.get(root, 0.0) or 0.0)
+    if not super_ring and super_running == 0 and cycle_id_by_root.get(root):
+        cycle_payload = store.get_runtime_sync(_campaign_super_priority_cycle_key(root)) or {}
+        if isinstance(cycle_payload, Mapping) and cycle_payload.get("status") == "active":
+            store.put_runtime_sync(
+                _campaign_super_priority_cycle_key(root),
+                {
+                    **dict(cycle_payload),
+                    "status": "completed",
+                    "completed_at": now,
+                },
+            )
+    if not super_ring and super_running == 0 and now >= next_super_tick:
+        round_ids = list(dict.fromkeys(candidates_by_root.get(root, [])))
+        super_ring.extend(round_ids)
+        round_id = datetime.fromtimestamp(now, tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        cycle_id_by_root[root] = round_id
+        next_tick_by_root[root] = (int(now // 60) + 1) * 60
+        store.put_runtime_sync(
+            _campaign_super_priority_cycle_key(root),
+            {
+                "schema": "mcd-campaign-super-priority-cycle-v1",
+                "root": root,
+                "cycle_id": round_id,
+                "status": "active",
+                "started_at": now,
+                "planned_ids": round_ids,
+                "completed_ids": [],
+                "failed_ids": [],
+                "watchdog_killed_ids": [],
+            },
+        )
+    if not super_ring or super_running != 0:
+        return 0
+
+    return _fill_from_ring(
+        ring=super_ring,
+        ring_limit=1,
+        total_limit=1,
+        root=root,
+        task_type="campaign_super_priority",
+        running=running,
+        ring_entities=set(super_ring),
+        config=config,
+        store=store,
+        popens=popens,
+        build_args=lambda cid: _campaign_super_priority_args(config, root, int(cid)),
+        remove_on_launch=True,
+        max_launches=1,
+        bypass_baseline_admission=True,
+        timeout_sec=0,
+    )
 
 
 def _campaign_super_priority_cycle_key(root: str) -> str:
@@ -19447,6 +19495,7 @@ def run_loop(
                     continue
                 segment_realtime = _segment_whitelist_realtime_setting(cfg, inst)
                 campaign_realtime = _campaign_whitelist_realtime_setting(cfg, inst)
+                campaign_super_priority_ids = _campaign_super_priority_effective_setting(cfg, inst)
                 due_scan_now = time.time()
                 due_scan_interval = max(
                     5,
@@ -19478,7 +19527,10 @@ def run_loop(
                             priority_campaign_due_error_at[root] = due_scan_now
                             logging.warning("[%s] due campaign priority scan failed: %s", root, exc)
                     priority_campaign_due_scanned_at[root] = due_scan_now
-                pending_due_ids = list(priority_campaign_due_ids.get(root, []))
+                pending_due_ids = _exclude_campaign_super_priority_ids(
+                    list(priority_campaign_due_ids.get(root, [])),
+                    campaign_super_priority_ids,
+                ) or []
                 if pending_due_ids:
                     launched_due_ids = set(
                         _dispatch_due_campaign_triggers(
@@ -19516,7 +19568,12 @@ def run_loop(
                     and fallback_now - fallback_last >= fallback_interval
                 )
                 fallback_block_reason = ""
-                if fallback_due and _running_campaign_total(running, root) > 0:
+                if fallback_due and campaign_super_priority_ids:
+                    # The native fallback has no campaign-ID exclusion
+                    # primitive. Do not let its all-campaign command launch a
+                    # campaign owned by the dedicated super ring.
+                    fallback_block_reason = "campaign_super_priority_dedicated_lane"
+                elif fallback_due and _running_campaign_total(running, root) > 0:
                     fallback_block_reason = "campaign_worker_active"
                 elif fallback_due and priority_executor.has_active_campaign_work(root):
                     fallback_block_reason = "priority_campaign_active"
@@ -20170,6 +20227,8 @@ def run_loop(
 
                 for campaign_id in sorted(_priority_realtime_campaign_rebuild_ids(campaign_realtime)):
                     campaign_id = int(campaign_id)
+                    if campaign_id in campaign_super_priority_ids:
+                        continue
                     priority_executor.launch(
                         cfg,
                         root=root,
@@ -20304,6 +20363,7 @@ def run_loop(
                 root = str(getattr(inst, "root", "") or "").strip()
                 if not root:
                     continue
+                campaign_super_priority_ids = _campaign_super_priority_effective_setting(cfg, inst)
                 last_scan = float(campaign_rebuild_liveness_scanned_at.get(root, 0.0) or 0.0)
                 if scan_now - last_scan < scan_interval:
                     continue
@@ -20352,7 +20412,10 @@ def run_loop(
                         logging.warning("[%s] campaign rebuild liveness scan failed: %s", root, exc)
                     continue
 
-                planned_ids = list(dict.fromkeys(int(value) for value in (due_ids or []) if int(value) > 0))
+                planned_ids = _exclude_campaign_super_priority_ids(
+                    list(dict.fromkeys(int(value) for value in (due_ids or []) if int(value) > 0)),
+                    campaign_super_priority_ids,
+                ) or []
                 launched_ids = _dispatch_due_campaign_rebuilds(
                     config=cfg,
                     root=root,
@@ -21789,6 +21852,16 @@ def run_loop(
                 segment_whitelist_for_inst = segment_priority_for_inst
                 campaign_whitelist_for_inst = _campaign_whitelist_effective_setting(config, inst)
                 campaign_super_priority_for_inst = _campaign_super_priority_effective_setting(config, inst)
+                # Super-priority is a direct MCC-configured ring. It is not
+                # discovered by ordinary due SQL and never enters the
+                # ordinary weight/priority planner. Keep its configured
+                # snapshot available even when ordinary campaign SQL is
+                # empty or delayed.
+                campaign_super_candidates[root] = sorted(
+                    int(value)
+                    for value in campaign_super_priority_for_inst
+                    if int(value) > 0
+                )
                 db = MauticDB(inst.db)
                 sql_ctx = campaign_sql_time_context(now_utc, inst.mautic_timezone, inst.mautic_major)
                 import_pending_cutoff_utc = _ensure_import_pending_cutoff_utc(
@@ -21982,31 +22055,21 @@ def run_loop(
                     campaign_trigger_due_ids = []
                     campaign_rebuild_ids = []
 
-                if cluster_cron_allowed and campaign_super_priority_for_inst:
-                    try:
-                        published_campaign_ids = db.fetch_ids(
-                            _SQL_CAMPAIGNS_ALL_PUBLISHED,
-                            limit=5000,
-                            context=sql_ctx,
-                        )
-                        (
-                            campaign_trigger_ids,
-                            campaign_rebuild_ids,
-                            missing_super_ids,
-                        ) = _merge_campaign_super_priority_ids(
-                            campaign_trigger_ids or [],
-                            campaign_rebuild_ids or [],
-                            published_campaign_ids,
-                            campaign_super_priority_for_inst,
-                        )
-                        if missing_super_ids:
-                            logging.warning(
-                                "[%s] campaign super-priority ids are not published: %s",
-                                root,
-                                ",".join(str(value) for value in missing_super_ids),
-                            )
-                    except Exception as e:
-                        logging.warning("[%s] campaign super-priority admission failed: %s", root, e)
+                # A super-priority ID is owned only by its dedicated ring.
+                # Remove it from ordinary trigger/rebuild planning before
+                # weights, priority sizing and due promotion are calculated.
+                campaign_trigger_ids = _exclude_campaign_super_priority_ids(
+                    campaign_trigger_ids,
+                    campaign_super_priority_for_inst,
+                )
+                campaign_rebuild_ids = _exclude_campaign_super_priority_ids(
+                    campaign_rebuild_ids,
+                    campaign_super_priority_for_inst,
+                )
+                campaign_trigger_due_ids = _exclude_campaign_super_priority_ids(
+                    campaign_trigger_due_ids,
+                    campaign_super_priority_for_inst,
+                ) or []
 
                 if campaign_trigger_ids is not None:
                     trigger_plan_started_at = campaign_trigger_plan_started_at_by_root.setdefault(root, {})
@@ -22561,11 +22624,10 @@ def run_loop(
                     if campaign_weight_query_failed:
                         logging.info("[%s] campaign latest-priority fallback to id order", root)
 
-                    trg_super, trg_prio, trg_reg = _split_campaign_circles_with_super_priority(
+                    trg_prio, trg_reg = _split_campaign_circles(
                         campaign_trigger_ids,
                         camp_w,
                         campaign_whitelist_for_inst,
-                        campaign_super_priority_for_inst,
                         config.campaign_priority_size,
                         latest_priority_ids,
                     )
@@ -22574,25 +22636,18 @@ def run_loop(
                         trg_reg,
                         campaign_trigger_due_ids,
                     )
-                    reb_super, reb_prio, reb_reg = _split_campaign_circles_with_super_priority(
+                    reb_prio, reb_reg = _split_campaign_circles(
                         campaign_rebuild_ids,
                         camp_w,
                         campaign_whitelist_for_inst,
-                        campaign_super_priority_for_inst,
                         config.campaign_priority_size,
                         latest_priority_ids,
                     )
-                    super_ids = list(dict.fromkeys([*trg_super, *reb_super]))
-                    campaign_super_candidates[root] = super_ids
                     if config.ring_mode == "single":
                         trg_prio, trg_reg = [], list(dict.fromkeys(campaign_trigger_ids))
                         reb_prio, reb_reg = [], list(dict.fromkeys(campaign_rebuild_ids))
-                        trg_prio = [cid for cid in trg_prio if cid not in set(super_ids)]
-                        trg_reg = [cid for cid in trg_reg if cid not in set(super_ids)]
-                        reb_prio = [cid for cid in reb_prio if cid not in set(super_ids)]
-                        reb_reg = [cid for cid in reb_reg if cid not in set(super_ids)]
-                    normal_trigger_ids = [cid for cid in campaign_trigger_ids if cid not in set(super_ids)]
-                    normal_rebuild_ids = [cid for cid in campaign_rebuild_ids if cid not in set(super_ids)]
+                    normal_trigger_ids = list(campaign_trigger_ids)
+                    normal_rebuild_ids = list(campaign_rebuild_ids)
                     if not _partition_complete(normal_trigger_ids, trg_prio, trg_reg):
                         logging.warning("[%s] invalid campaign trigger partition, forcing single ring", root)
                         trg_prio, trg_reg = [], sorted(list(dict.fromkeys(normal_trigger_ids)))
@@ -23324,8 +23379,6 @@ def run_loop(
                 or bool(campaign_trigger_reg_rings.get(root))
                 or bool(campaign_rebuild_prio_rings.get(root))
                 or bool(campaign_rebuild_reg_rings.get(root))
-                or bool(campaign_super_candidates.get(root))
-                or bool(campaign_super_rings.get(root))
             )
         }
         # A durable static-priority lane is also a shared-slot priority
@@ -24875,64 +24928,21 @@ def run_loop(
                                 max_launches=spill,
                             )
 
-            _publish_monitor_cycle()
+            _dispatch_campaign_super_priority_lane(
+                config=config,
+                store=store,
+                running=running,
+                popens=popens,
+                root=root,
+                super_ring=super_ring,
+                candidates_by_root=campaign_super_candidates,
+                next_tick_by_root=campaign_super_next_tick,
+                cycle_id_by_root=campaign_super_cycle_id,
+                cluster_cron_allowed=cluster_cron_allowed,
+                now_ts=now,
+            )
 
-            # Super-priority campaigns have one independent per-instance
-            # worker/ring.  A round is admitted only on a minute tick; once
-            # admitted, its snapshot continues to completion even across
-            # later ticks.  The next round gets a fresh candidate snapshot.
-            if cluster_cron_allowed and campaign_super_candidates.get(root):
-                super_running = _running_count(running, root, "campaign_super_priority")
-                next_super_tick = float(campaign_super_next_tick.get(root, 0.0) or 0.0)
-                if not super_ring and super_running == 0 and campaign_super_cycle_id.get(root):
-                    cycle_payload = store.get_runtime_sync(_campaign_super_priority_cycle_key(root)) or {}
-                    if isinstance(cycle_payload, Mapping) and cycle_payload.get("status") == "active":
-                        store.put_runtime_sync(
-                            _campaign_super_priority_cycle_key(root),
-                            {
-                                **dict(cycle_payload),
-                                "status": "completed",
-                                "completed_at": float(now),
-                            },
-                        )
-                if not super_ring and super_running == 0 and now >= next_super_tick:
-                    round_ids = list(dict.fromkeys(campaign_super_candidates.get(root, [])))
-                    super_ring.extend(round_ids)
-                    round_id = datetime.fromtimestamp(now, tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-                    campaign_super_cycle_id[root] = round_id
-                    campaign_super_next_tick[root] = (int(now // 60) + 1) * 60
-                    store.put_runtime_sync(
-                        _campaign_super_priority_cycle_key(root),
-                        {
-                            "schema": "mcd-campaign-super-priority-cycle-v1",
-                            "root": root,
-                            "cycle_id": round_id,
-                            "status": "active",
-                            "started_at": float(now),
-                            "planned_ids": round_ids,
-                            "completed_ids": [],
-                            "failed_ids": [],
-                            "watchdog_killed_ids": [],
-                        },
-                    )
-                if super_ring and super_running == 0:
-                    _fill_from_ring(
-                        ring=super_ring,
-                        ring_limit=1,
-                        total_limit=1,
-                        root=root,
-                        task_type="campaign_super_priority",
-                        running=running,
-                        ring_entities=set(super_ring),
-                        config=config,
-                        store=store,
-                        popens=popens,
-                        build_args=lambda cid: _campaign_super_priority_args(config, root, int(cid)),
-                        remove_on_launch=True,
-                        max_launches=1,
-                        bypass_baseline_admission=True,
-                        timeout_sec=0,
-                    )
+            _publish_monitor_cycle()
 
             # `mautic:campaigns:update` is treated as synonym of
             # `mautic:campaigns:rebuild` and is not scheduled separately.
