@@ -801,7 +801,8 @@ campaign snapshot independently of the ordinary trigger/rebuild due queries.
 This keeps an idle but published campaign in the minute ring; the realtime
 whitelist compatibility block is not required and does not replace the
 dedicated super worker. Unpublished or stale operator IDs are logged and are
-not launched.
+not launched. The legacy global whitelist kill-switch does not suppress this
+explicit operator-selected lane.
 
 Разделение на priority и regular строится из weight cache, campaign
 whitelist (`campaign_whitelist` и

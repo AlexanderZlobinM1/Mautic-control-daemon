@@ -6979,8 +6979,8 @@ def _campaign_whitelist_effective_setting(config: AgentConfig, inst: object) -> 
 def _campaign_super_priority_effective_setting(config: AgentConfig, inst: object) -> set[int]:
     """Resolve the independent per-instance campaign super-priority list."""
 
-    if bool(getattr(config, "disable_whitelist", False)):
-        return set()
+    # Super-priority is a dedicated operator-selected lane, not a whitelist
+    # ordering feature. The global whitelist kill-switch must not suppress it.
     global_ids = set(getattr(config, "campaign_super_priority", []) or [])
     found, raw = _instance_scoped_whitelist_entry(
         getattr(config, "campaign_super_priority_instance_settings", {}),
