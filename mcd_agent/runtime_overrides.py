@@ -56,6 +56,7 @@ _INSTANCE_RUNTIME_KEYS = {
     "segment_special_rings_v1",
     "segment_recurring_priority_v1",
     "campaign_whitelist_instance_settings",
+    "campaign_super_priority_instance_settings",
     "page_hits_orphan_cleanup_instance_settings",
     "plugin_operation_instance_settings",
     "message_queue_instance_settings",

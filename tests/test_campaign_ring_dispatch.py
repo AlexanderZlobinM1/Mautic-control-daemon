@@ -35,6 +35,9 @@ from mcd_agent.daemon import (
     _campaign_native_fallback_last_run_after_completion,
     _campaign_whitelist_realtime_setting,
     _campaign_whitelist_effective_setting,
+    _campaign_super_priority_effective_setting,
+    _campaign_super_priority_args,
+    _split_campaign_circles_with_super_priority,
     _campaign_rebuild_waits_for_trigger,
     _campaign_spill_prefers_priority,
     _campaign_trigger_email_progress_sql,
@@ -1850,6 +1853,48 @@ class CampaignRingDispatchTests(unittest.TestCase):
 
         self.assertEqual(_campaign_whitelist_effective_setting(cfg, electronic), {29})
         self.assertEqual(_campaign_whitelist_effective_setting(cfg, other), {99})
+
+    def test_campaign_super_priority_is_independent_and_instance_scoped(self) -> None:
+        cfg = SimpleNamespace(
+            disable_whitelist=False,
+            campaign_super_priority=[73],
+            campaign_super_priority_instance_settings={"electronic@host": {"campaign_super_priority": [81]}},
+        )
+        electronic = SimpleNamespace(instance_uid="electronic@host", primary_domain="electronic.example", name="electronic.example", domains=[])
+        other = SimpleNamespace(instance_uid="other@host", primary_domain="other.example", name="other.example", domains=[])
+
+        self.assertEqual(_campaign_super_priority_effective_setting(cfg, electronic), {81})
+        self.assertEqual(_campaign_super_priority_effective_setting(cfg, other), {73})
+
+    def test_campaign_super_priority_is_excluded_from_priority_and_regular(self) -> None:
+        super_ids, priority, regular = _split_campaign_circles_with_super_priority(
+            [73, 74, 75],
+            weights={73: 1.0, 74: 3.0, 75: 2.0},
+            whitelist={74},
+            super_priority={73},
+            priority_size=1,
+            latest_priority_ids=[],
+        )
+
+        self.assertEqual(super_ids, [73])
+        self.assertEqual(priority, [74])
+        self.assertEqual(regular, [75])
+
+    def test_campaign_super_priority_runs_rebuild_before_trigger(self) -> None:
+        cfg = SimpleNamespace(
+            php_bin="php",
+            mautic_run_as_user="www-data",
+            cmd_campaign_rebuild_template="mautic:campaigns:update -i {id}",
+            cmd_campaign_trigger_template="mautic:campaigns:trigger -i {id}",
+            campaign_limit=0,
+            campaign_batch_limit=0,
+        )
+        with patch("mcd_agent.executor._resolve_console_path", return_value="/var/www/electronic/public_html/bin/console"):
+            args = _campaign_super_priority_args(cfg, "/var/www/electronic/public_html", 73)
+        script = args[-1]
+        self.assertIn("mautic:campaigns:update", script)
+        self.assertIn("rebuild_rc", script)
+        self.assertLess(script.index("mautic:campaigns:update"), script.index("mautic:campaigns:trigger"))
 
     def test_whitelists_are_priority_only_without_explicit_realtime(self) -> None:
         cfg = SimpleNamespace(
