@@ -3001,7 +3001,9 @@ _CAMPAIGN_EMAIL_COUNTER_RECONCILE_DEFER_LOG_SEC = 15 * 60
 _CAMPAIGN_TRIGGER_STALE_SCAN_CAP = 8
 _PRIORITY_DISPATCH_REGULAR_CHUNK = 8
 _TASK_LOCK_BUSY_RC = 75
-_CAMPAIGN_EXACT_TASK_TYPES = frozenset({"campaign_update", "campaign_rebuild", "campaign_trigger"})
+_CAMPAIGN_EXACT_TASK_TYPES = frozenset(
+    {"campaign_update", "campaign_rebuild", "campaign_trigger", "campaign_super_priority"}
+)
 _STATIC_SEGMENT_TASK_TYPES = frozenset({"segment_priority", "segment_super_priority"})
 _SEGMENT_RUNTIME_TASK_TYPES = frozenset({"segment", "segment_sql", "import", *_STATIC_SEGMENT_TASK_TYPES})
 _SCHEDULER_RECONCILIATION_RECEIPT_KEY = "scheduler_reconciliation_last_receipt"
@@ -3326,6 +3328,7 @@ _SEGMENT_WHITELIST_STABLE_RUNTIME_KEYS = {
     "segment_priority_instance_settings",
     "segment_super_priority_instance_settings",
     "campaign_whitelist_instance_settings",
+    "campaign_super_priority_instance_settings",
     "segment_recurring_priority_v1",
 }
 _EMPTY_LEADS_CLEANUP_STABLE_RUNTIME_KEYS = {
@@ -6973,6 +6976,36 @@ def _campaign_whitelist_effective_setting(config: AgentConfig, inst: object) -> 
     return set(_to_int_list(raw))
 
 
+def _campaign_super_priority_effective_setting(config: AgentConfig, inst: object) -> set[int]:
+    """Resolve the independent per-instance campaign super-priority list."""
+
+    if bool(getattr(config, "disable_whitelist", False)):
+        return set()
+    global_ids = set(getattr(config, "campaign_super_priority", []) or [])
+    found, raw = _instance_scoped_whitelist_entry(
+        getattr(config, "campaign_super_priority_instance_settings", {}),
+        inst,
+    )
+    if not found:
+        return global_ids
+    if isinstance(raw, dict):
+        if "enabled" in raw and not _to_boolish(raw.get("enabled"), True):
+            return set()
+        if _to_boolish(raw.get("disable_whitelist"), False):
+            return set()
+        return set(
+            _to_int_list(
+                raw.get(
+                    "campaign_super_priority",
+                    raw.get("campaigns", raw.get("ids", raw.get("super_priority", []))),
+                )
+            )
+        )
+    if isinstance(raw, bool):
+        return global_ids if raw else set()
+    return set(_to_int_list(raw))
+
+
 def _campaign_whitelist_realtime_setting(
     config: AgentConfig,
     inst: object,
@@ -7948,13 +7981,15 @@ def _segment_sql_worker_total_count() -> int:
 
 
 _SCHEDULER_SEGMENT_TASK_TYPES = frozenset({"segment", "segment_sql", "import", *_STATIC_SEGMENT_TASK_TYPES})
-_SCHEDULER_CAMPAIGN_TASK_TYPES = frozenset({"campaign_update", "campaign_trigger", "campaign_rebuild"})
-_SCHEDULER_SUPER_PRIORITY_TASK_TYPES = frozenset({"segment_super_priority"})
+_SCHEDULER_CAMPAIGN_TASK_TYPES = frozenset(
+    {"campaign_update", "campaign_trigger", "campaign_rebuild", "campaign_super_priority"}
+)
+_SCHEDULER_SUPER_PRIORITY_TASK_TYPES = frozenset({"segment_super_priority", "campaign_super_priority"})
 _SCHEDULER_PRIORITY_SEGMENT_TASK_TYPES = frozenset(
     {"segment", "segment_priority", "segment_super_priority", "segment_recurring_priority"}
 )
 _SCHEDULER_PRIORITY_CAMPAIGN_TASK_TYPES = frozenset(
-    {"campaign_update", "campaign_rebuild", "campaign_trigger", "campaign_native_fallback"}
+    {"campaign_update", "campaign_rebuild", "campaign_trigger", "campaign_super_priority", "campaign_native_fallback"}
 )
 _SCHEDULER_SEGMENT_RR_CAMPAIGN_EXEMPT_TASK_TYPES = _SCHEDULER_PRIORITY_CAMPAIGN_TASK_TYPES
 _SCHEDULER_PRIORITY_WORK_TASK_TYPES = (
@@ -7968,7 +8003,7 @@ _SCHEDULER_SHARED_WORK_TASK_TYPES = frozenset(
 _SCHEDULER_BASELINE_SEGMENT_TASK_TYPES = frozenset(
     _SCHEDULER_SEGMENT_TASK_TYPES - _SCHEDULER_SUPER_PRIORITY_TASK_TYPES
 )
-_SCHEDULER_BASELINE_CAMPAIGN_TASK_TYPES = _SCHEDULER_CAMPAIGN_TASK_TYPES
+_SCHEDULER_BASELINE_CAMPAIGN_TASK_TYPES = _SCHEDULER_CAMPAIGN_TASK_TYPES - _SCHEDULER_SUPER_PRIORITY_TASK_TYPES
 _SCHEDULER_BACKGROUND_TASK_TYPES = frozenset({"segment", "segment_sql"})
 _SCHEDULER_RESERVED_SAFETY_TASK_TYPES = frozenset({"job:plugin_operation_safety"})
 _SCHEDULER_PRIORITY_PENDING_ROOTS: frozenset[str] = frozenset()
@@ -8514,7 +8549,7 @@ def _scheduler_capacity_key(root: str, task_type: str, entity_id: object) -> str
         "segment_recurring_priority",
     }:
         kind = "segment"
-    elif normalized in {"campaign_update", "campaign_rebuild", "campaign_trigger"}:
+    elif normalized in {"campaign_update", "campaign_rebuild", "campaign_trigger", "campaign_super_priority"}:
         kind = "campaign"
     elif normalized == "campaign_native_fallback":
         kind = "campaign_native_fallback"
@@ -10057,6 +10092,29 @@ def _split_campaign_circles(
     return priority, regular
 
 
+def _split_campaign_circles_with_super_priority(
+    ids: list[int],
+    weights: dict[int, float],
+    whitelist: set[int],
+    super_priority: set[int],
+    priority_size: int,
+    latest_priority_ids: list[int],
+) -> tuple[list[int], list[int], list[int]]:
+    """Partition campaign IDs into mutually exclusive super/priority/regular lanes."""
+
+    ordered_ids = list(dict.fromkeys(int(value) for value in ids if int(value) > 0))
+    super_ids = [value for value in ordered_ids if value in super_priority]
+    ordinary_ids = [value for value in ordered_ids if value not in set(super_ids)]
+    priority, regular = _split_campaign_circles(
+        ordinary_ids,
+        weights,
+        whitelist - set(super_ids),
+        priority_size,
+        [value for value in latest_priority_ids if value not in set(super_ids)],
+    )
+    return super_ids, priority, regular
+
+
 def _reconcile_campaign_rings(
     old_priority: deque[int] | None,
     old_regular: deque[int] | None,
@@ -11035,6 +11093,7 @@ def _fill_from_ring(
     admission_running=None,
     bypass_baseline_admission: bool = False,
     max_launches: int = 1,
+    timeout_sec: int | None = None,
 ) -> int:
     if task_type == "segment" and admission_claim is None:
         context = _SEGMENT_ADMISSION_CONTEXT.get(str(root), {})
@@ -11332,7 +11391,7 @@ def _fill_from_ring(
             task_type=task_type,
             entity_id=eid,
             args=args,
-            timeout_sec=config.command_timeout_sec,
+            timeout_sec=config.command_timeout_sec if timeout_sec is None else int(timeout_sec),
             max_parallel_for_type=max(1, total_limit),
             popens=popens,
             bypass_repeat_guard=bypass_repeat_guard,
@@ -13976,12 +14035,17 @@ class _PriorityTaskExecutor:
                 campaign_capacity = (
                     _campaign_priority_capacity(config)
                     if task_type in _CAMPAIGN_EXACT_TASK_TYPES
+                    and task_type not in _SCHEDULER_SUPER_PRIORITY_TASK_TYPES
                     else None
                 )
                 active_campaign_total = sum(
                     1
                     for active_root, active_type, _active_lane in self._active.values()
-                    if active_root == root and active_type in _CAMPAIGN_EXACT_TASK_TYPES
+                    if (
+                        active_root == root
+                        and active_type in _CAMPAIGN_EXACT_TASK_TYPES
+                        and active_type not in _SCHEDULER_SUPER_PRIORITY_TASK_TYPES
+                    )
                 )
                 host_slots = None
                 instance_slots = None
@@ -14019,8 +14083,16 @@ class _PriorityTaskExecutor:
                         campaign_capacity is None
                         or active_campaign_total < campaign_capacity
                     )
-                    and (host_slots is None or host_slots > 0)
-                    and (instance_slots is None or instance_slots > 0)
+                    and (
+                        task_type in _SCHEDULER_SUPER_PRIORITY_TASK_TYPES
+                        or host_slots is None
+                        or host_slots > 0
+                    )
+                    and (
+                        task_type in _SCHEDULER_SUPER_PRIORITY_TASK_TYPES
+                        or instance_slots is None
+                        or instance_slots > 0
+                    )
                 )
                 if admitted:
                     self._active[key] = (root, task_type, lane)
@@ -14213,6 +14285,86 @@ def _campaign_native_fallback_args(config: AgentConfig, root: str) -> list[str]:
     return ["/bin/sh", "-c", script]
 
 
+def _campaign_super_priority_args(config: AgentConfig, root: str, campaign_id: int) -> list[str]:
+    """Build the atomic super-priority campaign rebuild -> trigger operation."""
+
+    rebuild = render_mautic_command(
+        php_bin=config.php_bin,
+        run_as_user=config.mautic_run_as_user,
+        root=root,
+        template=config.cmd_campaign_rebuild_template,
+        id=campaign_id,
+    )
+    trigger = render_mautic_command(
+        php_bin=config.php_bin,
+        run_as_user=config.mautic_run_as_user,
+        root=root,
+        template=config.cmd_campaign_trigger_template,
+        id=campaign_id,
+        campaign_limit=config.campaign_limit,
+        batch_limit=config.campaign_batch_limit,
+    )
+    script = (
+        f"{shlex.join(rebuild)}; rebuild_rc=$?; "
+        'if [ "$rebuild_rc" -ne 0 ]; then exit 100; fi; '
+        f"{shlex.join(trigger)}; trigger_rc=$?; "
+        'if [ "$trigger_rc" -ne 0 ]; then exit 101; fi; exit 0'
+    )
+    return ["/bin/sh", "-c", script]
+
+
+def _campaign_super_priority_cycle_key(root: str) -> str:
+    return f"campaign_super_priority_cycle:{hashlib.sha1(str(root).encode('utf-8')).hexdigest()[:24]}"
+
+
+def _campaign_super_priority_cycle_update(
+    store: object,
+    root: str,
+    campaign_id: int,
+    *,
+    outcome: str,
+    note: str = "",
+) -> None:
+    """Persist per-round outcomes for MCC receipts and operator diagnostics."""
+
+    try:
+        current = store.get_runtime_sync(_campaign_super_priority_cycle_key(root)) or {}
+        if not isinstance(current, Mapping):
+            return
+        payload = dict(current)
+        field = {
+            "success": "completed_ids",
+            "failure": "failed_ids",
+            "watchdog": "watchdog_killed_ids",
+        }.get(str(outcome), "failed_ids")
+        ids = _normalize_segment_ids(payload.get(field))
+        if int(campaign_id) not in ids:
+            ids.append(int(campaign_id))
+        payload[field] = ids
+        watchdog_streaks = dict(payload.get("watchdog_streaks") or {}) if isinstance(payload.get("watchdog_streaks"), Mapping) else {}
+        campaign_key = str(int(campaign_id))
+        if outcome == "watchdog":
+            watchdog_streaks[campaign_key] = int(watchdog_streaks.get(campaign_key, 0) or 0) + 1
+        elif outcome == "success":
+            watchdog_streaks[campaign_key] = 0
+        payload["watchdog_streaks"] = watchdog_streaks
+        if outcome == "failure" or int(watchdog_streaks.get(campaign_key, 0) or 0) >= 3:
+            payload.setdefault("alert_required", []).append(
+                {
+                    "campaign_id": int(campaign_id),
+                    "reason": "explicit_error" if outcome == "failure" else "watchdog_three_consecutive",
+                    "at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        if note:
+            notes = dict(payload.get("notes") or {}) if isinstance(payload.get("notes"), Mapping) else {}
+            notes[str(int(campaign_id))] = str(note)[:500]
+            payload["notes"] = notes
+        store.put_runtime_sync(_campaign_super_priority_cycle_key(root), payload)
+    except Exception:
+        logging.debug("[%s] super-priority cycle receipt update failed", root, exc_info=True)
+
+
 def _priority_campaign_due_check_needed(
     *,
     now_ts: float,
@@ -14356,6 +14508,8 @@ def _task_repeat_interval_sec(config: AgentConfig, task_type: str) -> int:
         # that pass, relaunching the same ID every daemon tick creates a
         # no-op storm. Keep retries aligned with the audit/planner cadence.
         return max(min_repeat, audit_interval)
+    if task_type == "campaign_super_priority":
+        return 60
     if task_type in {"campaign_rebuild", "campaign_update"}:
         return max(0, int(getattr(config, "campaign_rebuild_min_repeat_sec", 0)))
     return 0
@@ -15755,6 +15909,7 @@ def _submit_if_slot_uncoordinated(
         and not _scheduler_baseline_launch_due(str(baseline_lane))
     ):
         return False
+    dedicated_super = str(task_type or "").strip().lower() in _SCHEDULER_SUPER_PRIORITY_TASK_TYPES
     host_slots = _scheduler_host_slots_available(
         config,
         running,
@@ -15762,9 +15917,9 @@ def _submit_if_slot_uncoordinated(
         root=root,
         store=store,
     )
-    if not manual_override and host_slots is not None and host_slots <= 0:
+    if not manual_override and not dedicated_super and host_slots is not None and host_slots <= 0:
         return False
-    if not manual_override:
+    if not manual_override and not dedicated_super:
         instance_slots = _scheduler_instance_slots_available(
             config,
             running,
@@ -16049,6 +16204,89 @@ def _campaign_trigger_progress_watchdog(
         snapshot.max_email_sent_at or "-",
         stable_checks,
         reason or "-",
+    )
+    return True
+
+
+def _campaign_super_priority_watchdog(
+    *,
+    config: AgentConfig,
+    store: TaskStore,
+    running: dict[str, RunningTask],
+    popens: dict[str, subprocess.Popen[bytes]],
+    task: RunningTask,
+    key: str,
+    db_configs_by_root: dict[str, object],
+    state_by_key: dict[str, dict[str, object]],
+    now_ts: float,
+) -> bool:
+    """Kill only an inactive super-priority process, never a merely long one."""
+
+    if task.task_type != "campaign_super_priority" or task.entity_id is None:
+        state_by_key.pop(key, None)
+        return False
+    evidence = _external_segment_process_liveness_signal(task.pid)
+    db_cfg = db_configs_by_root.get(str(task.root))
+    if db_cfg is not None:
+        try:
+            active_rows = []
+            for row in MauticDB(db_cfg).fetch_processlist(limit=200):
+                info = str(row.get("Info") or row.get("info") or "").lower()
+                if any(token in info for token in ("campaign", "lead_event_log", "campaigns")):
+                    active_rows.append(info[:500])
+            if active_rows:
+                evidence["db_active"] = True
+                evidence["db_query_progress"] = tuple(sorted(active_rows))
+        except Exception:
+            pass
+    state = state_by_key.setdefault(key, {})
+    progress_fields = {
+        field: evidence.get(field)
+        for field in ("db_query_progress", "cpu_progress", "io_progress")
+        if field in evidence
+    }
+    fingerprint = repr(sorted(progress_fields.items(), key=lambda item: item[0]))
+    changed = bool(progress_fields) and fingerprint != state.get("progress_fingerprint")
+    if progress_fields:
+        state["progress_fingerprint"] = fingerprint
+    if changed or bool(evidence.get("db_active")):
+        state["last_progress_at"] = float(now_ts)
+        state.pop("stall_observed_at", None)
+    elif "last_progress_at" not in state:
+        state["last_progress_at"] = float(task.started_at or now_ts)
+
+    grace_sec = max(30, int(getattr(config, "campaign_trigger_progress_watchdog_grace_sec", 180) or 180))
+    interval_sec = max(10, int(getattr(config, "campaign_trigger_progress_watchdog_interval_sec", 60) or 60))
+    stable_checks = max(1, int(getattr(config, "campaign_trigger_progress_watchdog_stable_checks", 3) or 3))
+    stall_timeout = max(grace_sec, grace_sec + interval_sec * stable_checks)
+    last_progress_at = float(state.get("last_progress_at") or task.started_at or now_ts)
+    if now_ts - last_progress_at <= stall_timeout:
+        return False
+    observed_at = state.get("stall_observed_at")
+    if observed_at is None:
+        state["stall_observed_at"] = float(now_ts)
+        return False
+    if now_ts - float(observed_at) <= max(10, min(30, interval_sec)):
+        return False
+    _kill_pid(task.pid, int(getattr(config, "segment_kill_grace_sec", 10) or 10))
+    note = "killed_by_campaign_super_priority_watchdog"
+    _segment_runtime_marker_write(store, task, status="terminal", now_ts=now_ts, note=note)
+    store.finish(task.row_id, state="timeout", rc=None, note=note)
+    _campaign_super_priority_cycle_update(
+        store,
+        task.root,
+        int(task.entity_id),
+        outcome="watchdog",
+        note=note,
+    )
+    state_by_key.pop(key, None)
+    running.pop(key, None)
+    popens.pop(key, None)
+    logging.warning(
+        "[%s] campaign_super_priority id=%s killed after %.1fs without independent progress",
+        task.root,
+        task.entity_id,
+        max(0.0, now_ts - last_progress_at),
     )
     return True
 
@@ -16461,6 +16699,14 @@ def _monitor_running(
                             reason="trigger-exit",
                             force=True,
                         )
+                if task.task_type == "campaign_super_priority" and task.entity_id is not None:
+                    _campaign_super_priority_cycle_update(
+                        store,
+                        task.root,
+                        int(task.entity_id),
+                        outcome="success" if rc == 0 else "failure",
+                        note="" if rc == 0 else (f"exit_{rc}" if rc is not None else "spawn_or_exit"),
+                    )
                 if rc == 0 and task.task_type == "import":
                     _mark_import_settle(config, task.root, now, elapsed_sec=now - float(task.started_at))
                 bootstrap_digest = _plugin_operation_bootstrap_digest_from_task(task)
@@ -16566,6 +16812,19 @@ def _monitor_running(
             )
             continue
 
+        if alive and _campaign_super_priority_watchdog(
+            config=config,
+            store=store,
+            running=running,
+            popens=popens,
+            task=task,
+            key=key,
+            db_configs_by_root=db_configs,
+            state_by_key=segment_watchdog,
+            now_ts=now,
+        ):
+            continue
+
         if alive and _campaign_trigger_progress_watchdog(
             config=config,
             store=store,
@@ -16615,6 +16874,14 @@ def _monitor_running(
             _kill_pid(task.pid, config.segment_kill_grace_sec)
             _segment_runtime_marker_write(store, task, status="terminal", now_ts=now, note="killed_by_timeout")
             store.finish(task.row_id, state="timeout", rc=None, note="killed_by_timeout")
+            if task.task_type == "campaign_super_priority" and task.entity_id is not None:
+                _campaign_super_priority_cycle_update(
+                    store,
+                    task.root,
+                    int(task.entity_id),
+                    outcome="watchdog",
+                    note="killed_by_timeout",
+                )
             progress_watchdog.pop(key, None)
             import_watchdog.pop(key, None)
             running.pop(key, None)
@@ -17527,6 +17794,10 @@ def run_loop(
     campaign_trigger_reg_rings: dict[str, deque[int]] = {}
     campaign_rebuild_prio_rings: dict[str, deque[int]] = {}
     campaign_rebuild_reg_rings: dict[str, deque[int]] = {}
+    campaign_super_rings: dict[str, deque[int]] = {}
+    campaign_super_candidates: dict[str, list[int]] = {}
+    campaign_super_next_tick: dict[str, float] = {}
+    campaign_super_cycle_id: dict[str, str] = {}
     segment_prio_sets: dict[str, set[int]] = {}
     segment_reg_sets: dict[str, set[int]] = {}
     campaign_trigger_prio_sets: dict[str, set[int]] = {}
@@ -20743,6 +21014,7 @@ def run_loop(
                 lane_keys = {
                     "segment_priority_instance_settings",
                     "segment_super_priority_instance_settings",
+                    "campaign_super_priority_instance_settings",
                 }
                 accepted_lanes = {
                     key: deepcopy(value)
@@ -22209,6 +22481,7 @@ def run_loop(
                     campaign_trigger_ids = list(dict.fromkeys(campaign_trigger_ids))
                     campaign_rebuild_ids = list(dict.fromkeys(campaign_rebuild_ids))
                     campaign_all_ids = list(dict.fromkeys(campaign_trigger_ids + campaign_rebuild_ids))
+                    campaign_super_priority_for_inst = _campaign_super_priority_effective_setting(config, inst)
                     camp_w = store.get_weights("campaign", root, config.weights_recalc_interval_sec)
                     campaign_weight_rows: list[dict[str, object]] = []
                     campaign_weight_query_failed = False
@@ -22236,10 +22509,11 @@ def run_loop(
                     if campaign_weight_query_failed:
                         logging.info("[%s] campaign latest-priority fallback to id order", root)
 
-                    trg_prio, trg_reg = _split_campaign_circles(
+                    trg_super, trg_prio, trg_reg = _split_campaign_circles_with_super_priority(
                         campaign_trigger_ids,
                         camp_w,
                         campaign_whitelist_for_inst,
+                        campaign_super_priority_for_inst,
                         config.campaign_priority_size,
                         latest_priority_ids,
                     )
@@ -22248,22 +22522,31 @@ def run_loop(
                         trg_reg,
                         campaign_trigger_due_ids,
                     )
-                    reb_prio, reb_reg = _split_campaign_circles(
+                    reb_super, reb_prio, reb_reg = _split_campaign_circles_with_super_priority(
                         campaign_rebuild_ids,
                         camp_w,
                         campaign_whitelist_for_inst,
+                        campaign_super_priority_for_inst,
                         config.campaign_priority_size,
                         latest_priority_ids,
                     )
+                    super_ids = list(dict.fromkeys([*trg_super, *reb_super]))
+                    campaign_super_candidates[root] = super_ids
                     if config.ring_mode == "single":
                         trg_prio, trg_reg = [], list(dict.fromkeys(campaign_trigger_ids))
                         reb_prio, reb_reg = [], list(dict.fromkeys(campaign_rebuild_ids))
-                    if not _partition_complete(campaign_trigger_ids, trg_prio, trg_reg):
+                        trg_prio = [cid for cid in trg_prio if cid not in set(super_ids)]
+                        trg_reg = [cid for cid in trg_reg if cid not in set(super_ids)]
+                        reb_prio = [cid for cid in reb_prio if cid not in set(super_ids)]
+                        reb_reg = [cid for cid in reb_reg if cid not in set(super_ids)]
+                    normal_trigger_ids = [cid for cid in campaign_trigger_ids if cid not in set(super_ids)]
+                    normal_rebuild_ids = [cid for cid in campaign_rebuild_ids if cid not in set(super_ids)]
+                    if not _partition_complete(normal_trigger_ids, trg_prio, trg_reg):
                         logging.warning("[%s] invalid campaign trigger partition, forcing single ring", root)
-                        trg_prio, trg_reg = [], sorted(list(dict.fromkeys(campaign_trigger_ids)))
-                    if not _partition_complete(campaign_rebuild_ids, reb_prio, reb_reg):
+                        trg_prio, trg_reg = [], sorted(list(dict.fromkeys(normal_trigger_ids)))
+                    if not _partition_complete(normal_rebuild_ids, reb_prio, reb_reg):
                         logging.warning("[%s] invalid campaign rebuild partition, forcing single ring", root)
-                        reb_prio, reb_reg = [], sorted(list(dict.fromkeys(campaign_rebuild_ids)))
+                        reb_prio, reb_reg = [], sorted(list(dict.fromkeys(normal_rebuild_ids)))
                     (
                         campaign_trigger_prio_rings[root],
                         campaign_trigger_reg_rings[root],
@@ -22989,6 +23272,8 @@ def run_loop(
                 or bool(campaign_trigger_reg_rings.get(root))
                 or bool(campaign_rebuild_prio_rings.get(root))
                 or bool(campaign_rebuild_reg_rings.get(root))
+                or bool(campaign_super_candidates.get(root))
+                or bool(campaign_super_rings.get(root))
             )
         }
         # A durable static-priority lane is also a shared-slot priority
@@ -23178,6 +23463,7 @@ def run_loop(
             trg_reg_ring = campaign_trigger_reg_rings.setdefault(root, deque())
             reb_prio_ring = campaign_rebuild_prio_rings.setdefault(root, deque())
             reb_reg_ring = campaign_rebuild_reg_rings.setdefault(root, deque())
+            super_ring = campaign_super_rings.setdefault(root, deque())
             seg_prio_set = segment_prio_sets.setdefault(root, set())
             seg_reg_set = segment_reg_sets.setdefault(root, set())
             trg_prio_set = campaign_trigger_prio_sets.setdefault(root, set())
@@ -24538,6 +24824,63 @@ def run_loop(
                             )
 
             _publish_monitor_cycle()
+
+            # Super-priority campaigns have one independent per-instance
+            # worker/ring.  A round is admitted only on a minute tick; once
+            # admitted, its snapshot continues to completion even across
+            # later ticks.  The next round gets a fresh candidate snapshot.
+            if cluster_cron_allowed and campaign_super_candidates.get(root):
+                super_running = _running_count(running, root, "campaign_super_priority")
+                next_super_tick = float(campaign_super_next_tick.get(root, 0.0) or 0.0)
+                if not super_ring and super_running == 0 and campaign_super_cycle_id.get(root):
+                    cycle_payload = store.get_runtime_sync(_campaign_super_priority_cycle_key(root)) or {}
+                    if isinstance(cycle_payload, Mapping) and cycle_payload.get("status") == "active":
+                        store.put_runtime_sync(
+                            _campaign_super_priority_cycle_key(root),
+                            {
+                                **dict(cycle_payload),
+                                "status": "completed",
+                                "completed_at": float(now),
+                            },
+                        )
+                if not super_ring and super_running == 0 and now >= next_super_tick:
+                    round_ids = list(dict.fromkeys(campaign_super_candidates.get(root, [])))
+                    super_ring.extend(round_ids)
+                    round_id = datetime.fromtimestamp(now, tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                    campaign_super_cycle_id[root] = round_id
+                    campaign_super_next_tick[root] = (int(now // 60) + 1) * 60
+                    store.put_runtime_sync(
+                        _campaign_super_priority_cycle_key(root),
+                        {
+                            "schema": "mcd-campaign-super-priority-cycle-v1",
+                            "root": root,
+                            "cycle_id": round_id,
+                            "status": "active",
+                            "started_at": float(now),
+                            "planned_ids": round_ids,
+                            "completed_ids": [],
+                            "failed_ids": [],
+                            "watchdog_killed_ids": [],
+                        },
+                    )
+                if super_ring and super_running == 0:
+                    _fill_from_ring(
+                        ring=super_ring,
+                        ring_limit=1,
+                        total_limit=1,
+                        root=root,
+                        task_type="campaign_super_priority",
+                        running=running,
+                        ring_entities=set(super_ring),
+                        config=config,
+                        store=store,
+                        popens=popens,
+                        build_args=lambda cid: _campaign_super_priority_args(config, root, int(cid)),
+                        remove_on_launch=True,
+                        max_launches=1,
+                        bypass_baseline_admission=True,
+                        timeout_sec=0,
+                    )
 
             # `mautic:campaigns:update` is treated as synonym of
             # `mautic:campaigns:rebuild` and is not scheduled separately.
