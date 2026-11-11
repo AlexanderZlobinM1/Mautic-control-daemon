@@ -775,6 +775,12 @@ segment priority и от `campaign_whitelist`. Для каждого instance с
 worker не вычитает и не добавляет regular/priority capacity и не участвует в
 их host/instance budget. Super-ring не зависит от колец других instances.
 
+Обычный DB-pressure circuit-breaker приостанавливает тяжёлые regular/priority
+dispatch, но не пропускает dedicated super-worker: super-priority уже вынесен
+за этот бюджет и получает отдельную попытку в своём instance-ring. Глобальные
+фенсы обновления, backup и scheduler admission остаются обязательными; поэтому
+обходится только DB-pressure пауза, а не общий запрет на запуск или lock.
+
 Каждый минутный tick, если предыдущий круг завершён, фиксирует новый snapshot
 списка и запускает его по round-robin. Внутри snapshot каждая campaign
 последовательно выполняет `campaign_rebuild`, затем `campaign_trigger`. Если

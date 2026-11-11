@@ -37,6 +37,7 @@ from mcd_agent.daemon import (
     _campaign_whitelist_effective_setting,
     _campaign_super_priority_effective_setting,
     _campaign_super_priority_args,
+    _dispatch_campaign_super_priority_lane,
     _merge_campaign_super_priority_ids,
     _split_campaign_circles_with_super_priority,
     _campaign_rebuild_waits_for_trigger,
@@ -1935,6 +1936,38 @@ class CampaignRingDispatchTests(unittest.TestCase):
         self.assertIn("mautic:campaigns:update", script)
         self.assertIn("rebuild_rc", script)
         self.assertLess(script.index("mautic:campaigns:update"), script.index("mautic:campaigns:trigger"))
+
+    def test_campaign_super_priority_dispatches_during_db_pause(self) -> None:
+        root = "/var/www/electronic/public_html"
+        ring = deque()
+        candidates = {root: [78]}
+        next_tick: dict[str, float] = {}
+        cycle_ids: dict[str, str] = {}
+        store = Mock()
+        config = SimpleNamespace()
+
+        with patch.object(daemon_mod, "_fill_from_ring", return_value=1) as fill:
+            launched = _dispatch_campaign_super_priority_lane(
+                config=config,
+                store=store,
+                running={},
+                popens={},
+                root=root,
+                super_ring=ring,
+                candidates_by_root=candidates,
+                next_tick_by_root=next_tick,
+                cycle_id_by_root=cycle_ids,
+                cluster_cron_allowed=True,
+                now_ts=120.0,
+            )
+
+        self.assertEqual(launched, 1)
+        self.assertEqual(list(ring), [78])
+        fill.assert_called_once()
+        self.assertEqual(fill.call_args.kwargs["task_type"], "campaign_super_priority")
+        self.assertEqual(fill.call_args.kwargs["total_limit"], 1)
+        self.assertEqual(next_tick[root], 180.0)
+        self.assertEqual(store.put_runtime_sync.call_count, 1)
 
     def test_whitelists_are_priority_only_without_explicit_realtime(self) -> None:
         cfg = SimpleNamespace(
