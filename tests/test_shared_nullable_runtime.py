@@ -23,3 +23,15 @@ def test_remote_empty_socket_preserves_working_local_socket(tmp_path):
     cfg=config.load_config(str(path),allow_recover_from_mcc=False)
     result,_,_,_=config.apply_runtime_overrides(cfg,{"state_mysql_unix_socket":None})
     assert result.state_mysql_unix_socket=="/run/mysqld/working.sock"
+
+def test_operator_runtime_value_overrides_selected_profile_preset(tmp_path):
+    path=tmp_path/"mcd.toml"
+    path.write_text('[profile]\nname="midi"\n[runtime]\n')
+    cfg=config.load_config(str(path),allow_recover_from_mcc=False)
+    profile_value=cfg.scheduler_host_max_parallel
+    result,applied,unsupported,blocked=config.apply_runtime_overrides(
+        cfg,{"scheduler_host_max_parallel":profile_value+1}
+    )
+    assert result.scheduler_host_max_parallel==profile_value+1
+    assert applied==["scheduler_host_max_parallel"]
+    assert not unsupported and not blocked

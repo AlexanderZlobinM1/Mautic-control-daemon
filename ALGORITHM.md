@@ -974,12 +974,21 @@ terminal monitor evidence и admission count остаются разными п�
 ### Runtime override ACK truthfulness
 
 Runtime ACK — это наблюдение по каждому ключу, а не эхо запрошенного payload.
-Каждый ключ сообщает `status` (`applied`, `profile_locked`, `rejected` или
-`unchanged`), `desired`, `effective`, `source`, `revision` и явную причину.
+Каждый ключ сообщает `status` (`applied`, `rejected` или `unchanged`),
+`desired`, `effective`, `source`, `revision` и явную причину.
 ACK содержит только запрошенные keys; `effective_runtime` присутствует
 только как per-key readback с теми же keys и не является whole-host snapshot,
 поэтому размер остаётся в пределах лимита MCC. Пустой instance desired state
 получает `unverified` ACK без runtime dump.
+Профиль оборудования задаёт исходные значения и рекомендацию, но не является
+жёстким запретом. Если оператор или MCC явно выбрали другое значение,
+MCD применяет именно его. Если после применения фактическое значение ещё
+отличается, ACK честно остаётся `rejected` и показывает обе величины; MCD не
+подменяет результат словом «profile locked».
+Для обмена MCD использует имя хоста из канонической записи MCC, а не случайное
+локальное имя машины. Если во время записи MCC сообщает о конфликте, MCD
+сначала перечитывает актуальные настройки MCC, оставляет только более новое
+локальное изменение и повторяет запись уже от нового состояния.
 Для host ACK MCD берёт запрошенные значения из canonical
 `desired_state.runtime_overrides`, если этот envelope присутствует в ответе
 MCC; top-level `runtime_overrides` не является заменой desired map, потому что

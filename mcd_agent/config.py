@@ -2569,52 +2569,14 @@ _RUNTIME_REMOTE_BLOCKED_KEYS: set[str] = {
     "mautic_run_as_user",
 }
 
-
-_PROFILE_LOCKED_RUNTIME_KEYS = {
-    "command_timeout_sec",
-    "worker_watchdog_sec",
-    "ring_mode",
-    "disable_throttle",
-    "disable_whitelist",
-    "enable_import_polling",
-    "import_stall_timeout_sec",
-    "enable_campaign_rebuild",
-    "segment_priority_weight_threshold",
-    "segment_priority_size",
-    "campaign_priority_size",
-    "campaign_latest_priority_count",
-    "segment_priority_parallel_idle",
-    "segment_regular_parallel_idle",
-    "segment_priority_parallel_throttled",
-    "segment_regular_parallel_throttled",
-    "segment_throttle_whitelist_only",
-    "segment_throttle_whitelist_parallel",
-    "segment_throttle_kill_non_whitelist",
-    "queue_throttle_threshold",
-    "queue_throttle_window_min",
-    "campaign_total_parallel",
-    "campaign_update_priority_parallel",
-    "campaign_update_regular_parallel",
-    "campaign_trigger_priority_parallel",
-    "campaign_trigger_regular_parallel",
-    "campaign_rebuild_priority_parallel",
-    "campaign_rebuild_regular_parallel",
-    "scheduler_host_max_parallel",
-    "scheduler_elastic_slots_enabled",
-    "scheduler_emergency_reserved_slots",
-    "scheduler_instance_max_parallel",
-    "scheduler_fairness_watchdog_sec",
-}
-
-
 def _reapply_manual_runtime_overrides(cfg: AgentConfig, runtime: dict[str, Any]) -> AgentConfig:
     updates: dict[str, Any] = {}
     for raw_key, raw_value in runtime.items():
-        if (
-            raw_key in _PROFILE_LOCKED_RUNTIME_KEYS
-            and str(getattr(cfg, "profile_name", "") or "").strip().lower() not in {"", "custom"}
-        ):
-            continue
+        # A workload profile supplies the starting values only. An explicit
+        # runtime value from MCC is an operator decision and must be applied
+        # even when the selected profile has a different preset. The profile
+        # remains visible in diagnostics; it is not a second immutable
+        # authority that can silently discard a desired value.
         attr = _RUNTIME_TO_ATTR.get(raw_key)
         if not attr:
             continue

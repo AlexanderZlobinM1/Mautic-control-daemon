@@ -1,3 +1,12 @@
+## 1.6.67 - 2026-11-11
+
+- Apply explicit MCC runtime values over the selected profile's starting
+  preset and report an actual value mismatch instead of hiding it as a locked
+  profile.
+- Match legacy segment whitelist rows by stable UID and host-qualified UID.
+- Use MCC's canonical host identity for runtime delivery and re-read the
+  current snapshot before retrying a transport-level runtime conflict.
+
 ## 1.6.66 - 2026-11-11
 
 - Treat MCC HTTP 409 desired-state responses as conflicts, trigger an

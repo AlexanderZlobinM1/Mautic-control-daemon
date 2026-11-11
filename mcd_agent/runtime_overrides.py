@@ -13,7 +13,6 @@ from urllib.error import HTTPError, URLError
 from mcd_agent import __version__
 from mcd_agent.config import (
     AgentConfig,
-    _PROFILE_LOCKED_RUNTIME_KEYS,
     apply_runtime_overrides,
     runtime_overrides_from_config_file,
     runtime_effective_map,
@@ -528,19 +527,27 @@ def merge_instance_desired_states(runtime: dict[str, Any], states: object) -> di
     return merged
 
 
-def fetch_runtime_overrides(cfg: AgentConfig, *, instance_uids: list[str] | None = None) -> dict[str, Any]:
+def fetch_runtime_overrides(
+    cfg: AgentConfig,
+    *,
+    instance_uids: list[str] | None = None,
+    host_scope_key: str | None = None,
+) -> dict[str, Any]:
     base = _api_base(cfg)
     if not base:
         return {"status": "disabled", "reason": "mcc_url_not_set"}
     ident = resolve_agent_identity(cfg)
-    effective_host_name = str(ident.get("effective_mcc_host_name") or ident.get("effective_hostname") or "").strip()
+    canonical_host_name = str(host_scope_key or "").strip()
+    effective_host_name = canonical_host_name or str(
+        ident.get("effective_mcc_host_name") or ident.get("effective_hostname") or ""
+    ).strip()
     canonical_instance_uids = _canonical_instance_uids(
         instance_uids or [],
         host_name=effective_host_name,
     )
     payload = {
         "hostname": str(ident.get("effective_hostname") or ""),
-        "mcc_host_name": str(ident.get("effective_mcc_host_name") or ""),
+        "mcc_host_name": canonical_host_name or str(ident.get("effective_mcc_host_name") or ""),
         "agent_hostname": str(ident.get("local_hostname") or ""),
         "configured_host_name": str(ident.get("configured_host_name") or ""),
         "desired_state_protocol": 1,
@@ -593,11 +600,13 @@ def push_runtime_overrides(
     instance_desired_states: dict[str, dict[str, Any]] | None = None,
     instance_desired_state_revisions: dict[str, int] | None = None,
     runtime_change_metadata: dict[str, Any] | None = None,
+    host_scope_key: str | None = None,
 ) -> dict[str, Any]:
     base = _api_base(cfg)
     if not base:
         return {"status": "disabled", "reason": "mcc_url_not_set"}
     ident = resolve_agent_identity(cfg)
+    canonical_host_name = str(host_scope_key or "").strip()
     target_mode = str(target or "observed").strip().lower()
     if target_mode not in {"observed", "desired"}:
         target_mode = "observed"
@@ -624,7 +633,7 @@ def push_runtime_overrides(
             }
     payload = {
         "hostname": str(ident.get("effective_hostname") or ""),
-        "mcc_host_name": str(ident.get("effective_mcc_host_name") or ""),
+        "mcc_host_name": canonical_host_name or str(ident.get("effective_mcc_host_name") or ""),
         "agent_hostname": str(ident.get("local_hostname") or ""),
         "configured_host_name": str(ident.get("configured_host_name") or ""),
         "runtime_overrides": runtime_payload,
@@ -670,6 +679,7 @@ def push_runtime_sync_v3(
     changes: dict[str, Any],
     idempotency_key: str,
     semantic_conflict_groups: list[dict[str, Any]] | None = None,
+    scope_key: str | None = None,
 ) -> dict[str, Any]:
     """Submit one opt-in host intent to MCC's canonical v3 sync endpoint.
 
@@ -681,17 +691,21 @@ def push_runtime_sync_v3(
     if not api_base:
         return {"status": "disabled", "reason": "mcc_url_not_set", "v3_supported": False}
     ident = resolve_agent_identity(cfg)
+    canonical_host_name = str(scope_key or "").strip()
+    wire_scope_key = canonical_host_name or str(
+        ident.get("effective_mcc_host_name") or ident.get("effective_hostname") or ""
+    )
     payload: dict[str, Any] = {
         "desired_state_sync_protocol": 3,
         "scope": "host",
-        "scope_key": str(ident.get("effective_mcc_host_name") or ident.get("effective_hostname") or ""),
+        "scope_key": wire_scope_key,
         "origin": "host",
         "base_revision": int(base_revision),
         "base": dict(base),
         "changes": dict(changes),
         "idempotency_key": str(idempotency_key),
         "hostname": str(ident.get("effective_hostname") or ""),
-        "mcc_host_name": str(ident.get("effective_mcc_host_name") or ""),
+        "mcc_host_name": canonical_host_name or str(ident.get("effective_mcc_host_name") or ""),
         "agent_hostname": str(ident.get("local_hostname") or ""),
         "configured_host_name": str(ident.get("configured_host_name") or ""),
     }
@@ -818,8 +832,10 @@ def runtime_key_observation(
             # Host ACKs carry a sparse desired map. Compare only the exact
             # requested UIDs, including explicit empty tombstones; unrelated
             # default-filled instance rows are not part of this observation.
+            # MCC may use either the stable base UID or a host-qualified UID,
+            # so compare the canonical row rather than the spelling.
             effective_value = {
-                str(uid): effective_value.get(uid, {})
+                str(uid): _lookup_instance_observation_value(effective_value, uid)
                 for uid in desired
             }
         if key in {
@@ -840,8 +856,6 @@ def runtime_key_observation(
             status, origin, reason = "rejected", "none", "unsupported_key"
         elif key not in runtime_remote_allowed_keys():
             status, origin, reason = "rejected", "none", "remote_blocked"
-        elif key in _PROFILE_LOCKED_RUNTIME_KEYS and profile not in {"", "custom"}:
-            status, origin, reason = "profile_locked", "profile", "profile_authority"
         elif effective_value == desired:
             status, origin, reason = "unchanged", source, "already_effective"
         else:
@@ -903,6 +917,17 @@ def _project_instance_observation_value(value: object, scope_key: str) -> object
     if any(isinstance(item, dict) for item in value.values()):
         return {}
     return value
+
+
+def _lookup_instance_observation_value(entries: object, scope_key: object) -> object:
+    """Read one instance row while accepting base and host-qualified UIDs."""
+    if not isinstance(entries, dict):
+        return {}
+    target = str(scope_key or "").strip()
+    if not target:
+        return {}
+    matched = _matching_instance_entry(entries, [target, target.split("@", 1)[0]])
+    return entries.get(matched, {}) if matched is not None else {}
 
 
 def _runtime_observation_chunks(
@@ -992,9 +1017,12 @@ def acknowledge_runtime_state(
     if not base:
         return {"status": "disabled", "reason": "mcc_url_not_set"}
     ident = resolve_agent_identity(cfg)
+    wire_host_name = str(scope_key or "").strip() if scope == "host" else ""
+    if not wire_host_name:
+        wire_host_name = str(ident.get("effective_mcc_host_name") or "")
     payload = {
         "hostname": str(ident.get("effective_hostname") or ""),
-        "mcc_host_name": str(ident.get("effective_mcc_host_name") or ""),
+        "mcc_host_name": wire_host_name,
         "agent_hostname": str(ident.get("local_hostname") or ""),
         "configured_host_name": str(ident.get("configured_host_name") or ""),
         "desired_state_protocol": 1,
@@ -1074,8 +1102,6 @@ def acknowledge_desired_runtime_states(
         all_effective = not statuses or statuses <= {"applied", "unchanged"}
         if not normalized_runtime:
             ack_status = "unverified"
-        elif "profile_locked" in statuses and statuses <= {"profile_locked", "unchanged"}:
-            ack_status = "profile_locked"
         elif rejected_keys or "rejected" in statuses:
             ack_status = "rejected"
         elif not all_effective:

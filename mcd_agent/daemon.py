@@ -780,6 +780,25 @@ def _runtime_sync_v3_groups(config: AgentConfig, store: object) -> list[dict[str
     return [dict(item) for item in raw if isinstance(item, Mapping)] if isinstance(raw, list) else []
 
 
+def _runtime_sync_v3_scope_key(config: AgentConfig, store: object) -> str:
+    """Use MCC's canonical host identity for every runtime write."""
+    desired = store.get_runtime_sync("mcc_runtime_desired_state")
+    if isinstance(desired, Mapping):
+        scope_key = str(desired.get("scope_key") or "").strip()
+        if scope_key:
+            return scope_key
+    return str(getattr(config, "mcc_host_name", "") or "").strip()
+
+
+def _runtime_sync_v3_reconcile_pending(state: object) -> bool:
+    """Return whether a transport conflict requires a fresh MCC snapshot."""
+    return (
+        isinstance(state, Mapping)
+        and str(state.get("status") or "").strip().lower() == "reconcile_pending"
+        and str(state.get("reason") or "").strip().lower() == "http_409"
+    )
+
+
 def _runtime_sync_v3_base(store: object) -> tuple[int | None, dict[str, Any]]:
     state = _runtime_sync_v3_state(store)
     base = state.get("base")
@@ -820,6 +839,7 @@ def _runtime_sync_v3_attempt(
     if base_revision is None:
         return {"handled": False, "reason": "runtime_sync_v3_base_unavailable"}
     groups = _runtime_sync_v3_groups(config, store)
+    scope_key = _runtime_sync_v3_scope_key(config, store)
     changes = _runtime_sync_v3_changes(base, current_runtime, allowed_keys=runtime_remote_allowed_keys())
     if not changes:
         return {"handled": False, "reason": "runtime_sync_v3_no_changes"}
@@ -832,7 +852,7 @@ def _runtime_sync_v3_attempt(
     key = str(state.get("idempotency_key") or "")
     if not key or str(state.get("current_digest") or "") != current_digest:
         key = _runtime_sync_v3_intent_id(
-            scope_key=str(getattr(config, "mcc_host_name", "") or ""),
+            scope_key=scope_key,
             base_revision=base_revision,
             base=base,
             changes=changes,
@@ -845,6 +865,7 @@ def _runtime_sync_v3_attempt(
         changes=changes,
         idempotency_key=key,
         semantic_conflict_groups=groups,
+        scope_key=scope_key,
     )
     supported = response.get("v3_supported")
     next_state: dict[str, Any] = {
@@ -881,8 +902,26 @@ def _runtime_sync_v3_attempt(
         next_state["status"] = "queued"
         _runtime_sync_v3_mark(store, next_state)
         return {"handled": True, "status": "queued", "response": {"status": "queued", "v3_supported": True}}
+    reason = str(response.get("reason", "runtime_sync_v3_failed") or "runtime_sync_v3_failed")
+    if reason.lower() == "http_409":
+        # A transport-level 409 has no canonical three-way conflict payload.
+        # Pause this intent, fetch MCC's current snapshot, and retry from the
+        # new base instead of replaying the old revision or freezing the host
+        # in an operator-resolution state.
+        next_state["status"] = "reconcile_pending"
+        next_state["reason"] = "http_409"
+        _runtime_sync_v3_mark(store, next_state)
+        return {
+            "handled": True,
+            "status": "transport_conflict",
+            "response": {
+                "status": "conflict",
+                "reason": "http_409",
+                "reconcile_required": True,
+            },
+        }
     next_state["status"] = "error"
-    next_state["reason"] = response.get("reason", "runtime_sync_v3_failed")
+    next_state["reason"] = reason
     _runtime_sync_v3_mark(store, next_state)
     return {"handled": True, "status": "error", "response": response}
 
@@ -2844,6 +2883,7 @@ def _retry_local_runtime_push_after_conflict(
     installs: list[object],
     runtime_metadata: Mapping[str, Any] | None = None,
     instance_revisions: Mapping[str, Any] | None = None,
+    host_scope_key: str | None = None,
 ) -> dict[str, Any]:
     """Fetch current MCC state and retry the local delta on its new revision."""
     instance_uids = sorted(
@@ -2853,7 +2893,10 @@ def _retry_local_runtime_push_after_conflict(
             if str(getattr(inst, "instance_uid", "") or "").strip()
         }
     )
-    fresh = fetch_runtime_overrides(config, instance_uids=instance_uids)
+    fetch_kwargs: dict[str, Any] = {"instance_uids": instance_uids}
+    if host_scope_key:
+        fetch_kwargs["host_scope_key"] = host_scope_key
+    fresh = fetch_runtime_overrides(config, **fetch_kwargs)
     if str(fresh.get("status", "")).strip().lower() != "ok":
         return fresh
 
@@ -2892,6 +2935,7 @@ def _retry_local_runtime_push_after_conflict(
         instance_desired_states=desired_instances,
         instance_desired_state_revisions=fresh_instance_revisions,
         runtime_change_metadata=dict(runtime_metadata) if isinstance(runtime_metadata, Mapping) else None,
+        host_scope_key=host_scope_key,
     )
 
 
@@ -2904,6 +2948,7 @@ def _push_local_runtime_change(
     desired_revision: int | None,
     instance_revisions: Mapping[str, Any],
     runtime_metadata: Mapping[str, Any] | None = None,
+    host_scope_key: str | None = None,
 ) -> dict[str, Any]:
     """Push a local edit on a fresh snapshot, retrying once on conflict."""
     instance_uids = sorted(
@@ -2913,7 +2958,10 @@ def _push_local_runtime_change(
             if str(getattr(inst, "instance_uid", "") or "").strip()
         }
     )
-    fresh = fetch_runtime_overrides(config, instance_uids=instance_uids)
+    fetch_kwargs: dict[str, Any] = {"instance_uids": instance_uids}
+    if host_scope_key:
+        fetch_kwargs["host_scope_key"] = host_scope_key
+    fresh = fetch_runtime_overrides(config, **fetch_kwargs)
     if str(fresh.get("status", "")).strip().lower() != "ok":
         return fresh
 
@@ -2954,6 +3002,7 @@ def _push_local_runtime_change(
         instance_desired_states=desired_instances,
         instance_desired_state_revisions=fresh_instance_revisions,
         runtime_change_metadata=dict(runtime_metadata) if isinstance(runtime_metadata, Mapping) else None,
+        host_scope_key=host_scope_key,
     )
     if str(pushed.get("status", "")).strip().lower() != "conflict":
         return pushed
@@ -2970,6 +3019,7 @@ def _push_local_runtime_change(
         installs,
         runtime_metadata=runtime_metadata,
         instance_revisions=instance_revisions,
+        host_scope_key=host_scope_key,
     )
     result = dict(rebased)
     result["_local_rebase_attempted"] = True
@@ -20877,8 +20927,11 @@ def run_loop(
         local_fp = overrides_fingerprint(local_runtime)
         pending_local_runtime = None
         local_runtime_push_accepted_this_tick = False
-        v3_conflict_active = _runtime_sync_v3_conflict_active(_runtime_sync_v3_state(store))
-        if config.mcc_url and config.mcc_token and not v3_conflict_active:
+        v3_state_before_local_push = _runtime_sync_v3_state(store)
+        v3_conflict_active = _runtime_sync_v3_conflict_active(v3_state_before_local_push)
+        v3_reconcile_pending = _runtime_sync_v3_reconcile_pending(v3_state_before_local_push)
+        host_scope_key = _runtime_sync_v3_scope_key(config, store)
+        if config.mcc_url and config.mcc_token and not v3_conflict_active and not v3_reconcile_pending:
             pending_local_runtime = _queue_local_runtime_delta(
                 store,
                 local_runtime,
@@ -20886,7 +20939,7 @@ def run_loop(
             )
             if pending_local_runtime is not None:
                 local_runtime_push_pending = True
-        if config.mcc_url and config.mcc_token and (
+        if config.mcc_url and config.mcc_token and not v3_reconcile_pending and (
             pending_local_runtime is not None or local_fp != last_local_runtime_fp
         ):
             if pending_local_runtime is None:
@@ -20968,6 +21021,7 @@ def run_loop(
                         desired_revision=known_revision,
                         instance_revisions=known_instance_revisions,
                         runtime_metadata=push_metadata,
+                        host_scope_key=host_scope_key,
                     )
                 p_status = str(pushed.get("status", "")).strip().lower()
                 accepted = p_status == "ok" and _store_desired_runtime_push_result(
@@ -21013,7 +21067,10 @@ def run_loop(
                     )
                     form_embed_reconcile_requested = True
                 elif p_status == "conflict":
-                    if v3_conflict_handled:
+                    transport_reconcile = bool(pushed.get("reconcile_required")) or str(
+                        pushed.get("reason", "")
+                    ).strip().lower() == "http_409"
+                    if v3_conflict_handled and not transport_reconcile:
                         local_runtime_push_pending = False
                         last_local_runtime_fp = overrides_fingerprint(local_runtime_overrides(config))
                         store.put_runtime_sync("local_runtime", local_runtime_overrides(config))
@@ -21028,7 +21085,7 @@ def run_loop(
                     runtime_overrides_sync_requested = True
                     next_runtime_overrides_poll_at = 0.0
                     logging.warning(
-                        "runtime-overrides local change rebase failed: %s",
+                        "runtime-overrides local change rebase deferred for MCC reconciliation: %s",
                         pushed.get("reason", "unknown"),
                     )
                 elif p_status != "disabled":
@@ -21056,9 +21113,17 @@ def run_loop(
 
         runtime_poll_enabled = bool(getattr(config, "mcc_runtime_overrides_poll_enabled", False))
         should_runtime_poll = runtime_poll_enabled and now >= next_runtime_overrides_poll_at
-        v3_conflict_active = _runtime_sync_v3_conflict_active(_runtime_sync_v3_state(store))
+        v3_state = _runtime_sync_v3_state(store)
+        v3_conflict_active = _runtime_sync_v3_conflict_active(v3_state)
+        v3_reconcile_pending = _runtime_sync_v3_reconcile_pending(v3_state)
         pending_before_runtime_poll = local_runtime_push_pending
-        if config.mcc_url and config.mcc_token and not local_runtime_push_pending and not v3_conflict_active:
+        if (
+            config.mcc_url
+            and config.mcc_token
+            and not local_runtime_push_pending
+            and not v3_conflict_active
+            and not v3_reconcile_pending
+        ):
             # Re-sample immediately before the remote fetch. A file edit can
             # arrive after the normal local-change block above; queue it
             # durably before the poll may refresh the baseline.
@@ -21072,10 +21137,12 @@ def run_loop(
             ro = fetch_runtime_overrides(
                 config,
                 instance_uids=[str(getattr(inst, "instance_uid", "") or "") for inst in installs],
+                host_scope_key=_runtime_sync_v3_scope_key(config, store),
             )
             status = str(ro.get("status", "")).strip().lower()
             poll_interval = max(15, min(300, int(config.mcc_push_interval_sec or config.poll_interval_sec or 60)))
             v3_state = _runtime_sync_v3_state(store)
+            v3_reconcile_pending = _runtime_sync_v3_reconcile_pending(v3_state)
             if _runtime_sync_v3_conflict_active(v3_state) and not _runtime_sync_v3_resolution_seen(v3_state, ro):
                 status = "v3_conflict_hold"
                 logging.warning("runtime-sync-v3 conflict remains unresolved; holding ambiguous runtime keys")
@@ -21204,7 +21271,23 @@ def run_loop(
                     state_for_store["instance_revisions"] = revisions
                     store.put_runtime_sync("mcc_runtime_desired_state", state_for_store)
                     v3_state = _runtime_sync_v3_state(store)
-                    if (
+                    if v3_reconcile_pending and isinstance(desired_state.get("revision"), int):
+                        # The 409 was a transport/revision race, not a
+                        # semantic conflict. The fresh MCC snapshot is now
+                        # the base for the still-pending local fields.
+                        _runtime_sync_v3_mark(
+                            store,
+                            {
+                                "schema": "mcd-runtime-sync-v3-state-v1",
+                                "status": "accepted",
+                                "base_revision": int(desired_state["revision"]),
+                                "base": deepcopy(remote_runtime),
+                                "changes": {},
+                                "current_digest": overrides_fingerprint(remote_runtime),
+                                "idempotency_key": "",
+                            },
+                        )
+                    elif (
                         not _runtime_sync_v3_conflict_active(v3_state)
                         and str(v3_state.get("status") or "").strip().lower() != "queued"
                         and isinstance(desired_state.get("revision"), int)
