@@ -796,6 +796,13 @@ MCC UI обязан предоставлять отдельную campaign-пл�
 на instance должна подтверждать minute tick и запуск даже при пустом результате
 Mautic-команды; это не считается отсутствием попытки.
 
+Configured campaign super-priority IDs are admitted from the current published
+campaign snapshot independently of the ordinary trigger/rebuild due queries.
+This keeps an idle but published campaign in the minute ring; the realtime
+whitelist compatibility block is not required and does not replace the
+dedicated super worker. Unpublished or stale operator IDs are logged and are
+not launched.
+
 Разделение на priority и regular строится из weight cache, campaign
 whitelist (`campaign_whitelist` и
 `campaign_whitelist_instance_settings`), `campaign_priority_size` и

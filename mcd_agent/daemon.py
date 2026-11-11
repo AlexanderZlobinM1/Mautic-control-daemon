@@ -10167,6 +10167,32 @@ def _merge_campaign_trigger_audit_ids(due_ids: list[int], audit_ids: list[int]) 
     return list(dict.fromkeys(list(due_ids or []) + list(audit_ids or [])))
 
 
+def _merge_campaign_super_priority_ids(
+    trigger_ids: list[int],
+    rebuild_ids: list[int],
+    published_ids: list[int],
+    configured_ids: set[int],
+) -> tuple[list[int], list[int], list[int]]:
+    """Admit configured super campaigns independently of ordinary due SQL.
+
+    Super-priority is its own minute-ticked ring. It must not depend on the
+    ordinary due planner or on the campaign whitelist realtime compatibility
+    block; otherwise an idle campaign disappears from the ring and no empty
+    attempt is observed. The published snapshot remains the eligibility
+    guard, so stale or unpublished operator IDs are never launched.
+    """
+
+    published = list(dict.fromkeys(int(value) for value in published_ids if int(value) > 0))
+    configured = {int(value) for value in configured_ids if int(value) > 0}
+    eligible = [value for value in published if value in configured]
+    missing = sorted(configured - set(eligible))
+    return (
+        _merge_campaign_trigger_audit_ids(trigger_ids, eligible),
+        _merge_campaign_trigger_audit_ids(rebuild_ids, eligible),
+        missing,
+    )
+
+
 def _needs_weight_recalc(ids: list[int], cached: dict[int, float]) -> bool:
     if not cached:
         return True
@@ -21762,6 +21788,7 @@ def run_loop(
                 )
                 segment_whitelist_for_inst = segment_priority_for_inst
                 campaign_whitelist_for_inst = _campaign_whitelist_effective_setting(config, inst)
+                campaign_super_priority_for_inst = _campaign_super_priority_effective_setting(config, inst)
                 db = MauticDB(inst.db)
                 sql_ctx = campaign_sql_time_context(now_utc, inst.mautic_timezone, inst.mautic_major)
                 import_pending_cutoff_utc = _ensure_import_pending_cutoff_utc(
@@ -21954,6 +21981,32 @@ def run_loop(
                     campaign_trigger_ids = []
                     campaign_trigger_due_ids = []
                     campaign_rebuild_ids = []
+
+                if cluster_cron_allowed and campaign_super_priority_for_inst:
+                    try:
+                        published_campaign_ids = db.fetch_ids(
+                            _SQL_CAMPAIGNS_ALL_PUBLISHED,
+                            limit=5000,
+                            context=sql_ctx,
+                        )
+                        (
+                            campaign_trigger_ids,
+                            campaign_rebuild_ids,
+                            missing_super_ids,
+                        ) = _merge_campaign_super_priority_ids(
+                            campaign_trigger_ids or [],
+                            campaign_rebuild_ids or [],
+                            published_campaign_ids,
+                            campaign_super_priority_for_inst,
+                        )
+                        if missing_super_ids:
+                            logging.warning(
+                                "[%s] campaign super-priority ids are not published: %s",
+                                root,
+                                ",".join(str(value) for value in missing_super_ids),
+                            )
+                    except Exception as e:
+                        logging.warning("[%s] campaign super-priority admission failed: %s", root, e)
 
                 if campaign_trigger_ids is not None:
                     trigger_plan_started_at = campaign_trigger_plan_started_at_by_root.setdefault(root, {})
@@ -22481,7 +22534,6 @@ def run_loop(
                     campaign_trigger_ids = list(dict.fromkeys(campaign_trigger_ids))
                     campaign_rebuild_ids = list(dict.fromkeys(campaign_rebuild_ids))
                     campaign_all_ids = list(dict.fromkeys(campaign_trigger_ids + campaign_rebuild_ids))
-                    campaign_super_priority_for_inst = _campaign_super_priority_effective_setting(config, inst)
                     camp_w = store.get_weights("campaign", root, config.weights_recalc_interval_sec)
                     campaign_weight_rows: list[dict[str, object]] = []
                     campaign_weight_query_failed = False

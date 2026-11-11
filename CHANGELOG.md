@@ -1,3 +1,8 @@
+## 1.6.58 - 2026-11-11
+
+- Admit published campaign super-priority IDs independently of ordinary due
+  queries so idle campaigns receive their dedicated minute-ring attempt.
+
 ## 1.6.57 - 2026-11-11
 
 - Reissue the campaign super-priority ring release under a new immutable
