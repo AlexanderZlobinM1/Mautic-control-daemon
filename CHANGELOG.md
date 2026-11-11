@@ -1,3 +1,10 @@
+## 1.6.64 - 2026-11-11
+
+- Drive campaign super-priority from the complete instance inventory instead
+  of the ordinary dispatch projection, keeping the dedicated per-instance
+  minute ring independent from ordinary fairness, import ordering and terminal
+  gates.
+
 ## 1.6.63 - 2026-11-11
 
 - Persist clear scheduler evidence when a campaign super-priority snapshot

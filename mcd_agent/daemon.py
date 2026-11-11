@@ -23533,13 +23533,12 @@ def run_loop(
             enabled=cluster_cron_allowed,
         )
 
-        # Super-priority is independent of the ordinary segment planner.  Do
-        # not wait for a plan refresh or let an ordinary root terminal gate
-        # hide the MCC-configured campaign ring: a continuously active
-        # segment cycle must not prevent the dedicated per-instance worker
-        # from receiving its latest direct snapshot and advancing its own
-        # minute-ticked queue.
-        for super_inst in dispatch_installs:
+        # Super-priority is independent of the ordinary scheduler entirely.
+        # Use the inventory snapshot, not the ordinary dispatch projection:
+        # the latter may be reordered or reduced by import/fairness/terminal
+        # handling and must never decide whether a dedicated per-instance
+        # super worker gets its minute-ticked ring.
+        for super_inst in installs:
             super_root = str(getattr(super_inst, "root", "") or "").strip()
             if not super_root:
                 continue
