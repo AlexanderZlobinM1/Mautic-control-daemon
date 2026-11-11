@@ -804,7 +804,11 @@ def runtime_key_observation(
         if key == "segment_whitelist_instance_settings":
             desired = _canonical_legacy_whitelist_value(desired)
         if scope_key and key.endswith("_instance_settings") and isinstance(desired, dict):
-            desired = _project_instance_observation_value(desired, scope_key)
+            desired = _project_instance_observation_value(
+                desired,
+                scope_key,
+                runtime_key=key,
+            )
         if key == "segment_whitelist_instance_settings":
             # Legacy whitelist is the wire alias of canonical priority; it is
             # not an independent scheduler lane.
@@ -827,7 +831,11 @@ def runtime_key_observation(
                 else effective.get(key)
             )
         if scope_key and key.endswith("_instance_settings") and isinstance(effective_value, dict):
-            effective_value = _project_instance_observation_value(effective_value, scope_key)
+            effective_value = _project_instance_observation_value(
+                effective_value,
+                scope_key,
+                runtime_key=key,
+            )
         elif key.endswith("_instance_settings") and isinstance(desired, dict) and isinstance(effective_value, dict):
             # Host ACKs carry a sparse desired map. Compare only the exact
             # requested UIDs, including explicit empty tombstones; unrelated
@@ -899,7 +907,12 @@ def _runtime_evidence_value(value: object) -> object:
     }
 
 
-def _project_instance_observation_value(value: object, scope_key: str) -> object:
+def _project_instance_observation_value(
+    value: object,
+    scope_key: str,
+    *,
+    runtime_key: str = "",
+) -> object:
     """Project a host map to one instance without losing a scoped row.
 
     MCC sends both shapes: a host-level sparse map keyed by UID and an
@@ -914,6 +927,12 @@ def _project_instance_observation_value(value: object, scope_key: str) -> object
     base_key = scope_key.split("@", 1)[0]
     if base_key in value:
         return value[base_key]
+    # Plugin operations are already scoped when they arrive inside an
+    # instance desired-state row. Their nested keys are operation IDs, not
+    # instance UIDs; treating every nested mapping as a UID map would turn a
+    # valid operation payload into ``{}`` in the ACK.
+    if runtime_key == "plugin_operation_instance_settings":
+        return value
     if any(isinstance(item, dict) for item in value.values()):
         return {}
     return value

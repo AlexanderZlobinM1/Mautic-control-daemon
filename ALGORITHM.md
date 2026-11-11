@@ -996,6 +996,10 @@ MCC; top-level `runtime_overrides` не является заменой desired 
 `desired.plugin_operations = {}` остаётся `{}` в evidence, даже если live
 effective `plugin_operations` содержит большой structured payload; digest/bytes
 вычисляются отдельно для каждого из этих двух значений.
+Для настроек операций плагинов MCD учитывает, что строка уже относится к
+конкретному instance: вложенные ключи вроде `ohip_sync` — это названия
+операций, а не новые UID инстансов. Поэтому такая операция сравнивается
+целиком с фактической настройкой и не превращается ошибочно в пустое `{}`.
 При частичном или instance-scoped runtime response пустой
 `plugin_operations` не считается командой удалить catalog: MCD сохраняет
 последний принятый непустой catalog, иначе сохранённые per-instance настройки
@@ -1028,10 +1032,9 @@ scheduler не стартует с пустой или частичной post-u
 Если отдельное `desired` или `effective` значение само превышает safety
 budget, оно заменяется строго проверяемой ссылкой
 `{encoding:"canonical-json-sha256",sha256,bytes}`; key не отбрасывается.
-Для profile-locked workload keys выбранный profile остаётся authority,
-а ACK сообщает effective profile value; такие ключи никогда не помечаются как
-применённые из MCC. `jobs_max_workers` и другие hot-effective keys читаются из
-effective runtime map. Если scope содержит больше 128 запрошенных keys или
+Профиль остаётся стартовым набором значений, но явно заданное MCC или оператором
+значение имеет приоритет и проверяется по факту. `jobs_max_workers` и другие
+hot-effective keys читаются из effective runtime map. Если scope содержит больше 128 запрошенных keys или
 ограниченный ACK превысил бы лимит MCC по размеру, MCD выдаёт детерминированные
 `mcd-runtime-key-observation-chunk-v1` parts со стабильным batch ID и после
 restart продолжает только отсутствующие parts. Верхнеуровневый ACK получает

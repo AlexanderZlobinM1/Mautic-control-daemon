@@ -1,3 +1,9 @@
+## 1.6.68 - 2026-11-11
+
+- Keep nested plugin-operation settings intact in per-instance ACK/readback;
+  operation IDs are not mistaken for instance UIDs and valid settings are no
+  longer reported as an empty desired value.
+
 ## 1.6.67 - 2026-11-11
 
 - Apply explicit MCC runtime values over the selected profile's starting
