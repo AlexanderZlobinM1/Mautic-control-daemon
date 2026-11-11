@@ -14391,88 +14391,6 @@ def _campaign_super_priority_cycle_update(
         logging.debug("[%s] super-priority cycle receipt update failed", root, exc_info=True)
 
 
-def _dispatch_campaign_super_priority_lane(
-    *,
-    config: AgentConfig,
-    store: TaskStore,
-    running: dict[str, RunningTask],
-    popens: dict[str, subprocess.Popen[bytes]],
-    root: str,
-    super_ring: deque[int],
-    candidates_by_root: Mapping[str, list[int]],
-    next_tick_by_root: dict[str, float],
-    cycle_id_by_root: dict[str, str],
-    cluster_cron_allowed: bool,
-    now_ts: float,
-) -> int:
-    """Dispatch the independent per-instance campaign super-priority worker.
-
-    The ordinary DB-pressure circuit breaker protects regular campaign and
-    segment dispatch.  It must not suppress this lane: super-priority is an
-    explicit, separately budgeted operator risk and has its own worker.  The
-    scheduler/update and backup pause fences still apply at the common submit
-    boundary.
-    """
-
-    if not cluster_cron_allowed or not candidates_by_root.get(root):
-        return 0
-
-    now = float(now_ts)
-    super_running = _running_count(running, root, "campaign_super_priority")
-    next_super_tick = float(next_tick_by_root.get(root, 0.0) or 0.0)
-    if not super_ring and super_running == 0 and cycle_id_by_root.get(root):
-        cycle_payload = store.get_runtime_sync(_campaign_super_priority_cycle_key(root)) or {}
-        if isinstance(cycle_payload, Mapping) and cycle_payload.get("status") == "active":
-            store.put_runtime_sync(
-                _campaign_super_priority_cycle_key(root),
-                {
-                    **dict(cycle_payload),
-                    "status": "completed",
-                    "completed_at": now,
-                },
-            )
-    if not super_ring and super_running == 0 and now >= next_super_tick:
-        round_ids = list(dict.fromkeys(candidates_by_root.get(root, [])))
-        super_ring.extend(round_ids)
-        round_id = datetime.fromtimestamp(now, tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        cycle_id_by_root[root] = round_id
-        next_tick_by_root[root] = (int(now // 60) + 1) * 60
-        store.put_runtime_sync(
-            _campaign_super_priority_cycle_key(root),
-            {
-                "schema": "mcd-campaign-super-priority-cycle-v1",
-                "root": root,
-                "cycle_id": round_id,
-                "status": "active",
-                "started_at": now,
-                "planned_ids": round_ids,
-                "completed_ids": [],
-                "failed_ids": [],
-                "watchdog_killed_ids": [],
-            },
-        )
-    if not super_ring or super_running != 0:
-        return 0
-
-    return _fill_from_ring(
-        ring=super_ring,
-        ring_limit=1,
-        total_limit=1,
-        root=root,
-        task_type="campaign_super_priority",
-        running=running,
-        ring_entities=set(super_ring),
-        config=config,
-        store=store,
-        popens=popens,
-        build_args=lambda cid: _campaign_super_priority_args(config, root, int(cid)),
-        remove_on_launch=True,
-        max_launches=1,
-        bypass_baseline_admission=True,
-        timeout_sec=0,
-    )
-
-
 def _priority_campaign_due_check_needed(
     *,
     now_ts: float,
@@ -24248,19 +24166,6 @@ def run_loop(
                 continue
             if db_pause_until > now:
                 _record_segment_pending_guard("db_pause")
-                _dispatch_campaign_super_priority_lane(
-                    config=config,
-                    store=store,
-                    running=running,
-                    popens=popens,
-                    root=root,
-                    super_ring=super_ring,
-                    candidates_by_root=campaign_super_candidates,
-                    next_tick_by_root=campaign_super_next_tick,
-                    cycle_id_by_root=campaign_super_cycle_id,
-                    cluster_cron_allowed=cluster_cron_allowed,
-                    now_ts=now,
-                )
                 _publish_monitor_cycle()
                 _mark_scheduler_shared_admission_skip(root, "segment")
                 continue
@@ -24975,21 +24880,59 @@ def run_loop(
             # Super-priority campaigns have one independent per-instance
             # worker/ring.  A round is admitted only on a minute tick; once
             # admitted, its snapshot continues to completion even across
-            # later ticks.  The helper is also called from the DB-pause path
-            # above so host pressure cannot erase this dedicated lane.
-            _dispatch_campaign_super_priority_lane(
-                config=config,
-                store=store,
-                running=running,
-                popens=popens,
-                root=root,
-                super_ring=super_ring,
-                candidates_by_root=campaign_super_candidates,
-                next_tick_by_root=campaign_super_next_tick,
-                cycle_id_by_root=campaign_super_cycle_id,
-                cluster_cron_allowed=cluster_cron_allowed,
-                now_ts=now,
-            )
+            # later ticks.  The next round gets a fresh candidate snapshot.
+            if cluster_cron_allowed and campaign_super_candidates.get(root):
+                super_running = _running_count(running, root, "campaign_super_priority")
+                next_super_tick = float(campaign_super_next_tick.get(root, 0.0) or 0.0)
+                if not super_ring and super_running == 0 and campaign_super_cycle_id.get(root):
+                    cycle_payload = store.get_runtime_sync(_campaign_super_priority_cycle_key(root)) or {}
+                    if isinstance(cycle_payload, Mapping) and cycle_payload.get("status") == "active":
+                        store.put_runtime_sync(
+                            _campaign_super_priority_cycle_key(root),
+                            {
+                                **dict(cycle_payload),
+                                "status": "completed",
+                                "completed_at": float(now),
+                            },
+                        )
+                if not super_ring and super_running == 0 and now >= next_super_tick:
+                    round_ids = list(dict.fromkeys(campaign_super_candidates.get(root, [])))
+                    super_ring.extend(round_ids)
+                    round_id = datetime.fromtimestamp(now, tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                    campaign_super_cycle_id[root] = round_id
+                    campaign_super_next_tick[root] = (int(now // 60) + 1) * 60
+                    store.put_runtime_sync(
+                        _campaign_super_priority_cycle_key(root),
+                        {
+                            "schema": "mcd-campaign-super-priority-cycle-v1",
+                            "root": root,
+                            "cycle_id": round_id,
+                            "status": "active",
+                            "started_at": float(now),
+                            "planned_ids": round_ids,
+                            "completed_ids": [],
+                            "failed_ids": [],
+                            "watchdog_killed_ids": [],
+                        },
+                    )
+                if super_ring and super_running == 0:
+                    _fill_from_ring(
+                        ring=super_ring,
+                        ring_limit=1,
+                        total_limit=1,
+                        root=root,
+                        task_type="campaign_super_priority",
+                        running=running,
+                        ring_entities=set(super_ring),
+                        config=config,
+                        store=store,
+                        popens=popens,
+                        build_args=lambda cid: _campaign_super_priority_args(config, root, int(cid)),
+                        remove_on_launch=True,
+                        max_launches=1,
+                        bypass_baseline_admission=True,
+                        timeout_sec=0,
+                    )
 
             # `mautic:campaigns:update` is treated as synonym of
             # `mautic:campaigns:rebuild` and is not scheduled separately.
