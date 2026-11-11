@@ -1,3 +1,8 @@
+## 1.6.59 - 2026-11-11
+
+- Keep the independent campaign super-priority lane active when the legacy
+  whitelist kill-switch is enabled.
+
 ## 1.6.58 - 2026-11-11
 
 - Admit published campaign super-priority IDs independently of ordinary due

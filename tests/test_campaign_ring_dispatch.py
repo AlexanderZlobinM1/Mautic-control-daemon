@@ -1867,6 +1867,21 @@ class CampaignRingDispatchTests(unittest.TestCase):
         self.assertEqual(_campaign_super_priority_effective_setting(cfg, electronic), {81})
         self.assertEqual(_campaign_super_priority_effective_setting(cfg, other), {73})
 
+    def test_campaign_super_priority_ignores_global_whitelist_disable(self) -> None:
+        cfg = SimpleNamespace(
+            disable_whitelist=True,
+            campaign_super_priority=[78],
+            campaign_super_priority_instance_settings={},
+        )
+        electronic = SimpleNamespace(
+            instance_uid="electronic@host",
+            primary_domain="electronic.example",
+            name="electronic.example",
+            domains=[],
+        )
+
+        self.assertEqual(_campaign_super_priority_effective_setting(cfg, electronic), {78})
+
     def test_campaign_super_priority_is_excluded_from_priority_and_regular(self) -> None:
         super_ids, priority, regular = _split_campaign_circles_with_super_priority(
             [73, 74, 75],
