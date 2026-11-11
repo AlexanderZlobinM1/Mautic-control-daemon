@@ -533,6 +533,8 @@ class AgentConfig:
     campaign_whitelist: list[int]
     campaign_whitelist_file: str | None
     campaign_whitelist_instance_settings: dict[str, Any]
+    campaign_super_priority: list[int]
+    campaign_super_priority_instance_settings: dict[str, Any]
     segment_priority_weight_threshold: float
     segment_priority_size: int
     segment_mode: str
@@ -1253,8 +1255,10 @@ def _enforce_profile_guards(cfg: AgentConfig) -> AgentConfig:
         and (
             cfg.segment_whitelist
             or cfg.campaign_whitelist
+            or cfg.campaign_super_priority
             or cfg.segment_whitelist_instance_settings
             or cfg.campaign_whitelist_instance_settings
+            or cfg.campaign_super_priority_instance_settings
         )
     ):
         # Whitelists only change the ordering of due Mautic work. A single
@@ -2274,6 +2278,8 @@ _RUNTIME_TO_ATTR: dict[str, str] = {
     "campaign_whitelist": "campaign_whitelist",
     "campaign_whitelist_file": "campaign_whitelist_file",
     "campaign_whitelist_instance_settings": "campaign_whitelist_instance_settings",
+    "campaign_super_priority": "campaign_super_priority",
+    "campaign_super_priority_instance_settings": "campaign_super_priority_instance_settings",
     "segment_priority_weight_threshold": "segment_priority_weight_threshold",
     "segment_priority_size": "segment_priority_size",
     "segment_mode": "segment_mode",
@@ -2624,6 +2630,7 @@ def _reapply_manual_runtime_overrides(cfg: AgentConfig, runtime: dict[str, Any])
             if attr in {
                 "segment_whitelist",
                 "campaign_whitelist",
+                "campaign_super_priority",
                 "segment_priority",
                 "segment_super_priority",
             }:
@@ -3160,6 +3167,12 @@ def _load_config_inner(path: str) -> AgentConfig:
         campaign_whitelist_instance_settings=(
             dict(runtime.get("campaign_whitelist_instance_settings", {}))
             if isinstance(runtime.get("campaign_whitelist_instance_settings", {}), dict)
+            else {}
+        ),
+        campaign_super_priority=_normalize_int_list(runtime.get("campaign_super_priority", [])),
+        campaign_super_priority_instance_settings=(
+            dict(runtime.get("campaign_super_priority_instance_settings", {}))
+            if isinstance(runtime.get("campaign_super_priority_instance_settings", {}), dict)
             else {}
         ),
         segment_priority_weight_threshold=float(runtime.get("segment_priority_weight_threshold", 60)),
@@ -3836,6 +3849,8 @@ def _load_config_inner(path: str) -> AgentConfig:
             segment_super_priority_instance_settings={},
             campaign_whitelist=[],
             campaign_whitelist_file=None,
+            campaign_super_priority=[],
+            campaign_super_priority_instance_settings={},
         )
     profiled = _apply_profile(cfg)
     merged = _reapply_manual_runtime_overrides(profiled, runtime)
@@ -3853,6 +3868,8 @@ def _load_config_inner(path: str) -> AgentConfig:
             segment_super_priority_instance_settings={},
             campaign_whitelist=[],
             campaign_whitelist_file=None,
+            campaign_super_priority=[],
+            campaign_super_priority_instance_settings={},
         )
     # Runtime customization flag is not "runtime section exists"; it is
     # "effective config diverges from selected profile baseline".
