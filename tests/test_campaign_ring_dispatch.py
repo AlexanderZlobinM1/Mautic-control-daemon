@@ -27,6 +27,7 @@ from mcd_agent.daemon import (
     _CAMPAIGN_TRIGGER_STUCK_UNTIL,
     _CampaignSuperPriorityLoop,
     _SegmentSuperPriorityLoop,
+    _refresh_dedicated_super_priority_workers,
     _PriorityTaskExecutor,
     _TASK_LOCK_BUSY_RC,
     _campaign_pressure_active,
@@ -2044,6 +2045,36 @@ class CampaignRingDispatchTests(unittest.TestCase):
             self.assertEqual(loop.run_once(now_ts=120.0), 0)
 
         self.assertEqual(dispatch.call_count, 1)
+
+    def test_runtime_apply_refreshes_both_dedicated_super_worker_snapshots(self) -> None:
+        config = SimpleNamespace(cluster_enabled=False)
+        installs = [SimpleNamespace(root="/var/www/electronic/public_html")]
+        segment_loop = Mock()
+        campaign_loop = Mock()
+        store = Mock()
+        running = {}
+        popens = {}
+
+        _refresh_dedicated_super_priority_workers(
+            config=config,
+            installs=installs,
+            store=store,
+            running=running,
+            popens=popens,
+            segment_loop=segment_loop,
+            campaign_loop=campaign_loop,
+        )
+
+        expected = {
+            "config": config,
+            "installs": installs,
+            "store": store,
+            "running": running,
+            "popens": popens,
+            "enabled": True,
+        }
+        segment_loop.update.assert_called_once_with(**expected)
+        campaign_loop.update.assert_called_once_with(**expected)
 
     def test_campaign_super_priority_dispatch_uses_only_configured_ring(self) -> None:
         root = "/var/www/electronic/public_html"
