@@ -1486,6 +1486,26 @@ def _merge_missing_plugin_operation_catalog(
     return merged
 
 
+def _runtime_response_authoritative_declaration_keys(
+    response: Mapping[str, Any],
+) -> set[str]:
+    """Return declarative runtime fields explicitly supplied by MCC.
+
+    Plugin operation definitions are catalog data, not an operator-owned
+    runtime setting.  When MCC explicitly supplies a non-empty catalog it is
+    the complete declaration set for the host and must not be replaced by an
+    older locally cached catalog during the generic LWW pass.  Instance
+    operation values remain independent bidirectional runtime settings.
+    """
+
+    explicit, value = _runtime_response_explicit_field_value(
+        response, _PLUGIN_OPERATIONS_RUNTIME_KEY
+    )
+    if explicit and isinstance(value, Mapping) and value:
+        return {_PLUGIN_OPERATIONS_RUNTIME_KEY}
+    return set()
+
+
 def _runtime_metadata_for_snapshot(
     metadata: Mapping[str, Any],
     runtime: Mapping[str, Any],
@@ -1669,8 +1689,11 @@ def _resolve_runtime_snapshots(
     remote_runtime: Mapping[str, Any],
     local_metadata: Mapping[str, Any],
     remote_metadata: Mapping[str, Any],
+    *,
+    remote_authoritative_keys: Iterable[str] = (),
 ) -> dict[str, Any]:
     """Resolve host and instance fields with durable last-write-wins metadata."""
+    authoritative_remote = {str(key) for key in remote_authoritative_keys}
     remote_runtime = _merge_legacy_priority_alias_with_metadata(remote_runtime, remote_metadata)
     local_fields = _runtime_snapshot_fields(local_runtime)
     remote_fields = _runtime_snapshot_fields(remote_runtime)
@@ -1727,7 +1750,9 @@ def _resolve_runtime_snapshots(
         remote_uid = remote_path[2] if remote_path else logical_uid
         local_stamp = _runtime_metadata_get(local_meta, scope, key, local_uid)
         remote_stamp = _runtime_metadata_get(remote_meta, scope, key, remote_uid)
-        if local_present and not remote_present and not (remote_stamp and remote_stamp.get("tombstone")):
+        if key in authoritative_remote and remote_present:
+            winner = "remote"
+        elif local_present and not remote_present and not (remote_stamp and remote_stamp.get("tombstone")):
             winner = "local"
         elif remote_present and not local_present and not (local_stamp and local_stamp.get("tombstone")):
             winner = "remote"
@@ -2650,6 +2675,7 @@ def _bootstrap_remote_runtime_before_local_baseline(
         remote_runtime,
         local_metadata,
         remote_metadata,
+        remote_authoritative_keys=_runtime_response_authoritative_declaration_keys(response),
     )
     _store_runtime_fetch_snapshot(store, response, remote_runtime, remote_metadata)
     if resolution.get("local_push"):
@@ -21227,6 +21253,7 @@ def run_loop(
                         remote_runtime,
                         local_metadata,
                         remote_metadata,
+                        remote_authoritative_keys=_runtime_response_authoritative_declaration_keys(ro),
                     )
                     local_runtime_push_pending = _reconcile_pending_local_runtime_after_remote(
                         store,
