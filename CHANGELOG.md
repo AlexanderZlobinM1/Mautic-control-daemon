@@ -1,3 +1,15 @@
+## 1.6.74 - 2026-11-12
+
+- Move segment super-priority to one dedicated per-instance minute worker,
+  matching the campaign super-priority execution model. Configured segment
+  IDs now run sequentially on every minute tick outside ordinary/priority
+  host and instance budgets, with canonical TaskStore cycle receipts.
+- Exclude segment super-priority IDs from the legacy static dispatcher as well
+  as ordinary planning. Removing an ID stops future super rounds and returns
+  it to ordinary planning without interrupting an already running command.
+- Add three-minute-tick and add/remove regressions for the independent segment
+  super-priority ring.
+
 ## 1.6.73 - 2026-11-12
 
 - Bind generic plugin-operation settings pushes to the desired-state revision

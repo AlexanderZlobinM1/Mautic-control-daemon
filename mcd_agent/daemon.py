@@ -14434,6 +14434,141 @@ def _campaign_super_priority_args(config: AgentConfig, root: str, campaign_id: i
     return ["/bin/sh", "-c", script]
 
 
+def _segment_super_priority_args(config: AgentConfig, root: str, segment_id: int) -> list[str]:
+    """Build the one native command owned by the dedicated segment ring."""
+
+    return render_mautic_command(
+        php_bin=config.php_bin,
+        run_as_user=config.mautic_run_as_user,
+        root=root,
+        template=config.cmd_segment_update_template,
+        id=int(segment_id),
+        batch_limit=config.segment_batch_limit,
+    )
+
+
+def _segment_super_priority_cycle_key(root: str) -> str:
+    return f"segment_super_priority_cycle:{hashlib.sha1(str(root).encode('utf-8')).hexdigest()[:24]}"
+
+
+def _segment_super_priority_cycle_update(
+    store: object,
+    root: str,
+    segment_id: int,
+    *,
+    outcome: str,
+    note: str = "",
+) -> None:
+    """Persist a terminal receipt for one member of the current minute ring."""
+
+    try:
+        current = store.get_runtime_sync(_segment_super_priority_cycle_key(root)) or {}
+        if not isinstance(current, Mapping):
+            return
+        payload = dict(current)
+        field = "completed_ids" if str(outcome) == "success" else "failed_ids"
+        ids = _normalize_segment_ids(payload.get(field))
+        if int(segment_id) not in ids:
+            ids.append(int(segment_id))
+        payload[field] = ids
+        if note:
+            notes = dict(payload.get("notes") or {}) if isinstance(payload.get("notes"), Mapping) else {}
+            notes[str(int(segment_id))] = str(note)[:500]
+            payload["notes"] = notes
+        store.put_runtime_sync(_segment_super_priority_cycle_key(root), payload)
+    except Exception:
+        logging.debug("[%s] segment super-priority cycle receipt update failed", root, exc_info=True)
+
+
+def _dispatch_segment_super_priority_lane(
+    *,
+    config: AgentConfig,
+    store: TaskStore,
+    running: dict[str, RunningTask],
+    popens: dict[str, subprocess.Popen[bytes]],
+    root: str,
+    super_ring: deque[int],
+    candidates_by_root: Mapping[str, list[int]],
+    next_tick_by_root: dict[str, float],
+    cycle_id_by_root: dict[str, str],
+    cluster_cron_allowed: bool,
+    now_ts: float,
+) -> int:
+    """Run one per-instance segment ring outside every ordinary budget.
+
+    The configured IDs are the complete policy input.  No ordinary segment
+    scan, weight, round-robin turn, host budget, or instance budget is read by
+    this lane.  A round starts on a minute boundary, drains sequentially, and
+    a long round is allowed to finish before the first later minute starts the
+    next snapshot.
+    """
+
+    if not cluster_cron_allowed or not candidates_by_root.get(root):
+        return 0
+
+    now = float(now_ts)
+    super_running = _running_count(running, root, "segment_super_priority")
+    next_super_tick = float(next_tick_by_root.get(root, 0.0) or 0.0)
+    if not super_ring and super_running == 0 and cycle_id_by_root.get(root):
+        cycle_payload = store.get_runtime_sync(_segment_super_priority_cycle_key(root)) or {}
+        if isinstance(cycle_payload, Mapping) and cycle_payload.get("status") == "active":
+            store.put_runtime_sync(
+                _segment_super_priority_cycle_key(root),
+                {**dict(cycle_payload), "status": "completed", "completed_at": now},
+            )
+            next_tick_by_root[root] = max(next_super_tick, (int(now // 60) + 1) * 60)
+            next_super_tick = float(next_tick_by_root[root])
+    if not super_ring and super_running == 0 and now >= next_super_tick:
+        round_ids = list(dict.fromkeys(candidates_by_root.get(root, [])))
+        scheduled_tick = next_super_tick if next_super_tick > 0 else None
+        super_ring.extend(round_ids)
+        round_id = datetime.fromtimestamp(now, tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        cycle_id_by_root[root] = round_id
+        next_tick_by_root[root] = (int(now // 60) + 1) * 60
+        store.put_runtime_sync(
+            _segment_super_priority_cycle_key(root),
+            {
+                "schema": "mcd-segment-super-priority-cycle-v1",
+                "root": root,
+                "cycle_id": round_id,
+                "status": "active",
+                "started_at": now,
+                "scheduled_at": scheduled_tick,
+                "tick_lag_sec": max(0.0, now - scheduled_tick) if scheduled_tick is not None else 0.0,
+                "worker": "per_instance_minute",
+                "planned_ids": round_ids,
+                "completed_ids": [],
+                "failed_ids": [],
+            },
+        )
+        logging.info(
+            "[%s] segment super-priority ring cycle started cycle_id=%s ids=%s worker=per_instance_minute",
+            root,
+            round_id,
+            ",".join(str(value) for value in round_ids) or "-",
+        )
+    if not super_ring or super_running != 0:
+        return 0
+
+    return _fill_from_ring(
+        ring=super_ring,
+        ring_limit=1,
+        total_limit=1,
+        root=root,
+        task_type="segment_super_priority",
+        running=running,
+        ring_entities=set(super_ring),
+        config=config,
+        store=store,
+        popens=popens,
+        build_args=lambda sid: _segment_super_priority_args(config, root, int(sid)),
+        remove_on_launch=True,
+        max_launches=1,
+        bypass_baseline_admission=True,
+        timeout_sec=0,
+    )
+
+
 def _dispatch_campaign_super_priority_lane(
     *,
     config: AgentConfig,
@@ -14734,7 +14869,7 @@ def _task_repeat_interval_sec(config: AgentConfig, task_type: str) -> int:
         # that pass, relaunching the same ID every daemon tick creates a
         # no-op storm. Keep retries aligned with the audit/planner cadence.
         return max(min_repeat, audit_interval)
-    if task_type == "campaign_super_priority":
+    if task_type in {"campaign_super_priority", "segment_super_priority"}:
         return 60
     if task_type in {"campaign_rebuild", "campaign_update"}:
         return max(0, int(getattr(config, "campaign_rebuild_min_repeat_sec", 0)))
@@ -15957,6 +16092,172 @@ class _RecurringSegmentPriorityLoop:
             self.run_once()
 
 
+class _SegmentSuperPriorityWorker:
+    """Drive one instance's segment super-priority ring independently."""
+
+    def __init__(self, root: str, *, stop_event: threading.Event | None = None, start: bool = True) -> None:
+        self.root = str(root or "").strip()
+        self._stop_event = stop_event
+        self._guard = threading.RLock()
+        self._wake = threading.Event()
+        self._snapshot: tuple[
+            AgentConfig,
+            object,
+            TaskStore,
+            dict[str, RunningTask],
+            dict[str, subprocess.Popen[bytes]],
+            bool,
+            tuple[int, ...],
+        ] | None = None
+        self._ring: deque[int] = deque()
+        self._next_tick_by_root: dict[str, float] = {self.root: 0.0}
+        self._cycle_id_by_root: dict[str, str] = {self.root: ""}
+        self._thread: threading.Thread | None = None
+        if start:
+            self._thread = threading.Thread(
+                target=self._run,
+                name="mcd-segment-super-" + hashlib.sha1(self.root.encode("utf-8")).hexdigest()[:8],
+                daemon=True,
+            )
+            self._thread.start()
+
+    def update(
+        self,
+        *,
+        config: AgentConfig,
+        inst: object,
+        store: TaskStore,
+        running: dict[str, RunningTask],
+        popens: dict[str, subprocess.Popen[bytes]],
+        enabled: bool,
+    ) -> None:
+        ids = tuple(
+            sorted(
+                int(value)
+                for value in _segment_super_priority_effective_setting(config, inst)
+                if int(value) > 0
+            )
+        )
+        with self._guard:
+            self._snapshot = (config, inst, store, running, popens, bool(enabled), ids)
+        self._wake.set()
+
+    def disable(
+        self,
+        *,
+        config: AgentConfig,
+        store: TaskStore,
+        running: dict[str, RunningTask],
+        popens: dict[str, subprocess.Popen[bytes]],
+        enabled: bool,
+    ) -> None:
+        with self._guard:
+            if self._snapshot is None:
+                return
+            _old_config, inst, _old_store, _old_running, _old_popens, _old_enabled, _old_ids = self._snapshot
+            self._snapshot = (config, inst, store, running, popens, bool(enabled), ())
+        self._wake.set()
+
+    def run_once(self, *, now_ts: float | None = None) -> int:
+        with self._guard:
+            snapshot = self._snapshot
+        if snapshot is None:
+            return 0
+        config, _inst, store, running, popens, enabled, ids = snapshot
+        if not ids and not self._ring:
+            if _running_count(running, self.root, "segment_super_priority") == 0:
+                cycle_key = _segment_super_priority_cycle_key(self.root)
+                cycle_payload = store.get_runtime_sync(cycle_key) or {}
+                if isinstance(cycle_payload, Mapping) and cycle_payload.get("status") == "active":
+                    store.put_runtime_sync(
+                        cycle_key,
+                        {**dict(cycle_payload), "status": "completed", "completed_at": float(time.time())},
+                    )
+            return 0
+        candidates = {self.root: list(ids) if ids else list(self._ring)}
+        with _SCHEDULER_RUNTIME_LOCK:
+            return _dispatch_segment_super_priority_lane(
+                config=config,
+                store=store,
+                running=running,
+                popens=popens,
+                root=self.root,
+                super_ring=self._ring,
+                candidates_by_root=candidates,
+                next_tick_by_root=self._next_tick_by_root,
+                cycle_id_by_root=self._cycle_id_by_root,
+                cluster_cron_allowed=enabled,
+                now_ts=float(time.time() if now_ts is None else now_ts),
+            )
+
+    def _run(self) -> None:
+        while self._stop_event is None or not self._stop_event.is_set():
+            try:
+                self.run_once()
+            except Exception as exc:
+                logging.warning("[%s] segment super-priority worker failed: %s", self.root, exc)
+            if self._stop_event is not None:
+                self._stop_event.wait(timeout=0.25)
+            else:
+                self._wake.wait(timeout=0.25)
+            self._wake.clear()
+
+
+class _SegmentSuperPriorityLoop:
+    """Maintain one independently waking segment super worker per instance."""
+
+    def __init__(self, *, stop_event: threading.Event | None = None, start: bool = True) -> None:
+        self._stop_event = stop_event
+        self._start = bool(start)
+        self._guard = threading.RLock()
+        self._workers: dict[str, _SegmentSuperPriorityWorker] = {}
+
+    def update(
+        self,
+        *,
+        config: AgentConfig,
+        installs: list[object],
+        store: TaskStore,
+        running: dict[str, RunningTask],
+        popens: dict[str, subprocess.Popen[bytes]],
+        enabled: bool,
+    ) -> None:
+        by_root = {
+            str(getattr(inst, "root", "") or "").strip(): inst
+            for inst in installs
+            if str(getattr(inst, "root", "") or "").strip()
+            and _segment_super_priority_effective_setting(config, inst)
+        }
+        with self._guard:
+            for root, inst in by_root.items():
+                worker = self._workers.get(root)
+                if worker is None:
+                    worker = _SegmentSuperPriorityWorker(root, stop_event=self._stop_event, start=self._start)
+                    self._workers[root] = worker
+                worker.update(
+                    config=config,
+                    inst=inst,
+                    store=store,
+                    running=running,
+                    popens=popens,
+                    enabled=enabled,
+                )
+            for root, worker in self._workers.items():
+                if root not in by_root:
+                    worker.disable(
+                        config=config,
+                        store=store,
+                        running=running,
+                        popens=popens,
+                        enabled=enabled,
+                    )
+
+    def run_once(self, *, now_ts: float | None = None) -> int:
+        with self._guard:
+            workers = list(self._workers.values())
+        return sum(worker.run_once(now_ts=now_ts) for worker in workers)
+
+
 class _CampaignSuperPriorityWorker:
     """Drive one instance's campaign super-priority ring independently."""
 
@@ -17143,6 +17444,26 @@ def _monitor_running(
                         outcome="success" if rc == 0 else "failure",
                         note="" if rc == 0 else (f"exit_{rc}" if rc is not None else "spawn_or_exit"),
                     )
+                if task.task_type == "segment_super_priority" and task.entity_id is not None:
+                    _segment_super_priority_cycle_update(
+                        store,
+                        task.root,
+                        int(task.entity_id),
+                        outcome="success" if rc == 0 else "failure",
+                        note="" if rc == 0 else (f"exit_{rc}" if rc is not None else "spawn_or_exit"),
+                    )
+                    # Retire any durable claim left by the pre-1.6.74 static
+                    # scheduler.  New rounds are owned by the dedicated
+                    # minute worker and no longer use this legacy lane state.
+                    _static_lane_terminal(
+                        store,
+                        root=task.root,
+                        lane=_SEGMENT_SUPER_PRIORITY_LANE,
+                        entity_id=int(task.entity_id),
+                        success=bool(rc == 0),
+                        note=None if rc == 0 else "segment_super_priority_failed",
+                        now_ts=now,
+                    )
                 if rc == 0 and task.task_type == "import":
                     _mark_import_settle(config, task.root, now, elapsed_sec=now - float(task.started_at))
                 bootstrap_digest = _plugin_operation_bootstrap_digest_from_task(task)
@@ -17323,6 +17644,14 @@ def _monitor_running(
                     task.root,
                     int(task.entity_id),
                     outcome="watchdog",
+                    note="killed_by_timeout",
+                )
+            if task.task_type == "segment_super_priority" and task.entity_id is not None:
+                _segment_super_priority_cycle_update(
+                    store,
+                    task.root,
+                    int(task.entity_id),
+                    outcome="failure",
                     note="killed_by_timeout",
                 )
             progress_watchdog.pop(key, None)
@@ -19823,6 +20152,20 @@ def run_loop(
         _scheduler_clear_refill_priority_notifier(_note_refill_priority)
 
     recurring_segment_priority_loop = _RecurringSegmentPriorityLoop(priority_executor)
+    segment_super_priority_loop = _SegmentSuperPriorityLoop(
+        stop_event=_test_stop_event,
+        start=not single_cycle,
+    )
+    segment_super_priority_loop.update(
+        config=config,
+        installs=list(installs),
+        store=store,
+        running=running,
+        popens=popens,
+        enabled=cluster_route_allows(config, "cron"),
+    )
+    if single_cycle:
+        segment_super_priority_loop.run_once()
     campaign_super_priority_loop = _CampaignSuperPriorityLoop(
         stop_event=_test_stop_event,
         start=not single_cycle,
@@ -20135,14 +20478,21 @@ def run_loop(
                             "delay_sec": max(0, int((time.time() - fallback_scheduled_at) // 60) * 60),
                         },
                     )
-                segment_priority_ids = _segment_priority_effective_setting(cfg, inst)
                 segment_super_priority_ids = _segment_super_priority_effective_setting(cfg, inst)
+                segment_priority_ids = (
+                    _segment_priority_effective_setting(cfg, inst)
+                    - segment_super_priority_ids
+                )
                 static_plans = {_SEGMENT_SUPER_PRIORITY_LANE: [], _SEGMENT_PRIORITY_LANE: []}
                 static_children: dict[int, set[int]] = {}
                 static_parents: dict[int, set[int]] = {}
-                static_graph_ready = not (segment_priority_ids or segment_super_priority_ids)
+                # Super-priority now has the same dedicated per-instance
+                # minute worker model as campaigns.  The legacy static
+                # scheduler remains responsible only for the ordinary
+                # priority lane.
+                static_graph_ready = not segment_priority_ids
                 static_graph_source = "not_configured"
-                if segment_priority_ids or segment_super_priority_ids:
+                if segment_priority_ids:
                     (
                         static_children,
                         static_parents,
@@ -20155,7 +20505,7 @@ def run_loop(
                     )
                     if static_graph_ready:
                         static_plans = _build_static_segment_lane_plans(
-                            super_priority_ids=segment_super_priority_ids,
+                            super_priority_ids=[],
                             priority_ids=segment_priority_ids,
                             parents_by_child=static_parents,
                             children_by_parent=static_children,
@@ -20252,12 +20602,6 @@ def run_loop(
                 )
                 static_host_limit = _scheduler_host_lane_limit(cfg, "segment")
                 for lane_name, task_type, interval_sec, max_parallel in (
-                    (
-                        _SEGMENT_SUPER_PRIORITY_LANE,
-                        "segment_super_priority",
-                        max(1, int(getattr(cfg, "segment_super_priority_interval_sec", 1) or 1)),
-                        _segment_static_lane_parallel_limit(cfg, inst, super_priority=True),
-                    ),
                     (
                         _SEGMENT_PRIORITY_LANE,
                         "segment_priority",
@@ -20852,6 +21196,14 @@ def run_loop(
         # Refresh only the worker snapshots here; each configured instance's
         # dedicated thread keeps ticking while this ordinary loop is busy in
         # planning, imports or another root's database work.
+        segment_super_priority_loop.update(
+            config=config,
+            installs=list(installs),
+            store=store,
+            running=running,
+            popens=popens,
+            enabled=cluster_route_allows(config, "cron"),
+        )
         campaign_super_priority_loop.update(
             config=config,
             installs=list(installs),

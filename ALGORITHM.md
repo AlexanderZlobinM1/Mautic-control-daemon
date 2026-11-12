@@ -308,19 +308,29 @@ profile/config и manual `segments:update` для admission не меняютс�
 создавать третью whitelist/dynamic-priority сущность. Membership взаимоисключающая:
 `super-priority → priority → ordinary`. Любой опубликованный segment/closure
 принадлежит только одной линии; статические линии полностью исключены из
-ordinary snapshot. Обе статические линии имеют собственные persisted queues,
-собственный lane accounting и execution locks.
+ordinary snapshot. `priority` сохраняет persisted static queue, а
+`super-priority` хранит отдельный minute-cycle receipt и замороженный список
+текущего круга; следующий круг перечитывает актуальную настройку.
 
 `super-priority` для каждой включённой instance — отдельное dedicated worker/ring
 вне общего regular host/instance budget. Поэтому при общей capacity `8+3` и
 четырёх super-instance общий regular budget остаётся `8+3`, а не уменьшается до
-`8+3−4`. Super-ring может работать на каждом minute tick независимо от
-обычной очереди; `slots_override` меняет только его собственный per-instance
-лимит. Super-процесс не вычитает и не добавляет regular/priority capacity, не
+`8+3−4`. Ровно один последовательный super-worker каждой instance начинает
+новый круг на каждом minute tick независимо от обычной очереди. Если текущий
+круг не завершился к следующему тику, он продолжается до конца без второго
+параллельного круга; после завершения следующий круг начинается на первой
+следующей минутной границе. Super-процесс не вычитает и не добавляет regular/priority capacity, не
 участвует ни в их host/instance budget, ни в reservation/accounting; его
-запущенные процессы не учитываются в обычных counters. Dependency closure,
-overlap, exact-task lock, durable claim и duplicate-защиты сохраняются и для
+запущенные процессы не учитываются в обычных counters. Exact-task lock,
+TaskStore receipt и duplicate-защиты сохраняются и для
 dedicated lane. Обычная `priority`-работа остаётся в shared regular accounting.
+
+Внутри super-круга MCD не рассчитывает веса и не использует ordinary
+dependency/priority planner: он последовательно запускает штатную
+`mautic:segments:update` для каждого настроенного ID. ID super-priority не
+может одновременно попасть в ordinary или priority. Удаление ID из настройки
+не прерывает уже запущенную команду, но исключает его из следующего круга;
+после удаления ID снова становится доступен обычному planner.
 
 `super-priority` проверяется чаще `priority`; частота не меняет precedence и
 не убивает running job. Если ordinary worker свободен, независимая работа
@@ -328,20 +338,11 @@ super-priority может продолжаться параллельно; activ
 уменьшает ordinary capacity, а dependency overlap и execution lock остаются
 обязательными.
 
-Native coverage receipt scoped to an ordinary cycle is never used to suppress
-a fresh static cycle. Within one static cycle, successful `done` receipts of
-the current lane and its stronger static lane are sufficient to exclude a
-shared Mautic 7 parent from a sibling leaf command. When the static lane
-reconciles a terminal snapshot into its next independent tick, that local
-coverage is intentionally discarded, so configured super-priority segments
-continue to execute by their own ring cadence instead of running only once per
-ordinary cycle.
-
-Static-lane reconciliation is lane-local as well: a completed super-priority
-snapshot rolls into its next cycle without waiting for the weaker priority
-lane to finish, and a priority lane may do the same independently. A claim or
-closure that is still active is preserved in its own lane; independent
-cadence never removes overlap, ownership, or durable execution-lock guards.
+Ordinary native coverage никогда не подавляет новый super-minute tick.
+Завершение или ожидание persisted `priority` lane также не может задержать
+следующий super-круг: это независимые workers и receipts. Старое durable
+super-state от версии до 1.6.74 закрывается фактическим terminal receipt
+первого запуска dedicated worker и больше не используется для admission.
 
 ### Канонический runtime envelope
 
