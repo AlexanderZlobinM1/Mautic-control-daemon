@@ -1,3 +1,9 @@
+## 1.6.70 - 2026-11-12
+
+- Treat an explicitly delivered non-empty plugin-operation catalog as MCC
+  declaration data during runtime reconciliation, so an older locally cached
+  catalog cannot hide newly published generic plugin operations.
+
 ## 1.6.69 - 2026-11-12
 
 - Materialize an explicit plugin-operation catalog delivered in the scoped

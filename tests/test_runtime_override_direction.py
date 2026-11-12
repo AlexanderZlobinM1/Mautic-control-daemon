@@ -2417,6 +2417,71 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
         self.assertEqual(resolved["runtime"]["scheduler_host_max_parallel"], 12)
         self.assertIn(("host", "scheduler_host_max_parallel", ""), resolved["local_wins"])
 
+    def test_explicit_plugin_catalog_replaces_stale_local_catalog_during_lww(self) -> None:
+        stale_catalog = {
+            "alex-personal.sales-snap.ru": [
+                {
+                    "operation_key": "mauticmailrupostmasterbundle:7:postmaster_sync",
+                    "bundle": "MauticMailRuPostmasterBundle",
+                }
+            ]
+        }
+        current_catalog = {
+            "alex-personal.sales-snap.ru": [
+                *stale_catalog["alex-personal.sales-snap.ru"],
+                {
+                    "operation_key": "warmupmail:update",
+                    "bundle": "MauticWarmupMailBundle",
+                    "operation": {
+                        "id": "update",
+                        "mode": "scheduled",
+                        "command": {
+                            "runner": "mautic_console",
+                            "name": "mautic:warmupmail:update",
+                        },
+                    },
+                },
+            ]
+        }
+        response = {
+            "desired_state": {
+                "revision": 5,
+                "updated_at": 100.0,
+                "runtime_overrides": {"plugin_operations": current_catalog},
+            }
+        }
+        local_metadata = daemon._runtime_metadata_empty()
+        daemon._runtime_metadata_set(
+            local_metadata,
+            "host",
+            "plugin_operations",
+            daemon._runtime_metadata_stamp(
+                source="mcd",
+                updated_at=500.0,
+                revision=99,
+                event_id="mcd:stale-catalog",
+            ),
+        )
+        remote_metadata = daemon._runtime_metadata_from_response(
+            response,
+            {"plugin_operations": current_catalog},
+            {"plugin_operations": stale_catalog},
+        )
+
+        resolved = daemon._resolve_runtime_snapshots(
+            {"plugin_operations": stale_catalog},
+            {"plugin_operations": current_catalog},
+            local_metadata,
+            remote_metadata,
+            remote_authoritative_keys=daemon._runtime_response_authoritative_declaration_keys(
+                response
+            ),
+        )
+
+        self.assertEqual(resolved["runtime"]["plugin_operations"], current_catalog)
+        self.assertIn(("host", "plugin_operations", ""), resolved["remote_wins"])
+        self.assertNotIn(("host", "plugin_operations", ""), resolved["local_push"])
+
     def test_runtime_lww_mcc_newer_wins_and_offline_updated_at_is_primary(self) -> None:
         local_metadata = daemon._runtime_metadata_empty()
         remote_metadata = daemon._runtime_metadata_empty()
@@ -3076,6 +3141,110 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
         )
 
         self.assertEqual(merged["plugin_operations"], catalog)
+
+    def test_bootstrap_replaces_stale_cached_plugin_catalog_with_explicit_mcc_catalog(self) -> None:
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        class MemoryStore:
+            def __init__(self, values=None):
+                self.values = dict(values or {})
+
+            def get_runtime_sync(self, key):
+                return self.values.get(key)
+
+            def put_runtime_sync(self, key, value):
+                self.values[key] = dict(value)
+
+            def delete_runtime_sync(self, keys):
+                for key in keys:
+                    self.values.pop(key, None)
+                return 1
+
+        stale_catalog = {
+            "alex-personal.sales-snap.ru": [
+                {
+                    "operation_key": "mauticmailrupostmasterbundle:7:postmaster_sync",
+                    "bundle": "MauticMailRuPostmasterBundle",
+                }
+            ]
+        }
+        current_catalog = {
+            "alex-personal.sales-snap.ru": [
+                *stale_catalog["alex-personal.sales-snap.ru"],
+                {
+                    "operation_key": "warmupmail:update",
+                    "bundle": "MauticWarmupMailBundle",
+                    "operation": {
+                        "id": "update",
+                        "mode": "scheduled",
+                        "command": {
+                            "runner": "mautic_console",
+                            "name": "mautic:warmupmail:update",
+                        },
+                    },
+                },
+            ]
+        }
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "mcd.toml"
+            path.write_text(
+                '[profile]\nname = "farm-hiload"\n\n[runtime]\n'
+                'plugin_operations = { "alex-personal.sales-snap.ru" = '
+                '[{ operation_key = "mauticmailrupostmasterbundle:7:postmaster_sync", '
+                'bundle = "MauticMailRuPostmasterBundle" }] }\n',
+                encoding="utf-8",
+            )
+            cfg = replace(
+                load_config(str(path), allow_recover_from_mcc=False),
+                mcc_url="https://mcc.example",
+                mcc_token="token",
+            )
+            local_metadata = daemon._runtime_metadata_empty()
+            daemon._runtime_metadata_set(
+                local_metadata,
+                "host",
+                "plugin_operations",
+                daemon._runtime_metadata_stamp(
+                    source="mcd",
+                    updated_at=500.0,
+                    revision=99,
+                    event_id="mcd:stale-catalog",
+                ),
+            )
+            store = MemoryStore(
+                {
+                    "local_runtime": {"plugin_operations": stale_catalog},
+                    "mcc_runtime": {"plugin_operations": stale_catalog},
+                    "local_runtime_metadata": local_metadata,
+                }
+            )
+            response = {
+                "status": "ok",
+                "desired_state": {
+                    "revision": 5,
+                    "updated_at": 100.0,
+                    "runtime_overrides": {"plugin_operations": current_catalog},
+                },
+            }
+
+            with patch("mcd_agent.daemon.fetch_runtime_overrides", return_value=response):
+                status = daemon._bootstrap_remote_runtime_before_local_baseline(
+                    cfg,
+                    store,
+                    ["alex-personal.sales-snap.ru"],
+                )
+
+            self.assertEqual(status, "applied")
+            restored = local_runtime_overrides(
+                load_config(str(path), allow_recover_from_mcc=False)
+            )
+            self.assertEqual(restored["plugin_operations"], current_catalog)
+            self.assertEqual(
+                store.get_runtime_sync("mcc_runtime")["plugin_operations"],
+                current_catalog,
+            )
 
     def test_plugin_catalog_survives_partial_restart_and_authoritative_empty_clears(self) -> None:
         from pathlib import Path
