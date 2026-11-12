@@ -28,6 +28,7 @@ _RUNTIME_ACK_MAX_BYTES = 256 * 1024
 _RUNTIME_ACK_SAFE_BYTES = 240 * 1024
 _RUNTIME_ACK_MAX_KEYS = 128
 _RUNTIME_DIGEST_ENCODING = "canonical-json-sha256"
+_PLUGIN_OPERATIONS_RUNTIME_KEY = "plugin_operations"
 
 
 def _post_json(url: str, payload: dict[str, Any], token: str | None, timeout_sec: int = 12) -> dict[str, Any]:
@@ -564,11 +565,25 @@ def fetch_runtime_overrides(
         # desired_state envelope.  The latter is authoritative for adoption;
         # otherwise a stale effective map can make a newer desired change look
         # already applied and it never reaches the local runtime include.
+        effective_runtime = out.get("runtime_overrides")
+        effective_runtime = effective_runtime if isinstance(effective_runtime, dict) else {}
         desired_state = out.get("desired_state")
         if isinstance(desired_state, dict):
             desired_runtime = desired_state.get("runtime_overrides")
             if isinstance(desired_runtime, dict):
-                out["runtime_overrides"] = desired_runtime
+                # Ordinary runtime settings follow the canonical desired
+                # envelope. Plugin operation definitions are different: MCC
+                # materializes that catalog from installed plugin metadata in
+                # the effective top-level envelope, while operator-owned
+                # enabled/interval values live in their separate instance
+                # settings map. Preserve the materialized declaration so a
+                # stale/empty desired catalog cannot hide a newly installed
+                # generic plugin operation.
+                runtime = dict(desired_runtime)
+                effective_catalog = effective_runtime.get(_PLUGIN_OPERATIONS_RUNTIME_KEY)
+                if isinstance(effective_catalog, dict) and effective_catalog:
+                    runtime[_PLUGIN_OPERATIONS_RUNTIME_KEY] = effective_catalog
+                out["runtime_overrides"] = runtime
             desired_instances = desired_state.get("instance_desired_states")
             if isinstance(desired_instances, dict):
                 out["instance_desired_states"] = desired_instances

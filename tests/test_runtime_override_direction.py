@@ -2039,6 +2039,49 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             {"segments": [23, 86]},
         )
 
+    def test_nested_desired_state_preserves_materialized_plugin_catalog(self) -> None:
+        uid = "alex-personal.sales-snap.ru"
+        materialized_catalog = {
+            uid: [
+                {
+                    "operation_key": "mauticwarmupmailbundle:7:warmupmail:update",
+                    "plugin_uid": "mauticwarmupmailbundle:7",
+                    "operation": "warmupmail:update",
+                    "command": "mautic:warmupmail:update",
+                    "interval_sec": 60,
+                }
+            ]
+        }
+        cfg = SimpleNamespace(mcc_url="https://mcc.example", mcc_token="token")
+        response = {
+            "status": "ok",
+            "runtime_overrides": {
+                "plugin_operations": materialized_catalog,
+                "scheduler_host_max_parallel": 2,
+            },
+            "desired_state": {
+                "revision": 205,
+                "runtime_overrides": {
+                    "plugin_operations": {},
+                    "scheduler_host_max_parallel": 8,
+                },
+            },
+        }
+        identity = {
+            "effective_hostname": "alex-personal",
+            "effective_mcc_host_name": "alex-personal",
+            "local_hostname": "alex-personal",
+            "configured_host_name": "",
+        }
+        with patch(
+            "mcd_agent.runtime_overrides.resolve_agent_identity",
+            return_value=identity,
+        ), patch("mcd_agent.runtime_overrides._post_json", return_value=response):
+            fetched = fetch_runtime_overrides(cfg, instance_uids=[uid])
+
+        self.assertEqual(fetched["runtime_overrides"]["plugin_operations"], materialized_catalog)
+        self.assertEqual(fetched["runtime_overrides"]["scheduler_host_max_parallel"], 8)
+
     def test_instance_state_uses_uid_and_reapplies_after_root_move(self) -> None:
         inst = SimpleNamespace(
             instance_uid="app.sales-snap.com",
