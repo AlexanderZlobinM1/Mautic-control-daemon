@@ -636,6 +636,27 @@ def _select_instance_for_ops(cfg, root: str | None):
 
 def _plugin_operation_cli(cfg, args) -> int:
     inst = _select_instance_for_ops(cfg, args.root)
+    # MCC materializes plugin declarations from the installed catalog in the
+    # effective runtime envelope. A CLI operation can race the daemon poll
+    # that persists that declaration after a plugin install or MCD restart.
+    # Resolve the current remote runtime in memory before looking up the
+    # operation so planning and execution consume the same declaration. The
+    # daemon remains the durable LWW/persistence owner; standalone/local-only
+    # installations simply keep their existing config when MCC is disabled.
+    try:
+        fetched = fetch_runtime_overrides(
+            cfg,
+            instance_uids=[str(getattr(inst, "instance_uid", "") or "")],
+        )
+        if str(fetched.get("status", "")).strip().lower() == "ok":
+            runtime = fetched.get("runtime_overrides")
+            if isinstance(runtime, dict):
+                refreshed = apply_remote_overrides(cfg, runtime)
+                candidate = refreshed.get("config")
+                if candidate is not None:
+                    cfg = candidate
+    except Exception as exc:
+        logging.warning("plugin-operation runtime refresh failed; using local declaration: %s", exc)
     operations = operations_for_instance(cfg, inst)
     if args.plugin_ops_cmd == "complete":
         values = operation_completion(cfg, inst, args.prefix)

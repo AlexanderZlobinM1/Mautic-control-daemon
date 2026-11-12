@@ -1,3 +1,9 @@
+## 1.6.72 - 2026-11-12
+
+- Refresh the current MCC materialized runtime in memory before generic plugin
+  CLI lookup, so execute uses the same declaration as planning even when it
+  races the daemon poll after an install or restart.
+
 ## 1.6.71 - 2026-11-12
 
 - Preserve MCC's materialized plugin-operation catalog when the canonical
