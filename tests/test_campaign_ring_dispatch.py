@@ -26,6 +26,7 @@ from mcd_agent.daemon import (
     _CAMPAIGN_TRIGGER_FUTURE_WAKE_LOGGED,
     _CAMPAIGN_TRIGGER_STUCK_UNTIL,
     _SegmentSuperPriorityLoop,
+    _refresh_segment_super_priority_workers,
     _PriorityTaskExecutor,
     _TASK_LOCK_BUSY_RC,
     _campaign_pressure_active,
@@ -1975,6 +1976,32 @@ class CampaignRingDispatchTests(unittest.TestCase):
             loop.update(config=cfg, installs=installs, store=Mock(), running={}, popens={}, enabled=True)
             self.assertEqual(loop.run_once(now_ts=120.0), 0)
         self.assertEqual(dispatch.call_count, 1)
+
+    def test_runtime_apply_refreshes_dedicated_segment_super_worker_snapshot(self) -> None:
+        config = SimpleNamespace(cluster_id=None)
+        installs = [SimpleNamespace(root="/var/www/electronic/public_html")]
+        segment_loop = Mock()
+        store = Mock()
+        running = {}
+        popens = {}
+
+        _refresh_segment_super_priority_workers(
+            config=config,
+            installs=installs,
+            store=store,
+            running=running,
+            popens=popens,
+            segment_loop=segment_loop,
+        )
+
+        segment_loop.update.assert_called_once_with(
+            config=config,
+            installs=installs,
+            store=store,
+            running=running,
+            popens=popens,
+            enabled=True,
+        )
 
     def test_whitelists_are_priority_only_without_explicit_realtime(self) -> None:
         cfg = SimpleNamespace(

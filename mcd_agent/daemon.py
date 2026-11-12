@@ -15962,6 +15962,27 @@ class _SegmentSuperPriorityLoop:
         return sum(worker.run_once(now_ts=now_ts) for worker in workers)
 
 
+def _refresh_segment_super_priority_workers(
+    *,
+    config: AgentConfig,
+    installs: list[object],
+    store: TaskStore,
+    running: dict[str, RunningTask],
+    popens: dict[str, subprocess.Popen[bytes]],
+    segment_loop: _SegmentSuperPriorityLoop,
+) -> None:
+    """Publish runtime changes without waiting for another ordinary farm pass."""
+
+    segment_loop.update(
+        config=config,
+        installs=list(installs),
+        store=store,
+        running=running,
+        popens=popens,
+        enabled=cluster_route_allows(config, "cron"),
+    )
+
+
 def _is_running(running: dict[str, RunningTask], root: str, task_type: str, entity_id: int | None) -> bool:
     if task_type in {"segment", "segment_sql"} and entity_id is not None:
         if _segment_sql_worker_running(root, int(entity_id)):
@@ -19628,13 +19649,13 @@ def run_loop(
         stop_event=_test_stop_event,
         start=not single_cycle,
     )
-    segment_super_priority_loop.update(
+    _refresh_segment_super_priority_workers(
         config=config,
         installs=list(installs),
         store=store,
         running=running,
         popens=popens,
-        enabled=cluster_route_allows(config, "cron"),
+        segment_loop=segment_super_priority_loop,
     )
     if single_cycle:
         segment_super_priority_loop.run_once()
@@ -20635,13 +20656,13 @@ def run_loop(
         # Only refresh the snapshot here.  Each configured instance owns an
         # independently waking minute worker, so external handler activity or
         # another root's planning cannot delay its ring.
-        segment_super_priority_loop.update(
+        _refresh_segment_super_priority_workers(
             config=config,
             installs=list(installs),
             store=store,
             running=running,
             popens=popens,
-            enabled=cluster_route_allows(config, "cron"),
+            segment_loop=segment_super_priority_loop,
         )
         current_commercial_mode, current_commercial_reason = _commercial_state_eligibility(config)
         if current_commercial_mode != commercial_profile_seen:
@@ -20802,6 +20823,14 @@ def run_loop(
                         if isinstance(applied.get("config"), AgentConfig):
                             config = applied["config"]
                             pusher.cfg = config
+                            _refresh_segment_super_priority_workers(
+                                config=config,
+                                installs=list(installs),
+                                store=store,
+                                running=running,
+                                popens=popens,
+                                segment_loop=segment_super_priority_loop,
+                            )
                         local_runtime_to_push = dict(v3_runtime)
                     elif v3_conflict_handled:
                         conflict = v3_result.get("response", {}).get("conflict")
@@ -20822,6 +20851,14 @@ def run_loop(
                             if isinstance(applied.get("config"), AgentConfig):
                                 config = applied["config"]
                                 pusher.cfg = config
+                                _refresh_segment_super_priority_workers(
+                                    config=config,
+                                    installs=list(installs),
+                                    store=store,
+                                    running=running,
+                                    popens=popens,
+                                    segment_loop=segment_super_priority_loop,
+                                )
                 else:
                     pushed = _push_local_runtime_change(
                         config,
@@ -21144,6 +21181,14 @@ def run_loop(
                         old_profile = (config.profile_name or "").strip().lower()
                         config = next_cfg
                         pusher.cfg = config
+                        _refresh_segment_super_priority_workers(
+                            config=config,
+                            installs=list(installs),
+                            store=store,
+                            running=running,
+                            popens=popens,
+                            segment_loop=segment_super_priority_loop,
+                        )
                         next_plan_refresh_at = 0.0
                         next_update_check_at = 0.0
                         next_service_profile_apply_at = 0.0
@@ -21293,6 +21338,14 @@ def run_loop(
                         if isinstance(next_cfg, AgentConfig):
                             config = next_cfg
                             pusher.cfg = config
+                            _refresh_segment_super_priority_workers(
+                                config=config,
+                                installs=list(installs),
+                                store=store,
+                                running=running,
+                                popens=popens,
+                                segment_loop=segment_super_priority_loop,
+                            )
                             _persist_resolved_runtime_to_config(
                                 config,
                                 effective_runtime,
@@ -23173,6 +23226,14 @@ def run_loop(
                         base_config = config
                         last_local_runtime_fp = _sync_local_runtime_baseline_after_config_recovery(config, store)
                         pusher.cfg = config
+                        _refresh_segment_super_priority_workers(
+                            config=config,
+                            installs=list(installs),
+                            store=store,
+                            running=running,
+                            popens=popens,
+                            segment_loop=segment_super_priority_loop,
+                        )
                         next_plan_refresh_at = 0.0
                         next_update_check_at = 0.0
                         next_service_profile_apply_at = 0.0
