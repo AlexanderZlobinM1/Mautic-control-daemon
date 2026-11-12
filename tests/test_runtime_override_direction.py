@@ -3054,6 +3054,29 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             self.assertEqual(restored["db_watchdog"], {"enabled": True, "max_connections": 120})
             self.assertEqual(store.get_runtime_sync("mcc_runtime")["plugin_operations"], catalog)
 
+    def test_scoped_desired_state_catalog_is_materialized_when_host_envelope_omits_it(self) -> None:
+        catalog = {
+            "alex-personal.sales-snap.ru": [
+                {
+                    "operation_key": "warmupmail:update",
+                    "bundle": "MauticWarmupMailBundle",
+                    "operation": {
+                        "id": "update",
+                        "mode": "scheduled",
+                        "command": {"runner": "mautic_console", "name": "mautic:warmupmail:update"},
+                    },
+                }
+            ]
+        }
+
+        merged = daemon._merge_missing_plugin_operation_catalog(
+            {},
+            {"desired_state": {"runtime_overrides": {"plugin_operations": catalog}}},
+            (),
+        )
+
+        self.assertEqual(merged["plugin_operations"], catalog)
+
     def test_plugin_catalog_survives_partial_restart_and_authoritative_empty_clears(self) -> None:
         from pathlib import Path
         from tempfile import TemporaryDirectory
