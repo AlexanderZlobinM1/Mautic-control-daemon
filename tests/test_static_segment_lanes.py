@@ -121,6 +121,39 @@ class StaticSegmentLaneTests(unittest.TestCase):
         self.assertEqual(_segment_priority_effective_setting(config, inst), {58, 59})
         self.assertEqual(_segment_super_priority_effective_setting(config, inst), {60})
 
+    def test_special_rings_ignore_legacy_whitelist_disable(self) -> None:
+        config = SimpleNamespace(
+            disable_whitelist=True,
+            segment_priority=[58],
+            segment_whitelist=[59],
+            segment_whitelist_file=None,
+            segment_priority_instance_settings={},
+            segment_whitelist_instance_settings={},
+            segment_super_priority=[60],
+            segment_super_priority_instance_settings={},
+        )
+        inst = SimpleNamespace(root="/var/www/site")
+
+        self.assertEqual(_segment_priority_effective_setting(config, inst), {58})
+        self.assertEqual(_segment_super_priority_effective_setting(config, inst), {60})
+
+    def test_instance_special_rings_ignore_legacy_whitelist_disable(self) -> None:
+        uid = "electronic.sales-snap.com@MauticFarm-02"
+        config = SimpleNamespace(
+            disable_whitelist=True,
+            segment_priority=[],
+            segment_whitelist=[59],
+            segment_whitelist_file=None,
+            segment_priority_instance_settings={uid: {"segments": [23, 86]}},
+            segment_whitelist_instance_settings={uid: {"segments": [59]}},
+            segment_super_priority=[],
+            segment_super_priority_instance_settings={uid: {"segments": [93, 94]}},
+        )
+        inst = SimpleNamespace(root="/var/www/electronic/public_html", instance_uid=uid)
+
+        self.assertEqual(_segment_priority_effective_setting(config, inst), {23, 86})
+        self.assertEqual(_segment_super_priority_effective_setting(config, inst), {93, 94})
+
     def test_legacy_priority_and_super_priority_are_mutually_exclusive(self) -> None:
         plans = build_lane_plans(
             super_priority_ids=[58, 58],

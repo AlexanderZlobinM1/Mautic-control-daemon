@@ -1,3 +1,12 @@
+## 1.6.75 - 2026-11-12
+
+- Keep the explicit segment priority and super-priority rings active when the
+  legacy `disable_whitelist` switch is enabled. The switch now disables only
+  the old whitelist alias, so MCC-delivered special-ring settings reach their
+  dedicated schedulers and are excluded from ordinary segment planning.
+- Add host- and instance-scoped regressions for the MCC payload used by
+  `electronic`, including super-priority segment IDs 93 and 94.
+
 ## 1.6.74 - 2026-11-12
 
 - Move segment super-priority to one dedicated per-instance minute worker,
