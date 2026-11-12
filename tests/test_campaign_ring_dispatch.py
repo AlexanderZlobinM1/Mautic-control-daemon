@@ -25,6 +25,7 @@ from mcd_agent.daemon import (
     _CAMPAIGN_TRIGGER_FUTURE_WAKE,
     _CAMPAIGN_TRIGGER_FUTURE_WAKE_LOGGED,
     _CAMPAIGN_TRIGGER_STUCK_UNTIL,
+    _SegmentSuperPriorityLoop,
     _PriorityTaskExecutor,
     _TASK_LOCK_BUSY_RC,
     _campaign_pressure_active,
@@ -37,6 +38,8 @@ from mcd_agent.daemon import (
     _campaign_whitelist_effective_setting,
     _campaign_super_priority_effective_setting,
     _campaign_super_priority_args,
+    _segment_super_priority_args,
+    _dispatch_segment_super_priority_lane,
     _split_campaign_circles_with_super_priority,
     _campaign_rebuild_waits_for_trigger,
     _campaign_spill_prefers_priority,
@@ -1895,6 +1898,83 @@ class CampaignRingDispatchTests(unittest.TestCase):
         self.assertIn("mautic:campaigns:update", script)
         self.assertIn("rebuild_rc", script)
         self.assertLess(script.index("mautic:campaigns:update"), script.index("mautic:campaigns:trigger"))
+
+    def test_segment_super_priority_uses_direct_native_segment_command(self) -> None:
+        cfg = SimpleNamespace(
+            php_bin="php",
+            mautic_run_as_user="www-data",
+            cmd_segment_update_template="mautic:segments:update -i {id}",
+            segment_batch_limit=0,
+        )
+        with patch("mcd_agent.executor._resolve_console_path", return_value="/var/www/electronic/public_html/bin/console"):
+            args = _segment_super_priority_args(cfg, "/var/www/electronic/public_html", 94)
+        self.assertIn("mautic:segments:update", args)
+        self.assertIn("94", args)
+
+    def test_segment_super_priority_repeats_on_three_minute_ticks(self) -> None:
+        root = "/var/www/electronic/public_html"
+        ring: deque[int] = deque()
+        next_tick: dict[str, float] = {}
+        cycle_ids: dict[str, str] = {}
+
+        class Store:
+            def __init__(self) -> None:
+                self.payloads: dict[str, object] = {}
+
+            def get_runtime_sync(self, key: str) -> object:
+                return self.payloads.get(key)
+
+            def put_runtime_sync(self, key: str, value: object) -> None:
+                self.payloads[key] = value
+
+        store = Store()
+        starts: list[float] = []
+
+        def launch_once(**kwargs: object) -> int:
+            starts.append(float(kwargs.pop("test_now")))
+            supplied_ring = kwargs["ring"]
+            self.assertIsInstance(supplied_ring, deque)
+            supplied_ring.clear()
+            return 1
+
+        for tick in (60.0, 120.0, 180.0):
+            with patch.object(daemon_mod, "_fill_from_ring") as fill:
+                fill.side_effect = lambda **kwargs: launch_once(test_now=tick, **kwargs)
+                self.assertEqual(
+                    _dispatch_segment_super_priority_lane(
+                        config=SimpleNamespace(), store=store, running={}, popens={}, root=root,
+                        super_ring=ring, candidates_by_root={root: [94]}, next_tick_by_root=next_tick,
+                        cycle_id_by_root=cycle_ids, cluster_cron_allowed=True, now_ts=tick,
+                    ),
+                    1,
+                )
+            self.assertEqual(
+                _dispatch_segment_super_priority_lane(
+                    config=SimpleNamespace(), store=store, running={}, popens={}, root=root,
+                    super_ring=ring, candidates_by_root={root: [94]}, next_tick_by_root=next_tick,
+                    cycle_id_by_root=cycle_ids, cluster_cron_allowed=True, now_ts=tick + 1.0,
+                ),
+                0,
+            )
+        self.assertEqual(starts, [60.0, 120.0, 180.0])
+        self.assertEqual(next_tick[root], 240.0)
+
+    def test_segment_super_priority_workers_are_instance_scoped_and_removable(self) -> None:
+        root = "/var/www/electronic/public_html"
+        cfg = SimpleNamespace(
+            segment_super_priority=[],
+            segment_super_priority_instance_settings={"electronic@host": {"segments": [94]}},
+        )
+        installs = [SimpleNamespace(root=root, instance_uid="electronic@host")]
+        loop = _SegmentSuperPriorityLoop(start=False)
+        with patch.object(daemon_mod, "_dispatch_segment_super_priority_lane", return_value=1) as dispatch:
+            loop.update(config=cfg, installs=installs, store=Mock(), running={}, popens={}, enabled=True)
+            self.assertEqual(loop.run_once(now_ts=60.0), 1)
+            self.assertEqual(dispatch.call_args.kwargs["candidates_by_root"], {root: [94]})
+            cfg.segment_super_priority_instance_settings = {"electronic@host": {"segments": []}}
+            loop.update(config=cfg, installs=installs, store=Mock(), running={}, popens={}, enabled=True)
+            self.assertEqual(loop.run_once(now_ts=120.0), 0)
+        self.assertEqual(dispatch.call_count, 1)
 
     def test_whitelists_are_priority_only_without_explicit_realtime(self) -> None:
         cfg = SimpleNamespace(

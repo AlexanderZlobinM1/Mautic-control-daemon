@@ -1,5 +1,11 @@
 ## 1.7.0 — Unreleased architecture candidate
 
+- Forward-port the segment super-priority minute ring: one sequential
+  per-instance worker, outside ordinary/priority budgets, with canonical cycle
+  receipts and add/remove behavior matching the stable line.
+- Preserve the 1.7 execution boundary: the ring invokes MCD's existing direct
+  Mautic command operation only; no OS/package/service/config implementation is
+  moved back from external handlers.
 - Required boundary: independently versioned MCC-distributed external wrapping
   owns all install/upgrade/migrate/config/profile/matrix semantics. MCD retains
   generic artifact cache/verification/execution/progress/receipts only.
