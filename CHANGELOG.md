@@ -1,3 +1,9 @@
+## 1.6.73 - 2026-11-12
+
+- Bind generic plugin-operation settings pushes to the desired-state revision
+  fetched for the same operation, preventing a valid MCC-routed enable/update
+  from being rejected as `stale_desired_revision` after host execution.
+
 ## 1.6.72 - 2026-11-12
 
 - Refresh the current MCC materialized runtime in memory before generic plugin
