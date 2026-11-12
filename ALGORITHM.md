@@ -333,6 +333,9 @@ MCC может передать per-instance envelope `segment_special_rings_v1`
 конфигурацию: envelope нормализуется в поддерживаемые
 `segment_priority_instance_settings` и
 `segment_super_priority_instance_settings` по immutable `instance_uid`.
+Старый флаг `disable_whitelist` отключает только legacy whitelist-алиас и не
+отключает отдельные priority/super-priority кольца. Их явные настройки остаются
+действующими независимо от режима старого whitelist.
 Положительные segment IDs дедуплицируются, `slots_override` проверяется и
 применяется к соответствующей static lane. Невалидная форма или неизвестное
 runtime key остаётся rejected и не получает applied revision; `applied`

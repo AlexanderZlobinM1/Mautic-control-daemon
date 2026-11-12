@@ -6752,11 +6752,18 @@ def _static_segment_setting_value(settings: object, inst: object) -> tuple[bool,
     return _instance_scoped_whitelist_entry(settings, inst)
 
 
-def _static_segment_ids_from_value(raw: object, *, super_priority: bool) -> set[int]:
+def _static_segment_ids_from_value(
+    raw: object,
+    *,
+    super_priority: bool,
+    honor_legacy_whitelist_disable: bool = False,
+) -> set[int]:
     if isinstance(raw, dict):
         if "enabled" in raw and not _to_boolish(raw.get("enabled"), True):
             return set()
-        if _to_boolish(raw.get("disable_whitelist"), False) or _to_boolish(raw.get("disabled"), False):
+        if _to_boolish(raw.get("disabled"), False):
+            return set()
+        if honor_legacy_whitelist_disable and _to_boolish(raw.get("disable_whitelist"), False):
             return set()
         keys = (
             ("segment_super_priority", "super_priority", "segments", "ids")
@@ -6775,31 +6782,40 @@ def _static_segment_ids_from_value(raw: object, *, super_priority: bool) -> set[
 def _segment_priority_effective_setting(config: AgentConfig, inst: object) -> set[int]:
     """Resolve the canonical priority list; whitelist is only its old alias."""
 
-    if bool(getattr(config, "disable_whitelist", False)):
-        return set()
+    legacy_whitelist_enabled = not bool(getattr(config, "disable_whitelist", False))
     global_ids = set(getattr(config, "segment_priority", []) or [])
-    global_ids.update(getattr(config, "segment_whitelist", []) or [])
-    global_ids |= _load_segment_whitelist_file(getattr(config, "segment_whitelist_file", None), inst)
+    if legacy_whitelist_enabled:
+        global_ids.update(getattr(config, "segment_whitelist", []) or [])
+        global_ids |= _load_segment_whitelist_file(getattr(config, "segment_whitelist_file", None), inst)
     found_priority, raw_priority = _static_segment_setting_value(
         getattr(config, "segment_priority_instance_settings", {}),
         inst,
     )
-    found_legacy, raw_legacy = _static_segment_setting_value(
-        getattr(config, "segment_whitelist_instance_settings", {}),
-        inst,
-    )
+    found_legacy, raw_legacy = (False, None)
+    if legacy_whitelist_enabled:
+        found_legacy, raw_legacy = _static_segment_setting_value(
+            getattr(config, "segment_whitelist_instance_settings", {}),
+            inst,
+        )
     if not found_priority and not found_legacy:
         return global_ids
     # An instance-scoped entry replaces the global baseline, while priority
     # and legacy-whitelist entries for that same instance are one merged
     # entity and are deduplicated below.
     ids: set[int] = set()
-    for raw in (raw_priority if found_priority else None, raw_legacy if found_legacy else None):
+    for raw, legacy_alias in (
+        (raw_priority if found_priority else None, False),
+        (raw_legacy if found_legacy else None, True),
+    ):
         if isinstance(raw, bool):
             if not raw:
                 continue
         else:
-            ids |= _static_segment_ids_from_value(raw, super_priority=False)
+            ids |= _static_segment_ids_from_value(
+                raw,
+                super_priority=False,
+                honor_legacy_whitelist_disable=legacy_alias,
+            )
         if isinstance(raw, dict):
             file_raw = str(raw.get("segment_priority_file", raw.get("segment_whitelist_file", "")) or "").strip()
             if file_raw:
@@ -6810,8 +6826,6 @@ def _segment_priority_effective_setting(config: AgentConfig, inst: object) -> se
 def _segment_super_priority_effective_setting(config: AgentConfig, inst: object) -> set[int]:
     """Resolve the sole additional static super-priority MCC list."""
 
-    if bool(getattr(config, "disable_whitelist", False)):
-        return set()
     global_ids = set(getattr(config, "segment_super_priority", []) or [])
     found, raw = _static_segment_setting_value(
         getattr(config, "segment_super_priority_instance_settings", {}),
