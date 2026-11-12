@@ -1,3 +1,13 @@
+## 1.6.76 - 2026-11-12
+
+- Refresh the dedicated segment and campaign super-priority worker snapshots
+  immediately after runtime apply, conflict rebase, accepted-lane recovery or
+  profile recovery. Large ordinary farm cycles no longer delay activation of
+  a newly delivered per-instance super-priority ring until the main loop
+  eventually starts another pass.
+- Add a regression proving one runtime refresh updates both independent worker
+  families with the same current configuration and instance inventory.
+
 ## 1.6.75 - 2026-11-12
 
 - Keep the explicit segment priority and super-priority rings active when the
