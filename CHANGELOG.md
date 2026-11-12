@@ -1,3 +1,10 @@
+## 1.6.71 - 2026-11-12
+
+- Preserve MCC's materialized plugin-operation catalog when the canonical
+  desired runtime envelope replaces ordinary runtime settings, so newly
+  installed generic operations reach the scheduler without changing their
+  independent per-instance enabled/interval settings.
+
 ## 1.6.70 - 2026-11-12
 
 - Treat an explicitly delivered non-empty plugin-operation catalog as MCC
