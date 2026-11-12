@@ -66,3 +66,74 @@ def test_cli_refreshes_materialized_catalog_before_operation_lookup(capsys) -> N
             "values": {"enabled": True, "interval_sec": 60},
         }
     ]
+
+
+def test_cli_set_pushes_against_fetched_desired_revision(capsys) -> None:
+    stale = SimpleNamespace(
+        config_file_path="/etc/mcd/mcd.toml",
+        plugin_operations={},
+        plugin_operation_instance_settings={},
+    )
+    fresh = SimpleNamespace(
+        config_file_path="/etc/mcd/mcd.toml",
+        plugin_operations={"app.example": [{"operation_key": "warmupmail:update"}]},
+        plugin_operation_instance_settings={},
+    )
+    persisted = SimpleNamespace(
+        config_file_path="/etc/mcd/mcd.toml",
+        plugin_operations=fresh.plugin_operations,
+        plugin_operation_instance_settings={
+            "app.example": {"warmupmail:update": {"enabled": True}},
+        },
+    )
+    inst = SimpleNamespace(instance_uid="app.example")
+    args = SimpleNamespace(
+        root="app.example",
+        plugin_ops_cmd="set",
+        prefix="",
+        json=True,
+        operation_key="warmupmail:update",
+        set=["enabled=true"],
+    )
+    operation = {
+        "operation_key": "warmupmail:update",
+        "bundle": "MauticWarmupMailBundle",
+        "operation": {
+            "id": "warmupmail:update",
+            "mode": "scheduled",
+            "fields": [{"id": "enabled", "type": "boolean", "default": False}],
+        },
+    }
+    response = {
+        "status": "ok",
+        "runtime_overrides": {"plugin_operations": fresh.plugin_operations},
+        "desired_state": {"revision": 41, "runtime_overrides": {}},
+    }
+    applied = {
+        "config": fresh,
+        "applied_keys": ["plugin_operations"],
+        "unsupported_keys": [],
+        "blocked_keys": [],
+    }
+
+    with patch.object(cli, "_select_instance_for_ops", return_value=inst), patch.object(
+        cli, "fetch_runtime_overrides", return_value=response
+    ), patch.object(cli, "apply_remote_overrides", return_value=applied), patch.object(
+        cli, "operations_for_instance", return_value=[operation]
+    ), patch.object(cli, "_upsert_runtime_values"), patch.object(
+        cli, "load_config", return_value=persisted
+    ), patch.object(
+        cli, "push_runtime_overrides", return_value={"status": "ok"}
+    ) as push, patch.object(cli, "touch_poll_trigger"):
+        rc = cli._plugin_operation_cli(stale, args)
+
+    assert rc == 0
+    assert push.call_args.kwargs["target"] == "desired"
+    assert push.call_args.kwargs["merge"] is True
+    assert push.call_args.kwargs["desired_state_revision"] == 41
+    assert push.call_args.args[1] == {
+        "plugin_operation_instance_settings": {
+            "app.example": {"warmupmail:update": {"enabled": True}},
+        }
+    }
+    assert json.loads(capsys.readouterr().out)["status"] == "ok"

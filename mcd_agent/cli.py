@@ -636,6 +636,7 @@ def _select_instance_for_ops(cfg, root: str | None):
 
 def _plugin_operation_cli(cfg, args) -> int:
     inst = _select_instance_for_ops(cfg, args.root)
+    desired_state_revision: int | None = None
     # MCC materializes plugin declarations from the installed catalog in the
     # effective runtime envelope. A CLI operation can race the daemon poll
     # that persists that declaration after a plugin install or MCD restart.
@@ -649,6 +650,11 @@ def _plugin_operation_cli(cfg, args) -> int:
             instance_uids=[str(getattr(inst, "instance_uid", "") or "")],
         )
         if str(fetched.get("status", "")).strip().lower() == "ok":
+            desired_state = fetched.get("desired_state")
+            if isinstance(desired_state, dict):
+                fetched_revision = desired_state.get("revision")
+                if isinstance(fetched_revision, int) and not isinstance(fetched_revision, bool):
+                    desired_state_revision = fetched_revision
             runtime = fetched.get("runtime_overrides")
             if isinstance(runtime, dict):
                 refreshed = apply_remote_overrides(cfg, runtime)
@@ -694,7 +700,13 @@ def _plugin_operation_cli(cfg, args) -> int:
         settings[inst.instance_uid] = block
         _upsert_runtime_values(cfg.config_file_path, {"plugin_operation_instance_settings": settings})
         cfg2 = load_config(cfg.config_file_path)
-        sync = push_runtime_overrides(cfg2, {"plugin_operation_instance_settings": settings}, merge=True, target="desired")
+        sync = push_runtime_overrides(
+            cfg2,
+            {"plugin_operation_instance_settings": settings},
+            merge=True,
+            target="desired",
+            desired_state_revision=desired_state_revision,
+        )
         touch_poll_trigger(cfg2)
         payload = {"status": "ok", "operation_key": key, "values": values, "mcc_sync": sync}
         print(json.dumps(payload, ensure_ascii=True, indent=2) if args.json else json.dumps(payload, ensure_ascii=True))
