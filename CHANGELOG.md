@@ -1,3 +1,9 @@
+## 1.6.69 - 2026-11-12
+
+- Materialize an explicit plugin-operation catalog delivered in the scoped
+  desired runtime envelope, so generic plugin declarations survive runtime
+  synchronization and become available to the MCD scheduler.
+
 ## 1.6.68 - 2026-11-11
 
 - Keep nested plugin-operation settings intact in per-instance ACK/readback;

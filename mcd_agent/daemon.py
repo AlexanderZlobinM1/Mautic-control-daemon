@@ -1462,6 +1462,10 @@ def _merge_missing_plugin_operation_catalog(
     tombstone = _runtime_response_has_host_tombstone(response, key)
     explicit, value = _runtime_response_explicit_field_value(response, key)
     if explicit and isinstance(value, Mapping) and value:
+        # A scoped response may carry the catalog only inside the desired
+        # state envelope. Materialize that explicit value before applying the
+        # resolved runtime instead of returning the pre-response snapshot.
+        merged[key] = deepcopy(dict(value))
         return merged
     if authoritative or tombstone:
         # A complete host snapshot or an explicit host tombstone is the only
