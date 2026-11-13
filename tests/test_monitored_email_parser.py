@@ -1,8 +1,13 @@
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
+from mcd_agent import daemon
+from mcd_agent.daemon import TaskStore
 from mcd_agent.monitored_email import (
     DNC_BOUNCED,
     DNC_UNSUBSCRIBED,
+    MonitoredEmailRunResult,
     MonitoredEmailParserSettings,
     TYPE_BOUNCE,
     TYPE_FEEDBACK_LOOP,
@@ -11,9 +16,115 @@ from mcd_agent.monitored_email import (
     parse_monitored_message,
     process_monitored_email,
 )
+from mcd_agent.segment_admission import cycle_key, sync_cycle
 
 
 class MonitoredEmailParserTests(unittest.TestCase):
+    def test_active_segment_cycle_does_not_starve_parser_or_duplicate_tick(self):
+        root = "/var/www/alex_personal/public_html"
+        instance_uid = "alex-personal.sales-snap.ru@alex-personal"
+        inst = SimpleNamespace(
+            root=root,
+            instance_uid=instance_uid,
+            name="alex_personal",
+            primary_domain="alex-personal.sales-snap.ru",
+            domains=["alex-personal.sales-snap.ru"],
+            db={"fixture": True},
+            local_php_path="/fixture/local.php",
+        )
+        config = SimpleNamespace(
+            php_bin="/usr/bin/php",
+            monitored_email_parser_enabled=False,
+            monitored_email_parser_interval_sec=900,
+            monitored_email_parser_batch_size=100,
+            monitored_email_parser_force_seen=False,
+            monitored_email_parser_delete_processed=False,
+            monitored_email_parser_disable_mautic_fetch=True,
+            monitored_email_parser_types=["feedback_loop"],
+            monitored_email_parser_whitelist=[],
+            monitored_email_parser_instance_settings={
+                instance_uid: {
+                    "enabled": True,
+                    "interval_sec": 900,
+                    "batch_size": 100,
+                    "force_seen": True,
+                    "delete_processed": True,
+                    "types": ["feedback_loop", "bounce", "unsubscribe"],
+                }
+            },
+        )
+        store = TaskStore(":memory:")
+        active_cycle, _added, _started = sync_cycle(
+            None,
+            planned_ids=[101, 102, 103],
+            never_built=[],
+            running_ids=[],
+            now_ts=10.0,
+        )
+        store.put_runtime_sync(cycle_key(root), active_cycle)
+        self.assertEqual(
+            daemon._active_persisted_segment_cycle_roots(store, [root]),
+            {root},
+        )
+
+        setting = daemon._monitored_email_parser_effective_setting(config, inst)
+        state_key = daemon.monitored_email_state_key(root, setting)
+        store.put_runtime_sync(
+            state_key,
+            {"folders": {"INBOX": {"last_uid": 2204}}},
+        )
+        advanced = MonitoredEmailRunResult(
+            scanned=61,
+            state={"folders": {"INBOX": {"last_uid": 2265}}},
+        )
+        last_run: dict[str, float] = {}
+        observed_cursors: list[int] = []
+
+        def parser_run(**kwargs):
+            state = kwargs["state"]
+            cursor = int(state["folders"]["INBOX"]["last_uid"])
+            observed_cursors.append(cursor)
+            if cursor == 2204:
+                return advanced
+            return MonitoredEmailRunResult(scanned=0, state=state)
+
+        with (
+            patch.object(daemon, "MauticDB", return_value=object()),
+            patch.object(daemon, "process_monitored_email", side_effect=parser_run) as parser,
+        ):
+            attempted = daemon._run_due_monitored_email_parsers(
+                config=config,
+                installs=[inst],
+                store=store,
+                last_run_ts=last_run,
+                now_ts=1000.0,
+                cluster_cron_allowed=True,
+            )
+            duplicate = daemon._run_due_monitored_email_parsers(
+                config=config,
+                installs=[inst],
+                store=store,
+                last_run_ts=last_run,
+                now_ts=1001.0,
+                cluster_cron_allowed=True,
+            )
+            after_restart = daemon._run_due_monitored_email_parsers(
+                config=config,
+                installs=[inst],
+                store=store,
+                last_run_ts={},
+                now_ts=1002.0,
+                cluster_cron_allowed=True,
+            )
+
+        self.assertEqual(attempted, (root,))
+        self.assertEqual(duplicate, ())
+        self.assertEqual(after_restart, (root,))
+        self.assertEqual(parser.call_count, 2)
+        self.assertEqual(observed_cursors, [2204, 2265])
+        self.assertEqual(store.get_runtime_sync(state_key)["folders"]["INBOX"]["last_uid"], 2265)
+        store.close()
+
     def test_feedback_loop_extracts_recipient_from_embedded_unsubscribe_url(self):
         raw = (
             b"From: fbl@example.net\r\n"
