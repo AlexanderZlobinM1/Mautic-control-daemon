@@ -22,7 +22,8 @@ from mcd_agent.segment_admission import cycle_key, sync_cycle
 class MonitoredEmailParserTests(unittest.TestCase):
     def test_active_segment_cycle_does_not_starve_parser_or_duplicate_tick(self):
         root = "/var/www/alex_personal/public_html"
-        instance_uid = "alex-personal.sales-snap.ru@alex-personal"
+        instance_uid = "alex-personal.sales-snap.ru"
+        wire_uid = f"{instance_uid}@alex-personal"
         inst = SimpleNamespace(
             root=root,
             instance_uid=instance_uid,
@@ -43,7 +44,7 @@ class MonitoredEmailParserTests(unittest.TestCase):
             monitored_email_parser_types=["feedback_loop"],
             monitored_email_parser_whitelist=[],
             monitored_email_parser_instance_settings={
-                instance_uid: {
+                wire_uid: {
                     "enabled": True,
                     "interval_sec": 900,
                     "batch_size": 100,
@@ -68,6 +69,7 @@ class MonitoredEmailParserTests(unittest.TestCase):
         )
 
         setting = daemon._monitored_email_parser_effective_setting(config, inst)
+        self.assertTrue(setting.enabled)
         state_key = daemon.monitored_email_state_key(root, setting)
         store.put_runtime_sync(
             state_key,

@@ -1,5 +1,13 @@
 ## 1.7.0 — Unreleased architecture candidate
 
+- Resolve monitored-email per-instance settings through the existing instance
+  alias contract. A native inventory UID now consumes its exact MCC
+  host-qualified wire row without requiring `uid@host` in local inventory or
+  an Alex-specific configuration rewrite.
+- Extend the starvation regression to use the production identity shape:
+  native inventory UID, host-qualified runtime key, active segment cycle,
+  durable cursor advance and restart-safe resume.
+
 - Run every enabled per-instance monitored-email/IMAP parser tick from the
   complete inventory before ordinary segment-cycle planning gates are applied.
   A continuously active durable segment queue can no longer starve mailbox
