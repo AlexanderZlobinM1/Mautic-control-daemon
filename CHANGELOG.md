@@ -1,3 +1,15 @@
+## 1.6.78 - 2026-11-13
+
+- Run every enabled per-instance monitored-email/IMAP parser tick from the
+  complete inventory before ordinary segment-cycle planning gates are applied.
+  A continuously active durable segment queue can no longer starve mailbox
+  polling or cursor progress.
+- Preserve the existing interval, cluster-route and durable cursor semantics:
+  a tick is not duplicated inside its interval, and restart recovery resumes
+  from the stored parser state.
+- Add a regression with an active persisted segment cycle proving parser
+  execution, durable cursor advance and duplicate suppression.
+
 ## 1.6.77 - 2026-11-13
 
 - Freeze each per-instance campaign rebuild liveness pass until all admitted

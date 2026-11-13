@@ -355,3 +355,17 @@ python3 -m unittest \
   tests.test_runtime_override_direction.RuntimeOverrideDirectionTests.test_named_profile_drops_resolved_absent_stale_capacity_snapshot \
   tests.test_runtime_override_direction.RuntimeOverrideDirectionTests.test_named_profile_applies_explicit_capacity_after_baseline_load
 ```
+
+## Monitored-email parser вне обычных циклов
+
+Регрессия создаёт enabled per-instance parser и активный durable segment-cycle
+с queued IDs. Несмотря на active root, parser получает сохранённый cursor,
+выполняет tick и атомарно сохраняет продвинутый cursor. Повторный daemon tick
+внутри configured interval не вызывает parser второй раз. Отдельно сохраняются
+cron-route и отсутствие DB-конфига как существующие skip-условия.
+
+Проверка:
+
+```bash
+python3 -m pytest -q tests/test_monitored_email_parser.py
+```
