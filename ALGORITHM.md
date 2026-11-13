@@ -3108,6 +3108,14 @@ Apple unsubscribe относится к существующему типу `uns
 delivery-status сохраняют приоритет классификации. Parser state key, cursor,
 processed UID, seen и delete-processed semantics не меняются.
 
+Распознанное письмо удаляется при `delete-processed=true` только после
+успешного сопоставления хотя бы с одним Mautic contact и применения DNC. Если
+формат распознан, но contact не найден, письмо сохраняется как диагностическое
+доказательство, помечается `Seen` и записывается в `processed_uids`; обычный
+цикл не переигрывает его и не пытается удалить. Это одинаково для Apple и
+classic unsubscribe. Ручная очистка mailbox и перемотка cursor в этот контракт
+не входят.
+
 Локальный inventory хранит стабильный UID без host-суффикса. Если MCC wire
 доставляет ту же instance-настройку как `<uid>@<host>`, MCD сопоставляет её
 существующим instance-scoped alias-механизмом; это не меняет локальную

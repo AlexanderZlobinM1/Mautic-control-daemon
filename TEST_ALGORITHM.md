@@ -378,6 +378,12 @@ tagged recipient, folded headers, отсутствующего Message-ID и bas
 проверяются отсутствие ложного сигнала по Subject/Auto-Submitted,
 feedback-loop/bounce precedence и cursor/delete/idempotent-DNC semantics.
 
+Для Apple и classic unsubscribe отдельно проверяется матрица удаления:
+`contacts > 0` при `delete_processed=true` выставляет `\Deleted` и выполняет
+`expunge`; `contacts = 0` выставляет только `\Seen`, увеличивает `no_contact`,
+сохраняет UID в `processed_uids` и не выполняет `expunge`. В обоих случаях
+cursor продвигается без повторного проигрывания сообщения.
+
 ## Stable instance runtime identity
 
 - Runtime polling and ACK use only the stable native instance UID.

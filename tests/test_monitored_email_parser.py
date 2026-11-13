@@ -336,6 +336,85 @@ class MonitoredEmailParserTests(unittest.TestCase):
         self.assertEqual(second_imap.fetches, [])
         self.assertEqual(db.calls, 1)
 
+    def test_unsubscribe_delete_contract_retains_parsed_mail_without_contact(self):
+        fixtures = (
+            "apple_unsubscribe_header.eml",
+            "classic_unsubscribe_rfc2047.eml",
+        )
+
+        class FakeDB:
+            def __init__(self, contacts):
+                self.contacts = contacts
+
+            def add_dnc_for_emails(self, emails, *, reason, comments):
+                del emails, reason, comments
+                return {
+                    "added": 1 if self.contacts else 0,
+                    "existing": 0,
+                    "contacts": self.contacts,
+                }
+
+        class FakeIMAP:
+            def __init__(self, raw):
+                self.raw = raw
+                self.stores = []
+                self.expunged = False
+
+            def select(self, _folder): return "OK", []
+            def uid(self, command, *args):
+                if command == "SEARCH": return "OK", [b"73"]
+                if command == "FETCH": return "OK", [(b"73 (BODY[])", self.raw)]
+                if command == "STORE":
+                    self.stores.append(args)
+                    return "OK", []
+                raise AssertionError(command)
+            def expunge(self): self.expunged = True
+            def close(self): return None
+            def logout(self): return None
+
+        monitored = {
+            "general": {
+                "host": "imap.example.net", "port": 993, "encryption": "/ssl",
+                "user": "fbl@example.net", "password": "fixture",
+            },
+            "EmailBundle_unsubscribes": {"folder": "INBOX"},
+        }
+        settings = MonitoredEmailParserSettings(
+            enabled=True, force_seen=True, delete_processed=True,
+            types=(TYPE_UNSUBSCRIBE,),
+        )
+
+        for fixture in fixtures:
+            raw = (self._FIXTURES / fixture).read_bytes()
+            for contacts in (1, 0):
+                with self.subTest(fixture=fixture, contacts=contacts):
+                    imap = FakeIMAP(raw)
+                    with (
+                        patch(
+                            "mcd_agent.monitored_email.load_monitored_email_config",
+                            return_value=monitored,
+                        ),
+                        patch("mcd_agent.monitored_email._connect", return_value=imap),
+                    ):
+                        result = process_monitored_email(
+                            db=FakeDB(contacts), local_php_path="/fixture/local.php",
+                            php_bin="/usr/bin/php", settings=settings, state={},
+                        )
+
+                    folder = next(iter(result.state["folders"].values()))
+                    self.assertEqual((result.scanned, result.matched), (1, 1))
+                    self.assertEqual(result.contacts_matched, contacts)
+                    self.assertEqual(folder["force_cursor_uid"], 73)
+                    self.assertEqual(folder["processed_uids"], [73])
+                    if contacts:
+                        self.assertEqual((result.deleted, result.marked_seen, result.no_contact), (1, 0, 0))
+                        self.assertEqual(imap.stores, [("73", "+FLAGS.SILENT", r"(\Deleted)")])
+                        self.assertTrue(imap.expunged)
+                    else:
+                        self.assertEqual((result.deleted, result.marked_seen, result.no_contact), (0, 1, 1))
+                        self.assertEqual(imap.stores, [("73", "+FLAGS.SILENT", r"(\Seen)")])
+                        self.assertFalse(imap.expunged)
+
     def test_whitelist_filters_exact_forwarder_email(self):
         raw = (
             b"From: Internal <support@example.org>\r\n"
