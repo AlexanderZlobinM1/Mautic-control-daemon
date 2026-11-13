@@ -1,3 +1,18 @@
+## 1.6.77 - 2026-11-13
+
+- Freeze each per-instance campaign rebuild liveness pass until all admitted
+  campaign IDs reach a terminal outcome, process the snapshot by descending
+  ID, and persist pending/in-flight receipts across daemon restarts.
+- Keep temporarily busy campaign IDs in the same pass without wasting other
+  configured rebuild slots. A completed pass is the only point where a fresh
+  due snapshot may replace it.
+- Remove stale profile-managed capacity values once LWW runtime resolution no
+  longer contains them, so named profiles such as `farm-hiload` regain their
+  configured multi-slot capacity while explicit newer operator overrides are
+  preserved.
+- Add regressions for descending frozen passes, restart recovery, busy-ID slot
+  use, stale profile fallback and explicit capacity overrides.
+
 ## 1.6.76 - 2026-11-12
 
 - Refresh the dedicated segment and campaign super-priority worker snapshots
