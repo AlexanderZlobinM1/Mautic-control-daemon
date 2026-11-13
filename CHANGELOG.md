@@ -1,3 +1,14 @@
+## 1.6.82 - 2026-11-13
+
+- Document and regression-lock the monitored-email retention boundary:
+  unsubscribe mail is deleted only after at least one Mautic contact is
+  matched and DNC is applied. Parsed mail without a contact remains `Seen` as
+  diagnostic evidence while its UID is recorded as processed, so it is not
+  replayed or silently destroyed.
+- Cover the same delete/seen/cursor behavior for Apple and classic unsubscribe
+  fixtures without changing parser state identity or mailbox contents during
+  rollout.
+
 ## 1.6.81 - 2026-11-13
 
 - Recognize Apple unsubscribe feedback explicitly from

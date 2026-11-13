@@ -2180,6 +2180,14 @@ DNC. Пустой Subject и `Auto-Submitted` сами по себе ничег�
 Новая классификация не меняет parser state key: существующие cursor,
 processed-UID, seen и delete-processed semantics сохраняются без перемотки.
 
+Распознанное письмо удаляется при `delete-processed=true` только после
+успешного сопоставления хотя бы с одним Mautic contact и применения DNC. Если
+формат распознан, но contact не найден, письмо сохраняется как диагностическое
+доказательство, помечается `Seen` и записывается в `processed_uids`; обычный
+цикл не переигрывает его и не пытается удалить. Это одинаково для Apple и
+classic unsubscribe. Ручная очистка mailbox и перемотка cursor в этот контракт
+не входят.
+
 Локальный inventory хранит стабильный UID без host-суффикса. Если MCC wire
 ещё содержит историческую настройку `<uid>@<host>`, MCD принимает её только как
 входной migration alias текущего хоста и materialize-ит под stable UID; это не
