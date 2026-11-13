@@ -381,6 +381,12 @@ feedback-loop/bounce, существующий DNC, cursor/processed UID и dele
 подтверждает результат `unsubscribe`, не включая реальные адреса или токены в
 репозиторий.
 
+Для Apple и classic unsubscribe отдельно проверяется матрица удаления:
+`contacts > 0` при `delete_processed=true` выставляет `\Deleted` и выполняет
+`expunge`; `contacts = 0` выставляет только `\Seen`, увеличивает `no_contact`,
+сохраняет UID в `processed_uids` и не выполняет `expunge`. В обоих случаях
+cursor продвигается без повторного проигрывания сообщения.
+
 Третий обезличенный fixture сохраняет классический unsubscribe: RFC2047/base64
 Subject декодируется в `unsubscribe`, `Auto-Submitted: auto-generated`, tagged
 recipient присутствует, а `X-Apple-Unsubscribe` отсутствует. Локальная
