@@ -371,3 +371,11 @@ Inventory fixture использует стабильный UID без host-су
 ```bash
 python3 -m pytest -q tests/test_monitored_email_parser.py
 ```
+## Stable instance runtime identity
+
+- Runtime polling sends one stable native instance UID and never adds a
+  host-qualified wire alias.
+- A same-host legacy `uid@host` desired row is consumed once under the stable
+  UID and acknowledged with that stable UID; a different-host alias is ignored.
+- Segment and campaign super-priority regression gates remain green after the
+  identity normalization change.

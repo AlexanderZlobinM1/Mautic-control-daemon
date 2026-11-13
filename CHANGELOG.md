@@ -1,3 +1,13 @@
+## 1.6.80 - 2026-11-13
+
+- Use the stable native instance UID as the only outbound MCC runtime key and
+  ACK scope. MCD no longer invents or publishes `instance_uid@host_name`.
+- Keep same-host qualified rows as read-only migration input, normalize them
+  to the stable UID before apply/ACK, and reject qualified rows belonging to a
+  different host.
+- Add regressions proving stable-only polling, legacy-row migration, exact
+  stable ACK identity and unchanged super-priority segment-ring delivery.
+
 ## 1.6.79 - 2026-11-13
 
 - Resolve monitored-email per-instance settings through the existing instance
