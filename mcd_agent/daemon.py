@@ -110,6 +110,7 @@ from mcd_agent.message_queue import (
     supports_message_queue,
 )
 from mcd_agent.mode import (
+    PROFILE_MANAGED_RUNTIME_KEYS,
     reconcile_empty_leads_cleanup_cron,
     reconcile_managed_cron,
     reconcile_mautic_email_fetch_cron,
@@ -2060,6 +2061,18 @@ def _persist_resolved_runtime_to_config(
         and key not in resolved
         and _runtime_metadata_has_remote_tombstone(resolved_metadata, str(key))
     }
+    # A named workload profile remains the baseline authority. Values that no
+    # longer survive LWW resolution must not remain as a stale profile-shaped
+    # runtime overlay (for example farm-hiload held at one slot).
+    selected_profile = str(
+        profile_name if profile_name is not None else getattr(config, "profile_name", "")
+    ).strip().lower()
+    if selected_profile not in {"", "custom"}:
+        removals.update(
+            str(key)
+            for key in set(previous) & set(PROFILE_MANAGED_RUNTIME_KEYS)
+            if key not in resolved
+        )
     if resource_cleared:
         removals.discard(resource_key)
     if profile_name is not None:
@@ -14565,18 +14578,40 @@ def _dispatch_due_campaign_rebuilds(
     on_success: Callable[[int], None],
     store: object | None = None,
 ) -> list[int]:
-    """Admit due rebuilds outside the segment/plugin scheduler lanes."""
+    """Admit one frozen liveness pass in descending campaign-ID order."""
     launched: list[int] = []
     rebuild_interval = max(1, int(config.campaign_rebuild_min_repeat_sec or 0))
     rebuild_parallel = max(1, int(config.campaign_rebuild_priority_parallel or 1))
-    for campaign_id in dict.fromkeys(int(value) for value in due_ids if int(value) > 0):
-        if (
-            _is_running(running, root, "campaign_rebuild", campaign_id)
-            or _is_running(running, root, "campaign_trigger", campaign_id)
-            or priority_executor.is_active(root, "campaign_rebuild", campaign_id)
-            or priority_executor.is_active(root, "campaign_trigger", campaign_id)
-        ):
+    cycle = _campaign_rebuild_liveness_cycle_read(store, root)
+    ordered_ids = (
+        _campaign_rebuild_liveness_cycle_pending(cycle)
+        if str(cycle.get("status") or "") == "active"
+        else sorted({int(value) for value in due_ids if int(value) > 0}, reverse=True)
+    )
+    for campaign_id in ordered_ids:
+        rebuild_active = _is_running(running, root, "campaign_rebuild", campaign_id) or priority_executor.is_active(
+            root,
+            "campaign_rebuild",
+            campaign_id,
+        )
+        if rebuild_active:
+            # Adopt an already supervised rebuild into this frozen pass. Its
+            # ordinary completion receipt will reconcile the durable claim
+            # after a daemon restart as well.
+            _campaign_rebuild_liveness_cycle_claim(store, root, campaign_id)
             continue
+        if _is_running(running, root, "campaign_trigger", campaign_id) or priority_executor.is_active(
+            root,
+            "campaign_trigger",
+            campaign_id,
+        ):
+            # A busy ID remains part of the pass, but it must not waste the
+            # other configured slots. Try the next lower ID and return here
+            # before declaring the pass complete.
+            continue
+        claimed = _campaign_rebuild_liveness_cycle_claim(store, root, campaign_id)
+        if store is not None and cycle and not claimed:
+            break
         started = priority_executor.launch(
             config,
             root=root,
@@ -14594,13 +14629,228 @@ def _dispatch_due_campaign_rebuilds(
             interval_sec=rebuild_interval,
             max_parallel=rebuild_parallel,
             on_success=lambda campaign_id=campaign_id: on_success(campaign_id),
+            on_complete=lambda rc, campaign_id=campaign_id: _campaign_rebuild_liveness_cycle_terminal(
+                store,
+                root,
+                campaign_id,
+                rc=rc,
+            ),
             capacity_lane="campaign_rebuild_liveness",
             log_label="liveness",
         )
         if started:
             launched.append(campaign_id)
             logging.info("[%s] due campaign rebuild dispatched by liveness lane entity=%s", root, campaign_id)
+            continue
+        _campaign_rebuild_liveness_cycle_release(store, root, campaign_id)
+        # False admission is normally shared capacity or the repeat guard.
+        # Preserve the frozen order and retry this same head when capacity is
+        # available instead of restarting or skipping farther down the pass.
+        break
     return launched
+
+
+_CAMPAIGN_REBUILD_LIVENESS_CYCLE_LOCK = threading.RLock()
+
+
+def _campaign_rebuild_liveness_cycle_key(root: str) -> str:
+    digest = hashlib.sha1(str(root).encode("utf-8")).hexdigest()[:24]
+    return f"campaign_rebuild_liveness_cycle:{digest}"
+
+
+def _campaign_rebuild_liveness_cycle_read(store: object | None, root: str) -> dict[str, object]:
+    if store is None:
+        return {}
+    try:
+        payload = store.get_runtime_sync(_campaign_rebuild_liveness_cycle_key(root))
+    except Exception:
+        return {}
+    return dict(payload) if isinstance(payload, Mapping) else {}
+
+
+def _campaign_rebuild_liveness_cycle_pending(state: Mapping[str, object] | None) -> list[int]:
+    return [
+        int(value)
+        for value in (state or {}).get("pending", [])
+        if str(value).strip().isdigit() and int(value) > 0
+    ]
+
+
+def _campaign_rebuild_liveness_cycle_prepare(
+    store: object | None,
+    root: str,
+    due_ids: list[int],
+    *,
+    now_ts: float | None = None,
+) -> dict[str, object]:
+    """Freeze one due snapshot; never replace an unfinished pass."""
+
+    if store is None:
+        return {}
+    with _CAMPAIGN_REBUILD_LIVENESS_CYCLE_LOCK:
+        current = _campaign_rebuild_liveness_cycle_read(store, root)
+        if str(current.get("status") or "") == "active" and (
+            _campaign_rebuild_liveness_cycle_pending(current)
+            or _normalize_segment_ids(current.get("inflight"))
+        ):
+            return current
+        now = float(time.time() if now_ts is None else now_ts)
+        items = sorted({int(value) for value in due_ids if int(value) > 0}, reverse=True)
+        state: dict[str, object] = {
+            "schema": "mcd-campaign-rebuild-liveness-cycle-v1",
+            "root": str(root),
+            "cycle_id": hashlib.sha256(f"{root}|{time.time_ns()}".encode("utf-8")).hexdigest()[:24],
+            "status": "active" if items else "completed",
+            "items": items,
+            "pending": list(items),
+            "inflight": [],
+            "done": [],
+            "failed": [],
+            "started_at": now,
+            "updated_at": now,
+        }
+        if not items:
+            state["completed_at"] = now
+        store.put_runtime_sync(_campaign_rebuild_liveness_cycle_key(root), state)
+        return state
+
+
+def _campaign_rebuild_liveness_cycle_claim(
+    store: object | None,
+    root: str,
+    campaign_id: int,
+    *,
+    now_ts: float | None = None,
+) -> bool:
+    if store is None:
+        return True
+    with _CAMPAIGN_REBUILD_LIVENESS_CYCLE_LOCK:
+        state = _campaign_rebuild_liveness_cycle_read(store, root)
+        pending = _campaign_rebuild_liveness_cycle_pending(state)
+        cid = int(campaign_id)
+        if str(state.get("status") or "") != "active" or cid not in pending:
+            return False
+        inflight = _normalize_segment_ids(state.get("inflight"))
+        state["pending"] = [value for value in pending if value != cid]
+        state["inflight"] = [*inflight, cid]
+        state["updated_at"] = float(time.time() if now_ts is None else now_ts)
+        store.put_runtime_sync(_campaign_rebuild_liveness_cycle_key(root), state)
+        return True
+
+
+def _campaign_rebuild_liveness_cycle_release(
+    store: object | None,
+    root: str,
+    campaign_id: int,
+    *,
+    now_ts: float | None = None,
+) -> None:
+    if store is None:
+        return
+    with _CAMPAIGN_REBUILD_LIVENESS_CYCLE_LOCK:
+        state = _campaign_rebuild_liveness_cycle_read(store, root)
+        cid = int(campaign_id)
+        inflight = [value for value in _normalize_segment_ids(state.get("inflight")) if value != cid]
+        pending = _campaign_rebuild_liveness_cycle_pending(state)
+        if cid not in pending:
+            pending.append(cid)
+        item_order = {
+            value: position
+            for position, value in enumerate(_normalize_segment_ids(state.get("items")))
+        }
+        pending.sort(key=lambda value: item_order.get(value, len(item_order)))
+        state["status"] = "active"
+        state["pending"] = pending
+        state["inflight"] = inflight
+        state["updated_at"] = float(time.time() if now_ts is None else now_ts)
+        store.put_runtime_sync(_campaign_rebuild_liveness_cycle_key(root), state)
+
+
+def _campaign_rebuild_liveness_cycle_terminal(
+    store: object | None,
+    root: str,
+    campaign_id: int,
+    *,
+    rc: int | None,
+    now_ts: float | None = None,
+) -> None:
+    if store is None:
+        return
+    if rc == _TASK_LOCK_BUSY_RC:
+        _campaign_rebuild_liveness_cycle_release(store, root, campaign_id, now_ts=now_ts)
+        return
+    with _CAMPAIGN_REBUILD_LIVENESS_CYCLE_LOCK:
+        state = _campaign_rebuild_liveness_cycle_read(store, root)
+        if not state:
+            return
+        cid = int(campaign_id)
+        state["inflight"] = [
+            value for value in _normalize_segment_ids(state.get("inflight")) if value != cid
+        ]
+        terminal_key = "done" if rc == 0 else "failed"
+        terminal = _normalize_segment_ids(state.get(terminal_key))
+        if cid not in terminal:
+            terminal.append(cid)
+        state[terminal_key] = terminal
+        now = float(time.time() if now_ts is None else now_ts)
+        state["updated_at"] = now
+        if not _campaign_rebuild_liveness_cycle_pending(state) and not _normalize_segment_ids(state.get("inflight")):
+            state["status"] = "completed"
+            state["completed_at"] = now
+        store.put_runtime_sync(_campaign_rebuild_liveness_cycle_key(root), state)
+
+
+def _campaign_rebuild_liveness_cycle_reconcile(
+    store: object | None,
+    root: str,
+    *,
+    running: dict[str, RunningTask],
+    priority_executor: _PriorityTaskExecutor,
+    now_ts: float | None = None,
+) -> dict[str, object]:
+    """Recover an interrupted daemon without losing or restarting the pass."""
+
+    if store is None:
+        return {}
+    with _CAMPAIGN_REBUILD_LIVENESS_CYCLE_LOCK:
+        state = _campaign_rebuild_liveness_cycle_read(store, root)
+        if str(state.get("status") or "") != "active":
+            return state
+        stale: list[int] = []
+        done = _normalize_segment_ids(state.get("done"))
+        for cid in _normalize_segment_ids(state.get("inflight")):
+            active = _is_running(running, root, "campaign_rebuild", cid) or priority_executor.is_active(
+                root,
+                "campaign_rebuild",
+                cid,
+            )
+            if active:
+                continue
+            if (str(root), cid) in _CAMPAIGN_REBUILD_FINISHED_AT:
+                if cid not in done:
+                    done.append(cid)
+            else:
+                stale.append(cid)
+        if not stale and len(done) == len(_normalize_segment_ids(state.get("done"))):
+            return state
+        failed = set(_normalize_segment_ids(state.get("failed")))
+        done_set = set(done)
+        inflight = [
+            cid
+            for cid in _normalize_segment_ids(state.get("inflight"))
+            if cid not in stale and cid not in done_set
+        ]
+        terminal = done_set | failed | set(inflight)
+        items = _normalize_segment_ids(state.get("items"))
+        state["done"] = done
+        state["inflight"] = inflight
+        state["pending"] = [cid for cid in items if cid not in terminal]
+        state["updated_at"] = float(time.time() if now_ts is None else now_ts)
+        if not state["pending"] and not inflight:
+            state["status"] = "completed"
+            state["completed_at"] = state["updated_at"]
+        store.put_runtime_sync(_campaign_rebuild_liveness_cycle_key(root), state)
+        return state
 
 
 def _task_repeat_interval_sec(config: AgentConfig, task_type: str) -> int:
@@ -20555,6 +20805,55 @@ def run_loop(
                 root = str(getattr(inst, "root", "") or "").strip()
                 if not root:
                     continue
+                campaign_super_priority_ids = _campaign_super_priority_effective_setting(cfg, inst)
+                cycle = _campaign_rebuild_liveness_cycle_reconcile(
+                    store,
+                    root,
+                    running=running,
+                    priority_executor=priority_executor,
+                    now_ts=scan_now,
+                )
+                cycle_active = str(cycle.get("status") or "") == "active" and bool(
+                    _campaign_rebuild_liveness_cycle_pending(cycle)
+                    or _normalize_segment_ids(cycle.get("inflight"))
+                )
+                if cycle_active:
+                    pending_ids = _campaign_rebuild_liveness_cycle_pending(cycle)
+                    launched_ids = _dispatch_due_campaign_rebuilds(
+                        config=cfg,
+                        root=root,
+                        due_ids=pending_ids,
+                        running=running,
+                        priority_executor=priority_executor,
+                        store=store,
+                        on_success=lambda campaign_id, root=root: _mark_campaign_rebuild_finished(root, campaign_id),
+                    )
+                    current_cycle = _campaign_rebuild_liveness_cycle_read(store, root)
+                    current_pending = _campaign_rebuild_liveness_cycle_pending(current_cycle)
+                    current_inflight = _normalize_segment_ids(current_cycle.get("inflight"))
+                    pusher.set_campaign_scheduler_liveness_runtime(
+                        root,
+                        {
+                            "schema": 1,
+                            "status": "dispatched" if launched_ids else "pending",
+                            "lane": "campaign_rebuild_liveness",
+                            "cycle_id": str(current_cycle.get("cycle_id") or ""),
+                            "cycle_order": "campaign_id_desc",
+                            "cycle_frozen": True,
+                            "scanned_at": datetime.fromtimestamp(scan_now, tz=timezone.utc).strftime(
+                                "%Y-%m-%dT%H:%M:%SZ"
+                            ),
+                            "scan_interval_sec": scan_interval,
+                            "pending_count": len(current_pending),
+                            "pending_ids": current_pending[:50],
+                            "inflight_ids": current_inflight[:50],
+                            "launched_count": len(launched_ids),
+                            "launched_ids": launched_ids[:50],
+                        },
+                    )
+                    # Do not query SQL or replace this snapshot until every
+                    # member of the frozen pass reaches a terminal outcome.
+                    continue
                 last_scan = float(campaign_rebuild_liveness_scanned_at.get(root, 0.0) or 0.0)
                 if scan_now - last_scan < scan_interval:
                     continue
@@ -20603,7 +20902,20 @@ def run_loop(
                         logging.warning("[%s] campaign rebuild liveness scan failed: %s", root, exc)
                     continue
 
-                planned_ids = list(dict.fromkeys(int(value) for value in (due_ids or []) if int(value) > 0))
+                planned_ids = [
+                    campaign_id
+                    for campaign_id in dict.fromkeys(
+                        int(value) for value in (due_ids or []) if int(value) > 0
+                    )
+                    if campaign_id not in campaign_super_priority_ids
+                ]
+                cycle = _campaign_rebuild_liveness_cycle_prepare(
+                    store,
+                    root,
+                    planned_ids,
+                    now_ts=scan_now,
+                )
+                planned_ids = _campaign_rebuild_liveness_cycle_pending(cycle)
                 launched_ids = _dispatch_due_campaign_rebuilds(
                     config=cfg,
                     root=root,
@@ -20613,16 +20925,21 @@ def run_loop(
                     store=store,
                     on_success=lambda campaign_id, root=root: _mark_campaign_rebuild_finished(root, campaign_id),
                 )
+                current_cycle = _campaign_rebuild_liveness_cycle_read(store, root)
                 pusher.set_campaign_scheduler_liveness_runtime(
                     root,
                     {
                         "schema": 1,
                         "status": "dispatched" if launched_ids else ("pending" if planned_ids else "idle"),
                         "lane": "campaign_rebuild_liveness",
+                        "cycle_id": str(current_cycle.get("cycle_id") or ""),
+                        "cycle_order": "campaign_id_desc",
+                        "cycle_frozen": True,
                         "scanned_at": scanned_at,
                         "scan_interval_sec": scan_interval,
-                        "pending_count": len(planned_ids),
-                        "pending_ids": planned_ids[:50],
+                        "pending_count": len(_campaign_rebuild_liveness_cycle_pending(current_cycle)),
+                        "pending_ids": _campaign_rebuild_liveness_cycle_pending(current_cycle)[:50],
+                        "inflight_ids": _normalize_segment_ids(current_cycle.get("inflight"))[:50],
                         "launched_count": len(launched_ids),
                         "launched_ids": launched_ids[:50],
                     },

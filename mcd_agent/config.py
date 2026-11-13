@@ -898,6 +898,43 @@ class AgentConfig:
     universal_workload_resource_ref: dict[str, Any] | None = None
 
 
+PROFILE_MANAGED_RUNTIME_KEYS = (
+    "command_timeout_sec",
+    "worker_watchdog_sec",
+    "ring_mode",
+    "disable_throttle",
+    "disable_whitelist",
+    "enable_import_polling",
+    "import_stall_timeout_sec",
+    "enable_campaign_rebuild",
+    "segment_priority_weight_threshold",
+    "segment_priority_size",
+    "campaign_priority_size",
+    "campaign_latest_priority_count",
+    "segment_priority_parallel_idle",
+    "segment_regular_parallel_idle",
+    "segment_priority_parallel_throttled",
+    "segment_regular_parallel_throttled",
+    "segment_throttle_whitelist_only",
+    "segment_throttle_whitelist_parallel",
+    "segment_throttle_kill_non_whitelist",
+    "queue_throttle_threshold",
+    "queue_throttle_window_min",
+    "campaign_total_parallel",
+    "campaign_update_priority_parallel",
+    "campaign_update_regular_parallel",
+    "campaign_trigger_priority_parallel",
+    "campaign_trigger_regular_parallel",
+    "campaign_rebuild_priority_parallel",
+    "campaign_rebuild_regular_parallel",
+    "scheduler_host_max_parallel",
+    "scheduler_elastic_slots_enabled",
+    "scheduler_emergency_reserved_slots",
+    "scheduler_instance_max_parallel",
+    "scheduler_fairness_watchdog_sec",
+)
+
+
 def _apply_profile(cfg: AgentConfig) -> AgentConfig:
     p = (cfg.profile_name or "custom").strip().lower()
     if p in {"", "custom"}:
@@ -1063,6 +1100,20 @@ def _enforce_campaign_trigger_audit_policy(cfg: AgentConfig) -> AgentConfig:
 
 def _enforce_profile_guards(cfg: AgentConfig) -> AgentConfig:
     profile = (cfg.profile_name or "").strip().lower()
+    if profile not in {"", "custom"}:
+        # Values materialized in [runtime] are not a second persistent profile.
+        # Rebuild the named baseline on every load so an old tiny/passive
+        # snapshot cannot keep farm-hiload at one slot forever. A current MCC
+        # or operator override is applied later by apply_runtime_overrides and
+        # therefore remains possible without becoming the next baseline.
+        baseline = _apply_profile(cfg)
+        authoritative: dict[str, Any] = {}
+        for key in PROFILE_MANAGED_RUNTIME_KEYS:
+            attr = _RUNTIME_TO_ATTR.get(key)
+            if attr and hasattr(baseline, attr):
+                authoritative[attr] = getattr(baseline, attr)
+        if authoritative:
+            cfg = replace(cfg, **authoritative)
     if (
         profile == "midi"
         and cfg.ring_mode == "single"

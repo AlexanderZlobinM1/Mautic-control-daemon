@@ -9,6 +9,8 @@ import re
 import subprocess
 from typing import TYPE_CHECKING, Iterable
 
+from mcd_agent.config import PROFILE_MANAGED_RUNTIME_KEYS
+
 if TYPE_CHECKING:
     from mcd_agent.models import MauticInstall
 
@@ -1141,45 +1143,6 @@ def supported_profile_names(config_path: str) -> tuple[str, ...]:
     cfg = load_config(config_path, allow_recover_from_mcc=False)
     return workload_profile_names(required_workload_resource(cfg))
 
-
-# Runtime keys controlled by named profiles.
-# If these remain in [runtime], they override profile baseline and can cause
-# profile drift after any config/deploy reconciliation.
-PROFILE_MANAGED_RUNTIME_KEYS = (
-    "command_timeout_sec",
-    "worker_watchdog_sec",
-    "ring_mode",
-    "disable_throttle",
-    "disable_whitelist",
-    "enable_import_polling",
-    "import_stall_timeout_sec",
-    "enable_campaign_rebuild",
-    "segment_priority_weight_threshold",
-    "segment_priority_size",
-    "campaign_priority_size",
-    "campaign_latest_priority_count",
-    "segment_priority_parallel_idle",
-    "segment_regular_parallel_idle",
-    "segment_priority_parallel_throttled",
-    "segment_regular_parallel_throttled",
-    "segment_throttle_whitelist_only",
-    "segment_throttle_whitelist_parallel",
-    "segment_throttle_kill_non_whitelist",
-    "queue_throttle_threshold",
-    "queue_throttle_window_min",
-    "campaign_total_parallel",
-    "campaign_update_priority_parallel",
-    "campaign_update_regular_parallel",
-    "campaign_trigger_priority_parallel",
-    "campaign_trigger_regular_parallel",
-    "campaign_rebuild_priority_parallel",
-    "campaign_rebuild_regular_parallel",
-    "scheduler_host_max_parallel",
-    "scheduler_elastic_slots_enabled",
-    "scheduler_emergency_reserved_slots",
-    "scheduler_instance_max_parallel",
-    "scheduler_fairness_watchdog_sec",
-)
 
 # Legacy keys used by old config revisions; they are ignored by current runtime
 # model and can create operator confusion after passive->active transitions.

@@ -43,6 +43,9 @@ from mcd_agent.daemon import (
     _dispatch_segment_super_priority_lane,
     _split_campaign_circles_with_super_priority,
     _campaign_rebuild_waits_for_trigger,
+    _campaign_rebuild_liveness_cycle_prepare,
+    _campaign_rebuild_liveness_cycle_read,
+    _campaign_rebuild_liveness_cycle_reconcile,
     _campaign_spill_prefers_priority,
     _campaign_trigger_email_progress_sql,
     _campaign_trigger_event_log_due_exists_sql,
@@ -1325,6 +1328,171 @@ class CampaignRingDispatchTests(unittest.TestCase):
 
         self.assertEqual(launched, [])
         executor.launch.assert_not_called()
+
+    def test_campaign_rebuild_liveness_freezes_descending_pass_until_terminal(self) -> None:
+        class MemoryStore:
+            def __init__(self) -> None:
+                self.values: dict[str, dict[str, object]] = {}
+
+            def get_runtime_sync(self, key: str) -> dict[str, object] | None:
+                value = self.values.get(key)
+                return dict(value) if value is not None else None
+
+            def put_runtime_sync(self, key: str, value: dict[str, object]) -> None:
+                self.values[key] = dict(value)
+
+        root = "/var/www/alex_personal/public_html"
+        store = MemoryStore()
+        cfg = SimpleNamespace(
+            campaign_rebuild_min_repeat_sec=15,
+            campaign_rebuild_priority_parallel=1,
+            php_bin="php",
+            mautic_run_as_user="www-data",
+            cmd_campaign_rebuild_template="mautic:campaigns:rebuild -i {id}",
+        )
+        first = _campaign_rebuild_liveness_cycle_prepare(
+            store,
+            root,
+            [45, 205, 48, 204],
+            now_ts=100.0,
+        )
+        self.assertEqual(first["items"], [205, 204, 48, 45])
+
+        # A fresh SQL result cannot replace an unfinished pass.
+        same = _campaign_rebuild_liveness_cycle_prepare(store, root, [999], now_ts=101.0)
+        self.assertEqual(same["cycle_id"], first["cycle_id"])
+        self.assertEqual(same["items"], [205, 204, 48, 45])
+
+        observed: list[int] = []
+        for position, expected in enumerate([205, 204, 48, 45]):
+            executor = Mock()
+            executor.is_active.return_value = False
+            remaining = 4 - position
+            executor.launch.side_effect = [True, False] if remaining > 1 else [True]
+            with patch.object(daemon_mod, "render_mautic_command", return_value=["php", "bin/console"]):
+                launched = _dispatch_due_campaign_rebuilds(
+                    config=cfg,
+                    root=root,
+                    due_ids=[999, 1],
+                    running={},
+                    priority_executor=executor,
+                    on_success=Mock(),
+                    store=store,
+                )
+            self.assertEqual(launched, [expected])
+            observed.extend(launched)
+            executor.launch.call_args_list[0].kwargs["on_complete"](0)
+
+        self.assertEqual(observed, [205, 204, 48, 45])
+        terminal = _campaign_rebuild_liveness_cycle_read(store, root)
+        self.assertEqual(terminal["status"], "completed")
+        self.assertEqual(terminal["done"], [205, 204, 48, 45])
+
+        replacement = _campaign_rebuild_liveness_cycle_prepare(store, root, [999, 7], now_ts=200.0)
+        self.assertNotEqual(replacement["cycle_id"], first["cycle_id"])
+        self.assertEqual(replacement["items"], [999, 7])
+
+    def test_campaign_rebuild_liveness_requeues_interrupted_inflight_head(self) -> None:
+        class MemoryStore:
+            def __init__(self) -> None:
+                self.values: dict[str, dict[str, object]] = {}
+
+            def get_runtime_sync(self, key: str) -> dict[str, object] | None:
+                value = self.values.get(key)
+                return dict(value) if value is not None else None
+
+            def put_runtime_sync(self, key: str, value: dict[str, object]) -> None:
+                self.values[key] = dict(value)
+
+        root = "/var/www/alex_personal/public_html"
+        store = MemoryStore()
+        _campaign_rebuild_liveness_cycle_prepare(store, root, [205, 204], now_ts=100.0)
+        cfg = SimpleNamespace(
+            campaign_rebuild_min_repeat_sec=15,
+            campaign_rebuild_priority_parallel=1,
+            php_bin="php",
+            mautic_run_as_user="www-data",
+            cmd_campaign_rebuild_template="mautic:campaigns:rebuild -i {id}",
+        )
+        executor = Mock()
+        executor.is_active.return_value = False
+        executor.launch.side_effect = [True, False]
+        with patch.object(daemon_mod, "render_mautic_command", return_value=["php", "bin/console"]):
+            self.assertEqual(
+                _dispatch_due_campaign_rebuilds(
+                    config=cfg,
+                    root=root,
+                    due_ids=[],
+                    running={},
+                    priority_executor=executor,
+                    on_success=Mock(),
+                    store=store,
+                ),
+                [205],
+            )
+
+        # Simulate daemon restart before the completion callback. With no
+        # adopted live process and no success receipt, the same head is
+        # restored instead of dropping or restarting the whole pass.
+        restarted_executor = Mock()
+        restarted_executor.is_active.return_value = False
+        recovered = _campaign_rebuild_liveness_cycle_reconcile(
+            store,
+            root,
+            running={},
+            priority_executor=restarted_executor,
+            now_ts=120.0,
+        )
+        self.assertEqual(recovered["status"], "active")
+        self.assertEqual(recovered["pending"], [205, 204])
+        self.assertEqual(recovered["inflight"], [])
+
+    def test_campaign_rebuild_liveness_busy_high_id_does_not_waste_other_slots(self) -> None:
+        class MemoryStore:
+            def __init__(self) -> None:
+                self.values: dict[str, dict[str, object]] = {}
+
+            def get_runtime_sync(self, key: str) -> dict[str, object] | None:
+                value = self.values.get(key)
+                return dict(value) if value is not None else None
+
+            def put_runtime_sync(self, key: str, value: dict[str, object]) -> None:
+                self.values[key] = dict(value)
+
+        root = "/var/www/alex_personal/public_html"
+        store = MemoryStore()
+        _campaign_rebuild_liveness_cycle_prepare(store, root, [205, 204], now_ts=100.0)
+        cfg = SimpleNamespace(
+            campaign_rebuild_min_repeat_sec=15,
+            campaign_rebuild_priority_parallel=2,
+            php_bin="php",
+            mautic_run_as_user="www-data",
+            cmd_campaign_rebuild_template="mautic:campaigns:rebuild -i {id}",
+        )
+        executor = Mock()
+        executor.is_active.return_value = False
+        executor.launch.return_value = True
+        with patch.object(daemon_mod, "render_mautic_command", return_value=["php", "bin/console"]):
+            launched = _dispatch_due_campaign_rebuilds(
+                config=cfg,
+                root=root,
+                due_ids=[],
+                running={
+                    "trigger-205": SimpleNamespace(
+                        root=root,
+                        task_type="campaign_trigger",
+                        entity_id=205,
+                    )
+                },
+                priority_executor=executor,
+                on_success=Mock(),
+                store=store,
+            )
+
+        self.assertEqual(launched, [204])
+        active = _campaign_rebuild_liveness_cycle_read(store, root)
+        self.assertEqual(active["pending"], [205])
+        self.assertEqual(active["inflight"], [204])
 
     def test_due_campaign_priority_dispatch_waits_for_same_campaign_rebuild(self) -> None:
         root = "/var/www/cvetana/public_html"

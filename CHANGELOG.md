@@ -1,5 +1,8 @@
 ## 1.7.0 — Unreleased architecture candidate
 
+- Forward-port the persisted descending campaign rebuild pass and named-profile
+  capacity authority from stable 1.6.77 without changing the 1.7 external
+  handler boundary.
 - Forward-port the segment super-priority minute ring: one sequential
   per-instance worker, outside ordinary/priority budgets, with canonical cycle
   receipts and add/remove behavior matching the stable line.

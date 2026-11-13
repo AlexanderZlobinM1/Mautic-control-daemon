@@ -327,3 +327,31 @@ slot timeline и cleanup proof. Приёмка запрещена, если matr
 `PASS` по обеим major, не подтверждает ровно один active import на instance
 (и допустимый parallelism между instances), или переиспользует старый
 receipt/source.
+
+## Campaign rebuild pass and profile capacity
+
+Campaign rebuild liveness проверяется как сохранённый per-instance проход:
+
+1. Due ID фиксируются один раз и сортируются по убыванию.
+2. Повторный SQL snapshot не заменяет незавершённый проход.
+3. При одном слоте последовательность `205, 204, 48, 45` сохраняется до
+   терминала; после него может быть создан новый проход.
+4. После рестарта незавершённый claim либо подхватывается по живому процессу,
+   либо возвращается в тот же проход, но очередь не начинается заново.
+5. Временно занятый trigger верхнего ID не расходует остальные разрешённые
+   слоты; lower ID запускается, а занятый остаётся незавершённым элементом
+   того же прохода.
+6. Для named profile исчезнувший из согласованного runtime старый capacity
+   override удаляется и снова действует профильный baseline. Явно
+   согласованный операторский override сохраняется.
+
+Проверка:
+
+```bash
+python3 -m unittest \
+  tests.test_campaign_ring_dispatch.CampaignRingDispatchTests.test_campaign_rebuild_liveness_freezes_descending_pass_until_terminal \
+  tests.test_campaign_ring_dispatch.CampaignRingDispatchTests.test_campaign_rebuild_liveness_requeues_interrupted_inflight_head \
+  tests.test_campaign_ring_dispatch.CampaignRingDispatchTests.test_campaign_rebuild_liveness_busy_high_id_does_not_waste_other_slots \
+  tests.test_runtime_override_direction.RuntimeOverrideDirectionTests.test_named_profile_drops_resolved_absent_stale_capacity_snapshot \
+  tests.test_runtime_override_direction.RuntimeOverrideDirectionTests.test_named_profile_keeps_external_capacity_authority
+```

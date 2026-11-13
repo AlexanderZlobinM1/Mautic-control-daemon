@@ -834,6 +834,60 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
         self.assertEqual(status, "applied")
         self.assertTrue(persist.call_args.kwargs["full_snapshot"])
 
+    def test_named_profile_drops_resolved_absent_stale_capacity_snapshot(self) -> None:
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "mcd.toml"
+            path.write_text(
+                '[profile]\nname = "farm-hiload"\n\n[runtime]\n'
+                'campaign_total_parallel = 1\n'
+                'campaign_rebuild_priority_parallel = 1\n'
+                'scheduler_host_max_parallel = 2\n',
+                encoding="utf-8",
+            )
+            cfg = SimpleNamespace(config_file_path=str(path), profile_name="farm-hiload")
+            stale = {
+                "campaign_total_parallel": 1,
+                "campaign_rebuild_priority_parallel": 1,
+                "scheduler_host_max_parallel": 2,
+            }
+
+            daemon._persist_resolved_runtime_to_config(
+                cfg,
+                stale,
+                {},
+                {},
+            )
+
+            reloaded = load_config(str(path), allow_recover_from_mcc=False)
+            self.assertEqual(reloaded.profile_name, "farm-hiload")
+            self.assertEqual(reloaded.campaign_total_parallel, 0)
+            self.assertEqual(reloaded.campaign_rebuild_priority_parallel, 3)
+            self.assertEqual(reloaded.scheduler_host_max_parallel, 12)
+
+    def test_named_profile_keeps_external_capacity_authority(self) -> None:
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "mcd.toml"
+            path.write_text(
+                '[profile]\nname = "farm-hiload"\n\n[runtime]\n'
+                'campaign_total_parallel = 1\n',
+                encoding="utf-8",
+            )
+            cfg = SimpleNamespace(config_file_path=str(path), profile_name="farm-hiload")
+            explicit = {"campaign_total_parallel": 1}
+
+            daemon._persist_resolved_runtime_to_config(cfg, explicit, explicit, {})
+
+            reloaded = load_config(str(path), allow_recover_from_mcc=False)
+            self.assertEqual(reloaded.campaign_total_parallel, 0)
+            applied = apply_remote_overrides(reloaded, explicit)["config"]
+            self.assertEqual(applied.campaign_total_parallel, 0)
+
     def test_restart_profile_snapshot_without_local_provenance_does_not_push(self) -> None:
         class MemoryStore:
             def __init__(self):
