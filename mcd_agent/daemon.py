@@ -7344,6 +7344,85 @@ def _normalize_monitored_email_whitelist(raw: object) -> tuple[str, ...]:
     return tuple(out[:200])
 
 
+def _run_due_monitored_email_parsers(
+    *,
+    config: AgentConfig,
+    installs: Iterable[object],
+    store: "TaskStore",
+    last_run_ts: dict[str, float],
+    now_ts: float,
+    cluster_cron_allowed: bool,
+) -> tuple[str, ...]:
+    """Run due per-instance IMAP parser ticks outside ordinary scheduler gates.
+
+    The monitored mailbox cursor is an independent durable service state. An
+    active segment/import/campaign cycle may limit scheduler admission, but it
+    must never exclude the instance from mailbox polling. The in-process
+    interval guard prevents duplicate ticks, while ``process_monitored_email``
+    resumes from the state stored under the parser's stable state key.
+    """
+
+    if not cluster_cron_allowed:
+        return ()
+
+    attempted: list[str] = []
+    for inst in installs:
+        root = str(getattr(inst, "root", "") or "").strip()
+        if not root:
+            continue
+        setting = _monitored_email_parser_effective_setting(config, inst)
+        last_run = float(last_run_ts.get(root, 0.0) or 0.0)
+        if not setting.enabled or (
+            last_run > 0 and now_ts - last_run < setting.interval_sec
+        ):
+            continue
+
+        attempted.append(root)
+        if not getattr(inst, "db", None):
+            logging.warning("[%s] monitored_email parser skipped: db config missing", root)
+            last_run_ts[root] = now_ts
+            continue
+
+        try:
+            state_key = monitored_email_state_key(root, setting)
+            state = store.get_runtime_sync(state_key) or {}
+            result = process_monitored_email(
+                db=MauticDB(inst.db),
+                local_php_path=getattr(inst, "local_php_path", None),
+                php_bin=config.php_bin,
+                settings=setting,
+                state=state,
+            )
+            store.put_runtime_sync(state_key, result.state)
+            if (
+                result.scanned
+                or result.dnc_added
+                or result.deleted
+                or result.whitelist_dnc_removed
+                or result.errors
+            ):
+                logging.info(
+                    "[%s] monitored_email parser scanned=%s matched=%s contacts=%s dnc_added=%s dnc_existing=%s whitelist_dnc_removed=%s deleted=%s marked_seen=%s no_contact=%s types=%s errors=%s",
+                    root,
+                    result.scanned,
+                    result.matched,
+                    result.contacts_matched,
+                    result.dnc_added,
+                    result.dnc_existing,
+                    result.whitelist_dnc_removed,
+                    result.deleted,
+                    result.marked_seen,
+                    result.no_contact,
+                    ",".join(f"{k}:{v}" for k, v in sorted(result.by_type.items())) or "-",
+                    " | ".join(result.errors[:5]) if result.errors else "-",
+                )
+        except Exception as e:
+            logging.warning("[%s] monitored_email parser failed: %s", root, e)
+        last_run_ts[root] = now_ts
+
+    return tuple(attempted)
+
+
 def _is_mautic_email_fetch_template(template: str) -> bool:
     return bool(re.search(r"\bmautic:emails?:fetch\b", str(template or "")))
 
@@ -22187,6 +22266,20 @@ def run_loop(
                         pause_sec=pause_sec,
                     )
 
+        # Monitored mail is an independent per-instance service tick. Use the
+        # complete inventory before applying the ordinary segment-cycle plan
+        # gate below; otherwise a continuously active persisted segment cycle
+        # can starve IMAP polling indefinitely.
+        if (config.profile_name or "").strip().lower() != "passive":
+            _run_due_monitored_email_parsers(
+                config=config,
+                installs=installs,
+                store=store,
+                last_run_ts=last_monitored_email_parser_ts,
+                now_ts=now,
+                cluster_cron_allowed=cluster_route_allows(config, "cron"),
+            )
+
         # Never run heavyweight planning for a root that already has an
         # admitted ordinary cycle.  The dispatch pass below is deliberately
         # allowed to refill that root from TaskStore.runtime_sync while other
@@ -25594,48 +25687,6 @@ def run_loop(
             # - trigger-due campaigns first
             # - then rebuild-due campaigns
             # Import polling is dispatched above through the shared segment slot.
-            monitored_email_setting = _monitored_email_parser_effective_setting(config, inst)
-            last_monitored_email = last_monitored_email_parser_ts.get(root, 0.0)
-            if (
-                monitored_email_setting.enabled
-                and cluster_cron_allowed
-                and (last_monitored_email <= 0 or now - last_monitored_email >= monitored_email_setting.interval_sec)
-            ):
-                if not getattr(inst, "db", None):
-                    logging.warning("[%s] monitored_email parser skipped: db config missing", root)
-                    last_monitored_email_parser_ts[root] = now
-                else:
-                    try:
-                        state_key = monitored_email_state_key(root, monitored_email_setting)
-                        state = store.get_runtime_sync(state_key) or {}
-                        result = process_monitored_email(
-                            db=db,
-                            local_php_path=getattr(inst, "local_php_path", None),
-                            php_bin=config.php_bin,
-                            settings=monitored_email_setting,
-                            state=state,
-                        )
-                        store.put_runtime_sync(state_key, result.state)
-                        if result.scanned or result.dnc_added or result.deleted or result.whitelist_dnc_removed or result.errors:
-                            logging.info(
-                                "[%s] monitored_email parser scanned=%s matched=%s contacts=%s dnc_added=%s dnc_existing=%s whitelist_dnc_removed=%s deleted=%s marked_seen=%s no_contact=%s types=%s errors=%s",
-                                root,
-                                result.scanned,
-                                result.matched,
-                                result.contacts_matched,
-                                result.dnc_added,
-                                result.dnc_existing,
-                                result.whitelist_dnc_removed,
-                                result.deleted,
-                                result.marked_seen,
-                                result.no_contact,
-                                ",".join(f"{k}:{v}" for k, v in sorted(result.by_type.items())) or "-",
-                                " | ".join(result.errors[:5]) if result.errors else "-",
-                            )
-                    except Exception as e:
-                        logging.warning("[%s] monitored_email parser failed: %s", root, e)
-                    last_monitored_email_parser_ts[root] = now
-
             if (config.profile_name or "").strip().lower() == "tiny":
                 _publish_monitor_cycle()
                 # Skip generic multi-ring campaign scheduler.

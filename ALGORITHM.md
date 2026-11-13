@@ -3080,3 +3080,17 @@ certificate dependency. Removal remains restricted to the instance-owned vhost;
 neighbor vhosts and certificates remain protected. Dev uses the externally
 verified baseline recipe; stable uses its minimal existing leaf generator fix.
 A paired source/test fix does not authorize channel promotion or host rollout.
+
+## Независимый monitored-email parser
+
+Включённый для инстанса IMAP parser является отдельным периодическим сервисом,
+а не элементом очереди сегментов, импортов или кампаний. На каждом daemon tick
+MCD рассматривает полный inventory инстансов до того, как активный сохранённый
+цикл сегментов исключит root из тяжёлого планирования.
+
+Для каждого инстанса сохраняются его собственные настройки interval, batch,
+типы писем, force-seen, delete-processed и whitelist. Запуск разрешается только
+по cron-route и не повторяется внутри interval. Cursor и состояние папок
+записываются в TaskStore после обработки; после рестарта parser продолжает с
+сохранённого cursor. Непрерывный segment backlog, занятые campaign/import slots
+и длительный обычный цикл не могут задерживать этот tick до своего terminal.

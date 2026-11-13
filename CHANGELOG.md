@@ -1,5 +1,15 @@
 ## 1.7.0 — Unreleased architecture candidate
 
+- Run every enabled per-instance monitored-email/IMAP parser tick from the
+  complete inventory before ordinary segment-cycle planning gates are applied.
+  A continuously active durable segment queue can no longer starve mailbox
+  polling or cursor progress.
+- Preserve the existing interval, cluster-route and durable cursor semantics:
+  a tick is not duplicated inside its interval, and restart recovery resumes
+  from the stored parser state.
+- Add a regression with an active persisted segment cycle proving parser
+  execution, durable cursor advance and duplicate suppression.
+
 - Forward-port the persisted descending campaign rebuild pass and named-profile
   capacity authority from stable 1.6.77 without changing the 1.7 external
   handler boundary.
