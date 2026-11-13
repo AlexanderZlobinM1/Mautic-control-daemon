@@ -28,6 +28,7 @@ ALLOWED_TYPES = {TYPE_FEEDBACK_LOOP, TYPE_BOUNCE, TYPE_UNSUBSCRIBE}
 DNC_UNSUBSCRIBED = 1
 DNC_BOUNCED = 3
 _EMAIL_RE = re.compile(r"(?<![A-Z0-9._%+\-])([A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,})(?![A-Z0-9._%+\-])", re.I)
+_APPLE_UNSUBSCRIBE_LOCAL_RE = re.compile(r"^fbl\+unsubscribe_[a-z0-9][a-z0-9_-]{5,}$", re.I)
 _IGNORE_LOCAL_PARTS = {"mailer-daemon", "postmaster", "abuse", "fbl", "noreply", "no-reply", "donotreply", "do-not-reply"}
 
 
@@ -466,11 +467,39 @@ def _is_bounce(msg: Message, extracted: dict[str, str]) -> bool:
 
 
 def _is_unsubscribe(msg: Message, extracted: dict[str, str]) -> bool:
+    if _is_apple_unsubscribe(msg):
+        return True
     subject = str(msg.get("Subject") or "").lower()
     hay = (subject + "\n" + extracted.get("headers", "") + "\n" + extracted.get("text", "")).lower()
     if "/email/unsubscribe/" in hay or "list-unsubscribe:" in hay:
         return True
     return any(token in hay for token in ("unsubscribe", "отпис", "одјав", "odjava"))
+
+
+def _is_apple_unsubscribe(msg: Message) -> bool:
+    """Recognize Apple's automatic unsubscribe feedback without heuristics.
+
+    Empty subjects and ``Auto-Submitted`` are common to unrelated automatic
+    mail and are deliberately not signals.  Apple provides either its
+    explicit boolean header or the canonical tagged feedback recipient.
+    """
+    explicit = any(
+        str(value or "").strip().casefold() == "true"
+        for value in msg.get_all("X-Apple-Unsubscribe", [])
+    )
+    return explicit or bool(_apple_unsubscribe_recipients(msg))
+
+
+def _apple_unsubscribe_recipients(msg: Message) -> list[str]:
+    values: list[str] = []
+    for name in ("To", "Delivered-To"):
+        values.extend(str(value) for value in msg.get_all(name, []))
+    addresses = [addr for _name, addr in getaddresses(values) if addr]
+    return [
+        address
+        for address in addresses
+        if _APPLE_UNSUBSCRIBE_LOCAL_RE.fullmatch(address.rsplit("@", 1)[0])
+    ]
 
 
 def _feedback_loop_emails(msg: Message, extracted: dict[str, str]) -> list[str]:

@@ -1,3 +1,17 @@
+## 1.6.81 - 2026-11-13
+
+- Recognize Apple unsubscribe feedback explicitly from
+  `X-Apple-Unsubscribe: true` or a canonical `fbl+unsubscribe_<token>`
+  recipient in `To`/`Delivered-To`, while retaining the existing unsubscribe
+  DNC path and sender/contact mapping.
+- Do not treat an empty subject or `Auto-Submitted` as unsubscribe evidence.
+  Feedback-loop and bounce reports keep precedence over the Apple signal.
+- Add sanitized EML fixtures and end-to-end parser regressions covering folded
+  headers, absent Message-ID, base64 bodies, existing DNC, cursor resume and
+  delete/seen semantics. The classic RFC2047/base64 unsubscribe format remains
+  covered alongside Apple feedback. Parser state identity is unchanged, so
+  rollout does not rewind or rescan an existing mailbox cursor.
+
 ## 1.6.80 - 2026-11-13
 
 - Use the stable native instance UID as the only outbound MCC runtime key and

@@ -2170,7 +2170,17 @@ MCD рассматривает полный inventory инстансов до т
 сохранённого cursor. Непрерывный segment backlog, занятые campaign/import slots
 и длительный обычный цикл не могут задерживать этот tick до своего terminal.
 
+Apple unsubscribe feedback относится к существующему типу `unsubscribe`, если
+письмо содержит точный заголовок `X-Apple-Unsubscribe: true` или адрес
+`fbl+unsubscribe_<token>` в `To`/`Delivered-To`. Контакт определяется тем же
+проверенным путём `Reply-To`/`From`, после чего применяется идемпотентный email
+DNC. Пустой Subject и `Auto-Submitted` сами по себе ничего не классифицируют.
+Настоящий feedback report или delivery-status остаётся соответственно
+`feedback_loop` или `bounce`, даже если в нём присутствует Apple-признак.
+Новая классификация не меняет parser state key: существующие cursor,
+processed-UID, seen и delete-processed semantics сохраняются без перемотки.
+
 Локальный inventory хранит стабильный UID без host-суффикса. Если MCC wire
-доставляет ту же instance-настройку как `<uid>@<host>`, MCD сопоставляет её
-существующим instance-scoped alias-механизмом; это не меняет локальную
-идентичность и не требует появления `@host` в пользовательском интерфейсе.
+ещё содержит историческую настройку `<uid>@<host>`, MCD принимает её только как
+входной migration alias текущего хоста и materialize-ит под stable UID; это не
+меняет локальную идентичность и не возвращает `@host` в интерфейс или ACK.
