@@ -371,6 +371,13 @@ Inventory fixture использует стабильный UID без host-су
 ```bash
 python3 -m pytest -q tests/test_monitored_email_parser.py
 ```
+
+Apple regressions используют обезличенные EML fixtures для явного заголовка,
+tagged recipient, folded headers, отсутствующего Message-ID и base64 body.
+Классический RFC2047/base64 unsubscribe остаётся отдельным fixture. Также
+проверяются отсутствие ложного сигнала по Subject/Auto-Submitted,
+feedback-loop/bounce precedence и cursor/delete/idempotent-DNC semantics.
+
 ## Stable instance runtime identity
 
 - Runtime polling and ACK use only the stable native instance UID.

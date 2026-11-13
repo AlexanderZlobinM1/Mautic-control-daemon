@@ -1,5 +1,11 @@
 ## 1.7.0 — Unreleased architecture candidate
 
+- Recognize Apple unsubscribe feedback from `X-Apple-Unsubscribe: true` or a
+  canonical `fbl+unsubscribe_<token>` recipient, using the existing
+  unsubscribe contact/DNC path without changing parser cursor identity.
+- Preserve classic RFC2047/base64 unsubscribe, feedback-loop/bounce precedence,
+  delete/seen semantics and independent segment/campaign super-priority lanes.
+
 - Use the stable native instance UID as the only outbound MCC runtime key and
   ACK scope. Same-host `uid@host` rows remain migration-only input; a legacy
   alias from another host is rejected.
