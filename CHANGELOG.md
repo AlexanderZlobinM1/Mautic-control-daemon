@@ -1,5 +1,11 @@
 ## 1.7.0 — Unreleased architecture candidate
 
+- Use the stable native instance UID as the only outbound MCC runtime key and
+  ACK scope. Same-host `uid@host` rows remain migration-only input; a legacy
+  alias from another host is rejected.
+- Preserve segment and campaign super-priority lane delivery under the stable
+  UID without changing their independent workers, cadence or budgets.
+
 - Resolve monitored-email per-instance settings through the existing instance
   alias contract. A native inventory UID now consumes its exact MCC
   host-qualified wire row without requiring `uid@host` in local inventory or

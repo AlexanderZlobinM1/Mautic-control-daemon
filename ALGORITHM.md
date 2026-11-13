@@ -226,16 +226,21 @@ Bootstrap после approved update сначала восстанавливае
 instance-rows из durable baseline, затем создаёт ровно один pending delta до
 первого accepted desired revision; remote apply до этого момента запрещён.
 При restart первым read-only шагом выполняется свежий canonical MCC fetch с
-instance UID aliases и field metadata. Его более новый qualified row
-materialize-ся в mutable config/effective runtime до локальной deletion
-classification; принятый instance row не очищается неполным host snapshot.
+stable instance UID и field metadata. Исторический same-host `uid@host` row
+принимается только как входной migration alias и materialize-ся под stable UID
+до локальной deletion classification; alias другого хоста отклоняется.
+Принятый instance row не очищается неполным host snapshot.
 
 После startup/poll persistence строится также из canonical MCC
 `instance_desired_states`, а не только из profile-shaped effective config.
-Qualified UID и его priority/super-priority lane maps сначала materialize-ся в
-локальном runtime, затем именно этот snapshot становится baseline; restart не
-создаёт ложную local deletion и не отправляет пустой instance-row обратно в
-MCC.
+Priority/super-priority lane maps materialize-ся под stable UID в локальном
+runtime, затем именно этот snapshot становится baseline; restart не создаёт
+ложную local deletion и не отправляет пустой instance-row обратно в MCC.
+
+Stable native `instance_uid` — единственный публичный ключ runtime poll,
+настроек и ACK независимо от текущего хоста. MCD не создаёт и не публикует
+`instance_uid@host_name`; имя хоста используется только для безопасной
+проверки входного legacy alias.
 
 Если локальный runtime include потерян или обнулён, любой remote winner вне
 stable-проекции переводит startup или обычный poll в full-snapshot режим: в

@@ -1075,7 +1075,7 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
         )
         self.assertIsNotNone(daemon._read_local_runtime_push_pending(store))
 
-    def test_poll_requests_local_and_host_qualified_instance_uid_aliases(self) -> None:
+    def test_poll_requests_stable_instance_uid_only(self) -> None:
         cfg = SimpleNamespace(mcc_url="https://mcc.example", mcc_token="token")
         identity = {
             "effective_hostname": "MauticFarm-02",
@@ -1091,7 +1091,7 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
         payload = post.call_args.args[1]
         self.assertEqual(
             payload["instance_uids"],
-            ["electronic.sales-snap.com", "electronic.sales-snap.com@MauticFarm-02"],
+            ["electronic.sales-snap.com"],
         )
 
     def test_local_runtime_push_targets_canonical_desired_state_when_requested(self) -> None:
@@ -1674,7 +1674,7 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
                 {qualified_uid: 5},
             )
 
-    def test_suffixed_mcc_response_maps_rings_and_acks_exact_revision(self) -> None:
+    def test_legacy_suffixed_mcc_response_maps_rings_and_acks_stable_uid(self) -> None:
         base_uid = "generic.sales-snap.com"
         qualified_uid = f"{base_uid}@MauticFarm-02"
         cfg = SimpleNamespace(mcc_url="https://mcc.example", mcc_token="token")
@@ -1682,15 +1682,6 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             "status": "ok",
             "runtime_overrides": {},
             "instance_desired_states": {
-                base_uid: {
-                    "revision": 1,
-                    "runtime_overrides": {
-                        "segment_special_rings_v1": {
-                            "priority": [],
-                            "super_priority": [],
-                        }
-                    },
-                },
                 qualified_uid: {
                     "revision": 5,
                     "runtime_overrides": {
@@ -1716,11 +1707,11 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
 
         self.assertEqual(
             post.call_args.args[1]["instance_uids"],
-            [base_uid, qualified_uid],
+            [base_uid],
         )
         states = fetched["instance_desired_states"]
-        self.assertEqual(list(states), [qualified_uid])
-        self.assertEqual(states[qualified_uid]["revision"], 5)
+        self.assertEqual(list(states), [base_uid])
+        self.assertEqual(states[base_uid]["revision"], 5)
         merged = merge_instance_desired_states(fetched["runtime_overrides"], states)
         from pathlib import Path
         from tempfile import TemporaryDirectory
@@ -1771,12 +1762,44 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             )
 
         self.assertEqual(failures, [])
-        self.assertEqual(acknowledge.call_args.kwargs["scope_key"], qualified_uid)
+        self.assertEqual(acknowledge.call_args.kwargs["scope_key"], base_uid)
         self.assertEqual(acknowledge.call_args.kwargs["revision"], 5)
         self.assertEqual(
-            store.values["mcc_runtime_acknowledged"]["instances"][qualified_uid]["revision"],
+            store.values["mcc_runtime_acknowledged"]["instances"][base_uid]["revision"],
             5,
         )
+
+    def test_foreign_host_qualified_desired_state_is_not_adopted(self) -> None:
+        base_uid = "electronic.sales-snap.com"
+        cfg = SimpleNamespace(mcc_url="https://mcc.example", mcc_token="token")
+        response = {
+            "status": "ok",
+            "runtime_overrides": {},
+            "instance_desired_states": {
+                f"{base_uid}@MauticFarm-01": {
+                    "revision": 19,
+                    "runtime_overrides": {
+                        "segment_super_priority_instance_settings": {
+                            "segments": [93],
+                            "slots_override": 1,
+                        },
+                    },
+                },
+            },
+        }
+        identity = {
+            "effective_hostname": "MauticFarm-02",
+            "effective_mcc_host_name": "MauticFarm-02",
+            "local_hostname": "MauticFarm-02",
+            "configured_host_name": "",
+        }
+        with patch(
+            "mcd_agent.runtime_overrides.resolve_agent_identity",
+            return_value=identity,
+        ), patch("mcd_agent.runtime_overrides._post_json", return_value=response):
+            fetched = fetch_runtime_overrides(cfg, instance_uids=[base_uid])
+
+        self.assertEqual(fetched["instance_desired_states"], {})
 
     def test_instance_state_uses_uid_and_reapplies_after_root_move(self) -> None:
         inst = SimpleNamespace(

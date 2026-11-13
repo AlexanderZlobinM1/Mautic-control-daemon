@@ -119,21 +119,19 @@ def _matching_instance_entry(entries: dict[str, Any], keys: list[str]) -> str | 
 
 
 def _canonical_instance_uids(instance_uids: list[str], *, host_name: str = "") -> list[str]:
-    """Return local UIDs plus one host-qualified compatibility alias.
-
-    Inventory keeps the stable local UID, while older/current MCC desired
-    rows may be addressed by the immutable ``<uid>@<mcc-host>`` key.  Send
-    both forms without inventing a host or binding the code to a domain.
-    """
+    """Return stable instance UIDs for the public MCC wire contract."""
     canonical: list[str] = []
-    host = str(host_name or "").strip()
+    host = str(host_name or "").strip().casefold()
     for raw_uid in instance_uids:
         uid = str(raw_uid or "").strip()
         if not uid:
             continue
+        if "@" in uid:
+            base_uid, qualifier = (part.strip() for part in uid.split("@", 1))
+            if not base_uid or not qualifier or (host and qualifier.casefold() != host):
+                continue
+            uid = base_uid
         canonical.append(uid)
-        if host and "@" not in uid:
-            canonical.append(f"{uid}@{host}")
     return list(dict.fromkeys(canonical))
 
 
@@ -174,8 +172,10 @@ def associate_instance_desired_states(
 def normalize_instance_desired_state_rows(
     states: object,
     requested_uids: object = None,
+    *,
+    host_name: str = "",
 ) -> dict[str, dict[str, Any]]:
-    """Collapse legacy/base and immutable host-qualified rows per instance."""
+    """Collapse MCC rows to stable UIDs, accepting same-host legacy aliases."""
     if not isinstance(states, dict):
         return {}
     requested = {
@@ -183,29 +183,37 @@ def normalize_instance_desired_state_rows(
         for uid in (requested_uids if isinstance(requested_uids, (list, tuple, set, dict)) else [])
         if str(uid or "").strip()
     }
+    host = str(host_name or "").strip().casefold()
     grouped: dict[str, list[tuple[str, dict[str, Any], int]]] = {}
     for position, (raw_uid, raw_state) in enumerate(states.items()):
         uid = str(raw_uid or "").strip()
         if not uid or not isinstance(raw_state, dict):
             continue
-        grouped.setdefault(uid.split("@", 1)[0], []).append((uid, raw_state, position))
+        base_uid = uid
+        if "@" in uid:
+            base_uid, qualifier = (part.strip() for part in uid.split("@", 1))
+            if not base_uid or not qualifier or (host and qualifier.casefold() != host):
+                continue
+        if requested and base_uid not in requested:
+            continue
+        grouped.setdefault(base_uid, []).append((uid, raw_state, position))
 
     out: dict[str, dict[str, Any]] = {}
-    for rows in grouped.values():
+    for base_uid, rows in grouped.items():
         def rank(row: tuple[str, dict[str, Any], int]) -> tuple[int, int, int, int, int]:
             uid, state, position = row
             revision = state.get("revision")
             revision_value = int(revision) if isinstance(revision, int) and not isinstance(revision, bool) else -1
             return (
-                1 if "@" in uid and uid in requested else 0,
-                1 if "@" in uid else 0,
+                1 if uid == base_uid else 0,
                 1 if uid in requested else 0,
+                0 if "@" in uid else 1,
                 revision_value,
                 -position,
             )
 
-        uid, state, _position = max(rows, key=rank)
-        out[uid] = state
+        _uid, state, _position = max(rows, key=rank)
+        out[base_uid] = state
     return out
 
 
@@ -522,6 +530,7 @@ def fetch_runtime_overrides(cfg: AgentConfig, *, instance_uids: list[str] | None
         out["instance_desired_states"] = normalize_instance_desired_state_rows(
             out.get("instance_desired_states"),
             canonical_instance_uids,
+            host_name=effective_host_name,
         )
         return out
     except HTTPError as e:
