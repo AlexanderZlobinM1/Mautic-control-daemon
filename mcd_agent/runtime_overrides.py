@@ -135,30 +135,25 @@ def _matching_instance_entry(entries: dict[str, Any], keys: list[str]) -> str | 
 
 
 def _canonical_instance_uids(instance_uids: list[str], *, host_name: str = "") -> list[str]:
-    """Return base and exact host-qualified aliases for every local UID.
+    """Return stable instance UIDs for the public MCC wire contract.
 
-    Inventory keeps the stable local UID, while older/current MCC desired
-    rows may be addressed by the immutable ``<uid>@<mcc-host>`` key.  Send
-    both forms even when inventory already contains the qualified form. This
-    lets MCC resolve a desired row written by an older/base-UID UI and lets
-    the response normalizer attach it back to the exact host-qualified row.
-    Never invent a second host-qualified alias for an already-qualified UID.
+    A historical ``<uid>@<host>`` inventory value is accepted only for the
+    current host and collapsed to its stable UID.  MCD must never emit or
+    invent the host-qualified alias: an instance can move between hosts, so
+    the host name is migration context rather than part of its identity.
     """
     canonical: list[str] = []
-    host = str(host_name or "").strip()
+    host = str(host_name or "").strip().casefold()
     for raw_uid in instance_uids:
         uid = str(raw_uid or "").strip()
         if not uid:
             continue
         if "@" in uid:
-            base_uid = uid.split("@", 1)[0].strip()
-            if base_uid:
-                canonical.append(base_uid)
-            canonical.append(uid)
-        else:
-            canonical.append(uid)
-            if host:
-                canonical.append(f"{uid}@{host}")
+            base_uid, qualifier = (part.strip() for part in uid.split("@", 1))
+            if not base_uid or not qualifier or (host and qualifier.casefold() != host):
+                continue
+            uid = base_uid
+        canonical.append(uid)
     return list(dict.fromkeys(canonical))
 
 
@@ -199,8 +194,10 @@ def associate_instance_desired_states(
 def normalize_instance_desired_state_rows(
     states: object,
     requested_uids: object = None,
+    *,
+    host_name: str = "",
 ) -> dict[str, dict[str, Any]]:
-    """Collapse legacy/base and immutable host-qualified rows per instance."""
+    """Collapse MCC rows to stable UIDs, accepting same-host legacy aliases."""
     if not isinstance(states, dict):
         return {}
     requested = {
@@ -208,42 +205,37 @@ def normalize_instance_desired_state_rows(
         for uid in (requested_uids if isinstance(requested_uids, (list, tuple, set, dict)) else [])
         if str(uid or "").strip()
     }
+    host = str(host_name or "").strip().casefold()
     grouped: dict[str, list[tuple[str, dict[str, Any], int]]] = {}
     for position, (raw_uid, raw_state) in enumerate(states.items()):
         uid = str(raw_uid or "").strip()
         if not uid or not isinstance(raw_state, dict):
             continue
-        grouped.setdefault(uid.split("@", 1)[0], []).append((uid, raw_state, position))
+        base_uid = uid
+        if "@" in uid:
+            base_uid, qualifier = (part.strip() for part in uid.split("@", 1))
+            if not base_uid or not qualifier or (host and qualifier.casefold() != host):
+                continue
+        if requested and base_uid not in requested:
+            continue
+        grouped.setdefault(base_uid, []).append((uid, raw_state, position))
 
     out: dict[str, dict[str, Any]] = {}
-    for rows in grouped.values():
+    for base_uid, rows in grouped.items():
         def rank(row: tuple[str, dict[str, Any], int]) -> tuple[int, int, int, int, int]:
             uid, state, position = row
             revision = state.get("revision")
             revision_value = int(revision) if isinstance(revision, int) and not isinstance(revision, bool) else -1
             return (
-                1 if "@" in uid and uid in requested else 0,
-                1 if "@" in uid else 0,
+                1 if uid == base_uid else 0,
                 1 if uid in requested else 0,
+                0 if "@" in uid else 1,
                 revision_value,
                 -position,
             )
 
-        uid, state, _position = max(rows, key=rank)
-        # A base-UID response is still the same instance when the request
-        # contains exactly one host-qualified alias for that base. Preserve
-        # the exact scope key for apply and receipt ACK; otherwise a base row
-        # can be silently treated as an unrelated sparse instance and the
-        # MCC UI change never reaches the selected host.
-        qualified_requested = [
-            candidate
-            for candidate in requested
-            if candidate.split("@", 1)[0] == uid.split("@", 1)[0]
-            and "@" in candidate
-        ]
-        if len(qualified_requested) == 1:
-            uid = qualified_requested[0]
-        out[uid] = state
+        _uid, state, _position = max(rows, key=rank)
+        out[base_uid] = state
     return out
 
 
@@ -595,6 +587,7 @@ def fetch_runtime_overrides(
         out["instance_desired_states"] = normalize_instance_desired_state_rows(
             out.get("instance_desired_states"),
             canonical_instance_uids,
+            host_name=effective_host_name,
         )
         return out
     except HTTPError as e:

@@ -45,11 +45,11 @@ root-only, docroot-only и symlink layouts сохраняют fail-closed semant
 ### Stable instance UID and MCC wire identity
 
 Локальный inventory сохраняет свой стабильный native `instance_uid` без переименования.
-При наличии эффективного `mcc_host_name` MCD в state/inventory payloads передаёт MCC
-канонический wire UID `instance_uid@host_name`. Bare UID принимается только как legacy
-alias текущего хоста; qualified UID другого хоста отклоняется fail-closed. Patch context,
-migration selectors и state sync используют одну и ту же проверку. В standalone-режиме
-без effective MCC host name native UID остаётся bare.
+Этот UID остаётся единственным публичным ключом в state/inventory payload, runtime poll,
+настройках и ACK независимо от текущего хоста. Исторический `instance_uid@host_name`
+принимается только как входной alias текущего хоста, сразу приводится к стабильному UID
+и наружу больше не передаётся; qualified UID другого хоста отклоняется fail-closed.
+Patch context, migration selectors и state sync используют одну и ту же проверку.
 
 Upgrade maintenance fencing is a cross-process admission barrier, not only a
 marker file. The upgrade owner acquires the exclusive
@@ -231,17 +231,16 @@ MCC desired state; observed telemetry envelope остаётся отдельны
 Bootstrap после approved update сначала восстанавливает отсутствующие
 instance-rows из durable baseline, затем создаёт ровно один pending delta до
 первого accepted desired revision; remote apply до этого момента запрещён.
-При restart первым read-only шагом выполняется свежий canonical MCC fetch с
-instance UID aliases и field metadata. Его более новый qualified row
-materialize-ся в mutable config/effective runtime до локальной deletion
+При restart первым read-only шагом выполняется свежий canonical MCC fetch со
+стабильными instance UID и field metadata. Если MCC ещё возвращает единственный
+same-host legacy alias, MCD связывает его со стабильным UID до локальной deletion
 classification; принятый instance row не очищается неполным host snapshot.
 
 После startup/poll persistence строится также из canonical MCC
 `instance_desired_states`, а не только из profile-shaped effective config.
-Qualified UID и его priority/super-priority lane maps сначала materialize-ся в
-локальном runtime, затем именно этот snapshot становится baseline; restart не
-создаёт ложную local deletion и не отправляет пустой instance-row обратно в
-MCC.
+Priority/super-priority lane maps materialize-ся под стабильным UID в локальном
+runtime, затем именно этот snapshot становится baseline; restart не создаёт
+ложную local deletion и не отправляет пустой instance-row обратно в MCC.
 
 Если локальный runtime include потерян или обнулён, любой remote winner вне
 stable-проекции переводит startup или обычный poll в full-snapshot режим: в
