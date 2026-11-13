@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -20,6 +21,8 @@ from mcd_agent.segment_admission import cycle_key, sync_cycle
 
 
 class MonitoredEmailParserTests(unittest.TestCase):
+    _FIXTURES = Path(__file__).parent / "fixtures" / "monitored_email"
+
     def test_active_segment_cycle_does_not_starve_parser_or_duplicate_tick(self):
         root = "/var/www/alex_personal/public_html"
         instance_uid = "alex-personal.sales-snap.ru"
@@ -205,6 +208,208 @@ class MonitoredEmailParserTests(unittest.TestCase):
         self.assertEqual(parsed.kind, TYPE_UNSUBSCRIBE)
         self.assertEqual(parsed.reason, DNC_UNSUBSCRIBED)
         self.assertEqual(parsed.emails, ["customer@example.org"])
+
+    def test_apple_unsubscribe_explicit_header_without_message_id(self):
+        raw = (self._FIXTURES / "apple_unsubscribe_header.eml").read_bytes()
+
+        parsed = parse_monitored_message(
+            raw,
+            (TYPE_FEEDBACK_LOOP, TYPE_BOUNCE, TYPE_UNSUBSCRIBE),
+        )
+
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed.kind, TYPE_UNSUBSCRIBE)
+        self.assertEqual(parsed.reason, DNC_UNSUBSCRIBED)
+        self.assertEqual(parsed.emails, ["subscriber.one@example.org"])
+
+    def test_apple_unsubscribe_explicit_header_does_not_require_tagged_recipient(self):
+        raw = (
+            b"X-Apple-Unsubscribe: true\r\n"
+            b"From: Subscriber <subscriber@example.org>\r\n"
+            b"To: ordinary-feedback@example.net\r\n"
+            b"Subject:\r\n"
+            b"Auto-Submitted: auto-replied\r\n"
+            b"Content-Type: text/plain; charset=utf-8\r\n"
+            b"\r\n"
+            b"Automatic list-removal request\r\n"
+        )
+
+        parsed = parse_monitored_message(raw, (TYPE_UNSUBSCRIBE,))
+
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed.kind, TYPE_UNSUBSCRIBE)
+        self.assertEqual(parsed.emails, ["subscriber@example.org"])
+
+    def test_apple_unsubscribe_tagged_recipient_with_folded_headers(self):
+        raw = (self._FIXTURES / "apple_unsubscribe_tagged_recipient.eml").read_bytes()
+
+        parsed = parse_monitored_message(
+            raw,
+            (TYPE_FEEDBACK_LOOP, TYPE_BOUNCE, TYPE_UNSUBSCRIBE),
+        )
+
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed.kind, TYPE_UNSUBSCRIBE)
+        self.assertEqual(parsed.reason, DNC_UNSUBSCRIBED)
+        self.assertEqual(parsed.emails, ["subscriber.two@example.org"])
+
+    def test_classic_rfc2047_unsubscribe_remains_supported(self):
+        raw = (self._FIXTURES / "classic_unsubscribe_rfc2047.eml").read_bytes()
+
+        parsed = parse_monitored_message(
+            raw,
+            (TYPE_FEEDBACK_LOOP, TYPE_BOUNCE, TYPE_UNSUBSCRIBE),
+        )
+
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed.kind, TYPE_UNSUBSCRIBE)
+        self.assertEqual(parsed.reason, DNC_UNSUBSCRIBED)
+        self.assertEqual(parsed.emails, ["classic.subscriber@example.org"])
+
+    def test_empty_subject_and_auto_submitted_are_not_unsubscribe_signals(self):
+        raw = (
+            b"From: automated@example.org\r\n"
+            b"To: ordinary@example.net\r\n"
+            b"Subject:\r\n"
+            b"Auto-Submitted: auto-replied\r\n"
+            b"Content-Type: text/plain; charset=utf-8\r\n"
+            b"\r\n"
+            b"Automatic response\r\n"
+        )
+
+        self.assertIsNone(parse_monitored_message(raw, (TYPE_UNSUBSCRIBE,)))
+
+    def test_feedback_loop_and_bounce_precede_apple_unsubscribe_signal(self):
+        feedback = (
+            b"X-Apple-Unsubscribe: true\r\n"
+            b"From: fbl@example.net\r\n"
+            b"To: fbl+unsubscribe_A1b2C3d4@example.net\r\n"
+            b"Content-Type: multipart/report; report-type=feedback-report; boundary=x\r\n\r\n"
+            b"--x\r\nContent-Type: message/feedback-report\r\n\r\n"
+            b"Feedback-Type: abuse\r\nOriginal-Rcpt-To: victim@example.org\r\n"
+            b"--x--\r\n"
+        )
+        bounce = (
+            b"X-Apple-Unsubscribe: true\r\n"
+            b"From: MAILER-DAEMON@example.net\r\n"
+            b"To: fbl+unsubscribe_A1b2C3d4@example.net\r\n"
+            b"Content-Type: multipart/report; report-type=delivery-status; boundary=x\r\n\r\n"
+            b"--x\r\nContent-Type: message/delivery-status\r\n\r\n"
+            b"Final-Recipient: rfc822; bounced@example.org\r\nAction: failed\r\n"
+            b"--x--\r\n"
+        )
+
+        parsed_feedback = parse_monitored_message(
+            feedback,
+            (TYPE_FEEDBACK_LOOP, TYPE_BOUNCE, TYPE_UNSUBSCRIBE),
+        )
+        parsed_bounce = parse_monitored_message(
+            bounce,
+            (TYPE_FEEDBACK_LOOP, TYPE_BOUNCE, TYPE_UNSUBSCRIBE),
+        )
+
+        self.assertIsNotNone(parsed_feedback)
+        self.assertEqual(parsed_feedback.kind, TYPE_FEEDBACK_LOOP)
+        self.assertEqual(parsed_feedback.emails, ["victim@example.org"])
+        self.assertIsNotNone(parsed_bounce)
+        self.assertEqual(parsed_bounce.kind, TYPE_BOUNCE)
+        self.assertEqual(parsed_bounce.emails, ["bounced@example.org"])
+
+    def test_apple_unsubscribe_preserves_cursor_delete_and_existing_dnc_semantics(self):
+        raw = (self._FIXTURES / "apple_unsubscribe_header.eml").read_bytes()
+
+        class FakeDB:
+            def __init__(self):
+                self.calls = []
+
+            def add_dnc_for_emails(self, emails, *, reason, comments):
+                self.calls.append((list(emails), reason, comments))
+                return {"added": 0, "existing": 1, "contacts": 1}
+
+        class FakeIMAP:
+            def __init__(self):
+                self.deleted = []
+                self.fetches = []
+                self.expunged = False
+
+            def select(self, _folder):
+                return "OK", []
+
+            def uid(self, command, *args):
+                if command == "SEARCH":
+                    return "OK", [b"41"]
+                if command == "FETCH":
+                    self.fetches.append(args[0])
+                    return "OK", [(b"41 (BODY[])", raw)]
+                if command == "STORE":
+                    self.deleted.append(args)
+                    return "OK", []
+                raise AssertionError(command)
+
+            def expunge(self):
+                self.expunged = True
+                return "OK", []
+
+            def close(self):
+                return None
+
+            def logout(self):
+                return None
+
+        monitored = {
+            "general": {
+                "host": "imap.example.net",
+                "port": 993,
+                "encryption": "/ssl",
+                "user": "fbl@example.net",
+                "password": "fixture",
+            },
+            "EmailBundle_unsubscribes": {"folder": "INBOX"},
+        }
+        settings = MonitoredEmailParserSettings(
+            enabled=True,
+            force_seen=True,
+            delete_processed=True,
+            types=(TYPE_UNSUBSCRIBE,),
+        )
+        db = FakeDB()
+        first_imap = FakeIMAP()
+        second_imap = FakeIMAP()
+        with (
+            patch("mcd_agent.monitored_email.load_monitored_email_config", return_value=monitored),
+            patch("mcd_agent.monitored_email._connect", side_effect=[first_imap, second_imap]),
+        ):
+            first = process_monitored_email(
+                db=db,
+                local_php_path="/fixture/local.php",
+                php_bin="/usr/bin/php",
+                settings=settings,
+                state={},
+            )
+            second = process_monitored_email(
+                db=db,
+                local_php_path="/fixture/local.php",
+                php_bin="/usr/bin/php",
+                settings=settings,
+                state=first.state,
+            )
+
+        folder = next(iter(first.state["folders"].values()))
+        self.assertEqual(first.scanned, 1)
+        self.assertEqual(first.matched, 1)
+        self.assertEqual(first.dnc_existing, 1)
+        self.assertEqual(first.deleted, 1)
+        self.assertEqual(first.marked_seen, 0)
+        self.assertEqual(first.by_type, {TYPE_UNSUBSCRIBE: 1})
+        self.assertEqual(folder["force_cursor_uid"], 41)
+        self.assertEqual(folder["processed_uids"], [41])
+        self.assertEqual(len(db.calls), 1)
+        self.assertEqual(first_imap.fetches, ["41"])
+        self.assertTrue(first_imap.expunged)
+        self.assertEqual(second.scanned, 0)
+        self.assertEqual(second.matched, 0)
+        self.assertEqual(second_imap.fetches, [])
+        self.assertEqual(len(db.calls), 1)
 
     def test_whitelist_filters_exact_forwarder_email(self):
         raw = (

@@ -371,6 +371,22 @@ Inventory fixture использует стабильный UID без host-су
 ```bash
 python3 -m pytest -q tests/test_monitored_email_parser.py
 ```
+
+Apple unsubscribe regressions используют две обезличенные EML fixtures с
+base64 text/plain body и разным порядком/переносом заголовков. Проверяются:
+явный Apple-заголовок без Message-ID, tagged recipient без Apple-заголовка,
+отсутствие ложного срабатывания только по Subject/Auto-Submitted, приоритет
+feedback-loop/bounce, существующий DNC, cursor/processed UID и delete semantics.
+Отдельная локальная evidence-проверка сверяет SHA256 двух исходных EML и
+подтверждает результат `unsubscribe`, не включая реальные адреса или токены в
+репозиторий.
+
+Третий обезличенный fixture сохраняет классический unsubscribe: RFC2047/base64
+Subject декодируется в `unsubscribe`, `Auto-Submitted: auto-generated`, tagged
+recipient присутствует, а `X-Apple-Unsubscribe` отсутствует. Локальная
+evidence-проверка исходника фиксирует SHA256
+`f8aa85476828efb50c1948166f3dd99cd6a97465a2020814836df14846829109`.
+
 ## Stable instance runtime identity
 
 - Runtime polling sends one stable native instance UID and never adds a
