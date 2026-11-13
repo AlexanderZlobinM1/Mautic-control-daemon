@@ -363,6 +363,8 @@ python3 -m unittest \
 выполняет tick и атомарно сохраняет продвинутый cursor. Повторный daemon tick
 внутри configured interval не вызывает parser второй раз. Отдельно сохраняются
 cron-route и отсутствие DB-конфига как существующие skip-условия.
+Inventory fixture использует стабильный UID без host-суффикса, а runtime row —
+его MCC wire alias `<uid>@<host>`; effective setting обязан остаться enabled.
 
 Проверка:
 

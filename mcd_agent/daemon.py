@@ -7398,38 +7398,32 @@ def _monitored_email_parser_effective_setting(config: AgentConfig, inst: object)
     types = _normalize_monitored_email_types(raw_types)
     whitelist = _normalize_monitored_email_whitelist(getattr(config, "monitored_email_parser_whitelist", []))
     settings = getattr(config, "monitored_email_parser_instance_settings", {})
-    if isinstance(settings, dict):
-        for key in _instance_setting_keys(inst) + ["default"]:
-            if key not in settings:
-                continue
-            raw = settings.get(key)
-            if isinstance(raw, dict):
-                if "enabled" in raw:
-                    enabled = _to_boolish(raw.get("enabled"), enabled)
-                if "interval_sec" in raw:
-                    try:
-                        interval = max(60, int(raw.get("interval_sec") or interval))
-                    except Exception:
-                        pass
-                if "batch_size" in raw:
-                    try:
-                        batch_size = min(5000, max(1, int(raw.get("batch_size") or batch_size)))
-                    except Exception:
-                        pass
-                if "force_seen" in raw:
-                    force_seen = _to_boolish(raw.get("force_seen"), force_seen)
-                if "delete_processed" in raw:
-                    delete_processed = _to_boolish(raw.get("delete_processed"), delete_processed)
-                if "disable_mautic_fetch" in raw:
-                    disable_mautic_fetch = _to_boolish(raw.get("disable_mautic_fetch"), disable_mautic_fetch)
-                if "types" in raw:
-                    types = _normalize_monitored_email_types(raw.get("types"))
-                if "whitelist" in raw:
-                    whitelist = _normalize_monitored_email_whitelist(raw.get("whitelist"))
-                break
-            if isinstance(raw, bool):
-                enabled = bool(raw)
-                break
+    found, raw = _instance_scoped_whitelist_entry(settings, inst)
+    if found and isinstance(raw, dict):
+        if "enabled" in raw:
+            enabled = _to_boolish(raw.get("enabled"), enabled)
+        if "interval_sec" in raw:
+            try:
+                interval = max(60, int(raw.get("interval_sec") or interval))
+            except Exception:
+                pass
+        if "batch_size" in raw:
+            try:
+                batch_size = min(5000, max(1, int(raw.get("batch_size") or batch_size)))
+            except Exception:
+                pass
+        if "force_seen" in raw:
+            force_seen = _to_boolish(raw.get("force_seen"), force_seen)
+        if "delete_processed" in raw:
+            delete_processed = _to_boolish(raw.get("delete_processed"), delete_processed)
+        if "disable_mautic_fetch" in raw:
+            disable_mautic_fetch = _to_boolish(raw.get("disable_mautic_fetch"), disable_mautic_fetch)
+        if "types" in raw:
+            types = _normalize_monitored_email_types(raw.get("types"))
+        if "whitelist" in raw:
+            whitelist = _normalize_monitored_email_whitelist(raw.get("whitelist"))
+    elif found and isinstance(raw, bool):
+        enabled = bool(raw)
     return MonitoredEmailParserSettings(
         enabled=enabled,
         interval_sec=interval,

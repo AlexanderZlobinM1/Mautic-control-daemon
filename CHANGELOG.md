@@ -1,3 +1,13 @@
+## 1.6.79 - 2026-11-13
+
+- Resolve monitored-email per-instance settings through the existing instance
+  alias contract. A native inventory UID now consumes its exact MCC
+  host-qualified wire row without requiring `uid@host` in local inventory or
+  an Alex-specific configuration rewrite.
+- Extend the starvation regression to use the production identity shape:
+  native inventory UID, host-qualified runtime key, active segment cycle,
+  durable cursor advance and restart-safe resume.
+
 ## 1.6.78 - 2026-11-13
 
 - Run every enabled per-instance monitored-email/IMAP parser tick from the
