@@ -491,7 +491,7 @@ class MonitoredEmailParserTests(unittest.TestCase):
                 return {
                     "emails": 1, "matched_emails": 1, "contacts": 1,
                     "created": 0, "added": 0, "existing": 1,
-                    "matching_existing": 1,
+                    "matching_existing": 0 if self.mode == "existing_other_reason" else 1,
                 }
 
         class PolicyIMAP:
@@ -524,6 +524,8 @@ class MonitoredEmailParserTests(unittest.TestCase):
             ("unknown_on_delete_on", "unknown", True, False, True, True),
             ("existing_off_delete_on", "existing", False, False, True, False),
             ("existing_on_delete_on", "existing", False, True, True, True),
+            ("existing_other_reason_off", "existing_other_reason", False, False, True, False),
+            ("existing_other_reason_on", "existing_other_reason", False, True, True, True),
             ("unknown_on_delete_off", "unknown", True, False, False, False),
             ("existing_on_delete_off", "existing", False, True, False, False),
         )
@@ -561,9 +563,13 @@ class MonitoredEmailParserTests(unittest.TestCase):
                     if mode == "unknown" and auto_create:
                         self.assertEqual(result.contacts_created, 1)
                         self.assertEqual(result.dnc_added, 1)
-                    if mode == "existing":
+                    if mode.startswith("existing"):
                         self.assertEqual(result.dnc_existing, 1)
                         self.assertEqual(result.dnc_added, 0)
+                        self.assertEqual(
+                            result.existing_dnc_reconciled,
+                            1 if process_existing else 0,
+                        )
                     if should_delete:
                         self.assertEqual((result.deleted, result.marked_seen), (1, 0))
                         self.assertEqual(imap.stores[-1][-1], r"(\Deleted)")
@@ -661,6 +667,93 @@ class MonitoredEmailParserTests(unittest.TestCase):
         self.assertEqual(second_imap.fetches, [])
         self.assertEqual(db.calls, 1)
         self.assertTrue(db.assert_create)
+
+    def test_policy_upgrade_rechecks_processed_uid_with_existing_dnc_other_reason(self):
+        raw = (self._FIXTURES / "apple_unsubscribe_header.eml").read_bytes()
+
+        class ExistingDNCDB:
+            def __init__(self):
+                self.calls = 0
+
+            def add_dnc_for_emails(self, emails, *, reason, comments, create_missing=False):
+                del emails, reason, comments, create_missing
+                self.calls += 1
+                return {
+                    "emails": 1, "matched_emails": 1, "contacts": 1,
+                    "created": 0, "added": 0, "existing": 1,
+                    "matching_existing": 0,
+                }
+
+        class ExistingDNCIMAP:
+            def __init__(self):
+                self.fetches = []
+                self.stores = []
+                self.expunged = False
+
+            def select(self, _folder): return "OK", []
+            def uid(self, command, *args):
+                if command == "SEARCH": return "OK", [b"1707"]
+                if command == "FETCH":
+                    self.fetches.append(args[0])
+                    return "OK", [(b"1707 (BODY[])", raw)]
+                if command == "STORE":
+                    self.stores.append(args)
+                    return "OK", []
+                raise AssertionError(command)
+            def expunge(self):
+                self.expunged = True
+                return "OK", []
+            def close(self): return None
+            def logout(self): return None
+
+        monitored = {
+            "general": {
+                "host": "imap.example.net", "port": 993, "encryption": "/ssl",
+                "user": "fbl@example.net", "password": "fixture",
+            },
+            "EmailBundle_unsubscribes": {"folder": "INBOX"},
+        }
+        settings = MonitoredEmailParserSettings(
+            enabled=True, force_seen=True, delete_processed=True,
+            auto_create_unknown_contacts=True,
+            process_existing_dnc_messages=True,
+            types=(TYPE_UNSUBSCRIBE,),
+        )
+        target_key = monitored_email_targets(monitored, settings.types)[0].key
+        state = {
+            "folders": {
+                target_key: {
+                    "force_cursor_uid": 1707,
+                    "processed_uids": [1707],
+                    "replay_policy": "previous-policy-receipt",
+                    "replay_checked_uids": [1707],
+                }
+            }
+        }
+        db = ExistingDNCDB()
+        imap = ExistingDNCIMAP()
+        with (
+            patch("mcd_agent.monitored_email.load_monitored_email_config", return_value=monitored),
+            patch("mcd_agent.monitored_email._connect", return_value=imap),
+        ):
+            result = process_monitored_email(
+                db=db, local_php_path="/fixture/local.php", php_bin="/usr/bin/php",
+                settings=settings, state=state,
+            )
+
+        folder = result.state["folders"][target_key]
+        self.assertEqual(result.by_type, {})
+        self.assertEqual(result.replay_checked, 1)
+        self.assertEqual(result.existing_dnc_reconciled, 1)
+        self.assertEqual((result.deleted, result.marked_seen), (1, 0))
+        self.assertEqual((result.dnc_existing, result.dnc_added), (1, 0))
+        self.assertEqual(folder["force_cursor_uid"], 1707)
+        self.assertEqual(folder["processed_uids"], [1707])
+        self.assertEqual(folder["replay_checked_uids"], [1707])
+        self.assertEqual(imap.fetches, ["1707"])
+        self.assertEqual(imap.stores[-1][-1], r"(\Deleted)")
+        self.assertTrue(imap.expunged)
+        self.assertEqual(db.calls, 1)
 
     def test_delete_failure_retries_idempotently_without_existing_dnc_flag(self):
         raw = (self._FIXTURES / "classic_unsubscribe_rfc2047.eml").read_bytes()

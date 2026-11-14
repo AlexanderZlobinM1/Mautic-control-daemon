@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 
 
 PARSER_VERSION = 1
+REPLAY_POLICY_VERSION = 2
 TYPE_FEEDBACK_LOOP = "feedback_loop"
 TYPE_BOUNCE = "bounce"
 TYPE_UNSUBSCRIBE = "unsubscribe"
@@ -287,6 +288,7 @@ def _process_target(
             ordinary_uids = [uid for uid in ordinary_uids if uid not in processed_uids]
 
         policy_payload = {
+            "replay_policy_version": REPLAY_POLICY_VERSION,
             "auto_create_unknown_contacts": bool(settings.auto_create_unknown_contacts),
             "delete_processed": bool(settings.delete_processed),
             "process_existing_dnc_messages": bool(settings.process_existing_dnc_messages),
@@ -349,7 +351,6 @@ def _process_target(
                     dnc = db.add_dnc_for_emails(parsed.emails, **dnc_kwargs)
                     added = int(dnc.get("added", 0) or 0)
                     existing = int(dnc.get("existing", 0) or 0)
-                    matching_existing = int(dnc.get("matching_existing", existing) or 0)
                     contacts = int(dnc.get("contacts", 0) or 0)
                     created = int(dnc.get("created", 0) or 0)
                     email_count = int(dnc.get("emails", len(parsed.emails)) or 0)
@@ -361,17 +362,17 @@ def _process_target(
                     if matched_emails < email_count or contacts <= 0:
                         result.no_contact += 1
                     complete_contact_match = email_count > 0 and matched_emails >= email_count
-                    complete_matching_dnc = contacts > 0 and (matching_existing + added) >= contacts
+                    complete_email_dnc = contacts > 0 and (existing + added) >= contacts
                     newly_applied = added > 0
                     if newly_applied:
                         pending_dnc_uids.add(uid)
                     existing_reconciliation = (
                         complete_contact_match
-                        and complete_matching_dnc
+                        and complete_email_dnc
                         and not newly_applied
                         and settings.process_existing_dnc_messages
                     )
-                    handled = complete_contact_match and complete_matching_dnc and (
+                    handled = complete_contact_match and complete_email_dnc and (
                         newly_applied or uid in pending_dnc_uids or existing_reconciliation
                     )
                     if existing_reconciliation:
