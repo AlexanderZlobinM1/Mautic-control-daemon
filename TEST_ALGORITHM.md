@@ -62,6 +62,11 @@ package/runtime SHA и реальный MCC/package/install receipt.
    файла: новый update barrier содержит operation/PID/PID-start identity;
    живой owner или source/update lease сохраняет barrier, orphaned legacy
    `mcd-update-admission` восстанавливается, а ручной `paused` не удаляется.
+5. MCC-ответ `mcc_update_admission_disabled` с полным планом более новой
+   MCD-сборки и включённым auto-update допускает только ремонт самого MCD.
+   Неполный или не более новый план не обходит admission.
+6. Runtime poll/push/ACK передают running и installed version, а backup state
+   push сохраняет неизвестные поля нового MCC без их локального применения.
 
 ## State fixture
 
@@ -256,6 +261,8 @@ barrier остаются обязательными.
 |---|---|---|
 | ordinary Mautic/PHP work не блокирует update; MCD critical barriers блокируют | `mcd_agent/self_update.py`, `mcd_agent/daemon.py`, `systemd/mcd.service` | self-update lifecycle tests + fresh M6/M7 receipt with worker PID adoption and barrier reasons |
 | stale scheduler admission не превращается в вечный blocker | `mcd_agent/update_admission.py`, `mcd_agent/self_update.py` | owner/lease/recovery tests in `tests/test_update_admission_race.py` + read-only stale-barrier receipt |
+| MCC admission разрешает только штатный self-repair устаревшего MCD при полном более новом плане | `mcd_agent/self_update.py` | `tests/test_dev_update_policy.py::test_mcc_admission_disabled_still_repairs_stale_mcd_runtime` |
+| runtime callbacks различают running/installed package; будущие backup fields не теряются | `mcd_agent/runtime_overrides.py`, `mcd_agent/backup.py` | `tests/test_runtime_override_direction.py`, `tests/test_backup_profile_v1_readback.py` |
 | TaskStore/runtime_sync queues, claims/running/follow-up/retry/monitor state переживают restart/reinstall | `mcd_agent/task_store.py`, `mcd_agent/daemon.py` | restart/adoption tests + fresh M6/M7 seeded-cycle receipt |
 | roots/instances независимы; нет all-roots barrier/loop одного root | `_iter_instances_with_root_dispatch_gate`, root-local monitor/refill workers | `tests/test_segment_liveness.py` + fresh M6/M7 receipt with every B/C root cycle_count and terminal seeded IDs |
 | explicit caps, sliding fairness и dedicated super lane считают правильный budget | `_scheduler_host_slots_available`, `_scheduler_instance_slots_available`, `_scheduler_round_robin_order` | `tests/test_campaign_ring_dispatch.py` hard-cap/3+ root/40+12/4-outside-11 rows + fresh aggregate slot receipt |

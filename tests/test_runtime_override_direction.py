@@ -36,6 +36,31 @@ from mcd_agent import daemon
 
 
 class RuntimeOverrideDirectionTests(unittest.TestCase):
+    def test_runtime_poll_and_push_advertise_running_and_installed_versions(self) -> None:
+        cfg = SimpleNamespace(mcc_url="https://mcc.example", mcc_token="fixture-token")
+        identity = {
+            "effective_hostname": "host-1",
+            "effective_mcc_host_name": "MauticFarm-02",
+            "local_hostname": "host-1",
+            "configured_host_name": "MauticFarm-02",
+        }
+        versions = {
+            "agent_version": "1.7.0.dev0",
+            "agent_running_version": "1.7.0.dev0",
+            "agent_installed_version": "1.7.0.dev0",
+        }
+        with patch.object(runtime_overrides, "resolve_agent_identity", return_value=identity), patch.object(
+            runtime_overrides, "agent_version_payload", return_value=versions
+        ), patch.object(runtime_overrides, "_post_json", return_value={"status": "ok"}) as post:
+            fetch_runtime_overrides(cfg, instance_uids=[])
+            push_runtime_overrides(cfg, {"import_stall_timeout_sec": 900}, target="desired")
+
+        for call in post.call_args_list:
+            payload = call.args[1]
+            self.assertEqual(payload["agent_version"], "1.7.0.dev0")
+            self.assertEqual(payload["agent_running_version"], "1.7.0.dev0")
+            self.assertEqual(payload["agent_installed_version"], "1.7.0.dev0")
+
     def test_179_key_runtime_observation_is_deterministically_chunked(self) -> None:
         keys = {f"runtime_key_{index}": index for index in range(179)}
         observation = {

@@ -52,15 +52,44 @@ def test_mapped_schedule_is_effective_and_hashed_before_receipt_masking(tmp_path
     assert backup.backup_profile_for_push(candidate) == backup.canonical_backup_profile(profile)
 
 
-def test_unknown_or_unapplied_field_is_rejected_before_any_write(tmp_path):
+def test_unknown_field_is_rejected_before_apply_but_preserved_for_state_push(tmp_path):
     cfg = config(tmp_path)
-    for profile in ({'enabled': True, 'unknown': 'never-echo-this'}, {'enabled': True, 'storage': {'password': 'new-fixture-secret'}}):
-        candidate = replace(cfg, backup_ssh_password='old-fixture-secret')
-        with patch.object(backup, '_cfg_with_profile_payload', return_value=candidate), patch.object(backup, '_validate_cfg'), patch.object(backup, 'backup_profile_set') as write:
-            _, receipt = backup.backup_profile_apply_sync(candidate, envelope(profile))
-        assert receipt['status'] in {'error', 'unsynced'}
-        assert 'never-echo-this' not in json.dumps(receipt)
-        write.assert_not_called()
+    profile = {
+        'enabled': True,
+        'unknown': 'forward-compatible-value',
+        'storage': {'future_option': {'mode': 'opaque'}},
+    }
+    with patch.object(backup, '_validate_cfg'), patch.object(backup, 'backup_profile_set') as write:
+        candidate, receipt = backup.backup_profile_apply_sync(cfg, envelope(profile))
+    assert receipt['status'] == 'error'
+    assert receipt['reason'] == 'unsupported_profile_field'
+    write.assert_not_called()
+    with patch.object(backup, 'backup_profile_get', return_value=profile):
+        assert backup.backup_profile_for_push(candidate) == profile
+
+
+def test_known_but_unapplied_field_still_fails_closed_before_write(tmp_path):
+    cfg = config(tmp_path)
+    profile = {'enabled': True, 'storage': {'password': 'new-fixture-secret'}}
+    candidate = replace(cfg, backup_ssh_password='old-fixture-secret')
+    with patch.object(backup, '_cfg_with_profile_payload', return_value=candidate), patch.object(
+        backup, '_validate_cfg'
+    ), patch.object(backup, 'backup_profile_set') as write:
+        _, receipt = backup.backup_profile_apply_sync(candidate, envelope(profile))
+    assert receipt['status'] == 'unsynced'
+    assert receipt['reason'] == 'effective_hash_mismatch'
+    write.assert_not_called()
+
+
+def test_unknown_profile_readback_does_not_crash_state_push(tmp_path):
+    cfg = config(tmp_path)
+    profile = {
+        'enabled': True,
+        'mcc_future_field': {'revision': 7},
+        'schedule': {'future_window': 'preserve-me'},
+    }
+    with patch.object(backup, 'backup_profile_get', return_value=profile):
+        assert backup.backup_profile_for_push(cfg) == profile
 
 
 def test_newer_request_does_not_reapply_older_db_values_to_candidate(tmp_path):

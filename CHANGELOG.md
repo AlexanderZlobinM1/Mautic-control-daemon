@@ -1,5 +1,12 @@
 ## 1.7.0 — Unreleased architecture candidate
 
+- Complete the previously separate connected-host lifecycle, prerequisites,
+  source-export and source-free runtime-profile closure in the canonical 1.7
+  branch. Preserve exact terminal receipts and external artifact bindings.
+- Advertise running and installed MCD versions on runtime synchronization,
+  allow a complete newer MCD package to repair an MCC admission deadlock, and
+  preserve opaque future backup-profile fields on outbound state sync.
+
 - Treat a complaint for a contact with any existing email DNC as handled when
   `process_existing_dnc_messages` is enabled, regardless of stored DNC reason.
   Preserve the existing DNC row, avoid duplicates and version the reconciliation

@@ -1,4 +1,5 @@
 """Explicit empty Dev never selects an Approved/latest package implicitly."""
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -47,3 +48,47 @@ def test_empty_dev_response_has_no_package_selection_or_download(tmp_path, monke
     assert message is None and retry>0 and len(sent)==1
     assert states[-1]['last_decision']==response
     assert not states[-1]['last_decision'].get('package_url')
+
+
+def test_mcc_admission_disabled_still_repairs_stale_mcd_runtime(tmp_path, monkeypatch):
+    path = tmp_path / 'mcd.toml'
+    path.write_text(
+        '[profile]\nname="custom"\n[runtime]\n'
+        'mcd_update_policy="test"\nmcd_auto_update_enabled=true\nbackup_enabled=false\n'
+        '[mcc]\nurl="https://fixture.invalid"\ntoken="synthetic-unit-fixture"\n',
+        encoding='utf-8',
+    )
+    cfg = config.load_config(str(path), allow_recover_from_mcc=False)
+    response = {
+        'status': 'disabled',
+        'reason': 'mcc_update_admission_disabled',
+        'current': '1.6.40',
+        'target': '1.7.0',
+        'package_url': 'https://fixture.invalid/mcd-runtime-1.7.0.tar.gz',
+        'sha256': 'a' * 64,
+    }
+    states = []
+    applied = []
+    monkeypatch.setattr(self_update, '_post_json', lambda *a, **kw: dict(response))
+    monkeypatch.setattr(self_update, '_read_state', lambda cfg: {})
+    monkeypatch.setattr(self_update, '_write_state', lambda cfg, value: states.append(value))
+    monkeypatch.setattr(self_update, '_maybe_run_update_cleanup', lambda *a, **kw: False)
+    monkeypatch.setattr(self_update, 'recover_stale_update_admission_barrier', lambda *a, **kw: {})
+    monkeypatch.setattr(self_update, '_active_mautic_processes', lambda: [])
+    monkeypatch.setattr(self_update, 'installed_agent_version', lambda: '1.6.40')
+    monkeypatch.setattr(self_update, 'scheduler_admission_lock', lambda cfg: nullcontext())
+    monkeypatch.setattr(self_update, 'create_update_admission_barrier', lambda *a, **kw: {})
+    monkeypatch.setattr(self_update, 'remove_update_admission_barrier', lambda *a, **kw: True)
+
+    def apply(_cfg, plan):
+        applied.append(plan)
+        return True, 'updated to 1.7.0'
+
+    monkeypatch.setattr(self_update, 'apply_update', apply)
+    message, retry = self_update.maybe_auto_update(cfg, force=True)
+
+    assert message == 'updated to 1.7.0'
+    assert retry > 0
+    assert applied and applied[0]['status'] == 'update'
+    assert applied[0]['mcd_update_admission_override'] == 'stale_mcd_runtime_repair'
+    assert states[-1]['last_decision']['reason'] == 'mcc_update_admission_disabled'

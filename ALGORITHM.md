@@ -747,6 +747,11 @@ config на его profile baseline и только после этого при
    orphaned `mcd-update-admission` flag снимается только если owner не жив и
    source/update lease свободен; `paused` и прочие manual/maintenance flags
    не трогаются recovery-кодом.
+   MCC admission не может навсегда удерживать устаревший MCD: если MCC вместе
+   с причиной `mcc_update_admission_disabled` возвращает полный штатный план
+   более новой MCD-сборки, включённый auto-update сначала применяет именно эту
+   сборку. Неполный, не более новый или запрещённый локальной политикой план
+   остаётся заблокированным. После обновления действует обычный admission.
 7. Обязательная и неотменяемая граница self-update: живой обычный PHP/Mautic console process
    (`segments`, `campaigns`, `import` и любой другой application command) не
    является blocker-ом. Он должен пережить restart/reinstall MCD, сохранить
@@ -1449,7 +1454,11 @@ each requested field against actual candidate values without injecting unrelated
 defaults or local-storage provenance. Schedule values affect the candidate
 immediately; an older DB profile must not overwrite the new candidate during
 verification. Unknown fields or mismatched actual values fail before profile
-mutation. After persistence, MCD rereads the stored effective values and returns
+mutation. При исходящем state callback сохранённые поля более нового MCC,
+которые текущий MCD ещё не умеет применить, передаются без изменения: старый
+агент не должен падать, обнулять или портить полный профиль. Известные поля
+по-прежнему читаются из фактической конфигурации. After persistence, MCD rereads
+the stored effective values and returns
 masked `effective_profile`, `effective_sha256`, the epoch and `status`.
 The transport hash covers the original envelope profile; the effective hash
 covers the canonical projection before credential masking. `ok` requires the
@@ -1459,7 +1468,8 @@ canonical shape, without injecting defaults/provenance as a false same-epoch
 conflict. Invalid/nonfinite epochs are rejected. Evidence:
 `test_backup_profile_v1_readback` includes the exact published MCC hash fixture,
 real temporary DB/config/crypto round trips, schedule adoption, old-state races,
-and negative checks that never apply unknown or unverifiable values.
+and negative checks that never apply unknown or unverifiable values while
+preserving opaque future fields on outbound state sync.
 Schema, validation,
 apply, or readback mismatch returns `unsynced` or `error` and does not claim a
 successful sync. The legacy `backup_profile` telemetry field remains for older
