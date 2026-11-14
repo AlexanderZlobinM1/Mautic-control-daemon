@@ -388,14 +388,18 @@ feedback-loop/bounce, существующий DNC, cursor/processed UID и dele
 cursor продвигается без повторного проигрывания сообщения.
 
 Policy matrix покрывает Apple/classic unsubscribe, bounce и feedback-loop:
-unknown contact и existing matching DNC при обоих новых флагах OFF/ON,
+unknown contact, existing matching DNC и existing email-DNC с другим reason при
+обоих новых флагах OFF/ON,
 `delete_processed` OFF/ON, создание ровно одного contact, идемпотентный DNC,
 `Seen` против `\Deleted`/`expunge`, monotonic cursor и `processed_uids`.
 Отдельная restart-проверка начинает с UID уже ниже cursor и внутри
 `processed_uids`: явный reconciliation обрабатывает его без rewind, не
 увеличивает обычный `by_type`, а policy receipt не допускает второй replay.
 DB regression проверяет per-email advisory lock, повторный вызов без дубля
-contact/DNC и отказ считать DNC с другим reason соответствующим.
+contact/DNC и различение reason в диагностическом результате. Parser regression
+подтверждает, что при включённом reconciliation любой уже существующий email-DNC
+считается обработанным без создания дубля, а обновление policy receipt один раз
+переоценивает ранее проверенный UID без перемотки cursor.
 
 Третий обезличенный fixture сохраняет классический unsubscribe: RFC2047/base64
 Subject декодируется в `unsubscribe`, `Auto-Submitted: auto-generated`, tagged

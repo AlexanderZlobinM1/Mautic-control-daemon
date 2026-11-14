@@ -840,7 +840,7 @@ Important:
     unknown complaints as Seen by default; when enabled, MCD serializes contact
     creation by email and applies the matching DNC
   - `monitored_email_parser_process_existing_dnc_messages = false` keeps mail
-    whose contact already has the matching DNC as Seen by default; when enabled,
+    whose contact already has an email DNC as Seen by default; when enabled,
     it also reconciles retained processed UIDs without cursor rewind or duplicate
     DNC/business events
   - `monitored_email_parser_whitelist = ["support@example.com"]` skips exact

@@ -1,3 +1,14 @@
+## 1.6.84 - 2026-11-14
+
+- Treat a complaint for a contact with any existing email DNC as handled when
+  `process_existing_dnc_messages` is enabled, regardless of the stored DNC
+  reason. Preserve the existing DNC row and avoid duplicates.
+- Version the reconciliation policy receipt so retained UIDs already checked by
+  1.6.83 are re-evaluated once without rewinding the mailbox cursor or replaying
+  ordinary business counters.
+- Add all-message-type and retained-UID regressions, including a DNC whose reason
+  differs from the newly classified complaint.
+
 ## 1.6.83 - 2026-11-14
 
 - Add independent, backward-compatible monitored-email policies for
