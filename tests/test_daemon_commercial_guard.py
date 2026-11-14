@@ -124,6 +124,10 @@ def test_default_factory_disables_without_portal_material(tmp_path, monkeypatch)
 
 
 def test_native_rescan_uses_current_local_config_and_preserves_manual_instances(tmp_path, monkeypatch):
+    from mcd_agent.commercial_detector import (
+        PORTAL_LOCAL_FACTS_CAPABILITIES,
+        build_applicability_facts_snapshot,
+    )
     from mcd_agent.inventory import InstanceInventory
     from mcd_agent.models import MauticInstall
 
@@ -142,6 +146,23 @@ def test_native_rescan_uses_current_local_config_and_preserves_manual_instances(
     monkeypatch.setattr("mcd_agent.daemon.load_config", load)
     monkeypatch.setattr("mcd_agent.daemon.local_runtime_overrides", lambda _config: {})
     monkeypatch.setattr("mcd_agent.daemon.default_scenario_runner_argv", lambda: [sys.executable])
+    synthetic_facts = {
+        "detector_schema": "mcd-scenario-detector-v1",
+        "os_id": "ubuntu",
+        "os_version": "24.04",
+        "architecture": "amd64",
+        "package_manager": "apt-get",
+        "capabilities": sorted(PORTAL_LOCAL_FACTS_CAPABILITIES),
+        "target_kind": "existing_server",
+    }
+    monkeypatch.setattr(
+        "mcd_agent.daemon.build_applicability_facts_snapshot",
+        lambda **_kwargs: build_applicability_facts_snapshot(
+            target_kind="existing_server",
+            capabilities=list(PORTAL_LOCAL_FACTS_CAPABILITIES),
+            facts_reader=lambda **_reader_kwargs: dict(synthetic_facts),
+        ),
+    )
     native = InstanceInventory(config.state_db_path)
     manual = MauticInstall("manual", "manual", str(tmp_path / "manual"), "/manual/bin/console", source="manual")
     discovered = MauticInstall("new", "new", str(tmp_path / "current-root"), "/new/bin/console", mautic_major=7)
@@ -167,7 +188,7 @@ def test_native_rescan_uses_current_local_config_and_preserves_manual_instances(
     assert result["discovered_count"] == 1
     assert result["snapshot_reference"]["snapshot_revision"] == 1
     assert result["snapshot_reference"]["durable_hash"].startswith("sha256:")
-    assert loads == [(config.config_file_path, False)]
+    assert loads == [(config.config_file_path, False)] * 3
     assert discoveries == [current.discovery_roots]
     assert {(row.instance_uid, row.source) for row in native.list_instances()} == {
         ("manual", "manual"), ("new", "autodiscovery"),
