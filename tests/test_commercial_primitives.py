@@ -23,9 +23,10 @@ def test_inventory_advertises_native_rescan_separately_from_read_only_primitives
         "check_web_php",
         "read_host_facts",
         "rescan_inventory",
+        "sync_binding",
     ]
     assert all(
-        command["mutates_state"] == (command["command_id"] == "rescan_inventory")
+        command["mutates_state"] == (command["command_id"] in {"rescan_inventory", "sync_binding"})
         for capability in validated["capabilities"]
         for command in capability["commands"]
     )

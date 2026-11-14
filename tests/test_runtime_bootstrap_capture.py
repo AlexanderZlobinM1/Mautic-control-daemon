@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import importlib.util
 from pathlib import Path
 import subprocess
@@ -90,4 +91,62 @@ def test_bootstrap_capture_cli_is_read_only_and_legacy_compatible(tmp_path):
     assert payload["schema"] == "mcd-profile-authority-probe-v1"
     assert payload["capture_phase"] == "pre_runtime_install"
     assert payload["selection_exists"] is False
+
+
+def test_source_free_runtime_repairs_only_managed_legacy_default_includes(tmp_path):
+    bridge = _bridge_module()
+    install = tmp_path / "mcd"
+    entrypoint = install / "etc" / "mcd.toml"
+    local = install / "etc" / "mcd.local.toml"
+    runtime = install / "runtime"
+    entrypoint.parent.mkdir(parents=True)
+    (runtime / "etc").mkdir(parents=True)
+    entrypoint.write_text(
+        '# MCD_CONFIG_ENTRYPOINT v1\n'
+        '[include]\n'
+        f'files = ["{install / "src/etc/mcd-agent.system.example.toml"}", '
+        f'"{install / "src/etc/mcd-agent.operator.example.toml"}", '
+        f'"{local}"]\n',
+        encoding="utf-8",
+    )
+    local_bytes = b'[mcc]\nurl = "https://controller.example.invalid"\ntoken = "preserve"\n'
+    local.write_bytes(local_bytes)
+    for name in ("mcd-agent.system.example.toml", "mcd-agent.operator.example.toml"):
+        (runtime / "etc" / name).write_text("# verified runtime default\n", encoding="utf-8")
+
+    captured = bridge._capture_profile_authority(install, entrypoint)
+    result = bridge._migrate_runtime_config_includes(entrypoint, install, runtime)
+
+    assert any(row["exists"] is False and "/src/etc/" in row["path"] for row in captured["config_files"])
+    assert result["changed"] is True
+    assert len(result["replacements"]) == 2
+    assert "/src/" not in entrypoint.read_text(encoding="utf-8")
+    assert str(runtime / "etc") in entrypoint.read_text(encoding="utf-8")
+    assert local.read_bytes() == local_bytes
+    assert not (install / "src").exists()
+    assert bridge._profile_config_files(entrypoint) == [
+        {"path": str(entrypoint.resolve()), "exists": True},
+        {"path": str((runtime / "etc/mcd-agent.system.example.toml").resolve()), "exists": True},
+        {"path": str((runtime / "etc/mcd-agent.operator.example.toml").resolve()), "exists": True},
+        {"path": str(local.resolve()), "exists": True},
+    ]
+    assert result["after_sha256"] == hashlib.sha256(entrypoint.read_bytes()).hexdigest()
+
+
+def test_named_profile_rejects_runtime_package_without_universal_resource(tmp_path):
+    bridge = _bridge_module()
+    config = tmp_path / "mcd.toml"
+    config.write_text('[profile]\nname = "passive"\n', encoding="utf-8")
+
+    try:
+        bridge._require_runtime_profile_closure(config, {"version": "1.7.0.dev0"})
+    except bridge.BridgeError as exc:
+        assert "universal_workload_resource_ref" in str(exc)
+    else:
+        raise AssertionError("named profile admitted an incomplete runtime package")
+
+    assert bridge._require_runtime_profile_closure(
+        config,
+        {"universal_workload_resource_ref": {"schema": "mcc-universal-workload-resource-ref-v1"}},
+    ) == "passive"
 

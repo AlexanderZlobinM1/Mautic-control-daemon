@@ -491,9 +491,16 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
                 "local_facts_capabilities": local_facts_capabilities,
             }
 
-            def inventory_snapshot(_installation_id: str) -> Mapping[str, Any]:
+            def inventory_snapshot(
+                _installation_id: str,
+                *,
+                loaded_config: AgentConfig | None = None,
+            ) -> Mapping[str, Any]:
                 """Build the complete secret-free host/instance inventory."""
-                local_cfg = load_config(config.config_file_path, allow_recover_from_mcc=False)
+                local_cfg = loaded_config or load_config(
+                    config.config_file_path,
+                    allow_recover_from_mcc=False,
+                )
                 runtime = local_runtime_overrides(local_cfg)
                 instances = InstanceInventory(config.state_db_path).list_instances()
                 desired_state = runtime_store.get_runtime_sync("mcc_runtime_desired_state")
@@ -598,10 +605,11 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
                     raise ValueError("commercial_generic_identity_unavailable")
                 from mcd_agent.commercial_capabilities import mautic_version_capability
                 from mcd_agent.commercial_generic import capability_inventory_digest
+                local_cfg = load_config(config.config_file_path, allow_recover_from_mcc=False)
                 inventory = build_capability_inventory(
                     installation_id=_installation_id,
                     dns_name=dns_name,
-                    config=config,
+                    config=local_cfg,
                 )
                 if state.get("ownership") == "sales_snap_managed":
                     account_id = str(registration.get("account_id") or "").strip()
@@ -636,7 +644,7 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
                     count = local_inventory.rescan(local_cfg, preserve_manual=True)
                 finally:
                     local_inventory.conn.close()
-                snapshot = inventory_snapshot(installation_id)
+                snapshot = inventory_snapshot(installation_id, loaded_config=local_cfg)
                 _prepared, record = state.prepare_inventory_snapshot(
                     installation_id=installation_id,
                     inventory=snapshot,
@@ -649,8 +657,19 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
                     },
                 }
 
+            portal_client = PortalClient(state)
+
+            def stage_generic_artifact(command):
+                from mcd_agent.external_operation_cache import stage_transient_delivery
+                local_cfg = load_config(config.config_file_path, allow_recover_from_mcc=False)
+                return stage_transient_delivery(
+                    command,
+                    config=local_cfg,
+                    downloader=portal_client.download_artifact,
+                )
+
             worker = SelfHostedPortalWorker(
-                PortalClient(state),
+                portal_client,
                 SelfHostedScenarioExecutor(state, runner=runner.run),
                 installation_id=sorted(str(value) for value in installations.values()),
                 portal_keys={},
@@ -663,6 +682,7 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
                 runtime_command_handler=handle_runtime_command,
                 capability_inventory_provider=capability_inventory,
                 generic_command_handler=execute_portal_core_command,
+                generic_artifact_stager=stage_generic_artifact,
             )
         except Exception:
             disabled("commercial_worker_material_invalid")

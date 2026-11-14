@@ -64,11 +64,31 @@
 - Preserve the 1.7 execution boundary: the ring invokes MCD's existing direct
   Mautic command operation only; no OS/package/service/config implementation is
   moved back from external handlers.
+- Freeze the connected-host generic terminal wire contract: preserve the
+  `{status, host_prerequisites}` wrapper, keep executable and closure digests
+  distinct, document private-key evidence redaction, and prove that a rejected
+  terminal ACK redelivers the exact durable receipt without host re-execution.
 - Required boundary: independently versioned MCC-distributed external wrapping
   owns all install/upgrade/migrate/config/profile/matrix semantics. MCD retains
   generic artifact cache/verification/execution/progress/receipts only.
 - Candidate work removes DNS mutation/credential paths and adds generic bundle
   delivery plus exact selected-task cache reuse, including manual/offline cache.
+- Add Portal-brokered, grant-free durable cache synchronization for immutable
+  external-operation closures. Advertise connected-host lifecycle commands only
+  after complete binding/artifact/profile verification, execute them through the
+  existing offline runner, and reject host-qualified instance UIDs such as
+  `uid@host`.
+- Admit connected-host prerequisites revision 1.0.7 only. Require explicit
+  renewal evidence in prepare receipts, confine the stable challenge webroot to
+  the managed parent, and reject stale temporary renewal paths before success.
+  The external artifact owns Certbot symlink validation and post-mutation
+  compensation; MCD independently validates the exact public result contract.
+- Accept the revision 1.0.7 `repaired` certificate-boundary disposition only
+  for a mutating applied result with distinct valid before/after hashes. This
+  preserves fail-closed receipt validation while allowing the bounded renewal
+  webroot repair to report its real directory-boundary change.
+- Preserve production custom-manifest v1 group rows and multi-entrypoint bundle
+  rows while append-only merging an external-operation binding closure.
 - NOT READY: remaining embedded implementations/callers, external replacement
   integration, complete-task closure and same-artifact native acceptance remain
   required. No 1.7.0 release is claimed or authorized by this entry.

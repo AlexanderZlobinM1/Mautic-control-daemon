@@ -145,6 +145,15 @@ def test_native_rescan_uses_current_local_config_and_preserves_manual_instances(
 
     monkeypatch.setattr("mcd_agent.daemon.load_config", load)
     monkeypatch.setattr("mcd_agent.daemon.local_runtime_overrides", lambda _config: {})
+    monkeypatch.setattr(
+        "mcd_agent.daemon.build_applicability_facts_snapshot",
+        lambda **_kwargs: {
+            "schema": "mcd-applicability-facts-v1",
+            "contract_version": "1.0",
+            "facts": {},
+            "facts_digest": "sha256:" + "0" * 64,
+        },
+    )
     monkeypatch.setattr("mcd_agent.daemon.default_scenario_runner_argv", lambda: [sys.executable])
     synthetic_facts = {
         "detector_schema": "mcd-scenario-detector-v1",
@@ -188,7 +197,10 @@ def test_native_rescan_uses_current_local_config_and_preserves_manual_instances(
     assert result["discovered_count"] == 1
     assert result["snapshot_reference"]["snapshot_revision"] == 1
     assert result["snapshot_reference"]["durable_hash"].startswith("sha256:")
-    assert loads == [(config.config_file_path, False)] * 3
+    # One fresh read builds the connected-host capability inventory and one
+    # drives the rescan. The inventory snapshot reuses that rescan config so
+    # one command observes a single coherent local configuration revision.
+    assert loads == [(config.config_file_path, False)] * 2
     assert discoveries == [current.discovery_roots]
     assert {(row.instance_uid, row.source) for row in native.list_instances()} == {
         ("manual", "manual"), ("new", "autodiscovery"),

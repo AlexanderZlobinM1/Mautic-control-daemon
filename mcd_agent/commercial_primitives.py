@@ -34,6 +34,7 @@ COMMAND_VERSION = "1.0"
 _SNAPSHOT_HASH_RE = re.compile(r"sha256:[0-9a-f]{64}")
 
 _COMMANDS = (
+    ("external_operation_cache", "sync_binding", True, "portal://mcd/input/external-operation-cache-sync-v1", "host"),
     ("host_facts", "read_host_facts", False, "portal://mcd/input/host-facts-v1", "host"),
     ("prerequisites", "check_prerequisites", False, "portal://mcd/input/prerequisites-v1", "host"),
     ("web_php", "check_web_php", False, "portal://mcd/input/web-php-v1", "host"),
@@ -125,7 +126,19 @@ def build_capability_inventory(
                     ],
                 }
             )
-            unsigned["capabilities"].sort(key=lambda item: str(item["capability_id"]))
+        from mcd_agent.connected_host_lifecycle import capability as lifecycle_capability
+        lifecycle = lifecycle_capability(config)
+        if lifecycle is not None:
+            unsigned["capabilities"].append(lifecycle)
+        from mcd_agent.connected_host_source_export import capability as source_export_capability
+        source_export = source_export_capability(config)
+        if source_export is not None:
+            unsigned["capabilities"].append(source_export)
+        from mcd_agent.connected_host_prerequisites import capability as host_prerequisites_capability
+        host_prerequisites = host_prerequisites_capability(config)
+        if host_prerequisites is not None:
+            unsigned["capabilities"].append(host_prerequisites)
+        unsigned["capabilities"].sort(key=lambda item: str(item["capability_id"]))
     unsigned["inventory_sha256"] = capability_inventory_digest(unsigned)
     return unsigned
 
@@ -309,6 +322,27 @@ def execute_generic_primitive(
     if command == "apply" and str((job.get("capability") or {}).get("capability_id") or "") == "mautic_upgrade":
         return _execute_mautic_upgrade(job, config)
     value = job.get("input")
+    capability_id = str((job.get("capability") or {}).get("capability_id") or "")
+    if capability_id == "mautic_lifecycle":
+        if config is None:
+            return {"status": "failed", "reason": "mautic_lifecycle_config_unavailable"}
+        from mcd_agent.connected_host_lifecycle import execute
+        return execute(job, config=config)
+    if capability_id == "mautic_source_export":
+        if config is None:
+            return {"status": "failed", "reason": "mautic_source_export_config_unavailable"}
+        from mcd_agent.connected_host_source_export import execute
+        return execute(job, config=config)
+    if capability_id == "mautic_host_prerequisites":
+        if config is None:
+            return {"status": "failed", "reason": "mautic_host_prerequisites_config_unavailable"}
+        from mcd_agent.connected_host_prerequisites import execute
+        return execute(job, config=config)
+    if capability_id == "external_operation_cache" and command == "sync_binding":
+        if config is None:
+            return {"status": "failed", "reason": "external_operation_cache_config_unavailable"}
+        from mcd_agent.external_operation_cache import sync_binding
+        return sync_binding(job, config=config)
     if not isinstance(value, Mapping) or value:
         return {"status": "failed", "reason": "commercial_generic_input_must_be_empty"}
     if command == "rescan_inventory":

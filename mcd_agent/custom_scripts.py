@@ -83,6 +83,96 @@ def _cache_manifest_path(config: AgentConfig) -> Path:
     return _cache_root(config) / "manifest.json"
 
 
+def _canonical_json(value: Any) -> bytes:
+    return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _safe_cached_bytes(root: Path, relative: object) -> bytes:
+    if not isinstance(relative, str):
+        raise CustomSelectedTaskError("custom_operation_profile_descriptor_invalid")
+    posix = PurePosixPath(relative)
+    if (not relative or posix.is_absolute() or posix.as_posix() != relative
+            or ".." in posix.parts or "." in posix.parts):
+        raise CustomSelectedTaskError("custom_operation_profile_descriptor_invalid")
+    path = root.joinpath(*posix.parts)
+    try:
+        if root.is_symlink():
+            raise CustomSelectedTaskError("custom_operation_profile_descriptor_invalid")
+        cursor = root
+        for part in posix.parts:
+            cursor = cursor / part
+            if cursor.is_symlink():
+                raise CustomSelectedTaskError("custom_operation_profile_descriptor_invalid")
+        root_real = root.resolve(strict=True)
+        path_real = path.resolve(strict=True)
+        if root_real not in path_real.parents or not path_real.is_file() or path_real.stat().st_size > 256 * 1024:
+            raise CustomSelectedTaskError("custom_operation_profile_descriptor_invalid")
+        return path_real.read_bytes()
+    except CustomSelectedTaskError:
+        raise
+    except (OSError, RuntimeError):
+        raise CustomSelectedTaskError("custom_operation_profile_descriptor_invalid") from None
+
+
+def _active_operation_binding(
+    document: dict[str, Any],
+    *,
+    root: Path,
+    component: str,
+    operation: str,
+    matches: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    active = document.get("active_bindings")
+    if active is None:
+        return None
+    if not isinstance(active, dict):
+        raise CustomSelectedTaskError("custom_operation_profile_manifest_invalid")
+    selected: list[dict[str, Any]] = []
+    for binding_schema, selector in active.items():
+        if (not isinstance(binding_schema, str)
+                or not isinstance(selector, dict)
+                or set(selector) != {
+                    "catalog_item_id", "catalog_item_revision", "binding_sha256",
+                    "cache_file", "resource_sha256",
+                }
+                or not isinstance(selector.get("catalog_item_id"), str)
+                or not isinstance(selector.get("catalog_item_revision"), str)
+                or not isinstance(selector.get("binding_sha256"), str)
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", selector["binding_sha256"]) is None
+                or not isinstance(selector.get("resource_sha256"), str)
+                or re.fullmatch(r"[0-9a-f]{64}", selector["resource_sha256"]) is None):
+            raise CustomSelectedTaskError("custom_operation_profile_descriptor_invalid")
+        raw = _safe_cached_bytes(root, selector.get("cache_file"))
+        if hashlib.sha256(raw).hexdigest() != selector["resource_sha256"]:
+            raise CustomSelectedTaskError("custom_operation_profile_descriptor_invalid")
+        try:
+            identity = json.loads(raw.decode("utf-8"))
+        except (UnicodeError, ValueError, TypeError):
+            raise CustomSelectedTaskError("custom_operation_profile_descriptor_invalid") from None
+        if (not isinstance(identity, dict)
+                or identity.get("schema") != binding_schema
+                or identity.get("catalog_item_id") != selector["catalog_item_id"]
+                or identity.get("catalog_item_revision") != selector["catalog_item_revision"]
+                or "sha256:" + hashlib.sha256(_canonical_json(identity)).hexdigest() != selector["binding_sha256"]):
+            raise CustomSelectedTaskError("custom_operation_profile_descriptor_invalid")
+        identity_bindings = identity.get("operation_bindings")
+        if not isinstance(identity_bindings, list) or any(not isinstance(row, dict) for row in identity_bindings):
+            raise CustomSelectedTaskError("custom_operation_profile_descriptor_invalid")
+        active_matches = [
+            row for row in identity_bindings
+            if row.get("component") == component and row.get("operation") == operation
+        ]
+        for row in active_matches:
+            manifest_matches = [candidate for candidate in matches if _canonical_json(candidate) == _canonical_json(row)]
+            if len(manifest_matches) != 1:
+                code = "custom_operation_profile_descriptor_ambiguous" if len(manifest_matches) > 1 else "custom_operation_profile_descriptor_invalid"
+                raise CustomSelectedTaskError(code)
+            selected.append(manifest_matches[0])
+    if len(selected) > 1:
+        raise CustomSelectedTaskError("custom_operation_profile_descriptor_ambiguous")
+    return selected[0] if selected else None
+
+
 def load_configured_profile_cache(
     config: AgentConfig,
     *,
@@ -121,9 +211,12 @@ def load_configured_profile_cache(
                and item.get("component") == component and item.get("operation") == operation]
     if not matches:
         return None
-    if len(matches) != 1:
+    selected = _active_operation_binding(
+        document, root=root, component=component, operation=operation, matches=matches,
+    )
+    if selected is None and len(matches) != 1:
         raise CustomSelectedTaskError("custom_operation_profile_descriptor_ambiguous")
-    source = matches[0].get("profile_source")
+    source = (selected or matches[0]).get("profile_source")
     if source is None:
         return None
     if (not isinstance(source, dict)
@@ -945,6 +1038,7 @@ def run_configured_external_operation(
     operation: str,
     profile: dict[str, Any] | None,
     operation_input: dict[str, Any],
+    resolved_context: dict[str, Any] | None = None,
 ) -> tuple[int, str]:
     """Dispatch an authority-bound operation through the existing custom item.
 
@@ -969,9 +1063,18 @@ def run_configured_external_operation(
         return 2, "custom_operation_binding_not_configured"
     matches = [item for item in bindings if isinstance(item, dict)
                and item.get("component") == component and item.get("operation") == operation]
-    if len(matches) != 1:
-        return 2, "custom_operation_binding_not_configured" if not matches else "custom_operation_mapping_invalid"
-    binding = matches[0]
+    if not matches:
+        return 2, "custom_operation_binding_not_configured"
+    try:
+        selected = _active_operation_binding(
+            document, root=Path(config.custom_cache_dir), component=component,
+            operation=operation, matches=matches,
+        )
+    except CustomSelectedTaskError as exc:
+        return 2, str(exc)
+    if selected is None and len(matches) != 1:
+        return 2, "custom_operation_mapping_invalid"
+    binding = selected or matches[0]
     artifact = binding.get("artifact")
     if (not isinstance(artifact, dict)
             or not isinstance(artifact.get("key"), str) or not artifact["key"].strip()
@@ -1039,6 +1142,14 @@ def run_configured_external_operation(
             value = {name: getattr(config, name, None) for name in declared}
             if any(not hasattr(config, name) for name in declared):
                 return 2, "custom_operation_mapping_runtime_mapping_invalid"
+        elif source in {"mcd_resolved_operation_context", "mcd_resolved_source_installation_context"}:
+            expected_schema = spec.get("schema")
+            if (not isinstance(resolved_context, dict)
+                    or not isinstance(expected_schema, str)
+                    or not expected_schema
+                    or resolved_context.get("schema") != expected_schema):
+                return 2, "custom_operation_resolved_context_invalid"
+            value = dict(resolved_context)
         else:
             return 2, "custom_operation_mapping_runtime_mapping_invalid"
         encoded = _encoded(value, spec.get("fields"), spec.get("envelope_key"))

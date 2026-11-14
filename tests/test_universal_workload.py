@@ -146,6 +146,24 @@ def test_corrupt_embedded_required_data_fails_before_cache_mutation(tmp_path, mo
     assert not target.exists()
 
 
+def test_runtime_preseed_repairs_corrupt_selected_cache_from_same_embedded_digest(tmp_path, monkeypatch):
+    from mcd_agent.universal_workload import preseed_runtime_workload_resources
+    from pathlib import Path
+
+    _, ref, expected, stage = runtime_resource_fixture(tmp_path)
+    forbid_network_and_execution(monkeypatch)
+    cache_dir = tmp_path / "cache"
+    first = preseed_runtime_workload_resources(runtime_dir=stage, cache_dir=cache_dir)
+    cached = Path(first["cache_path"])
+    cached.write_bytes(b"corrupt selected cache")
+
+    repaired = preseed_runtime_workload_resources(runtime_dir=stage, cache_dir=cache_dir)
+
+    assert repaired["sha256"] == ref["sha256"]
+    assert Path(repaired["cache_path"]).read_bytes() == expected.read_bytes()
+    assert hashlib.sha256(Path(repaired["cache_path"]).read_bytes()).hexdigest() == ref["sha256"]
+
+
 def test_completed_replay_verifies_only_and_never_repairs_missing_cache(tmp_path, monkeypatch):
     from mcd_agent.universal_workload import preseed_runtime_workload_resources
     _, _, _, stage = runtime_resource_fixture(tmp_path)
