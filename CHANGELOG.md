@@ -1,5 +1,20 @@
 ## 1.7.0 — Unreleased architecture candidate
 
+- Add independent, backward-compatible monitored-email policies for
+  auto-creating an unknown complaint contact and reconciling retained messages
+  whose matching DNC already exists. Both defaults remain off; per-instance
+  overrides use `auto_create_unknown_contacts` and
+  `process_existing_dnc_messages`.
+- Serialize minimal contact creation by normalized email, keep DNC insertion
+  idempotent and require the matching DNC reason before treating an existing
+  record as handled. `delete_processed` remains the sole physical-delete gate.
+- Reconcile explicitly enabled processed UIDs without rewinding the mailbox
+  cursor or replaying ordinary event counters. Persist a policy fingerprint and
+  checked-UID receipt so unchanged policy cannot repeat a business effect.
+- Add Apple/classic unsubscribe, bounce and feedback-loop policy matrices plus
+  DB duplicate-prevention and config-default regressions. No live mailbox
+  mutation is part of the release.
+
 - Document and regression-lock the monitored-email retention boundary:
   unsubscribe mail is deleted only after at least one Mautic contact is
   matched and DNC is applied. Parsed mail without a contact remains `Seen` as

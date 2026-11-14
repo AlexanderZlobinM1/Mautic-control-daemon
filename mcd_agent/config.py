@@ -629,6 +629,8 @@ class AgentConfig:
     monitored_email_parser_batch_size: int
     monitored_email_parser_force_seen: bool
     monitored_email_parser_delete_processed: bool
+    monitored_email_parser_auto_create_unknown_contacts: bool
+    monitored_email_parser_process_existing_dnc_messages: bool
     monitored_email_parser_disable_mautic_fetch: bool
     monitored_email_parser_types: list[str]
     monitored_email_parser_whitelist: list[str]
@@ -2303,6 +2305,8 @@ _RUNTIME_TO_ATTR: dict[str, str] = {
     "monitored_email_parser_batch_size": "monitored_email_parser_batch_size",
     "monitored_email_parser_force_seen": "monitored_email_parser_force_seen",
     "monitored_email_parser_delete_processed": "monitored_email_parser_delete_processed",
+    "monitored_email_parser_auto_create_unknown_contacts": "monitored_email_parser_auto_create_unknown_contacts",
+    "monitored_email_parser_process_existing_dnc_messages": "monitored_email_parser_process_existing_dnc_messages",
     "monitored_email_parser_disable_mautic_fetch": "monitored_email_parser_disable_mautic_fetch",
     "monitored_email_parser_types": "monitored_email_parser_types",
     "monitored_email_parser_whitelist": "monitored_email_parser_whitelist",
@@ -3314,6 +3318,12 @@ def _load_config_inner(path: str) -> AgentConfig:
         ),
         monitored_email_parser_force_seen=bool(runtime.get("monitored_email_parser_force_seen", False)),
         monitored_email_parser_delete_processed=bool(runtime.get("monitored_email_parser_delete_processed", False)),
+        monitored_email_parser_auto_create_unknown_contacts=bool(
+            runtime.get("monitored_email_parser_auto_create_unknown_contacts", False)
+        ),
+        monitored_email_parser_process_existing_dnc_messages=bool(
+            runtime.get("monitored_email_parser_process_existing_dnc_messages", False)
+        ),
         monitored_email_parser_disable_mautic_fetch=bool(
             runtime.get("monitored_email_parser_disable_mautic_fetch", True)
         ),

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 import time
 from datetime import datetime, timedelta, timezone
@@ -1226,7 +1227,21 @@ class MauticDB:
             "batch_size": limit,
         }
 
-    def add_dnc_for_emails(self, emails: list[str], *, reason: int, comments: str) -> dict[str, Any]:
+    def add_dnc_for_emails(
+        self,
+        emails: list[str],
+        *,
+        reason: int,
+        comments: str,
+        create_missing: bool = False,
+    ) -> dict[str, Any]:
+        """Reconcile email DNC state and optionally create missing contacts.
+
+        Contact creation is serialized per normalized email with a database
+        advisory lock. This keeps concurrent parser workers from creating the
+        same minimal contact while preserving Mautic's existing contacts and
+        channel-DNC uniqueness semantics.
+        """
         cleaned: list[str] = []
         seen: set[str] = set()
         for raw in emails:
@@ -1236,7 +1251,15 @@ class MauticDB:
             seen.add(email)
             cleaned.append(email)
         if not cleaned:
-            return {"emails": 0, "contacts": 0, "added": 0, "existing": 0}
+            return {
+                "emails": 0,
+                "matched_emails": 0,
+                "contacts": 0,
+                "created": 0,
+                "added": 0,
+                "existing": 0,
+                "matching_existing": 0,
+            }
 
         leads_table = self._safe_table(f"{self.cfg.table_prefix}leads")
         dnc_table = self._safe_table(f"{self.cfg.table_prefix}lead_donotcontact")
@@ -1248,8 +1271,57 @@ class MauticDB:
         )
         with self._connect() as conn:
             with conn.cursor() as cur:
+                for email in sorted(cleaned):
+                    lock_name = f"mcd:monitored-email:{hashlib.sha256(email.encode('utf-8')).hexdigest()[:38]}"
+                    cur.execute("SELECT GET_LOCK(%s, 5) AS acquired", (lock_name,))
+                    lock_row = cur.fetchone() or {}
+                    if not isinstance(lock_row, dict) or int(lock_row.get("acquired") or 0) != 1:
+                        raise RuntimeError("monitored_email_contact_lock_timeout")
                 cur.execute(select_leads, tuple(cleaned))
                 rows = cur.fetchall() or []
+                matched_emails = {
+                    str(row.get("email") or "").strip().lower()
+                    for row in rows
+                    if isinstance(row, dict) and str(row.get("email") or "").strip()
+                }
+                created = 0
+                if create_missing:
+                    missing = [email for email in cleaned if email not in matched_emails]
+                    columns: set[str] | None = None
+                    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                    for email in missing:
+                        cur.execute(
+                            f"SELECT `id` FROM `{leads_table}` WHERE LOWER(`email`)=%s LIMIT 1",
+                            (email,),
+                        )
+                        if cur.fetchone():
+                            continue
+                        if columns is None:
+                            columns = self._table_columns(cur, leads_table)
+                        insert_values: list[tuple[str, object]] = [("email", email)]
+                        for name, value in (
+                            ("date_added", now),
+                            ("date_identified", now),
+                            ("is_published", 1),
+                            ("points", 0),
+                        ):
+                            if name in columns:
+                                insert_values.append((name, value))
+                        names = ", ".join(f"`{name}`" for name, _value in insert_values)
+                        placeholders_insert = ", ".join(["%s"] * len(insert_values))
+                        cur.execute(
+                            f"INSERT INTO `{leads_table}` ({names}) VALUES ({placeholders_insert})",
+                            tuple(value for _name, value in insert_values),
+                        )
+                        created += 1
+                    if missing:
+                        cur.execute(select_leads, tuple(cleaned))
+                        rows = cur.fetchall() or []
+                        matched_emails = {
+                            str(row.get("email") or "").strip().lower()
+                            for row in rows
+                            if isinstance(row, dict) and str(row.get("email") or "").strip()
+                        }
                 lead_ids: list[int] = []
                 for row in rows:
                     if not isinstance(row, dict):
@@ -1262,21 +1334,33 @@ class MauticDB:
                         lead_ids.append(lead_id)
                 lead_ids = list(dict.fromkeys(lead_ids))
                 if not lead_ids:
-                    return {"emails": len(cleaned), "contacts": 0, "added": 0, "existing": 0}
+                    return {
+                        "emails": len(cleaned),
+                        "matched_emails": len(matched_emails),
+                        "contacts": 0,
+                        "created": created,
+                        "added": 0,
+                        "existing": 0,
+                        "matching_existing": 0,
+                    }
 
                 lead_placeholders = ",".join(["%s"] * len(lead_ids))
                 cur.execute(
-                    f"SELECT `lead_id` FROM `{dnc_table}` "
+                    f"SELECT `lead_id`, `reason` FROM `{dnc_table}` "
                     f"WHERE `channel`='email' AND `lead_id` IN ({lead_placeholders})",
                     tuple(lead_ids),
                 )
                 existing_rows = cur.fetchall() or []
                 existing_ids: set[int] = set()
+                matching_existing_ids: set[int] = set()
                 for row in existing_rows:
                     if not isinstance(row, dict):
                         continue
                     try:
-                        existing_ids.add(int(row.get("lead_id") or 0))
+                        lead_id = int(row.get("lead_id") or 0)
+                        existing_ids.add(lead_id)
+                        if int(row.get("reason") or 0) == int(reason):
+                            matching_existing_ids.add(lead_id)
                     except Exception:
                         continue
                 to_add = [lead_id for lead_id in lead_ids if lead_id not in existing_ids]
@@ -1290,9 +1374,12 @@ class MauticDB:
                     )
                 return {
                     "emails": len(cleaned),
+                    "matched_emails": len(matched_emails),
                     "contacts": len(lead_ids),
+                    "created": created,
                     "added": len(to_add),
                     "existing": len(existing_ids),
+                    "matching_existing": len(matching_existing_ids),
                 }
 
     def remove_email_dnc_for_emails(self, emails: list[str]) -> dict[str, Any]:

@@ -384,6 +384,21 @@ feedback-loop/bounce precedence и cursor/delete/idempotent-DNC semantics.
 сохраняет UID в `processed_uids` и не выполняет `expunge`. В обоих случаях
 cursor продвигается без повторного проигрывания сообщения.
 
+Policy matrix покрывает Apple/classic unsubscribe, bounce и feedback-loop:
+unknown contact и existing matching DNC при обоих новых флагах OFF/ON,
+`delete_processed` OFF/ON, создание ровно одного contact, идемпотентный DNC,
+`Seen` против `\Deleted`/`expunge`, monotonic cursor и `processed_uids`.
+Отдельная restart-проверка начинает с UID уже ниже cursor и внутри
+`processed_uids`: явный reconciliation обрабатывает его без rewind, не
+увеличивает обычный `by_type`, а policy receipt не допускает второй replay.
+DB regression проверяет per-email advisory lock, повторный вызов без дубля
+contact/DNC и отказ считать DNC с другим reason соответствующим.
+
+Третий обезличенный fixture сохраняет классический unsubscribe: RFC2047/base64
+Subject декодируется в `unsubscribe`, `Auto-Submitted: auto-generated`, tagged
+recipient присутствует, а `X-Apple-Unsubscribe` отсутствует. Локальная
+evidence-проверка исходника фиксирует SHA256
+`f8aa85476828efb50c1948166f3dd99cd6a97465a2020814836df14846829109`.
 ## Stable instance runtime identity
 
 - Runtime polling and ACK use only the stable native instance UID.

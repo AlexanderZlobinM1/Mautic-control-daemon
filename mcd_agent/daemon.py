@@ -3391,6 +3391,8 @@ _MONITORED_EMAIL_PARSER_STABLE_RUNTIME_KEYS = {
     "monitored_email_parser_batch_size",
     "monitored_email_parser_force_seen",
     "monitored_email_parser_delete_processed",
+    "monitored_email_parser_auto_create_unknown_contacts",
+    "monitored_email_parser_process_existing_dnc_messages",
     "monitored_email_parser_disable_mautic_fetch",
     "monitored_email_parser_types",
     "monitored_email_parser_whitelist",
@@ -7261,6 +7263,12 @@ def _monitored_email_parser_effective_setting(config: AgentConfig, inst: object)
     batch_size = min(5000, max(1, int(getattr(config, "monitored_email_parser_batch_size", 100) or 100)))
     force_seen = bool(getattr(config, "monitored_email_parser_force_seen", False))
     delete_processed = bool(getattr(config, "monitored_email_parser_delete_processed", False))
+    auto_create_unknown_contacts = bool(
+        getattr(config, "monitored_email_parser_auto_create_unknown_contacts", False)
+    )
+    process_existing_dnc_messages = bool(
+        getattr(config, "monitored_email_parser_process_existing_dnc_messages", False)
+    )
     disable_mautic_fetch = bool(getattr(config, "monitored_email_parser_disable_mautic_fetch", True))
     raw_types = getattr(config, "monitored_email_parser_types", ["feedback_loop"]) or ["feedback_loop"]
     types = _normalize_monitored_email_types(raw_types)
@@ -7284,6 +7292,14 @@ def _monitored_email_parser_effective_setting(config: AgentConfig, inst: object)
             force_seen = _to_boolish(raw.get("force_seen"), force_seen)
         if "delete_processed" in raw:
             delete_processed = _to_boolish(raw.get("delete_processed"), delete_processed)
+        if "auto_create_unknown_contacts" in raw:
+            auto_create_unknown_contacts = _to_boolish(
+                raw.get("auto_create_unknown_contacts"), auto_create_unknown_contacts
+            )
+        if "process_existing_dnc_messages" in raw:
+            process_existing_dnc_messages = _to_boolish(
+                raw.get("process_existing_dnc_messages"), process_existing_dnc_messages
+            )
         if "disable_mautic_fetch" in raw:
             disable_mautic_fetch = _to_boolish(raw.get("disable_mautic_fetch"), disable_mautic_fetch)
         if "types" in raw:
@@ -7298,6 +7314,8 @@ def _monitored_email_parser_effective_setting(config: AgentConfig, inst: object)
         batch_size=batch_size,
         force_seen=force_seen,
         delete_processed=delete_processed,
+        auto_create_unknown_contacts=auto_create_unknown_contacts,
+        process_existing_dnc_messages=process_existing_dnc_messages,
         disable_mautic_fetch=disable_mautic_fetch,
         types=types,
         whitelist=whitelist,
@@ -7392,17 +7410,22 @@ def _run_due_monitored_email_parsers(
                 result.scanned
                 or result.dnc_added
                 or result.deleted
+                or result.contacts_created
+                or result.existing_dnc_reconciled
                 or result.whitelist_dnc_removed
                 or result.errors
             ):
                 logging.info(
-                    "[%s] monitored_email parser scanned=%s matched=%s contacts=%s dnc_added=%s dnc_existing=%s whitelist_dnc_removed=%s deleted=%s marked_seen=%s no_contact=%s types=%s errors=%s",
+                    "[%s] monitored_email parser scanned=%s matched=%s contacts=%s contacts_created=%s dnc_added=%s dnc_existing=%s existing_dnc_reconciled=%s replay_checked=%s whitelist_dnc_removed=%s deleted=%s marked_seen=%s no_contact=%s types=%s errors=%s",
                     root,
                     result.scanned,
                     result.matched,
                     result.contacts_matched,
+                    result.contacts_created,
                     result.dnc_added,
                     result.dnc_existing,
+                    result.existing_dnc_reconciled,
+                    result.replay_checked,
                     result.whitelist_dnc_removed,
                     result.deleted,
                     result.marked_seen,
