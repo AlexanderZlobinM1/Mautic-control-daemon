@@ -39,6 +39,8 @@ class MonitoredEmailParserSettings:
     batch_size: int = 100
     force_seen: bool = False
     delete_processed: bool = False
+    auto_create_unknown_contacts: bool = False
+    process_existing_dnc_messages: bool = False
     disable_mautic_fetch: bool = True
     types: tuple[str, ...] = (TYPE_FEEDBACK_LOOP,)
     whitelist: tuple[str, ...] = ()
@@ -62,6 +64,9 @@ class MonitoredEmailRunResult:
     deleted: int = 0
     marked_seen: int = 0
     no_contact: int = 0
+    contacts_created: int = 0
+    existing_dnc_reconciled: int = 0
+    replay_checked: int = 0
     whitelist_dnc_removed: int = 0
     errors: list[str] = field(default_factory=list)
     by_type: dict[str, int] = field(default_factory=dict)
@@ -271,17 +276,61 @@ def _process_target(
         typ, data = imap.uid("SEARCH", None, criteria)
         if typ != "OK":
             raise RuntimeError(f"search_failed:{criteria}")
-        uids = _parse_uid_list(data)
+        ordinary_uids = _parse_uid_list(data)
         processed_uids = _int_set(folder_state.get("processed_uids"))
         cursor_uid = int(folder_state.get("force_cursor_uid") or 0)
         if settings.force_seen:
-            uids = [uid for uid in uids if uid > cursor_uid and uid not in processed_uids]
+            ordinary_uids = [
+                uid for uid in ordinary_uids if uid > cursor_uid and uid not in processed_uids
+            ]
         else:
-            uids = [uid for uid in uids if uid not in processed_uids]
-        uids = sorted(uids)[: min(5000, max(1, int(settings.batch_size)))]
+            ordinary_uids = [uid for uid in ordinary_uids if uid not in processed_uids]
+
+        policy_payload = {
+            "auto_create_unknown_contacts": bool(settings.auto_create_unknown_contacts),
+            "delete_processed": bool(settings.delete_processed),
+            "process_existing_dnc_messages": bool(settings.process_existing_dnc_messages),
+        }
+        replay_policy = hashlib.sha256(
+            json.dumps(policy_payload, sort_keys=True).encode("utf-8")
+        ).hexdigest()[:16]
+        replay_checked = _int_set(folder_state.get("replay_checked_uids"))
+        pending_dnc_uids = _int_set(folder_state.get("pending_dnc_uids"))
+        if str(folder_state.get("replay_policy") or "") != replay_policy:
+            replay_checked = set()
+
+        replay_uids: list[int] = []
+        if (
+            settings.process_existing_dnc_messages and processed_uids
+        ) or pending_dnc_uids:
+            if criteria == "ALL":
+                all_uids = _parse_uid_list(data)
+            else:
+                replay_typ, replay_data = imap.uid("SEARCH", None, "ALL")
+                if replay_typ != "OK":
+                    raise RuntimeError("search_failed:ALL")
+                all_uids = _parse_uid_list(replay_data)
+            if settings.process_existing_dnc_messages:
+                replay_uids.extend(
+                    uid for uid in all_uids if uid in processed_uids and uid not in replay_checked
+                )
+            replay_uids.extend(uid for uid in all_uids if uid in pending_dnc_uids)
+            replay_uids = list(dict.fromkeys(replay_uids))
+
+        batch_limit = min(5000, max(1, int(settings.batch_size)))
+        candidates: list[tuple[int, bool]] = [
+            (uid, False) for uid in sorted(ordinary_uids)
+        ]
+        candidates.extend(
+            (uid, True)
+            for uid in sorted(replay_uids)
+            if uid not in set(ordinary_uids)
+        )
+        candidates = candidates[:batch_limit]
         max_seen_uid = cursor_uid
-        for uid in uids:
-            max_seen_uid = max(max_seen_uid, uid)
+        for uid, replay_mode in candidates:
+            if not replay_mode:
+                max_seen_uid = max(max_seen_uid, uid)
             result.scanned += 1
             try:
                 raw = _fetch_raw(imap, uid)
@@ -289,21 +338,44 @@ def _process_target(
                 handled = False
                 if parsed is not None:
                     result.matched += 1
-                    result.bump(parsed.kind)
-                    dnc = db.add_dnc_for_emails(
-                        parsed.emails,
-                        reason=parsed.reason,
-                        comments=parsed.comments,
-                    )
+                    if not replay_mode:
+                        result.bump(parsed.kind)
+                    dnc_kwargs = {
+                        "reason": parsed.reason,
+                        "comments": parsed.comments,
+                    }
+                    if settings.auto_create_unknown_contacts:
+                        dnc_kwargs["create_missing"] = True
+                    dnc = db.add_dnc_for_emails(parsed.emails, **dnc_kwargs)
                     added = int(dnc.get("added", 0) or 0)
                     existing = int(dnc.get("existing", 0) or 0)
+                    matching_existing = int(dnc.get("matching_existing", existing) or 0)
                     contacts = int(dnc.get("contacts", 0) or 0)
+                    created = int(dnc.get("created", 0) or 0)
+                    email_count = int(dnc.get("emails", len(parsed.emails)) or 0)
+                    matched_emails = int(dnc.get("matched_emails", contacts) or 0)
                     result.dnc_added += added
                     result.dnc_existing += existing
                     result.contacts_matched += contacts
-                    if contacts <= 0:
+                    result.contacts_created += created
+                    if matched_emails < email_count or contacts <= 0:
                         result.no_contact += 1
-                    handled = contacts > 0
+                    complete_contact_match = email_count > 0 and matched_emails >= email_count
+                    complete_matching_dnc = contacts > 0 and (matching_existing + added) >= contacts
+                    newly_applied = added > 0
+                    if newly_applied:
+                        pending_dnc_uids.add(uid)
+                    existing_reconciliation = (
+                        complete_contact_match
+                        and complete_matching_dnc
+                        and not newly_applied
+                        and settings.process_existing_dnc_messages
+                    )
+                    handled = complete_contact_match and complete_matching_dnc and (
+                        newly_applied or uid in pending_dnc_uids or existing_reconciliation
+                    )
+                    if existing_reconciliation:
+                        result.existing_dnc_reconciled += 1
                 if handled and settings.delete_processed:
                     _delete_uid(imap, uid)
                     result.deleted += 1
@@ -311,15 +383,28 @@ def _process_target(
                 else:
                     _mark_seen(imap, uid)
                     result.marked_seen += 1
+                if replay_mode:
+                    result.replay_checked += 1
+                    replay_checked.add(uid)
+                pending_dnc_uids.discard(uid)
                 processed_uids.add(uid)
             except Exception as e:
                 result.errors.append(f"uid={uid}:{e}")
         if settings.force_seen:
             folder_state["force_cursor_uid"] = max_seen_uid
         folder_state["processed_uids"] = sorted(processed_uids)[-10000:]
+        folder_state["replay_policy"] = replay_policy
+        folder_state["replay_checked_uids"] = sorted(replay_checked)[-10000:]
+        folder_state["pending_dnc_uids"] = sorted(pending_dnc_uids)[-10000:]
         folder_state["last_run_at"] = time.time()
         if deleted_any:
-            imap.expunge()
+            expunge_result = imap.expunge()
+            if (
+                isinstance(expunge_result, tuple)
+                and expunge_result
+                and expunge_result[0] != "OK"
+            ):
+                raise RuntimeError("expunge_failed")
     finally:
         try:
             imap.close()
@@ -352,11 +437,15 @@ def _fetch_raw(imap: imaplib.IMAP4, uid: int) -> bytes:
 
 
 def _delete_uid(imap: imaplib.IMAP4, uid: int) -> None:
-    imap.uid("STORE", str(uid), "+FLAGS.SILENT", r"(\Deleted)")
+    status, _data = imap.uid("STORE", str(uid), "+FLAGS.SILENT", r"(\Deleted)")
+    if status != "OK":
+        raise RuntimeError("delete_failed")
 
 
 def _mark_seen(imap: imaplib.IMAP4, uid: int) -> None:
-    imap.uid("STORE", str(uid), "+FLAGS.SILENT", r"(\Seen)")
+    status, _data = imap.uid("STORE", str(uid), "+FLAGS.SILENT", r"(\Seen)")
+    if status != "OK":
+        raise RuntimeError("mark_seen_failed")
 
 
 def _parse_uid_list(data: list[bytes] | list[Any] | tuple[Any, ...] | None) -> list[int]:
@@ -616,6 +705,9 @@ def _merge_result(target: MonitoredEmailRunResult, src: MonitoredEmailRunResult)
     target.deleted += src.deleted
     target.marked_seen += src.marked_seen
     target.no_contact += src.no_contact
+    target.contacts_created += src.contacts_created
+    target.existing_dnc_reconciled += src.existing_dnc_reconciled
+    target.replay_checked += src.replay_checked
     target.whitelist_dnc_removed += src.whitelist_dnc_removed
     target.errors.extend(src.errors)
     for key, value in src.by_type.items():

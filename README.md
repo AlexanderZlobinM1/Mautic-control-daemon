@@ -834,7 +834,15 @@ Important:
   - `monitored_email_parser_batch_size = 100` (agent caps at 5000)
   - `monitored_email_parser_types = ["feedback_loop", "bounce", "unsubscribe"]`
   - `monitored_email_parser_delete_processed = true` deletes mailbox messages only
-    after a matching contact is found and email DNC is present or inserted
+    after the selected policy has handled them; it remains the master physical
+    deletion switch
+  - `monitored_email_parser_auto_create_unknown_contacts = false` safely keeps
+    unknown complaints as Seen by default; when enabled, MCD serializes contact
+    creation by email and applies the matching DNC
+  - `monitored_email_parser_process_existing_dnc_messages = false` keeps mail
+    whose contact already has the matching DNC as Seen by default; when enabled,
+    it also reconciles retained processed UIDs without cursor rewind or duplicate
+    DNC/business events
   - `monitored_email_parser_whitelist = ["support@example.com"]` skips exact
     internal emails and removes existing email-DNC rows for those contacts
 - MCC-managed own-host mail uses `bounce@<instance>` as its return path and

@@ -2188,6 +2188,25 @@ processed-UID, seen и delete-processed semantics сохраняются без 
 classic unsubscribe. Ручная очистка mailbox и перемотка cursor в этот контракт
 не входят.
 
+Две независимые instance-настройки расширяют этот безопасный default и по
+умолчанию выключены:
+
+1. `auto_create_unknown_contacts` — для распознанного feedback-loop, bounce
+   или unsubscribe с неизвестным email MCD под per-email DB lock создаёт один
+   минимальный Mautic contact и идемпотентно добавляет DNC с reason события.
+2. `process_existing_dnc_messages` — разрешает reconciliation сообщений,
+   которые уже входят в `processed_uids`, но остаются в mailbox, а также новых
+   сообщений, чей contact уже имеет соответствующий DNC. Cursor не
+   перематывается, тип события повторно не публикуется, существующий contact и
+   DNC не дублируются.
+
+`delete_processed` остаётся главным разрешением физического удаления: только
+полностью сопоставленное/согласованное сообщение получает `\Deleted`, а
+`expunge` выполняется после batch. При выключенном `delete_processed` результат
+остаётся `Seen`. Reconciliation имеет отдельный policy fingerprint и список
+проверенных UID: изменение любого из трёх policy-флагов открывает один новый
+ограниченный проход, неизменная политика не повторяет бизнес-эффект.
+
 Локальный inventory хранит стабильный UID без host-суффикса. Если MCC wire
 ещё содержит историческую настройку `<uid>@<host>`, MCD принимает её только как
 входной migration alias текущего хоста и materialize-ит под stable UID; это не

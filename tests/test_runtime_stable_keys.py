@@ -49,6 +49,8 @@ def test_monitored_email_parser_runtime_keys_are_stable() -> None:
         "monitored_email_parser_batch_size",
         "monitored_email_parser_force_seen",
         "monitored_email_parser_delete_processed",
+        "monitored_email_parser_auto_create_unknown_contacts",
+        "monitored_email_parser_process_existing_dnc_messages",
         "monitored_email_parser_disable_mautic_fetch",
         "monitored_email_parser_types",
         "monitored_email_parser_whitelist",
