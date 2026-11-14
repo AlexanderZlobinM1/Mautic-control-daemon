@@ -62,8 +62,9 @@ def wire(root, plan, monkeypatch, *, drift=False):
         monkeypatch.setattr(upgrade, name, lambda *a, _value=value, **kw: _value)
     monkeypatch.setattr(upgrade, "_read_current_version", lambda *a: "7.2.1" if installed[0] else "7.2.0")
     monkeypatch.setattr(upgrade, "_resolve_composer_project_root", lambda root: root)
-    monkeypatch.setattr(upgrade, "_enter_upgrade_maintenance", lambda *a: events.append("maintenance") or object())
+    monkeypatch.setattr(upgrade, "_enter_upgrade_maintenance", lambda *a, **kw: events.append("maintenance") or object())
     monkeypatch.setattr(upgrade, "_exit_upgrade_maintenance", lambda *a: events.append("resume"))
+    monkeypatch.setattr(upgrade, "_prepare_composer_host", lambda *a, **kw: "/usr/bin/composer")
     for name in ("_verify_assetmapper_upgrade", "ensure_mailer_packages_for_sender_config",
                  "ensure_amazon_mailer_for_bundles", "_post_upgrade_verify"):
         monkeypatch.setattr(upgrade, name, lambda *a, **kw: None)
@@ -74,7 +75,7 @@ def wire(root, plan, monkeypatch, *, drift=False):
         events.append(phase)
         return real_execute(root, raw, phase, run_id, **kwargs)
     monkeypatch.setattr(patch_plan, "execute", execute)
-    def install(*args):
+    def install(*args, **kwargs):
         hook = args[-1]; events.append("replacement")
         hook(str(root))
         assert "maintenance" in events and "resume" not in events

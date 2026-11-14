@@ -191,11 +191,9 @@
   ],
   "release_target": "1.7.0",
   "additional_pending_recipe_paths": [
-    "mcd_agent/apt_profile.py",
     "mcd_agent/service_profiles.py",
     "mcd_agent/local_mail.py",
     "mcd_agent/mail_config.py",
-    "mcd_agent/security_blocklist.py",
     "mcd_agent/amazon_mailer_dep.py",
     "mcd_agent/self_update.py",
     "mcd_agent/uninstall.py",

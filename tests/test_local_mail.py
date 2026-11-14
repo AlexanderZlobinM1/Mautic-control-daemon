@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 from pathlib import Path
 import re
 import subprocess
@@ -13,6 +14,228 @@ from mcd_agent import local_mail
 
 
 class LocalMailTests(unittest.TestCase):
+    def test_mail_os_operation_uses_existing_generic_binding_and_typed_result(self) -> None:
+        cfg = SimpleNamespace()
+        runtime = {
+            "mta": "postfix",
+            "mail_hostname": "mail.example.test",
+            "domains": ["example.test"],
+            "selector": "mcd",
+        }
+        with patch.object(
+            local_mail,
+            "run_configured_external_operation",
+            return_value=(0, '{"status":"applied","changed_files":[]}'),
+        ) as dispatch:
+            result = local_mail._configured_mail_os_operation(
+                cfg,
+                operation="mail_os_filesystem_apply",
+                runtime=runtime,
+            )
+        self.assertEqual(result, {"status": "applied", "changed_files": []})
+        dispatch.assert_called_once_with(
+            cfg,
+            component="mail",
+            operation="mail_os_filesystem_apply",
+            profile={},
+            operation_input=runtime,
+        )
+
+    def test_mail_os_operation_fails_closed_when_binding_is_missing(self) -> None:
+        with patch.object(
+            local_mail,
+            "run_configured_external_operation",
+            return_value=(2, "custom_operation_binding_not_configured"),
+        ):
+            self.assertIsNone(
+                local_mail._configured_mail_os_operation(
+                    SimpleNamespace(),
+                    operation="mail_os_filesystem_cleanup",
+                    runtime={"mta": "postfix", "mail_hostname": "mail.example.test", "domains": [], "selector": "mcd"},
+                )
+            )
+
+    def test_mail_submit_capability_is_typed_and_legacy_key_path_is_migrated(self) -> None:
+        self.assertEqual(
+            local_mail._resolved_submit_command({"status": "applied", "submit_command": "mcd-test-submit"}),
+            "mcd-test-submit",
+        )
+        for value in (None, "", "mcd-test\nsubmit"):
+            with self.assertRaisesRegex(RuntimeError, "mail_os_submit_interface_command_invalid"):
+                local_mail._resolved_submit_command({"submit_command": value})
+        with tempfile.TemporaryDirectory() as td:
+            state_path = Path(td) / "domains.json"
+            with patch.object(local_mail, "DOMAINS_PATH", state_path):
+                local_mail._save_domains({
+                    "schema": 1,
+                    "domains": {"example.test": {"key_path": "/etc/opendkim/keys/example.test/mcd.private", "root": td}},
+                })
+            saved = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertNotIn("key_path", saved["domains"]["example.test"])
+
+    def test_mail_os_concrete_host_operations_are_not_implemented_in_mcd(self) -> None:
+        source = Path(local_mail.__file__).read_text(encoding="utf-8")
+
+        for residue in (
+            "apt-get",
+            "dpkg-query",
+            "iptables",
+            "systemctl",
+            "postconf",
+            "postmap",
+            "makemap",
+            "opendkim-testkey",
+            "_configure_opendkim",
+            "_configure_mta",
+            "_configure_inbound",
+            "_configure_smtp_firewall",
+            "OPENDKIM_KEYS",
+            "SUBMIT_WRAPPER",
+            "SUBMIT_ROOT_HELPER",
+            "SUBMIT_SUDOERS",
+            "_write_key",
+            "_write_submit_wrapper",
+            "visudo",
+            "/usr/local/",
+            "/etc/opendkim/",
+        ):
+            self.assertNotIn(residue, source)
+
+        self.assertIn("mail_os_filesystem_apply", source)
+        self.assertIn("mail_os_filesystem_cleanup", source)
+        self.assertIn("mail_os_lifecycle_apply", source)
+        self.assertIn("mail_os_lifecycle_cleanup", source)
+        self.assertIn("mail_os_lifecycle_status", source)
+        self.assertIn("mail_os_opendkim_key_apply", source)
+        self.assertIn("mail_os_opendkim_key_cleanup", source)
+        self.assertIn("mail_os_opendkim_key_status", source)
+        self.assertIn("mail_os_submit_interface_apply", source)
+        self.assertIn("mail_os_submit_interface_cleanup", source)
+        self.assertIn("mail_os_submit_interface_status", source)
+
+    def test_mail_cleanup_disables_lifecycle_before_removing_external_files(self) -> None:
+        configure_source = inspect.getsource(local_mail.configure_local_mail)
+        rollback = configure_source[configure_source.index("except Exception as exc:"):]
+        self.assertLess(
+            rollback.index('operation="mail_os_lifecycle_cleanup"'),
+            rollback.index('operation="mail_os_submit_interface_cleanup"'),
+        )
+        self.assertLess(
+            rollback.index('operation="mail_os_submit_interface_cleanup"'),
+            rollback.index('operation="mail_os_filesystem_cleanup"'),
+        )
+        self.assertLess(
+            rollback.index('operation="mail_os_filesystem_cleanup"'),
+            rollback.index('operation="mail_os_opendkim_key_cleanup"'),
+        )
+
+        disable_source = inspect.getsource(local_mail.disable_local_mail)
+        self.assertLess(
+            disable_source.index('operation="mail_os_lifecycle_cleanup"'),
+            disable_source.index('operation="mail_os_submit_interface_cleanup"'),
+        )
+        self.assertLess(
+            disable_source.index('operation="mail_os_submit_interface_cleanup"'),
+            disable_source.index('operation="mail_os_filesystem_cleanup"'),
+        )
+        self.assertLess(
+            disable_source.rindex('operation="mail_os_filesystem_cleanup"'),
+            disable_source.rindex('operation="mail_os_opendkim_key_cleanup"'),
+        )
+
+    def test_mail_lifecycle_apply_failure_rolls_back_external_files(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            local_php = Path(td) / "local.php"
+            local_php.write_text("<?php return [];\n", encoding="utf-8")
+            calls: list[str] = []
+
+            def external(_cfg, *, operation, runtime):
+                del runtime
+                calls.append(operation)
+                return {
+                    "mail_os_filesystem_apply": {"status": "applied"},
+                    "mail_os_opendkim_key_apply": {"status": "applied"},
+                    "mail_os_submit_interface_apply": {"status": "applied", "submit_command": "mcd-test-submit"},
+                    "mail_os_lifecycle_apply": {"status": "error", "error": "mocked"},
+                    "mail_os_lifecycle_cleanup": {"status": "cleaned"},
+                    "mail_os_submit_interface_cleanup": {"status": "cleaned"},
+                    "mail_os_filesystem_cleanup": {"status": "cleaned"},
+                    "mail_os_opendkim_key_cleanup": {"status": "cleaned"},
+                }[operation]
+
+            with patch.object(local_mail.os, "geteuid", return_value=0), patch.object(
+                local_mail,
+                "_preflight_local_mail_material",
+                return_value=(
+                    {
+                        "private_key_pem": "test-key",
+                        "mail_hostname": "mail.example.test",
+                        "selector": "mcd",
+                    },
+                    "mail.example.test",
+                    {},
+                ),
+            ), patch.object(local_mail, "_local_php", return_value=local_php), patch.object(
+                local_mail,
+                "_load_domains",
+                return_value={"schema": 1, "domains": {}},
+            ), patch.object(local_mail, "_save_domains"), patch.object(
+                local_mail, "_configured_mail_os_operation", side_effect=external
+            ):
+                with self.assertRaisesRegex(RuntimeError, "mail_os_lifecycle_apply_failed"):
+                    local_mail.configure_local_mail(
+                        SimpleNamespace(),
+                        domain="example.test",
+                        root=td,
+                        validate_runtime=False,
+                    )
+
+            self.assertEqual(
+                calls,
+                [
+                    "mail_os_filesystem_apply",
+                    "mail_os_opendkim_key_apply",
+                    "mail_os_submit_interface_apply",
+                    "mail_os_lifecycle_apply",
+                    "mail_os_lifecycle_cleanup",
+                    "mail_os_submit_interface_cleanup",
+                    "mail_os_filesystem_cleanup",
+                    "mail_os_opendkim_key_cleanup",
+                ],
+            )
+
+    def test_mail_status_requires_all_external_read_only_probes(self) -> None:
+        calls: list[str] = []
+
+        def external(_cfg, *, operation, runtime):
+            calls.append(operation)
+            self.assertNotIn("private_key_pem", runtime)
+            return {
+                "mail_os_lifecycle_status": {"status": "ok", "read_only": True, "services": {}},
+                "mail_os_opendkim_key_status": {"status": "ok", "read_only": True, "observed": {}},
+                "mail_os_submit_interface_status": {"status": "ok", "read_only": True, "observed": {}},
+            }[operation]
+
+        with patch.object(local_mail, "_load_domains", return_value={
+            "schema": 1,
+            "mail_identity_hostname": "mail.example.test",
+            "domains": {
+                "example.test": {"mail_hostname": "mail.example.test", "selector": "mcd", "mta": "postfix"}
+            },
+        }), patch.object(local_mail, "quota_state", return_value={}), patch.object(
+            local_mail, "_mail_identity", return_value={"fcrdns": True}
+        ), patch.object(local_mail, "_configured_mail_os_operation", side_effect=external):
+            result = local_mail.local_mail_status(SimpleNamespace(), domain="example.test")
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(calls, [
+            "mail_os_lifecycle_status",
+            "mail_os_opendkim_key_status",
+            "mail_os_submit_interface_status",
+        ])
+        self.assertEqual(result["opendkim_key"]["read_only"], True)
+        self.assertEqual(result["submit_interface"]["read_only"], True)
+
     def test_runtime_keeps_python_310_compatible_utc_import(self) -> None:
         source = Path(local_mail.__file__).read_text(encoding="utf-8")
 
@@ -24,134 +247,6 @@ class LocalMailTests(unittest.TestCase):
         self.assertIn("$included = include $argv[1]", script)
         self.assertIn("is_array($included)", script)
         self.assertIn("isset($parameters) && is_array($parameters)", script)
-
-    def test_clean_host_installs_postfix_and_opendkim(self) -> None:
-        installed = {
-            "sendmail-bin": False,
-            "postfix": False,
-            "opendkim": False,
-            "opendkim-tools": False,
-            "sudo": False,
-        }
-        commands = []
-
-        def fake_run(args, **_kwargs):
-            commands.append(args)
-            if args[:2] == ["dpkg-query", "-W"]:
-                return (0, "installed") if installed.get(args[-1]) else (1, "")
-            if args == ["debconf-set-selections"] or args[:2] == ["apt-get", "update"]:
-                return 0, ""
-            if args[:4] == ["env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install"]:
-                self.assertEqual(args[4:], ["-y", "postfix", "opendkim", "opendkim-tools", "dnsutils", "sudo"])
-                installed.update({"postfix": True, "opendkim": True, "opendkim-tools": True, "sudo": True, "dnsutils": True})
-                return 0, ""
-            self.fail(f"unexpected command: {args}")
-
-        def fake_which(name):
-            if name == "sendmail" and installed["postfix"]:
-                return "/usr/sbin/sendmail"
-            if name == "opendkim" and installed["opendkim"]:
-                return "/usr/sbin/opendkim"
-            if name == "opendkim-testkey" and installed["opendkim-tools"]:
-                return "/usr/sbin/opendkim-testkey"
-            if name == "sudo" and installed["sudo"]:
-                return "/usr/bin/sudo"
-            if name == "dig" and installed.get("dnsutils"):
-                return "/usr/bin/dig"
-            return None
-
-        with patch.object(local_mail, "_run", side_effect=fake_run), patch.object(
-            local_mail.shutil, "which", side_effect=fake_which
-        ):
-            self.assertEqual(local_mail._apt_install(), "postfix")
-        self.assertIn(["debconf-set-selections"], commands)
-
-    def test_apt_install_adds_only_missing_native_packages(self) -> None:
-        installed = {"sendmail-bin": True, "opendkim": False, "opendkim-tools": False}
-
-        def fake_run(args, **_kwargs):
-            if args[:2] == ["dpkg-query", "-W"]:
-                package = args[-1]
-                return (0, "installed") if installed.get(package) else (1, "")
-            if args[:2] == ["apt-get", "update"]:
-                return 0, ""
-            if args[:4] == ["env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install"]:
-                self.assertEqual(args[4:], ["-y", "opendkim", "opendkim-tools"])
-                installed["opendkim"] = True
-                installed["opendkim-tools"] = True
-                return 0, ""
-            self.fail(f"unexpected command: {args}")
-
-        def fake_which(name):
-            if name == "sudo":
-                return "/usr/bin/sudo"
-            if name == "sendmail" or installed.get("opendkim" if name == "opendkim" else "opendkim-tools"):
-                return "/usr/sbin/" + name
-            if name == "dig":
-                return "/usr/bin/dig"
-            return None
-
-        with patch.object(local_mail, "_run", side_effect=fake_run), patch.object(
-            local_mail.shutil, "which", side_effect=fake_which
-        ):
-            local_mail._apt_install()
-
-    def test_apt_install_refuses_to_replace_foreign_mta(self) -> None:
-        def fake_run(args, **_kwargs):
-            if args[:2] == ["dpkg-query", "-W"]:
-                return 1, ""
-            self.fail(f"package changes must not run: {args}")
-
-        with patch.object(local_mail, "_run", side_effect=fake_run), patch.object(
-            local_mail.shutil, "which", side_effect=lambda name: "/usr/sbin/sendmail" if name == "sendmail" else None
-        ):
-            with self.assertRaisesRegex(RuntimeError, "will not replace"):
-                local_mail._apt_install()
-
-    def test_sendmail_transform_disables_legacy_relay_and_masquerade(self) -> None:
-        source = """divert(-1)dnl
-define(`SMART_HOST', `mail.sales-snap.com')dnl
-define(`confDOMAIN_NAME', `old.example.com')dnl
-FEATURE(`allmasquerade')dnl
-FEATURE(`masquerade_envelope')dnl
-MASQUERADE_AS(`sales-snap.com')dnl
-MAILER(`smtp')dnl
-"""
-        result = local_mail._sendmail_direct_text(source, "mail.app.sales-snap.com")
-        active = [line for line in result.splitlines() if not line.lstrip().startswith("dnl")]
-        self.assertFalse(any("SMART_HOST" in line for line in active))
-        self.assertFalse(any("MASQUERADE" in line for line in active))
-        self.assertIn("define(`confDOMAIN_NAME', `mail.app.sales-snap.com')dnl", result)
-        self.assertIn("Port=2525, Addr=127.0.0.1", result)
-        self.assertIn("CLIENT_OPTIONS(`Family=inet, Address=0.0.0.0')dnl", result)
-        self.assertIn("define(`QUEUE_DIR', `/var/spool/mqueue-mcd')", result)
-        self.assertEqual(result.count(local_mail._SENDMAIL_BEGIN), 1)
-        self.assertLess(result.index(local_mail._SENDMAIL_BEGIN), result.index("MAILER(`smtp')dnl"))
-
-    def test_sendmail_inbound_transform_preserves_relay_and_opens_only_mta_listener(self) -> None:
-        source = """FEATURE(`no_default_msa')dnl
-DAEMON_OPTIONS(`Family=inet, Name=MTA-v4, Port=smtp, Addr=127.0.0.1')dnl
-DAEMON_OPTIONS(`Family=inet6, Name=MTA-v6, Port=25, Addr=::1')dnl
-DAEMON_OPTIONS(`Family=inet, Name=MSP-v4, Port=submission, Addr=127.0.0.1')dnl
-define(`SMART_HOST', `mail.sales-snap.com')dnl
-MAILER(`local')dnl
-MAILER(`smtp')dnl
-"""
-
-        result = local_mail._sendmail_inbound_text(source, "mail.nikola.sales-snap.com")
-        repeated = local_mail._sendmail_inbound_text(result, "mail.nikola.sales-snap.com")
-
-        self.assertIn("define(`SMART_HOST', `mail.sales-snap.com')dnl", result)
-        self.assertIn("Name=MCD-Inbound, Port=smtp", result)
-        self.assertIn("Name=MCD-Inbound, Port=smtp, M=A", result)
-        self.assertIn("define(`confDOMAIN_NAME', `mail.nikola.sales-snap.com')dnl", result)
-        self.assertEqual(result.count("define(`confDOMAIN_NAME'"), 1)
-        self.assertIn("Port=submission, Addr=127.0.0.1", result)
-        self.assertIn("FEATURE(`virtusertable'", result)
-        self.assertEqual(repeated.count(local_mail._SENDMAIL_INBOUND_BEGIN), 1)
-        active = [line for line in result.splitlines() if not line.lstrip().startswith("dnl")]
-        self.assertFalse(any("Port=smtp" in line and "Addr=127.0.0.1" in line for line in active))
-        self.assertFalse(any("Port=25" in line and "Addr=::1" in line for line in active))
 
     def test_mail_identity_requires_forward_confirmed_reverse_dns(self) -> None:
         with patch.object(local_mail.shutil, "which", return_value="/usr/bin/dig"), patch.object(
@@ -222,131 +317,6 @@ MAILER(`smtp')dnl
             timeout_sec=15,
         )
 
-    def test_receive_root_helper_restricts_mta_user_arguments(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            helper = Path(td) / "mcd-mail-receive-root"
-            wrapper = Path(td) / "mcd-mail-receive"
-            sudoers = Path(td) / "sudoers"
-            with patch.object(local_mail, "RECEIVE_ROOT_HELPER", helper), patch.object(
-                local_mail, "RECEIVE_WRAPPER", wrapper
-            ), patch.object(local_mail, "RECEIVE_SUDOERS", sudoers), patch.object(
-                local_mail.pwd, "getpwnam", return_value=object()
-            ), patch.object(local_mail, "_run", return_value=(0, "")):
-                local_mail._write_receive_wrapper()
-
-            text = helper.read_text(encoding="utf-8")
-            self.assertIn('[ "$#" -eq 2 ]', text)
-            self.assertIn("--instance-domain=*", text)
-            self.assertIn("--kind=bounce|--kind=feedback_loop", text)
-            self.assertNotIn('receive "$@"', text)
-
-    def test_smtp_firewall_is_exact_idempotent_and_systemd_managed(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            helper = Path(td) / "mcd-local-mail-firewall"
-            service = Path(td) / "mcd-local-mail-firewall.service"
-            calls = []
-
-            def fake_run(args, **_kwargs):
-                calls.append(args)
-                return 0, ""
-
-            with patch.object(local_mail, "SMTP_FIREWALL_HELPER", helper), patch.object(
-                local_mail, "SMTP_FIREWALL_SERVICE", service
-            ), patch.object(local_mail.shutil, "which", return_value="/usr/sbin/iptables"), patch.object(
-                local_mail, "_run", side_effect=fake_run
-            ):
-                local_mail._configure_smtp_firewall()
-
-            helper_text = helper.read_text(encoding="utf-8")
-            self.assertIn("--dport 25", helper_text)
-            self.assertIn(local_mail._SMTP_FIREWALL_COMMENT, helper_text)
-            self.assertIn("-C INPUT", helper_text)
-            self.assertIn("-I INPUT 1", helper_text)
-            self.assertIn("-D INPUT", helper_text)
-            self.assertIn("-C OUTPUT", helper_text)
-            self.assertIn("! --uid-owner 0", helper_text)
-            self.assertIn("-C FORWARD", helper_text)
-            self.assertIn(local_mail._SMTP_EGRESS_COMMENT, helper_text)
-            self.assertIn(local_mail._SMTP_FORWARD_COMMENT, helper_text)
-            self.assertIn("RemainAfterExit=yes", service.read_text(encoding="utf-8"))
-            self.assertIn(["systemctl", "enable", "--now", local_mail._SMTP_FIREWALL_SERVICE_NAME], calls)
-
-    def test_inbound_routes_are_exact_and_reject_other_domain_mailboxes(self) -> None:
-        aliases, virtual = local_mail._inbound_route_lines({"app.sales-snap.com": {}})
-
-        self.assertEqual(len(aliases), 2)
-        self.assertTrue(any("--kind=bounce" in line for line in aliases))
-        self.assertTrue(any("--kind=feedback_loop" in line for line in aliases))
-        self.assertTrue(any(line.startswith("bounce@app.sales-snap.com ") for line in virtual))
-        self.assertTrue(any(line.startswith("fbl@app.sales-snap.com ") for line in virtual))
-        self.assertTrue(any(line.startswith("abuse@app.sales-snap.com ") for line in virtual))
-        self.assertIn("@app.sales-snap.com error:5.1.1:550 No such own-host mailbox", virtual)
-
-    def test_sendmail_configuration_does_not_modify_system_config_or_queue(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            base = Path(td)
-            system_mc = base / "system-sendmail.mc"
-            isolated_mc = base / "mcd" / "sendmail.mc"
-            isolated_cf = base / "mcd" / "sendmail.cf"
-            isolated_queue = base / "mqueue-mcd"
-            isolated_service = base / "mcd-local-mail-sendmail.service"
-            source = "define(`SMART_HOST', `mail.sales-snap.com')dnl\nMAILER(`smtp')dnl\n"
-            system_mc.write_text(source, encoding="utf-8")
-            compiled = subprocess.CompletedProcess(
-                ["m4"],
-                0,
-                stdout=f"compiled config\nO QueueDirectory={isolated_queue}\n".encode(),
-                stderr=b"",
-            )
-            patches = (
-                patch.object(local_mail, "SENDMAIL_MC", system_mc),
-                patch.object(local_mail, "SENDMAIL_ISOLATED_MC", isolated_mc),
-                patch.object(local_mail, "SENDMAIL_ISOLATED_CF", isolated_cf),
-                patch.object(local_mail, "SENDMAIL_ISOLATED_QUEUE", isolated_queue),
-                patch.object(local_mail, "SENDMAIL_ISOLATED_SERVICE", isolated_service),
-                patch.object(local_mail.subprocess, "run", return_value=compiled),
-                patch.object(local_mail, "_run", return_value=(0, "")),
-                patch.object(local_mail.shutil, "chown"),
-            )
-            for item in patches:
-                item.start()
-            self.addCleanup(lambda: [item.stop() for item in reversed(patches)])
-
-            local_mail._configure_sendmail("mail.app.sales-snap.com")
-
-            self.assertEqual(system_mc.read_text(encoding="utf-8"), source)
-            self.assertFalse((base / "mqueue").exists())
-            self.assertIn(
-                f"O QueueDirectory={isolated_queue}",
-                isolated_cf.read_text(encoding="utf-8"),
-            )
-            self.assertIn("127.0.0.1", isolated_mc.read_text(encoding="utf-8"))
-            service_text = isolated_service.read_text(encoding="utf-8")
-            self.assertIn("sendmail.cf -bD", service_text)
-            self.assertIn("KillSignal=SIGINT", service_text)
-            self.assertIn("TimeoutStopSec=15s", service_text)
-
-    def test_sendmail_configuration_rejects_compiled_system_queue(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            base = Path(td)
-            system_mc = base / "system-sendmail.mc"
-            system_mc.write_text("MAILER(`smtp')dnl\n", encoding="utf-8")
-            isolated_service = base / "mcd-local-mail-sendmail.service"
-            compiled = subprocess.CompletedProcess(
-                ["m4"],
-                0,
-                stdout=b"O QueueDirectory=/var/spool/mqueue\n",
-                stderr=b"",
-            )
-            with patch.object(local_mail, "SENDMAIL_MC", system_mc), patch.object(
-                local_mail, "SENDMAIL_ISOLATED_MC", base / "mcd" / "sendmail.mc"
-            ), patch.object(local_mail, "SENDMAIL_ISOLATED_CF", base / "mcd" / "sendmail.cf"), patch.object(
-                local_mail, "SENDMAIL_ISOLATED_SERVICE", isolated_service
-            ), patch.object(local_mail.subprocess, "run", return_value=compiled):
-                with self.assertRaisesRegex(RuntimeError, "dedicated queue path"):
-                    local_mail._configure_sendmail("mail.app.sales-snap.com")
-            self.assertFalse(isolated_service.exists())
-
     def test_mautic_patch_uses_quota_wrapper_and_instance_from_domain(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "local.php"
@@ -355,10 +325,12 @@ MAILER(`smtp')dnl
                 encoding="utf-8",
             )
             with patch.object(local_mail, "_local_php", return_value=path):
-                local_mail._configure_mautic("/var/www/app/public_html", "app.sales-snap.com")
+                local_mail._configure_mautic(
+                    "/var/www/app/public_html", "app.sales-snap.com", submit_command="mcd-test-submit"
+                )
             result = path.read_text(encoding="utf-8")
             self.assertIn(
-                "mcd-mail-submit%%20--instance-domain%%3Dapp.sales-snap.com%%20--%%20-oi%%20-t",
+                "mcd-test-submit%%20--instance-domain%%3Dapp.sales-snap.com%%20--%%20-oi%%20-t",
                 result,
             )
             self.assertIn("'mailer_from_email'=>'mailer@app.sales-snap.com'", result)
@@ -373,7 +345,9 @@ MAILER(`smtp')dnl
                 encoding="utf-8",
             )
             with patch.object(local_mail, "_local_php", return_value=path):
-                local_mail._configure_mautic("/var/www/app/public_html", "app.sales-snap.com")
+                local_mail._configure_mautic(
+                    "/var/www/app/public_html", "app.sales-snap.com", submit_command="mcd-test-submit"
+                )
             result = path.read_text(encoding="utf-8")
 
         self.assertIn("'parameters'=>[", result)
@@ -390,7 +364,9 @@ MAILER(`smtp')dnl
                 encoding="utf-8",
             )
             with patch.object(local_mail, "_local_php", return_value=path):
-                local_mail._configure_mautic("/var/www/app/public_html", "app.sales-snap.com")
+                local_mail._configure_mautic(
+                    "/var/www/app/public_html", "app.sales-snap.com", submit_command="mcd-test-submit"
+                )
             result = path.read_text(encoding="utf-8")
 
         self.assertIn("$parameters = array(\n    'mailer_return_path'", result)

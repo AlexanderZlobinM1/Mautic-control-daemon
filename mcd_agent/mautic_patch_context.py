@@ -20,11 +20,15 @@ def load_readonly_discovery_config(config_path: str):
     discovery = data.get("discovery", {})
     if not isinstance(discovery, dict):
         raise ValueError("invalid discovery config")
+    mcc = data.get("mcc", {})
+    if not isinstance(mcc, dict):
+        mcc = {}
     return SimpleNamespace(
         discovery_roots=_normalize_list(discovery.get("roots", ["/var/www"])),
         exclude_path_contains=_normalize_list(discovery.get("exclude_path_contains", [])),
         supported_mautic_majors=_normalize_int_list(discovery.get("supported_mautic_majors", [4, 5, 6, 7])),
         custom_instances=_parse_manual_instances(data.get("instances", [])),
+        mcc_host_name=str(mcc.get("host_name") or "").strip(),
     )
 
 

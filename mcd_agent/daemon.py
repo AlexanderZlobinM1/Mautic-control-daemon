@@ -82,7 +82,7 @@ from mcd_agent.db_watchdog import collect_db_watchdog_snapshot, effective_db_wat
 from mcd_agent.email_counters import repair_campaign_email_counters
 from mcd_agent.executor import render_mautic_command
 from mcd_agent.native_comparator import shared_root_fence_path
-from mcd_agent.security_blocklist import sync_security_blocklist_once
+from mcd_agent.security_blocklist import _security_poll_interval, sync_security_blocklist_once
 from mcd_agent.web_ingress_firewall import ensure_managed_web_firewall_loopback
 from mcd_agent.fs_permissions import effective_guard_identity, ensure_instance_permissions
 from mcd_agent.host_identity import resolve_agent_identity
@@ -477,7 +477,8 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
                 }
 
             # Portal job applicability uses the stable MCD capability
-            # vocabulary.  Host probes (dpkg, systemd, package:curl, etc.)
+            # vocabulary.  Host probes (package manager, systemd,
+            # package:curl, etc.)
             # are useful diagnostics but are not the signed Portal facts and
             # must not make a valid recovery command fail closed locally.
             local_facts_capabilities = list(PORTAL_LOCAL_FACTS_CAPABILITIES)
@@ -596,7 +597,11 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
                     raise ValueError("commercial_generic_identity_unavailable")
                 from mcd_agent.commercial_capabilities import mautic_version_capability
                 from mcd_agent.commercial_generic import capability_inventory_digest
-                inventory = build_capability_inventory(installation_id=_installation_id, dns_name=dns_name)
+                inventory = build_capability_inventory(
+                    installation_id=_installation_id,
+                    dns_name=dns_name,
+                    config=config,
+                )
                 if state.get("ownership") == "sales_snap_managed":
                     account_id = str(registration.get("account_id") or "").strip()
                     if not account_id:
@@ -616,7 +621,12 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
                 installation_id = str((job.get("installation") or {}).get("installation_id") or "").strip()
                 if not installation_id:
                     return {"status": "failed", "reason": "commercial_inventory_installation_binding_missing"}
-                return execute_generic_primitive(job, inventory_rescan=lambda: rescan_inventory(installation_id))
+                local_cfg = load_config(config.config_file_path, allow_recover_from_mcc=False)
+                return execute_generic_primitive(
+                    job,
+                    inventory_rescan=lambda: rescan_inventory(installation_id),
+                    config=local_cfg,
+                )
 
             def rescan_inventory(installation_id: str) -> Mapping[str, Any]:
                 local_cfg = load_config(config.config_file_path, allow_recover_from_mcc=False)
@@ -20978,7 +20988,7 @@ def run_loop(
                 security_sync = sync_security_blocklist_once(config)
                 applied = security_sync.get("apply")
                 if isinstance(applied, dict):
-                    poll_sec = max(30, min(3600, int(applied.get("poll_sec") or 60)))
+                    poll_sec = _security_poll_interval(applied.get("poll_sec"))
                     if bool(applied.get("changed", False)):
                         logging.warning(
                             "security blocklist reconciled: status=%s desired=%s added=%s removed=%s",

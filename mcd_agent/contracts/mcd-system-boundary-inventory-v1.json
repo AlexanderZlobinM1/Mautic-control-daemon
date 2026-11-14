@@ -433,13 +433,8 @@
       "function": "collect_wazuh_agent_state",
       "classification": "KEEP",
       "line": 115,
-      "lexical_name_callers": [
-        {
-          "path": "mcd_agent/apt_profile.py",
-          "line": 2638
-        }
-      ],
-      "caller_resolution": "core inventory observer; nine retained helpers perform read-only package/service/config observation",
+      "lexical_name_callers": [],
+      "caller_resolution": "core observer retained for external scenario use; MCD direct APT caller removed after MCC-owned observation binding",
       "retained_dependency_closure": [
         "_bool",
         "_parsed_agent_config",

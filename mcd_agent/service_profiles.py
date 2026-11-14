@@ -3,13 +3,11 @@ from __future__ import annotations
 from mcd_agent.mcc_transport import mcc_request
 
 import json
-import os
 from pathlib import Path
 from typing import Any
 from urllib import request
 from urllib.error import HTTPError, URLError
 
-from mcd_agent.apt_profile import apply_apt_profile
 from mcd_agent import __version__
 from mcd_agent.config import AgentConfig
 from mcd_agent.host_identity import resolve_agent_identity
@@ -27,7 +25,6 @@ _MYSQL_GALERA_MARKERS = (
     "wsrep_cluster_address",
     "wsrep_cluster_name",
 )
-
 
 def _post_json(url: str, payload: dict[str, Any], token: str | None, timeout_sec: int = 12) -> dict[str, Any]:
     data = json.dumps(payload, ensure_ascii=True).encode("utf-8")
@@ -150,10 +147,6 @@ def fetch_mysql_profile(cfg: AgentConfig) -> dict[str, Any]:
     return fetch_service_profile(cfg, "mysql")
 
 
-def fetch_apt_profile(cfg: AgentConfig) -> dict[str, Any]:
-    return fetch_service_profile(cfg, "apt")
-
-
 def fetch_wazuh_profile(cfg: AgentConfig) -> dict[str, Any]:
     return fetch_service_profile(cfg, "wazuh")
 
@@ -201,22 +194,23 @@ def _decode_configured_operation_result(code: int, output: str) -> dict[str, Any
     }
 
 
-def _configured_apt_operation(
+def _configured_external_operation(
+    component: str,
     profile: dict[str, Any],
     *,
     cfg: AgentConfig,
     operation: str,
     operation_input: dict[str, Any],
 ) -> dict[str, Any] | None:
-    """Dispatch one declared APT operation through the existing custom seam.
+    """Dispatch one declared operation through the existing custom seam.
 
     ``None`` means that MCC has not installed this optional binding yet.  Any
     other dispatch or terminal failure is returned as an error and must not
-    silently fall back to the builtin writer.
+    silently fall back to an implementation in MCD.
     """
     code, output = run_configured_external_operation(
         cfg,
-        component="apt",
+        component=component,
         operation=operation,
         profile=profile,
         operation_input=operation_input,
@@ -224,42 +218,6 @@ def _configured_apt_operation(
     if code == 2 and output == "custom_operation_binding_not_configured":
         return None
     return _decode_configured_operation_result(code, output)
-
-
-def _configured_apt_apply(
-    profile: dict[str, Any],
-    *,
-    cfg: AgentConfig,
-    dry_run: bool,
-    force_repo_rescan: bool,
-) -> dict[str, Any] | None:
-    """Dispatch the owner-declared complete APT composition as one operation."""
-    return _configured_apt_operation(
-        profile,
-        cfg=cfg,
-        operation="apt_apply",
-        operation_input={
-            "dry_run": bool(dry_run),
-            "force_repo_rescan": bool(force_repo_rescan),
-        },
-    )
-
-
-def _configured_zabbix_bootstrap(
-    profile: dict[str, Any],
-    *,
-    cfg: AgentConfig,
-    force: bool,
-    timeout_sec: int,
-) -> dict[str, Any]:
-    """Dispatch the selected APT monitor operation through external data."""
-    result = _configured_apt_operation(
-        profile,
-        cfg=cfg,
-        operation="zabbix_mysql_monitor_bootstrap",
-        operation_input={"force": bool(force), "dry_run": False, "trigger": "service-profile"},
-    )
-    return result or {"status": "error", "reason": "custom_operation_binding_not_configured"}
 
 
 def _agent_cluster_mode(cfg: AgentConfig) -> bool:
@@ -378,13 +336,15 @@ def service_profiles_apply_once(
                 raise
             return {"status": "error", "reason": str(error), "fetch": public_fetch}
     else:
-        if os.geteuid() != 0:
-            raise RuntimeError("service-profile apply requires root")
-        external_apply = _configured_apt_apply(
+        external_apply = _configured_external_operation(
+            "apt",
             profile,
             cfg=cfg,
-            dry_run=dry_run,
-            force_repo_rescan=bool(force_apt_repo_rescan),
+            operation="apt_apply",
+            operation_input={
+                "dry_run": bool(dry_run),
+                "force_repo_rescan": bool(force_apt_repo_rescan),
+            },
         )
         if external_apply is not None:
             # The owner composition owns ordering, system facts and all
@@ -392,48 +352,10 @@ def service_profiles_apply_once(
             # operation, then preserves its public receipt semantics.
             applied = external_apply
         else:
-            # Compatibility path remains until the complete owner composition
-            # is installed and proven. It is never combined with a partial
-            # external block.
-            applied = apply_apt_profile(
-                profile,
-                dry_run=dry_run,
-                cfg=cfg,
-                force_repo_rescan=bool(force_apt_repo_rescan),
-            )
-        if not dry_run and external_apply is None:
-            # Keep the former apply_apt_profile control-flow boundary: the
-            # monitor operation was reached only after the repository,
-            # refresh and DB-candidate gates had returned successfully.  Do
-            # not let the external replacement turn an early APT failure into
-            # a monitor-account mutation.
-            apt_status = str(applied.get("status") or "").strip().lower()
-            if apt_status == "applied":
-                zbx_result = _configured_zabbix_bootstrap(
-                    profile,
-                    cfg=cfg,
-                    force=True,
-                    timeout_sec=max(8, int(getattr(cfg, "command_timeout_sec", 20) or 20)),
-                )
-            else:
-                zbx_result = {
-                    "status": "skipped",
-                    "reason": "apt_profile_gate_failed",
-                    "apt_profile_status": apt_status or "unknown",
-                }
-            applied["zabbix_mysql_monitor"] = zbx_result
-            state = applied.get("state")
-            if isinstance(state, dict):
-                state["zabbix_mysql_monitor"] = zbx_result
-            zbx_status = str(zbx_result.get("status") or "").strip().lower()
-            if zbx_status in {"applied", "already_present", "noop", "disabled", "skipped"}:
-                actions = applied.setdefault("actions", [])
-                actions[:] = [item for item in actions if not str(item).startswith("zabbix_mysql_monitor:")]
-                actions.append(f"zabbix_mysql_monitor:{zbx_status}")
-            else:
-                applied["status"] = "error"
-                errors = applied.setdefault("errors", [])
-                errors.append(f"zabbix_mysql_monitor:{str(zbx_result.get('reason') or 'external_operation_failed')}")
+            # APT is an MCC-owned external composition.  Absence of its
+            # binding is a concrete configuration error, never permission to
+            # execute the retired builtin implementation.
+            applied = {"status": "error", "reason": "apt_apply_binding_not_configured"}
     if comp == "nginx":
         # The external wrapper owns writer/observer outcome semantics, including
         # successful drift observations. Reuse its validated terminal decision.

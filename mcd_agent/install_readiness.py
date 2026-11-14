@@ -9,7 +9,7 @@ import shutil
 import subprocess
 from typing import Any
 
-from mcd_agent.apt_profile import collect_zabbix_agent_state
+from mcd_agent.service_profiles import _configured_external_operation
 from mcd_agent.env import ipv6_runtime_disabled, ipv6_status, reconcile_ipv6_runtime_from_intent
 from mcd_agent.nginx_external import cloudflare_real_ip_state
 from mcd_agent.runtime_adapters import installed_runtime_adapters
@@ -216,7 +216,7 @@ def _path_state(path: str) -> dict[str, Any]:
         return {"path": path, "exists": True, "is_dir": False, "error": str(exc)}
 
 
-def collect_mautic_install_readiness() -> dict[str, Any]:
+def collect_mautic_install_readiness(cfg: Any | None = None) -> dict[str, Any]:
     reconcile_ipv6_runtime_from_intent()
     composer_exists, composer_version = _cmd_version("composer", ["--version"])
     node_exists, node_version = _cmd_version("node", ["--version"])
@@ -225,6 +225,18 @@ def collect_mautic_install_readiness() -> dict[str, Any]:
     certbot_exists, certbot_version = _cmd_version("certbot", ["--version"])
     nginx_rc, nginx_state = _run(["systemctl", "is-active", "nginx"], timeout_sec=4)
     php = _php_versions()
+    zabbix_agent = (
+        _configured_external_operation(
+            "apt", {}, cfg=cfg, operation="zabbix_agent_state_observe",
+            operation_input={},
+        )
+        if cfg is not None else None
+    )
+    if zabbix_agent is None:
+        zabbix_agent = {
+            "status": "error",
+            "reason": "zabbix_agent_state_observe_binding_not_configured",
+        }
     return {
         "schema": "mcd-mautic-install-readiness-v1",
         "checked_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -253,6 +265,6 @@ def collect_mautic_install_readiness() -> dict[str, Any]:
         "docker_runtime_capability": {"schema": "mcd-docker-runtime-capability-v1", "status": "unobserved", "reason": "requires selected instance container context"},
         "runtime_migration_adapters": installed_runtime_adapters(),
         "database": _database_state(),
-        "zabbix_agent": collect_zabbix_agent_state(profile={"zabbix_agent_enabled": True}),
+        "zabbix_agent": zabbix_agent,
         "paths": {"var_www": _path_state("/var/www")},
     }

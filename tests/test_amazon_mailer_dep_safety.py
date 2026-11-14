@@ -87,9 +87,17 @@ class MailerComposerSafetyTests(unittest.TestCase):
         cfg = SimpleNamespace(php_bin="php", command_timeout_sec=900)
         with (
             patch("mcd_agent.amazon_mailer_dep._resolve_project_root", return_value="/var/www/mautic"),
+            patch("mcd_agent.amazon_mailer_dep.detect_install_type", return_value="composer"),
             patch("mcd_agent.amazon_mailer_dep._composer_project_is_mautic", return_value=True),
             patch("mcd_agent.amazon_mailer_dep._mautic_console_healthy", side_effect=[True, True]),
-            patch("mcd_agent.amazon_mailer_dep._resolve_composer_bin", return_value="/usr/local/bin/composer"),
+            patch(
+                "mcd_agent.amazon_mailer_dep.run_upgrade_os_operation",
+                return_value={
+                    "status": "ok",
+                    "composer_binary": "/usr/local/bin/composer",
+                    "composer_dependency_commands_owned_by_mcd": True,
+                },
+            ) as host_prepare,
             patch("mcd_agent.amazon_mailer_dep._verify_composer_as_www_data"),
             patch("mcd_agent.amazon_mailer_dep._composer_has_package", return_value=False),
             patch("mcd_agent.amazon_mailer_dep._composer_update_targeted_package") as targeted,
@@ -106,6 +114,9 @@ class MailerComposerSafetyTests(unittest.TestCase):
             )
 
         self.assertTrue(changed)
+        self.assertEqual(host_prepare.call_args.kwargs["component"], "composer")
+        self.assertEqual(host_prepare.call_args.kwargs["operation"], "composer_host_prepare")
+        self.assertEqual(host_prepare.call_args.kwargs["operation_input"]["working_root"], "/var/www/mautic")
         targeted.assert_called_once_with(
             project_root="/var/www/mautic",
             composer_bin="/usr/local/bin/composer",

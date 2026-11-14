@@ -4,7 +4,7 @@ from mcd_agent.mcc_transport import mcc_request
 
 from dataclasses import dataclass
 from pathlib import Path
-import gzip
+import json
 import os
 import re
 import secrets
@@ -12,21 +12,18 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
-import time
 from typing import Any
 from urllib import request
+from uuid import uuid4
 
 from mcd_agent.archive_utils import safe_extract_tar
 from mcd_agent.config import AgentConfig
-from mcd_agent.form_embed import render_form_embed_location
-from mcd_agent.nginx_templates import render_nginx_template
+from mcd_agent.nginx_external import (
+    cleanup_managed_vhost as _external_cleanup_managed_vhost,
+    write_managed_nginx_vhost as _external_write_managed_nginx_vhost,
+)
 from mcd_agent.source_operation import stable_source_operation
-
-
-_LETSENCRYPT_LIVE = Path("/etc/letsencrypt/live")
-_LETSENCRYPT_RENEWAL = Path("/etc/letsencrypt/renewal")
-_CERTBOT_LOCK_RETRY_SEC = 5
-_CERTBOT_LOCK_MAX_WAIT_SEC = 180
+from mcd_agent.upgrade_os_external import run_upgrade_os_operation
 
 
 @dataclass
@@ -51,17 +48,6 @@ def _run(args: list[str], *, timeout_sec: int = 300, input_text: str | None = No
         check=False,
     )
     return int(proc.returncode), ((proc.stdout or "") + (proc.stderr or "")).strip()
-
-
-def _run_certbot(args: list[str], *, timeout_sec: int) -> tuple[int, str]:
-    deadline = time.monotonic() + _CERTBOT_LOCK_MAX_WAIT_SEC
-    while True:
-        rc, out = _run(args, timeout_sec=timeout_sec)
-        if rc == 0 or "another instance of certbot is already running" not in out.lower():
-            return rc, out
-        if time.monotonic() >= deadline:
-            return rc, out
-        time.sleep(_CERTBOT_LOCK_RETRY_SEC)
 
 
 def _domain(raw: str) -> str:
@@ -184,7 +170,7 @@ def _selected_php_bin(plan: ImageInstallPlan) -> str:
     return f"/usr/bin/php{plan.php_version}"
 
 
-def _preflight(plan: ImageInstallPlan) -> list[str]:
+def _preflight(plan: ImageInstallPlan, cfg: AgentConfig | None = None) -> list[str]:
     problems: list[str] = []
     if os.geteuid() != 0:
         problems.append("must run as root")
@@ -210,14 +196,24 @@ def _preflight(plan: ImageInstallPlan) -> list[str]:
                     problems.append(f"instance parent is not empty: {parent}")
             except OSError as exc:
                 problems.append(f"instance parent cannot be inspected: {parent}: {exc}")
-    site_avail = Path("/etc/nginx/sites-available") / f"{plan.domain}.conf"
-    site_enabled = Path("/etc/nginx/sites-enabled") / f"{plan.domain}.conf"
-    if site_avail.exists():
-        problems.append(f"nginx vhost already exists: {site_avail}")
-    if site_enabled.exists() or site_enabled.is_symlink():
-        problems.append(f"nginx enabled symlink already exists: {site_enabled}")
-    if (_LETSENCRYPT_LIVE / plan.domain).exists() or (_LETSENCRYPT_RENEWAL / f"{plan.domain}.conf").exists():
-        problems.append(f"certificate already exists: {plan.domain}")
+    if cfg is not None:
+        try:
+            run_upgrade_os_operation(
+                cfg,
+                component="certificate",
+                operation="certificate_material",
+                operation_input={
+                    "operation_id": "",
+                    "domain": plan.domain,
+                    "action": "inspect",
+                    "webroot": "",
+                    "email": "",
+                    "certificate_ref": "",
+                    "dry_run": "false",
+                },
+            )
+        except Exception as exc:
+            problems.append(f"certificate preflight failed: {type(exc).__name__}")
     try:
         if _db_exists(plan.db_name):
             problems.append(f"database already exists: {plan.db_name}")
@@ -228,24 +224,16 @@ def _preflight(plan: ImageInstallPlan) -> list[str]:
     return problems
 
 
-def _prepare_instance_parent(webroot: Path) -> None:
-    parent = webroot.parent
-    if parent.exists():
-        if not parent.is_dir():
-            raise RuntimeError(f"instance parent is not a directory: {parent}")
-        if any(parent.iterdir()):
-            raise RuntimeError(f"instance parent is not empty: {parent}")
-        return
-    parent.mkdir(parents=True, exist_ok=False)
-
-
 def _rollback_failed_install(
     cfg: AgentConfig,
     plan: ImageInstallPlan,
     *,
-    database_created: bool,
-    user_created: bool,
-    resources_started: bool,
+    operation_id: str,
+    database_owned: bool,
+    certificate_owned: bool,
+    prepared_root: Path,
+    tree_materialized: bool,
+    vhost_ownership_receipt: dict[str, Any] | None,
     mail_requested: bool,
 ) -> list[str]:
     errors: list[str] = []
@@ -257,55 +245,93 @@ def _rollback_failed_install(
         except Exception as exc:
             errors.append(f"local mail: {exc}")
 
-    if resources_started:
-        for path in (
-            Path("/etc/nginx/sites-enabled") / f"{plan.domain}.conf",
-            Path("/etc/nginx/sites-available") / f"{plan.domain}.conf",
-        ):
-            try:
-                if path.exists() or path.is_symlink():
-                    path.unlink()
-            except Exception as exc:
-                errors.append(f"nginx {path}: {exc}")
-
-        cert_dir = _LETSENCRYPT_LIVE / plan.domain
-        renewal = _LETSENCRYPT_RENEWAL / f"{plan.domain}.conf"
-        if cert_dir.exists() or renewal.exists():
-            rc, out = _run_certbot(
-                ["certbot", "delete", "--cert-name", plan.domain, "--non-interactive"],
-                timeout_sec=120,
+    if vhost_ownership_receipt is not None:
+        try:
+            _external_cleanup_managed_vhost(
+                operation_id=operation_id,
+                domain=plan.domain,
+                ownership_receipt=vhost_ownership_receipt,
+                cfg=cfg,
             )
-            if rc != 0:
-                errors.append(f"certificate: {out or 'certbot delete failed'}")
-
-
-        try:
-            if plan.webroot.exists():
-                shutil.rmtree(plan.webroot)
-            plan.webroot.parent.rmdir()
-        except FileNotFoundError:
-            pass
-        except OSError as exc:
-            errors.append(f"webroot: {exc}")
-
-        rc, out = _run(["nginx", "-t"], timeout_sec=30)
-        if rc == 0:
-            reload_rc, reload_out = _run(["systemctl", "reload", "nginx"], timeout_sec=30)
-            if reload_rc != 0:
-                errors.append(f"nginx reload: {reload_out}")
-        else:
-            errors.append(f"nginx validation: {out}")
-
-    if database_created:
-        try:
-            _mysql_exec(f"DROP DATABASE IF EXISTS {_quote_ident(plan.db_name)}")
         except Exception as exc:
-            errors.append(f"database: {exc}")
-    if user_created:
+            errors.append(f"nginx managed vhost: {type(exc).__name__}")
+
+    if certificate_owned:
         try:
-            _mysql_exec(f"DROP USER IF EXISTS {_quote_sql(plan.db_user)}@'localhost'")
+            run_upgrade_os_operation(
+                cfg,
+                component="certificate",
+                operation="certificate_material",
+                operation_input={
+                    "operation_id": operation_id,
+                    "domain": plan.domain,
+                    "action": "remove_owned",
+                    "webroot": str(plan.webroot),
+                    "email": "",
+                    "certificate_ref": "",
+                    "dry_run": "false",
+                },
+            )
         except Exception as exc:
-            errors.append(f"database user: {exc}")
+            errors.append(f"certificate: {type(exc).__name__}")
+
+    if tree_materialized:
+        try:
+            run_upgrade_os_operation(
+                cfg,
+                component="filesystem",
+                operation="upgrade_tree_transition",
+                operation_input={
+                    "operation_id": operation_id,
+                    "instance_root": str(plan.webroot),
+                    "prepared_root": str(prepared_root),
+                    "backup_id": "",
+                    "action": "rollback_materialized",
+                    "dry_run": "false",
+                },
+            )
+        except Exception as exc:
+            errors.append(f"webroot: {type(exc).__name__}")
+
+    if vhost_ownership_receipt is not None:
+        try:
+            for action in ("test", "reload"):
+                run_upgrade_os_operation(
+                    cfg,
+                    component="nginx",
+                    operation="nginx_service_transition",
+                    operation_input={
+                        "operation_id": operation_id,
+                        "target_php_version": plan.php_version,
+                        "action": action,
+                        "dry_run": "false",
+                    },
+                )
+        except Exception as exc:
+            errors.append(f"nginx: {type(exc).__name__}")
+
+    if database_owned:
+        try:
+            run_upgrade_os_operation(
+                cfg,
+                component="database",
+                operation="database_prepare_import",
+                operation_input={
+                    "operation_id": operation_id,
+                    "engine": "mariadb",
+                    "database": plan.db_name,
+                    "database_user": plan.db_user,
+                    "action": "rollback_owned",
+                    "host": "127.0.0.1",
+                    "port": "3306",
+                    "unix_socket": "",
+                    "dump_ref": "",
+                    "target_db_credentials_json": "{}",
+                    "dry_run": "false",
+                },
+            )
+        except Exception as exc:
+            errors.append(f"database: {type(exc).__name__}")
     return errors
 
 
@@ -315,314 +341,18 @@ def _download(url: str, token: str, dst: Path) -> None:
         shutil.copyfileobj(resp, f)
 
 
-_CREATE_TABLE_RE = re.compile(r"^CREATE TABLE `([^`]+)`")
-_CREATE_COLUMN_RE = re.compile(r"^\s*`([^`]+)`\s+")
-_INSERT_VALUES_RE = re.compile(r"^INSERT INTO `([^`]+)` VALUES\s*", re.DOTALL)
-
-
-def _sql_statement_complete(sql: str) -> bool:
-    in_quote = False
-    escaped = False
-    complete = False
-    for ch in sql:
-        if in_quote:
-            if escaped:
-                escaped = False
-            elif ch == "\\":
-                escaped = True
-            elif ch == "'":
-                in_quote = False
-            continue
-        if ch == "'":
-            in_quote = True
-            continue
-        if ch == ";":
-            complete = True
-        elif not ch.isspace():
-            complete = False
-    return complete and not in_quote
-
-
-def _split_sql_rows(values_sql: str) -> list[str]:
-    rows: list[str] = []
-    i = 0
-    n = len(values_sql)
-    while i < n:
-        while i < n and (values_sql[i].isspace() or values_sql[i] in ",;"):
-            i += 1
-        if i >= n:
-            break
-        if values_sql[i] != "(":
-            return []
-        start = i + 1
-        i += 1
-        depth = 1
-        in_quote = False
-        escaped = False
-        while i < n:
-            ch = values_sql[i]
-            if in_quote:
-                if escaped:
-                    escaped = False
-                elif ch == "\\":
-                    escaped = True
-                elif ch == "'":
-                    in_quote = False
-            else:
-                if ch == "'":
-                    in_quote = True
-                elif ch == "(":
-                    depth += 1
-                elif ch == ")":
-                    depth -= 1
-                    if depth == 0:
-                        rows.append(values_sql[start:i])
-                        i += 1
-                        break
-            i += 1
-        else:
-            return []
-    return rows
-
-
-def _split_sql_values(row_sql: str) -> list[str]:
-    values: list[str] = []
-    start = 0
-    depth = 0
-    in_quote = False
-    escaped = False
-    for i, ch in enumerate(row_sql):
-        if in_quote:
-            if escaped:
-                escaped = False
-            elif ch == "\\":
-                escaped = True
-            elif ch == "'":
-                in_quote = False
-            continue
-        if ch == "'":
-            in_quote = True
-        elif ch == "(":
-            depth += 1
-        elif ch == ")":
-            depth = max(0, depth - 1)
-        elif ch == "," and depth == 0:
-            values.append(row_sql[start:i])
-            start = i + 1
-    values.append(row_sql[start:])
-    return values
-
-
-def _rewrite_generated_insert(stmt: str, generated_columns: dict[str, tuple[list[str], set[int]]]) -> str:
-    match = _INSERT_VALUES_RE.match(stmt)
-    if not match:
-        return stmt
-    table = match.group(1)
-    meta = generated_columns.get(table)
-    if not meta:
-        return stmt
-    columns, generated_indexes = meta
-    non_generated_columns = [name for idx, name in enumerate(columns) if idx not in generated_indexes]
-    rows = _split_sql_rows(stmt[match.end() :])
-    if not rows:
-        return stmt
-    rewritten_rows: list[str] = []
-    for row in rows:
-        values = _split_sql_values(row)
-        if len(values) != len(columns):
-            return stmt
-        kept = [value for idx, value in enumerate(values) if idx not in generated_indexes]
-        rewritten_rows.append("(" + ",".join(kept) + ")")
-    column_sql = ",".join(_quote_ident(col) for col in non_generated_columns)
-    return f"INSERT INTO {_quote_ident(table)} ({column_sql}) VALUES\n" + ",\n".join(rewritten_rows) + ";\n"
-
-
-def _iter_mysql_import_sql(lines: Any) -> Any:
-    generated_columns: dict[str, tuple[list[str], set[int]]] = {}
-    create_table = ""
-    create_columns: list[tuple[str, bool]] = []
-    insert_buffer: list[str] = []
-
-    for line in lines:
-        if insert_buffer:
-            insert_buffer.append(line)
-            stmt = "".join(insert_buffer)
-            if _sql_statement_complete(stmt):
-                yield _rewrite_generated_insert(stmt, generated_columns)
-                insert_buffer = []
-            continue
-
-        create_match = _CREATE_TABLE_RE.match(line)
-        if create_match:
-            create_table = create_match.group(1)
-            create_columns = []
-            yield line
-            continue
-
-        if create_table:
-            column_match = _CREATE_COLUMN_RE.match(line)
-            if column_match:
-                create_columns.append((column_match.group(1), "GENERATED" in line.upper()))
-            if line.startswith(")"):
-                indexes = {idx for idx, (_, generated) in enumerate(create_columns) if generated}
-                if indexes:
-                    generated_columns[create_table] = ([name for name, _ in create_columns], indexes)
-                create_table = ""
-                create_columns = []
-            yield line
-            continue
-
-        insert_match = _INSERT_VALUES_RE.match(line)
-        if insert_match and insert_match.group(1) in generated_columns:
-            insert_buffer = [line]
-            stmt = "".join(insert_buffer)
-            if _sql_statement_complete(stmt):
-                yield _rewrite_generated_insert(stmt, generated_columns)
-                insert_buffer = []
-            continue
-
-        yield line
-
-    if insert_buffer:
-        yield _rewrite_generated_insert("".join(insert_buffer), generated_columns)
-
-
-def _mysql_import_gz(path: Path, db_name: str) -> None:
-    proc = subprocess.Popen(
-        [*_mysql_admin_base(), db_name],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+def _apt_install_role(cfg: AgentConfig, package_role: str) -> dict[str, Any]:
+    return run_upgrade_os_operation(
+        cfg,
+        component="apt",
+        operation="apt_apply",
+        operation_input={
+            "package_role": package_role,
+            "package_state": "present",
+            "force_repo_rescan": "true",
+            "dry_run": "false",
+        },
     )
-    assert proc.stdin is not None
-    out_b = b""
-    err_b = b""
-    try:
-        with gzip.open(path, "rt", encoding="utf-8", errors="surrogateescape", newline="") as f:
-            for chunk in _iter_mysql_import_sql(f):
-                proc.stdin.write(chunk.encode("utf-8", errors="surrogateescape"))
-        proc.stdin.close()
-        proc.stdin = None
-        out_b, err_b = proc.communicate(timeout=1800)
-    except Exception as exc:
-        if proc.stdin is not None:
-            try:
-                proc.stdin.close()
-            except Exception:
-                pass
-            proc.stdin = None
-        try:
-            out_b, err_b = proc.communicate(timeout=30)
-        except Exception:
-            proc.kill()
-            out_b, err_b = proc.communicate()
-        out = ((out_b or b"") + (err_b or b"")).decode("utf-8", errors="replace").strip()
-        if out:
-            raise RuntimeError("database import failed: " + out) from exc
-        proc.kill()
-        raise
-    if proc.returncode != 0:
-        out = ((out_b or b"") + (err_b or b"")).decode("utf-8", errors="replace").strip()
-        raise RuntimeError("database import failed: " + out)
-
-
-def _apt_install_packages(packages: list[str]) -> None:
-    wanted = [str(x or "").strip() for x in packages if str(x or "").strip()]
-    if not wanted:
-        return
-    if not shutil.which("apt-get"):
-        raise RuntimeError("missing required packages and apt-get is unavailable: " + ", ".join(wanted))
-    env = dict(os.environ)
-    env["DEBIAN_FRONTEND"] = "noninteractive"
-    for cmd, timeout in (
-        (["apt-get", "update", "--allow-releaseinfo-change"], 900),
-        (["apt-get", "install", "-y", "--no-install-recommends", *wanted], 1800),
-    ):
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env, check=False)
-        if proc.returncode != 0:
-            raise RuntimeError(((proc.stdout or "") + (proc.stderr or "")).strip() or f"{cmd[0]} failed")
-
-
-def _myloader_bin(cfg: AgentConfig) -> str:
-    configured = str(getattr(cfg, "backup_myloader_bin", "") or "").strip()
-    candidates = [configured] if configured else []
-    candidates += ["myloader", "/usr/bin/myloader"]
-    for name in candidates:
-        if not name:
-            continue
-        found = shutil.which(name) or (name if Path(name).exists() else "")
-        if found:
-            return found
-    package = str(getattr(cfg, "backup_mydumper_package", "") or "mydumper").strip() or "mydumper"
-    _apt_install_packages([package])
-    for name in candidates:
-        if not name:
-            continue
-        found = shutil.which(name) or (name if Path(name).exists() else "")
-        if found:
-            return found
-    raise RuntimeError("myloader is missing after package install")
-
-
-def _mysql_admin_defaults_file() -> Path | None:
-    for arg in _mysql_admin_base()[1:]:
-        if arg.startswith("--defaults-extra-file="):
-            return Path(arg.split("=", 1)[1])
-    return None
-
-
-def _myloader_base_args(cfg: AgentConfig) -> list[str]:
-    args = [_myloader_bin(cfg)]
-    defaults = _mysql_admin_defaults_file()
-    if defaults is not None:
-        args.append(f"--defaults-file={defaults}")
-    return args
-
-
-def _find_mydumper_dump_dir(root: Path) -> Path:
-    candidates: list[Path] = []
-    for item in [root, *root.rglob("*")]:
-        if not item.is_dir():
-            continue
-        try:
-            if any(child.name.startswith("metadata") for child in item.iterdir()):
-                candidates.append(item)
-        except Exception:
-            pass
-    if not candidates:
-        raise RuntimeError("mydumper metadata not found in database artifact")
-    candidates.sort(key=lambda p: (len(p.parts), str(p)))
-    return candidates[0]
-
-
-def _mysql_import_mydumper_tar(cfg: AgentConfig, path: Path, db_name: str) -> None:
-    with tempfile.TemporaryDirectory(prefix="mcd-image-db-mydumper-") as td:
-        extract_root = Path(td)
-        with tarfile.open(path, "r:gz") as tf:
-            _safe_extract(tf, extract_root)
-        dump_dir = _find_mydumper_dump_dir(extract_root)
-        rc, out = _run(
-            [
-                *_myloader_base_args(cfg),
-                "-B",
-                db_name,
-                "-d",
-                str(dump_dir),
-                "--threads",
-                str(max(1, int(getattr(cfg, "backup_myloader_threads", 4) or 4))),
-                "--overwrite-tables",
-            ],
-            timeout_sec=max(1800, int(getattr(cfg, "backup_dump_timeout_sec", 1800) or 1800)),
-        )
-        if rc != 0:
-            raise RuntimeError("myloader import failed: " + out)
-
-
-def _mysql_import_artifact(cfg: AgentConfig, path: Path, db_name: str) -> None:
-    if tarfile.is_tarfile(path):
-        _mysql_import_mydumper_tar(cfg, path, db_name)
-        return
-    _mysql_import_gz(path, db_name)
 
 
 def _artifact_url(cfg: AgentConfig, image_ref: str, kind: str) -> str:
@@ -665,123 +395,15 @@ def _patch_local_php(path: Path, plan: ImageInstallPlan) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def _mautic_nginx_locations(plan: ImageInstallPlan) -> str:
-    fastcgi_pass = _php_fpm_fastcgi_pass(plan.php_version)
-    return f"""    location ~ \\.php$ {{
-        include snippets/fastcgi-php.conf;
-        fastcgi_pass {fastcgi_pass};
-    }}
-
-    location ~* ^/(?:config|vendor|node_modules|tests|var|\\.git)(?:/|$) {{
-        deny all;
-    }}
-
-    location ~* ^/(?:composer\\.(?:json|lock)|package(?:-lock)?\\.json|yarn\\.lock|pnpm-lock\\.yaml|symfony\\.lock|webpack\\.config\\.js|tsconfig\\.json|phpunit\\.xml(?:\\.dist)?|codeception\\.yml|SECURITY\\.md|README(?:\\..*)?|CHANGELOG(?:\\..*)?|\\.env(?:\\..*)?)$ {{
-        deny all;
-    }}
-
-    location ~* /\\.(?!well-known/) {{
-        deny all;
-    }}"""
-
-
-def _php_fpm_fastcgi_pass(php_version: str) -> str:
-    exact = Path(f"/run/php/php{str(php_version).strip()}-fpm.sock")
-    if exact.exists():
-        return f"unix:{exact}"
-    generic = Path("/run/php/php-fpm.sock")
-    if generic.exists():
-        return f"unix:{generic}"
-    return f"unix:{exact}"
-
-
-def _http_root_location(*, ssl_enabled: bool) -> str:
-    if ssl_enabled:
-        return """    location / {
-        return 301 https://$host$request_uri;
-    }"""
-    return """    location / {
-        try_files $uri /index.php$is_args$args;
-    }"""
-
-
-def _indented_form_embed_location(fastcgi_pass: str) -> str:
-    rendered = render_form_embed_location(fastcgi_pass=fastcgi_pass)
-    return "\n".join(("    " + line) if line else "" for line in rendered.splitlines())
-
-
-def _ssl_server_block(plan: ImageInstallPlan, web_root: Path) -> str:
-    cert_dir = Path("/etc/letsencrypt/live") / plan.domain
-    return f"""server {{
-    listen 443 ssl;
-    server_name {plan.domain};
-    root {web_root};
-    index index.php index.html;
-    client_max_body_size 128M;
-
-    ssl_certificate {cert_dir / "fullchain.pem"};
-    ssl_certificate_key {cert_dir / "privkey.pem"};
-
-    location / {{
-        try_files $uri /index.php$is_args$args;
-    }}
-
-{_indented_form_embed_location(_php_fpm_fastcgi_pass(plan.php_version))}
-
-{_mautic_nginx_locations(plan)}
-}}
-"""
-
-
-def _write_nginx_vhost(plan: ImageInstallPlan, *, ssl_enabled: bool = False) -> Path:
-    site = Path("/etc/nginx/sites-available") / f"{plan.domain}.conf"
-    site.parent.mkdir(parents=True, exist_ok=True)
-    web_root = _nginx_web_root(plan.webroot)
-    content = render_nginx_template(
-        "mautic_image_vhost.conf",
-        DOMAIN=plan.domain,
-        WEB_ROOT=web_root,
-        HTTP_ROOT_LOCATION=_http_root_location(ssl_enabled=ssl_enabled),
-        FORM_EMBED_HTTP_LOCATION=(
-            "" if ssl_enabled else _indented_form_embed_location(_php_fpm_fastcgi_pass(plan.php_version))
-        ),
-        MAUTIC_DENY_LOCATIONS=_mautic_nginx_locations(plan),
-        SSL_SERVER_BLOCK=_ssl_server_block(plan, web_root) if ssl_enabled else "",
+def _write_nginx_vhost(plan: ImageInstallPlan, cfg: AgentConfig, *,
+                       operation_id: str) -> dict[str, Any]:
+    return _external_write_managed_nginx_vhost(
+        operation_id=operation_id,
+        root=plan.webroot,
+        domains=[plan.domain],
+        php_version=plan.php_version,
+        cfg=cfg,
     )
-    site.write_text(content, encoding="utf-8")
-    enabled = Path("/etc/nginx/sites-enabled") / site.name
-    enabled.parent.mkdir(parents=True, exist_ok=True)
-    if not enabled.exists() and not enabled.is_symlink():
-        enabled.symlink_to(site)
-    return site
-
-
-def _nginx_web_root(project_root: Path) -> Path:
-    """Return the actual nginx root for extracted zip/composer image layouts."""
-    root = Path(project_root)
-    for child in ("docroot", "public"):
-        candidate = root / child
-        if (candidate / "index.php").exists():
-            return candidate
-    return root
-
-
-def _run_certbot_http01(plan: ImageInstallPlan) -> None:
-    rc, out = _run_certbot(
-        [
-            "certbot",
-            "--nginx",
-            "-d",
-            plan.domain,
-            "--non-interactive",
-            "--agree-tos",
-            "--redirect",
-            "--register-unsafely-without-email",
-        ],
-        timeout_sec=600,
-    )
-    if rc != 0:
-        raise RuntimeError("certbot failed: " + out)
 
 
 def _skip_image_archive_member(name: str) -> bool:
@@ -849,13 +471,15 @@ def install_from_image(
     mail_profile_id: str | None = None,
 ) -> dict[str, Any]:
     plan = build_plan(image_ref=image_ref, domain=domain, php_version=php_version)
+    operation_id = f"image-{uuid4().hex}"
     if not yes:
         raise RuntimeError("--yes is required")
     if not str(cfg.mcc_token or "").strip():
         raise RuntimeError("mcc.token is not configured")
 
+    _apt_install_role(cfg, "image_install")
     print(f"Preflight: domain={plan.domain} webroot={plan.webroot} db={plan.db_name}")
-    problems = _preflight(plan)
+    problems = _preflight(plan, cfg)
     if problems:
         for p in problems:
             print(f"preflight_error: {p}")
@@ -870,68 +494,110 @@ def install_from_image(
         print("Downloading image database")
         _download(_artifact_url(cfg, plan.image_ref, "db"), str(cfg.mcc_token), db_artifact)
 
-        database_created = False
-        user_created = False
-        resources_started = False
+        database_owned = False
+        certificate_owned = False
+        tree_materialized = False
+        vhost_ownership_receipt: dict[str, Any] | None = None
+        prepared_root = tmp / "prepared-root"
         mail_requested = bool(mail_profile_id or own_mail)
         try:
-            print("Creating database and user")
-            _mysql_exec(f"CREATE DATABASE {_quote_ident(plan.db_name)} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
-            database_created = True
-            _mysql_exec(
-                "CREATE USER "
-                + _quote_sql(plan.db_user)
-                + "@'localhost' IDENTIFIED BY "
-                + _quote_sql(plan.db_password)
+            print("Creating database, user and importing database")
+            run_upgrade_os_operation(
+                cfg,
+                component="database",
+                operation="database_prepare_import",
+                operation_input={
+                    "operation_id": operation_id,
+                    "engine": "mariadb",
+                    "database": plan.db_name,
+                    "database_user": plan.db_user,
+                    "action": "import",
+                    "host": "127.0.0.1",
+                    "port": "3306",
+                    "unix_socket": "",
+                    "dump_ref": str(db_artifact),
+                    "target_db_credentials_json": json.dumps(
+                        {"username": plan.db_user, "password": plan.db_password},
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                    ),
+                    "dry_run": "false",
+                },
             )
-            user_created = True
-            _mysql_exec(f"GRANT ALL PRIVILEGES ON {_quote_ident(plan.db_name)}.* TO {_quote_sql(plan.db_user)}@'localhost'")
-            _mysql_exec("FLUSH PRIVILEGES")
+            database_owned = True
 
             print("Extracting files")
-            _prepare_instance_parent(plan.webroot)
-            resources_started = True
-            plan.webroot.mkdir(parents=True, exist_ok=False)
+            prepared_root.mkdir(parents=True, exist_ok=False)
             with tarfile.open(files_tgz, "r:gz") as tf:
-                _safe_extract(tf, plan.webroot)
+                _safe_extract(tf, prepared_root)
 
-            local_php = plan.webroot / "config" / "local.php"
+            local_php = prepared_root / "config" / "local.php"
             if not local_php.exists():
-                local_php = plan.webroot / "app" / "config" / "local.php"
+                local_php = prepared_root / "app" / "config" / "local.php"
             if not local_php.exists():
                 raise RuntimeError("local.php not found after extraction")
             print("Patching Mautic local.php")
             _patch_local_php(local_php, plan)
 
-            print("Importing database")
-            _mysql_import_artifact(cfg, db_artifact, plan.db_name)
-
-            print("Fixing permissions")
-            permission_rc, _ = _run(["chown", "-R", "www-data:www-data", str(plan.webroot.parent)], timeout_sec=300)
-            if permission_rc != 0:
-                raise RuntimeError("image runtime ownership setup failed")
             for rel in ("var/cache", "var/logs"):
-                imported = plan.webroot / rel
+                imported = prepared_root / rel
                 if imported.is_symlink():
                     imported.unlink()
                 elif imported.exists():
                     shutil.rmtree(imported)
 
+            print("Materializing image runtime with external ownership policy")
+            run_upgrade_os_operation(
+                cfg,
+                component="filesystem",
+                operation="upgrade_tree_transition",
+                operation_input={
+                    "operation_id": operation_id,
+                    "instance_root": str(plan.webroot),
+                    "prepared_root": str(prepared_root),
+                    "backup_id": "",
+                    "action": "materialize_fresh",
+                    "dry_run": "false",
+                },
+            )
+            tree_materialized = True
+
             print("Warming prod runtime before publishing nginx vhost")
             warmup = _warm_image_runtime(plan)
 
             print("Writing nginx vhost")
-            _write_nginx_vhost(plan)
-            rc, out = _run(["nginx", "-t"], timeout_sec=30)
-            if rc != 0:
-                raise RuntimeError("nginx -t failed: " + out)
-            reload_rc, reload_out = _run(["systemctl", "reload", "nginx"], timeout_sec=30)
-            if reload_rc != 0:
-                raise RuntimeError("nginx reload failed: " + reload_out)
+            vhost_result = _write_nginx_vhost(plan, cfg, operation_id=operation_id)
+            vhost_ownership_receipt = vhost_result["ownership_receipt"]
+            for action in ("test", "reload"):
+                run_upgrade_os_operation(
+                    cfg,
+                    component="nginx",
+                    operation="nginx_service_transition",
+                    operation_input={
+                        "operation_id": operation_id,
+                        "target_php_version": plan.php_version,
+                        "action": action,
+                        "dry_run": "false",
+                    },
+                )
 
             if run_certbot:
                 print("Running certbot via nginx HTTP-01")
-                _run_certbot_http01(plan)
+                run_upgrade_os_operation(
+                    cfg,
+                    component="certificate",
+                    operation="certificate_material",
+                    operation_input={
+                        "operation_id": operation_id,
+                        "domain": plan.domain,
+                        "action": "issue_http01",
+                        "webroot": str(plan.webroot),
+                        "email": "",
+                        "certificate_ref": "",
+                        "dry_run": "false",
+                    },
+                )
+                certificate_owned = True
 
             if mail_profile_id:
                 print("Applying MCC mail profile")
@@ -965,9 +631,12 @@ def install_from_image(
             rollback_errors = _rollback_failed_install(
                 cfg,
                 plan,
-                database_created=database_created,
-                user_created=user_created,
-                resources_started=resources_started,
+                operation_id=operation_id,
+                database_owned=database_owned,
+                certificate_owned=certificate_owned,
+                prepared_root=prepared_root,
+                tree_materialized=tree_materialized,
+                vhost_ownership_receipt=vhost_ownership_receipt,
                 mail_requested=mail_requested,
             )
             if rollback_errors:

@@ -177,12 +177,23 @@ def wire_upgrade(invocation, monkeypatch, kind="composer"):
         raise HTTPError(request.full_url, 409, "release blocked", {}, None)
 
     monkeypatch.setattr(upgrade.urllib.request, "urlopen", deny)
-    monkeypatch.setattr(upgrade, "_enter_upgrade_maintenance", lambda *a: events.append("maintenance") or object())
+    monkeypatch.setattr(upgrade, "_enter_upgrade_maintenance", lambda *a, **kw: events.append("maintenance") or object())
     monkeypatch.setattr(upgrade, "_exit_upgrade_maintenance", lambda *a: events.append("cleanup"))
     monkeypatch.setattr(upgrade, "_pre_upgrade_permissions_check", lambda *a: events.append("permissions"))
     monkeypatch.setattr(upgrade, "revert_mautic713_import_tag_patch", lambda *a: events.append("revert") or {"status": "clean"})
+    monkeypatch.setattr(upgrade, "_prepare_composer_host", lambda *a, **kw: "/usr/bin/composer")
 
-    def install(*args):
+    def external(_config, *, component, operation, operation_input):
+        if (component, operation, operation_input.get("action")) == (
+            "filesystem", "upgrade_tree_transition", "backup"
+        ):
+            events.append("baseline_backup")
+            return {"status": "ok", "backup_ref": "verified-backup"}
+        return {"status": "ok"}
+
+    monkeypatch.setattr(upgrade, "run_upgrade_os_operation", external)
+
+    def install(*args, **kwargs):
         events.append("install")
         installed[0] = True
 
@@ -217,7 +228,6 @@ def test_same_major_upgrade_keeps_requested_baseline_backup(invocation, monkeypa
     invocation.update(target="7.1.5", raw_plan=None, run_id=None)
     args, events = wire_upgrade(invocation, monkeypatch)
     args["do_backup"] = True
-    monkeypatch.setattr(upgrade, "_backup_install", lambda *a: events.append("baseline_backup") or "verified-backup")
     assert upgrade.run_upgrade_apply(**args, mcc_preflighted_single_instance=True) == 0
     assert events.index("baseline_backup") < events.index("install")
 
@@ -225,12 +235,11 @@ def test_same_major_upgrade_keeps_requested_baseline_backup(invocation, monkeypa
 def test_manual_php84_runs_after_verified_mautic_update(invocation, monkeypatch, capsys):
     args, events = wire_upgrade(invocation, monkeypatch)
     args.update(do_backup=True, with_system_upgrade=True)
-    monkeypatch.setattr(upgrade, "_backup_install", lambda *a: events.append("baseline_backup") or "verified-backup")
     monkeypatch.setattr(upgrade, "_assert_php84_host_safe", lambda *a: events.append("host_preflight"))
     monkeypatch.setattr(upgrade, "_apply_system_upgrade", lambda *a, **kw: events.append("system"))
     monkeypatch.setattr(upgrade, "rebind_php_after_system_upgrade", lambda value: value)
     monkeypatch.setattr(upgrade, "replace", lambda config, **kw: config)
-    monkeypatch.setattr(upgrade, "_php84_runtime_observation", lambda: {"cli_version": "8.4.1", "fpm_version": "8.4", "nginx_socket": ["/run/php/php8.4-fpm.sock"]})
+    monkeypatch.setattr(upgrade, "_verify_nginx_and_php_services", lambda *a, **kw: {"cli_version": "8.4.1", "fpm_version": "8.4", "nginx_socket": ["/run/php/php8.4-fpm.sock"]})
     assert upgrade.run_upgrade_apply(**args, mcc_preflighted_single_instance=True) == 0
     assert events == ["host_preflight", "stage", "maintenance", "permissions", "baseline_backup", "install", "system", "cleanup"]
     evidence = [
@@ -323,7 +332,7 @@ def test_same_version_manual_job_emits_terminal_rejection_before_maintenance(
 def test_source_change_during_maintenance_aborts_before_first_mutation(invocation, monkeypatch):
     args, events = wire_upgrade(invocation, monkeypatch)
 
-    def changed(*a):
+    def changed(*a, **kw):
         events.append("maintenance")
         (Path(invocation["root"]) / "composer.lock").write_text('{"packages":[{"name":"mautic/core-lib","version":"7.1.2"}]}')
         return object()

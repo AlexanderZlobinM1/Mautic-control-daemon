@@ -29,6 +29,7 @@ from mcd_agent.cluster_routing import cluster_local_identity_values
 from mcd_agent.inventory import InstanceInventory, ensure_seeded
 from mcd_agent.models import DBConfig, MauticInstall
 from mcd_agent.secret_store import SecretStore
+from mcd_agent.upgrade_os_external import run_upgrade_os_operation
 
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -1697,16 +1698,34 @@ def _backup_method(cfg: AgentConfig) -> str:
     return _normalize_backup_method(getattr(cfg, "backup_method", "mydumper"))
 
 
-def _apt_install_packages(packages: list[str]) -> None:
-    wanted = [p for p in [str(x or "").strip() for x in packages] if p]
-    if not wanted:
-        return
-    if not shutil.which("apt-get"):
-        raise RuntimeError(f"missing required backup packages and apt-get is unavailable: {', '.join(wanted)}")
-    env = dict(os.environ)
-    env["DEBIAN_FRONTEND"] = "noninteractive"
-    _run(["apt-get", "update", "--allow-releaseinfo-change"], timeout_sec=900, env=env, check=True)
-    _run(["apt-get", "install", "-y", "--no-install-recommends"] + wanted, timeout_sec=1800, env=env, check=True)
+def _install_backup_myloader(cfg: AgentConfig) -> None:
+    run_upgrade_os_operation(
+        cfg,
+        component="apt",
+        operation="apt_apply",
+        operation_input={
+            "package_role": "backup_myloader",
+            "package_state": "present",
+            "force_repo_rescan": "true",
+            "dry_run": "false",
+        },
+    )
+
+
+def _install_missing_mydumper_only(
+    cfg: AgentConfig,
+    missing: list[tuple[str, str]],
+) -> list[str]:
+    unsupported = [bin_path for bin_path, _pkg in missing if bin_path != cfg.backup_mydumper_bin]
+    if unsupported:
+        raise RuntimeError("missing required backup tools: " + ", ".join(unsupported))
+    if not missing:
+        return []
+    if not cfg.backup_auto_install_packages:
+        raise RuntimeError("missing required backup tools: " + ", ".join(bin_path for bin_path, _ in missing))
+    _install_backup_myloader(cfg)
+    package = str(cfg.backup_mydumper_package or "").strip()
+    return [package] if package else []
 
 
 def _ensure_backup_tools(cfg: AgentConfig) -> dict[str, Any]:
@@ -1721,17 +1740,7 @@ def _ensure_backup_tools(cfg: AgentConfig) -> dict[str, Any]:
     missing = [(bin_path, pkg) for bin_path, pkg in required if not shutil.which(bin_path) and not Path(bin_path).exists()]
     installed: list[str] = []
     if missing:
-        packages = []
-        seen: set[str] = set()
-        for _bin, pkg in missing:
-            pkg = str(pkg or "").strip()
-            if pkg and pkg not in seen:
-                seen.add(pkg)
-                packages.append(pkg)
-        if not cfg.backup_auto_install_packages:
-            raise RuntimeError("missing required backup tools: " + ", ".join(bin_path for bin_path, _ in missing))
-        _apt_install_packages(packages)
-        installed = packages
+        installed = _install_missing_mydumper_only(cfg, missing)
     still_missing = [bin_path for bin_path, _ in required if not shutil.which(bin_path) and not Path(bin_path).exists()]
     if still_missing:
         raise RuntimeError("required backup tools are still missing after package preflight: " + ", ".join(still_missing))
@@ -2949,17 +2958,7 @@ def _ensure_cluster_tools(cfg: AgentConfig, methods: set[str]) -> dict[str, Any]
     missing = [(bin_path, pkg) for bin_path, pkg in required if not shutil.which(bin_path) and not Path(bin_path).exists()]
     installed: list[str] = []
     if missing:
-        packages: list[str] = []
-        seen: set[str] = set()
-        for _bin, pkg in missing:
-            pkg = str(pkg or "").strip()
-            if pkg and pkg not in seen:
-                seen.add(pkg)
-                packages.append(pkg)
-        if not cfg.backup_auto_install_packages:
-            raise RuntimeError("missing required backup tools: " + ", ".join(bin_path for bin_path, _ in missing))
-        _apt_install_packages(packages)
-        installed = packages
+        installed = _install_missing_mydumper_only(cfg, missing)
     still_missing = [bin_path for bin_path, _ in required if not shutil.which(bin_path) and not Path(bin_path).exists()]
     if still_missing:
         raise RuntimeError("required backup tools are still missing after package preflight: " + ", ".join(still_missing))

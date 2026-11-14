@@ -118,12 +118,7 @@ def _matching_instance_entry(entries: dict[str, Any], keys: list[str]) -> str | 
 
 
 def _canonical_instance_uids(instance_uids: list[str], *, host_name: str = "") -> list[str]:
-    """Return local UIDs plus one host-qualified compatibility alias.
-
-    Inventory keeps the stable local UID, while older/current MCC desired
-    rows may be addressed by the immutable ``<uid>@<mcc-host>`` key.  Send
-    both forms without inventing a host or binding the code to a domain.
-    """
+    """Return local UIDs plus one host-qualified compatibility alias."""
     canonical: list[str] = []
     host = str(host_name or "").strip()
     for raw_uid in instance_uids:
@@ -156,11 +151,11 @@ def associate_instance_desired_states(
             continue
         target = uid if uid in available else ""
         if not target:
-            base = uid.split("@", 1)[0]
+            base_uid = uid.split("@", 1)[0]
             matches = [
                 candidate
                 for candidate in available
-                if candidate not in used and candidate.split("@", 1)[0] == base
+                if candidate not in used and candidate.split("@", 1)[0] == base_uid
             ]
             if len(matches) == 1:
                 target = matches[0]

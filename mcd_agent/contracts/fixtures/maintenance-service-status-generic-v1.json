@@ -1,0 +1,61 @@
+{
+  "schema": "mcd-maintenance-service-status-generic-fixture-v1",
+  "capability": {
+    "capability_id": "maintenance",
+    "version": "1.0",
+    "command": {
+      "command_id": "read_service_status",
+      "version": "1.0",
+      "execution": "generic_primitive",
+      "mutates_state": false,
+      "input_schema_ref": "portal://mcd/input/maintenance-service-status-v1",
+      "target_scope": "host",
+      "binding_schema": "mcd-upgrade-os-binding-v1",
+      "binding_sha256": "sha256:6ebeda623d7155fe70072823eda435a889b2e794baabe2a02025862b0946444e"
+    }
+  },
+  "request_input": {
+    "action": "status"
+  },
+  "external_dispatch": {
+    "component": "service",
+    "operation": "upgrade_service_transition",
+    "operation_input": {
+      "operation_id": "",
+      "target_php_version": "",
+      "action": "status",
+      "owned_stop": "false",
+      "dry_run": "false"
+    },
+    "artifact_sha256": "3cf5c2333260a9cbe7b46f5cc17534cf3ee28f96e8a1bc8fb23831a36c1603c7",
+    "entrypoint_sha256": "93ae4ae65e2b758efd90df955671654b1e93f2fdf542e29fede355dd586ae437",
+    "profile_sha256": "52944786428d409a704d1e3622334e62ace75a06ff3a7f32ec39d881a44aedfe"
+  },
+  "expected_receipts": {
+    "stage": {
+      "schema": "portal-mcd-generic-stage-receipt-v1",
+      "sequence": 1,
+      "stage_id": "execute",
+      "status": "started"
+    },
+    "terminal": {
+      "schema": "portal-mcd-generic-terminal-receipt-v1",
+      "sequence": 2,
+      "status": "succeeded",
+      "result": {
+        "status": "succeeded",
+        "action": "status",
+        "binding": {
+          "schema": "mcd-upgrade-os-binding-v1",
+          "sha256": "sha256:6ebeda623d7155fe70072823eda435a889b2e794baabe2a02025862b0946444e"
+        },
+        "external_receipt_required": {
+          "component": "service",
+          "action": "status",
+          "mutation_started": false
+        }
+      }
+    }
+  },
+  "cli_equivalent": "/opt/mcd/venv/bin/mcd-cli maintenance --config <mcd.toml> status --json"
+}

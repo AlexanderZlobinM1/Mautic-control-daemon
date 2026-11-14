@@ -28,7 +28,7 @@ import pymysql
 from pymysql.cursors import DictCursor
 
 from mcd_agent import __version__
-from mcd_agent.apt_profile import collect_apt_state
+from mcd_agent.service_profiles import _configured_external_operation
 from mcd_agent.backup import backup_profile_for_push, backup_profile_sync_payload, backup_state_for_push
 from mcd_agent.cluster_assets import collect_cluster_assets_status
 from mcd_agent.config import AgentConfig
@@ -56,6 +56,7 @@ from mcd_agent.plugin_inventory import (
 )
 from mcd_agent.runtime_matrix import build_runtime_profile
 from mcd_agent.inventory import InstanceInventory, MauticInstall, ensure_seeded
+from mcd_agent.instance_uid import canonical_instance_uid
 from mcd_agent.logical_issues import read_logical_issues_snapshot
 from mcd_agent.maintenance_mode import collect_maintenance_state
 from mcd_agent.mautic_version_cache import collect_mautic_version
@@ -2331,21 +2332,18 @@ class MCCStatePusher:
         If package DB/sources changed, refresh apt_state immediately
         even when cache interval is not yet elapsed.
         """
-        paths = [
-            Path("/var/lib/dpkg/status"),
-            Path("/var/lib/apt/periodic/update-success-stamp"),
-            Path("/var/lib/apt/lists"),
-            Path("/etc/apt/sources.list"),
-            Path("/etc/apt/sources.list.d"),
-        ]
-        parts: list[str] = []
-        for p in paths:
-            try:
-                st = p.stat()
-                parts.append(f"{p}:{int(st.st_mtime_ns)}:{int(st.st_size)}")
-            except Exception:
-                parts.append(f"{p}:missing")
-        return "|".join(parts)
+        external = _configured_external_operation(
+            "apt", {}, cfg=self.cfg, operation="apt_state_observe",
+            operation_input={"mode": "probe"},
+        )
+        if external is not None:
+            if str(external.get("status") or "").strip().lower() in {"error", "failed"}:
+                raise RuntimeError(str(external.get("reason") or "apt_state_observe_failed"))
+            probe_key = external.get("probe_key")
+            if not isinstance(probe_key, str) or not probe_key:
+                raise RuntimeError("apt_state_observe returned invalid probe_key")
+            return probe_key
+        raise RuntimeError("apt_state_observe_binding_not_configured")
 
     def _apt_state(self, now_ts: float) -> dict[str, Any]:
         interval = max(30, int(getattr(self.cfg, "mcc_push_apt_state_interval_sec", 120) or 120))
@@ -2359,7 +2357,18 @@ class MCCStatePusher:
         # Periodic state publication is observation-only.  The explicit
         # service-profile/``zabbix bootstrap-mysql-user`` operations retain
         # ownership of the mutating bootstrap and its durable marker.
-        payload = collect_apt_state(timeout_sec=30, cfg=self.cfg, auto_bootstrap_zabbix=False)
+        external = _configured_external_operation(
+            "apt", {}, cfg=self.cfg, operation="apt_state_observe",
+            operation_input={"mode": "collect", "timeout_sec": 30, "auto_bootstrap_zabbix": False},
+        )
+        if external is not None:
+            # ``status:error`` is a valid observation result (for example an
+            # unavailable apt cache); only the external executor's typed
+            # terminal failure is a transport/dispatch concern. Preserve the
+            # established apt_state payload unchanged for MCC.
+            payload = external
+        else:
+            raise RuntimeError("apt_state_observe_binding_not_configured")
         self.latest_apt_state = payload
         self.latest_apt_state_ts = now_ts
         self.latest_apt_probe_key = probe_key
@@ -2584,7 +2593,7 @@ class MCCStatePusher:
             )
             instances.append(
                 {
-                    "instance_uid": i.instance_uid,
+                    "instance_uid": canonical_instance_uid(i.instance_uid),
                     "name": i.name,
                     "root": i.root,
                     "source": i.source,
@@ -2665,7 +2674,7 @@ class MCCStatePusher:
             "backup_profile": backup_profile_for_push(self.cfg),
             "backup_profile_sync": backup_profile_sync_payload(self.cfg),
             "apt_state": self._apt_state(now_ts),
-            "mautic_install_readiness": collect_mautic_install_readiness(),
+            "mautic_install_readiness": collect_mautic_install_readiness(self.cfg),
             "cluster_db": self._cluster_db_state(now_ts),
             "state_backend": self._state_backend_payload(now_ts),
             "cluster_assets": self._cluster_assets_payload(now_ts, installs),

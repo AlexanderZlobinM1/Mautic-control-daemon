@@ -1,0 +1,22 @@
+{
+  "schema": "mcd-upgrade-os-instance-identity-fixture-v1",
+  "host_name": "MauticFarm-02",
+  "persisted_instance_uid": "demov6.sales-snap.com",
+  "cases": [
+    {
+      "input": "demov6.sales-snap.com",
+      "accepted": true,
+      "canonical_instance_uid": "demov6.sales-snap.com"
+    },
+    {
+      "input": "demov6.sales-snap.com@MauticFarm-02",
+      "accepted": true,
+      "canonical_instance_uid": "demov6.sales-snap.com"
+    },
+    {
+      "input": "demov6.sales-snap.com@MauticFarm-01",
+      "accepted": false,
+      "error_code": "instance_uid_host_mismatch"
+    }
+  ]
+}

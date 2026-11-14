@@ -9,6 +9,9 @@ import signal
 import subprocess
 import time
 from typing import Any
+from uuid import uuid4
+
+from mcd_agent.upgrade_os_external import run_upgrade_os_operation
 
 try:
     import fcntl
@@ -18,10 +21,6 @@ except Exception:  # pragma: no cover - non-POSIX development environments
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _run(cmd: list[str], timeout_sec: int = 8) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec, check=False)
 
 
 def _scheduler_pause_flag(cfg: Any) -> Path:
@@ -128,72 +127,58 @@ def _clear_cron_marker(cfg: Any) -> None:
         p.unlink()
 
 
-def _detect_cron_unit() -> str | None:
-    for unit in ("cron", "crond"):
-        try:
-            proc = _run(["systemctl", "show", "-p", "LoadState", "--value", unit], timeout_sec=5)
-        except Exception:
-            continue
-        if proc.returncode != 0:
-            continue
-        state = str(proc.stdout or "").strip().lower()
-        if state and state != "not-found":
-            return unit
-    return None
-
-
-def _cron_is_active(unit: str) -> bool | None:
-    try:
-        proc = _run(["systemctl", "is-active", unit], timeout_sec=5)
-    except Exception:
-        return None
-    if proc.returncode == 0 and str(proc.stdout or "").strip().lower() == "active":
-        return True
-    if proc.returncode != 0:
-        return False
-    return False
-
-
-def stop_cron_service(cfg: Any) -> dict[str, Any]:
+def stop_cron_service(
+    cfg: Any,
+    *,
+    operation_id: str | None = None,
+    target_php_version: str = "",
+) -> dict[str, Any]:
     marker = _read_cron_marker(cfg)
-    unit = str(marker.get("unit", "") or "").strip() or (_detect_cron_unit() or "")
-    if not unit:
+    if marker:
         return {
-            "ok": False,
-            "requested": True,
-            "unit": "",
-            "was_active": False,
-            "cron_stopped": False,
-            "message": "cron service unit not found (expected cron/crond)",
+            "ok": True,
+            "requested": False,
+            "unit": str(marker.get("unit", "") or ""),
+            "was_active": bool(marker.get("was_active", False)),
+            "cron_stopped": bool(marker.get("owned_stop", False)),
+            "operation_id": str(marker.get("operation_id", "") or ""),
+            "message": "cron ownership marker already present",
         }
-    active = _cron_is_active(unit)
-    was_active = bool(active) if active is not None else False
-    stopped_ok = False
-    message = ""
-    if active:
-        proc = _run(["systemctl", "stop", unit], timeout_sec=20)
-        stopped_ok = proc.returncode == 0
-        if not stopped_ok:
-            message = (proc.stderr or proc.stdout or "failed to stop cron service").strip()
-    else:
-        stopped_ok = True
-
-    if stopped_ok:
+    opid = str(operation_id or f"maintenance-{uuid4().hex}")
+    receipt = run_upgrade_os_operation(
+        cfg,
+        component="service",
+        operation="upgrade_service_transition",
+        operation_input={
+            "operation_id": opid,
+            "target_php_version": str(target_php_version or ""),
+            "action": "quiesce",
+            "owned_stop": "false",
+            "dry_run": "false",
+        },
+    )
+    unit = str(receipt.get("cron_service") or "")
+    was_active = bool(receipt.get("was_active", False))
+    owned_stop = bool(receipt.get("owned_stop", False))
+    if owned_stop:
         _write_cron_marker(
             cfg,
             {
+                "operation_id": opid,
                 "unit": unit,
                 "was_active": was_active,
+                "owned_stop": True,
                 "stopped_at_utc": _utc_now_iso(),
             },
         )
     return {
-        "ok": bool(stopped_ok),
+        "ok": True,
         "requested": True,
         "unit": unit,
         "was_active": was_active,
-        "cron_stopped": bool(stopped_ok),
-        "message": message,
+        "cron_stopped": owned_stop,
+        "operation_id": opid,
+        "message": "",
     }
 
 
@@ -207,34 +192,40 @@ def restore_cron_service_if_needed(cfg: Any) -> dict[str, Any]:
             "started": False,
             "message": "cron marker not set",
         }
-    unit = str(marker.get("unit", "") or "").strip() or (_detect_cron_unit() or "")
+    unit = str(marker.get("unit", "") or "").strip()
     was_active = bool(marker.get("was_active", False))
-    if not unit:
-        _clear_cron_marker(cfg)
+    opid = str(marker.get("operation_id", "") or "")
+    if not opid or marker.get("owned_stop") is not True:
         return {
             "ok": False,
-            "requested": bool(was_active),
-            "unit": "",
+            "requested": True,
+            "unit": unit,
             "started": False,
-            "message": "cron service unit not found while restoring",
+            "message": "cron ownership marker is incomplete",
         }
-    started = False
-    message = ""
-    ok = True
-    if was_active:
-        proc = _run(["systemctl", "start", unit], timeout_sec=20)
-        ok = proc.returncode == 0
-        if ok:
-            started = True
-        else:
-            message = (proc.stderr or proc.stdout or "failed to start cron service").strip()
-    _clear_cron_marker(cfg)
+    receipt = run_upgrade_os_operation(
+        cfg,
+        component="service",
+        operation="upgrade_service_transition",
+        operation_input={
+            "operation_id": opid,
+            "target_php_version": "",
+            "action": "recover",
+            "owned_stop": "true",
+            "dry_run": "false",
+        },
+    )
+    started = bool(receipt.get("recovered", False))
+    ok = bool(started or not was_active)
+    if ok:
+        _clear_cron_marker(cfg)
     return {
         "ok": bool(ok),
         "requested": bool(was_active),
         "unit": unit,
         "started": bool(started),
-        "message": message,
+        "operation_id": opid,
+        "message": "" if ok else "external cron recovery did not confirm active state",
     }
 
 
@@ -242,8 +233,21 @@ def collect_maintenance_state(cfg: Any) -> dict[str, Any]:
     pause_flag = _scheduler_pause_flag(cfg)
     paused = pause_flag.exists()
     marker = _read_cron_marker(cfg)
-    unit = str(marker.get("unit", "") or "").strip() or (_detect_cron_unit() or "")
-    cron_active = _cron_is_active(unit) if unit else None
+    receipt = run_upgrade_os_operation(
+        cfg,
+        component="service",
+        operation="upgrade_service_transition",
+        operation_input={
+            "operation_id": "",
+            "target_php_version": "",
+            "action": "status",
+            "owned_stop": "false",
+            "dry_run": "false",
+        },
+    )
+    unit = str(receipt.get("cron_service") or marker.get("unit") or "")
+    active = receipt.get("active")
+    cron_active = active.get(unit) if isinstance(active, dict) and unit else None
     return {
         "mode": "on" if paused else "off",
         "paused": bool(paused),
@@ -253,6 +257,11 @@ def collect_maintenance_state(cfg: Any) -> dict[str, Any]:
         "cron_service_active": cron_active,
         "cron_marker_present": bool(marker),
         "checked_at_utc": _utc_now_iso(),
+        # Preserve the typed external observation for callers that must prove
+        # the configured Debian binding was actually dispatched.  The CLI
+        # keeps its established summary, while the Portal generic primitive
+        # can carry this bounded, secret-free receipt in its normal terminal.
+        "external_receipt": receipt,
     }
 
 

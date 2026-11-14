@@ -22,6 +22,8 @@ NGINX_OPERATION_INPUT_KEYS = {
     'nginx_baseline_satisfied': set(),
     'cloudflare_real_ip_state': set(),
     'write_nginx_vhost': {'root', 'domains', 'php_version'},
+    'write_managed_nginx_vhost': {'operation_id', 'root', 'domains', 'php_version'},
+    'cleanup_managed_vhost': {'operation_id', 'domain', 'ownership_receipt'},
     'write_switched_vhost': {'source_root', 'nginx_root', 'php_version', 'site_available', 'site_enabled'},
 }
 
@@ -29,10 +31,16 @@ def nginx_operation_input_valid(operation: Any, values: Any) -> bool:
     required = NGINX_OPERATION_INPUT_KEYS.get(operation) if isinstance(operation, str) else None
     if required is None or not isinstance(values, dict) or set(values) != required:
         return False
-    if operation == 'write_nginx_vhost':
+    if operation in {'write_nginx_vhost', 'write_managed_nginx_vhost'}:
         return (isinstance(values['root'], str) and isinstance(values['php_version'], str)
                 and isinstance(values['domains'], list)
-                and all(isinstance(domain, str) for domain in values['domains']))
+                and all(isinstance(domain, str) for domain in values['domains'])
+                and (operation == 'write_nginx_vhost'
+                     or isinstance(values['operation_id'], str)))
+    if operation == 'cleanup_managed_vhost':
+        return (isinstance(values['operation_id'], str)
+                and isinstance(values['domain'], str)
+                and isinstance(values['ownership_receipt'], dict))
     if operation == 'write_switched_vhost':
         return (all(isinstance(values[key], str) for key in required - {'site_enabled'})
                 and (values['site_enabled'] is None or isinstance(values['site_enabled'], str)))

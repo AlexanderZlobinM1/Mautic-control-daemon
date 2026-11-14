@@ -14,7 +14,7 @@ def scenario(tmp_path, monkeypatch):
     plan.webroot = tmp_path / "verify" / "public_html"
     cfg = SimpleNamespace(mcc_token="test", mcc_url="https://controller.example.org", state_db_path=str(tmp_path / "state.db"))
     monkeypatch.setattr(install, "build_plan", lambda **kw: plan)
-    monkeypatch.setattr(install, "_preflight", lambda plan: [])
+    monkeypatch.setattr(install, "_preflight", lambda plan, cfg: [])
     monkeypatch.setattr("mcd_agent.source_operation.source_operation_lease", lambda cfg: nullcontext())
     def download(url, token, destination):
         if destination.name == "files.tar.gz":
@@ -29,12 +29,21 @@ def scenario(tmp_path, monkeypatch):
             path.write_text("fixture")
     monkeypatch.setattr(install, "_download", download)
     monkeypatch.setattr(install, "_safe_extract", extract)
-    monkeypatch.setattr(install, "_mysql_exec", lambda *a, **kw: "")
-    monkeypatch.setattr(install, "_mysql_import_artifact", lambda *a: events.append("db"))
+    def external(_cfg, *, component, operation, operation_input):
+        if component == "database" and operation_input["action"] == "import":
+            events.append("db")
+        elif component == "filesystem" and operation_input["action"] == "materialize_fresh":
+            events.append("materialize")
+        elif component == "certificate" and operation_input["action"] == "issue_http01":
+            events.append("certificate")
+        return {"status": "ok"}
+    monkeypatch.setattr(install, "run_upgrade_os_operation", external)
     monkeypatch.setattr(install, "_patch_local_php", lambda *a: events.append("config"))
     monkeypatch.setattr(install, "_run", lambda *a, **kw: (0, ""))
-    monkeypatch.setattr(install, "_write_nginx_vhost", lambda *a, **kw: events.append("vhost"))
-    monkeypatch.setattr(install, "_run_certbot_http01", lambda *a: events.append("certificate"))
+    monkeypatch.setattr(
+        install, "_write_nginx_vhost",
+        lambda *a, **kw: events.append("vhost") or {"ownership_receipt": {"schema": "test"}},
+    )
     monkeypatch.setattr(install, "_warm_image_runtime", lambda *a: events.append("warm") or {"status": "ok"})
     monkeypatch.setattr(install, "_verify_image_https", lambda *a: events.append("https") or {"status": "ok", "http_status": 200})
     monkeypatch.setattr(install, "_rollback_failed_install", lambda *a, **kw: events.append("rollback") or [])
@@ -51,7 +60,7 @@ def run(scenario, **kwargs):
 def test_publish_and_success_follow_prod_warmup_and_https_acceptance(scenario):
     result = run(scenario)
     events = scenario[2]
-    assert events.index("config") < events.index("warm") < events.index("vhost") < events.index("https") < events.index("rescan")
+    assert events.index("config") < events.index("materialize") < events.index("warm") < events.index("vhost") < events.index("https") < events.index("rescan")
     assert result["runtime_warmup"]["status"] == "ok"
     assert result["runtime_verification"]["http_status"] == 200
 
@@ -125,9 +134,16 @@ def test_warmup_nonzero_is_failure_without_secret_console_output(tmp_path, monke
     assert "sensitive" not in str(exc.value)
 
 
-def test_failed_ownership_never_warms_or_publishes(scenario, monkeypatch):
-    monkeypatch.setattr(install, "_run", lambda *a, **kw: (1, "ownership failed"))
-    with pytest.raises(RuntimeError, match="ownership setup failed"):
+def test_failed_external_materialization_never_warms_or_publishes(scenario, monkeypatch):
+    original = install.run_upgrade_os_operation
+
+    def fail_materialize(cfg, *, component, operation, operation_input):
+        if component == "filesystem" and operation_input.get("action") == "materialize_fresh":
+            raise RuntimeError("materialization failed")
+        return original(cfg, component=component, operation=operation, operation_input=operation_input)
+
+    monkeypatch.setattr(install, "run_upgrade_os_operation", fail_materialize)
+    with pytest.raises(RuntimeError, match="materialization failed"):
         run(scenario)
     assert "warm" not in scenario[2]
     assert "vhost" not in scenario[2]

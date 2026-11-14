@@ -15,6 +15,8 @@ REQUIRED_TESTS = (
     "test_mautic_upgrade_contract.py",
     "test_mautic_composer_move.py",
     "test_production_runtime_boundary.py",
+    "test_unit_repair.py",
+    "test_apt_external_callers.py",
 )
 
 
