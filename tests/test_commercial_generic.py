@@ -75,6 +75,99 @@ def test_generic_job_requires_latest_advertised_inventory():
         raise AssertionError("unadvertised command must be rejected")
 
 
+def test_generic_job_accepts_exact_pinned_host_observer_and_rejects_binding_drift(monkeypatch):
+    from mcd_agent import commercial_primitives
+    binding = {"binding_schema": "mcd-upgrade-os-binding-v1", "binding_sha256": "sha256:" + "a" * 64}
+    monkeypatch.setattr(commercial_primitives, "upgrade_os_binding_identity", lambda _cfg: binding)
+    inventory = commercial_primitives.build_capability_inventory(
+        installation_id="installation-1", dns_name="mautic.example.com", config=object(),
+    )
+    descriptor = next(
+        item["commands"][0] for item in inventory["capabilities"]
+        if item["capability_id"] == "maintenance"
+    )
+    job = _job()
+    job["capability"] = {"capability_id": "maintenance", "version": "1.0"}
+    job["command"] = {key: descriptor[key] for key in (
+        "command_id", "version", "execution", "mutates_state", "target_scope",
+        "binding_schema", "binding_sha256",
+    )}
+    job["input"] = {"action": "status"}
+    assert validate_generic_command_job(job, inventory=inventory)["command"] == job["command"]
+    job["command"]["binding_sha256"] = "sha256:" + "b" * 64
+    with pytest.raises(ValueError, match="portal_mcd_generic_command_not_advertised"):
+        validate_generic_command_job(job, inventory=inventory)
+
+
+def test_worker_delivers_pinned_maintenance_status_stage_terminal_and_ack(tmp_path, monkeypatch):
+    from mcd_agent import commercial_primitives
+    binding = {"binding_schema": "mcd-upgrade-os-binding-v1", "binding_sha256": "sha256:" + "a" * 64}
+    cfg = object()
+    monkeypatch.setattr(commercial_primitives, "upgrade_os_binding_identity", lambda _cfg: binding)
+    monkeypatch.setattr(commercial_primitives, "collect_maintenance_state", lambda _cfg: {
+        "mode": "off", "paused": False, "active": False, "cron_stopped": False,
+        "cron_service_name": "cron", "cron_service_active": True,
+        "cron_marker_present": False, "checked_at_utc": "2026-11-03T12:00:00Z",
+        "external_receipt": {
+            "component": "service", "status": "applied", "mutation_started": False,
+            "operation_id": "status", "action": "status",
+            "active": {"cron": True, "nginx": True, "php8.4-fpm": True},
+            "command_attempts": [], "rollback_owner": "external_recipe",
+        },
+    })
+    inventory = commercial_primitives.build_capability_inventory(
+        installation_id="installation-1", dns_name="mautic.example.com", config=cfg,
+    )
+    descriptor = next(
+        item["commands"][0] for item in inventory["capabilities"]
+        if item["capability_id"] == "maintenance"
+    )
+    job = _job()
+    job["capability"] = {"capability_id": "maintenance", "version": "1.0"}
+    job["command"] = {key: descriptor[key] for key in (
+        "command_id", "version", "execution", "mutates_state", "target_scope",
+        "binding_schema", "binding_sha256",
+    )}
+    job["input"] = {"action": "status"}
+
+    class Portal:
+        def __init__(self):
+            self.receipts = []
+            self.polled = False
+        def send_capability_inventory(self, **_kwargs):
+            return {}
+        def pull_job(self, **_kwargs):
+            if self.polled:
+                return None
+            self.polled = True
+            return {"cursor": "31", "job": job}
+        def send_receipt(self, payload, **_kwargs):
+            self.receipts.append(copy.deepcopy(payload))
+            return {"accepted": True}
+
+    state = CommercialState(str(tmp_path / "commercial.sqlite"))
+    portal = Portal()
+    worker = SelfHostedPortalWorker(
+        portal, _Executor(state), installation_id="installation-1",
+        portal_keys={}, publisher_keys={}, context={}, commercial_key_id="commercial-1",
+        agent_id="agent-1", host_fingerprint="sha256:" + "a" * 64, clock=_Clock(),
+        capability_inventory_provider=lambda _installation: inventory,
+        generic_command_handler=lambda value: commercial_primitives.execute_generic_primitive(value, config=cfg),
+    )
+    assert worker.run_once() == {"status": "succeeded", "job_id": "generic-job-1"}
+    assert [(item["schema"], item["sequence"], item["status"]) for item in portal.receipts] == [
+        ("portal-mcd-generic-stage-receipt-v1", 1, "started"),
+        ("portal-mcd-generic-terminal-receipt-v1", 2, "succeeded"),
+    ]
+    terminal = portal.receipts[-1]
+    assert terminal["result"]["binding"] == {
+        "schema": binding["binding_schema"], "sha256": binding["binding_sha256"],
+    }
+    assert terminal["result"]["external_receipt"]["mutation_started"] is False
+    assert state.get("commercial_portal_cursor") == "31"
+    assert state.get("commercial_self_hosted_pending_receipts") in (None, [])
+
+
 def test_inventory_rescan_terminal_survives_restart_without_rescanning(tmp_path):
     from mcd_agent.commercial_primitives import build_capability_inventory, execute_generic_primitive
 

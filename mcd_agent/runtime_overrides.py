@@ -155,11 +155,11 @@ def associate_instance_desired_states(
             continue
         target = uid if uid in available else ""
         if not target:
-            base = uid.split("@", 1)[0]
+            base_uid = uid.split("@", 1)[0]
             matches = [
                 candidate
                 for candidate in available
-                if candidate not in used and candidate.split("@", 1)[0] == base
+                if candidate not in used and candidate.split("@", 1)[0] == base_uid
             ]
             if len(matches) == 1:
                 target = matches[0]

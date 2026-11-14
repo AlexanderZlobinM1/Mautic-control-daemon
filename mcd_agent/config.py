@@ -6,7 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 import hashlib
 import json
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import re
 import socket
 import sys
@@ -725,6 +725,11 @@ class AgentConfig:
     plugins_post_cache_clear: bool
     plugins_post_install: bool
     plugins_state_filename: str
+    plugins_managed_root: str | None
+    plugins_filesystem_owner: str | None
+    plugins_filesystem_group: str | None
+    plugins_filesystem_mode: str | None
+    plugins_cache_relative_paths: list[str] | None
     plugins_cluster_file_sync_wait_sec: int
     plugins_cluster_cache_clear_wait_sec: int
     custom_repo_base_url: str | None
@@ -3549,6 +3554,27 @@ def _load_config_inner(path: str) -> AgentConfig:
         plugins_post_cache_clear=bool(plugins.get("post_cache_clear", True)),
         plugins_post_install=bool(plugins.get("post_plugin_install", True)),
         plugins_state_filename=str(plugins.get("state_filename", ".mcd-plugin.json")),
+        plugins_managed_root=(
+            str(plugins.get("managed_root")).strip()
+            if isinstance(plugins.get("managed_root"), str) and str(plugins.get("managed_root")).strip()
+            else None
+        ),
+        plugins_filesystem_owner=(
+            str(plugins.get("filesystem_owner")).strip()
+            if isinstance(plugins.get("filesystem_owner"), str) and str(plugins.get("filesystem_owner")).strip()
+            else None
+        ),
+        plugins_filesystem_group=(
+            str(plugins.get("filesystem_group")).strip()
+            if isinstance(plugins.get("filesystem_group"), str) and str(plugins.get("filesystem_group")).strip()
+            else None
+        ),
+        plugins_filesystem_mode=(
+            str(plugins.get("filesystem_mode")).strip()
+            if isinstance(plugins.get("filesystem_mode"), str) and str(plugins.get("filesystem_mode")).strip()
+            else None
+        ),
+        plugins_cache_relative_paths=_strict_plugin_cache_paths(plugins.get("cache_relative_paths")),
         plugins_cluster_file_sync_wait_sec=max(
             30,
             int(plugins.get("cluster_file_sync_wait_sec", 900) or 900),
@@ -3846,6 +3872,22 @@ def _load_config_inner(path: str) -> AgentConfig:
     merged = replace(merged, config_customized=customized)
     _record_config_history(merged)
     return merged
+
+
+def _strict_plugin_cache_paths(value: Any) -> list[str] | None:
+    if not isinstance(value, list) or not value:
+        return None
+    result: list[str] = []
+    for raw in value:
+        if not isinstance(raw, str) or not raw or "\x00" in raw or "\\" in raw:
+            return None
+        if Path(raw).is_absolute() or PureWindowsPath(raw).is_absolute() or PureWindowsPath(raw).drive or raw.startswith("//"):
+            return None
+        parts = raw.split("/")
+        if any(part.strip() != part or part in {"", ".", ".."} for part in parts):
+            return None
+        result.append(raw)
+    return result
 
 
 def load_config(path: str, *, allow_recover_from_mcc: bool = True) -> AgentConfig:

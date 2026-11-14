@@ -1023,7 +1023,14 @@ def run_configured_external_operation(
         source = spec.get("source")
         if source == "existing_private_operator_profile":
             value = profile if isinstance(profile, dict) else {}
-        elif source == "caller_operation_input":
+        elif source in {
+            "caller_operation_input",
+            "mcd_resolved_mail_runtime",
+            "mcd_resolved_plugin_filesystem",
+        }:
+            # These recipes name an already-resolved, non-secret runtime
+            # object explicitly. It is still caller input at this boundary;
+            # the descriptor owns the exact fields and MCD never expands it.
             value = operation_input
         elif source == "effective_caller_cfg":
             declared = spec.get("fields")

@@ -14,9 +14,7 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
-import tarfile
 from typing import Any
 from dataclasses import dataclass, replace
 from urllib import error as urlerror
@@ -39,8 +37,6 @@ from mcd_agent.amazon_mailer_dep import (
     ensure_amazon_mailer_for_bundles,
     ensure_mailer_packages_for_sender_config,
     installed_required_bundles,
-    _ensure_node20,
-    _resolve_composer_bin,
 )
 from mcd_agent.assetmapper_verification import verify_assetmapper_upgrade
 from mcd_agent.fs_permissions import ensure_instance_permissions
@@ -63,6 +59,7 @@ from mcd_agent.mautic_upgrade_contract import (
     inspect_json_schema_repair,
     rebind_php_after_system_upgrade,
 )
+from mcd_agent.upgrade_os_external import run_upgrade_os_operation
 
 
 CORE_PLUGIN_BUNDLES = {
@@ -88,29 +85,6 @@ FALLBACK_BRANCH_TARGETS: dict[str, str] = {
     "7.1": "7.1.3",
 }
 
-PHP84_PACKAGE_SUFFIXES = [
-    "apcu",
-    "fpm",
-    "cli",
-    "curl",
-    "mysql",
-    "mailparse",
-    "gd",
-    "mbstring",
-    "imagick",
-    "bcmath",
-    "zip",
-    "tidy",
-    "soap",
-    "intl",
-    "xml",
-    "imap",
-    "redis",
-    "opcache",
-]
-
-PHP_CUSTOM_INI_NAMES = {"60-custom.ini", "90-redis-sessions.ini"}
-PHP_CUSTOM_INI_HINTS = ("custom", "mcd", "sales-snap", "redis-session", "redis_sessions")
 MAUTIC7_LOCALE_FIX_BUNDLE = "MauticLocaleFixBundle"
 
 
@@ -237,17 +211,33 @@ def _scheduler_pause_flag(config: AgentConfig) -> Path:
     return path
 
 
-def _enter_upgrade_maintenance(config: AgentConfig) -> UpgradeMaintenanceGuard:
+def _enter_upgrade_maintenance(
+    config: AgentConfig,
+    *,
+    operation_id: str | None = None,
+    target_php_version: str = "",
+) -> UpgradeMaintenanceGuard:
     fence = scheduler_dispatch_fence(config, exclusive=True, blocking=True)
     fence.__enter__()
     try:
-        return _enter_upgrade_maintenance_locked(config, fence)
+        return _enter_upgrade_maintenance_locked(
+            config,
+            fence,
+            operation_id=operation_id,
+            target_php_version=target_php_version,
+        )
     except BaseException:
         fence.__exit__(*sys.exc_info())
         raise
 
 
-def _enter_upgrade_maintenance_locked(config: AgentConfig, fence: Any) -> UpgradeMaintenanceGuard:
+def _enter_upgrade_maintenance_locked(
+    config: AgentConfig,
+    fence: Any,
+    *,
+    operation_id: str | None = None,
+    target_php_version: str = "",
+) -> UpgradeMaintenanceGuard:
     pause_flag = _scheduler_pause_flag(config)
     owned_pause_flag = not pause_flag.exists()
     if owned_pause_flag:
@@ -261,7 +251,11 @@ def _enter_upgrade_maintenance_locked(config: AgentConfig, fence: Any) -> Upgrad
     if marker.exists():
         print(f"Maintenance guard: cron stop marker already present ({marker}); leaving ownership unchanged")
     else:
-        cron_stop = stop_cron_service(config)
+        cron_stop = stop_cron_service(
+            config,
+            operation_id=operation_id,
+            target_php_version=target_php_version,
+        )
         if not bool(cron_stop.get("ok", False)):
             pause_removed = False
             if owned_pause_flag and pause_flag.exists():
@@ -682,24 +676,6 @@ def _load_prepared_target_input(
         raise RuntimeError(f"Prepared Mautic target rejected: {exc}") from exc
 
 
-def _restore_prepared_target_backup(root: str, backup_path: str | Path) -> None:
-    """Restore the complete pre-apply tree from the local upgrade backup."""
-    target = Path(root).resolve(strict=True)
-    archive = Path(backup_path).resolve(strict=True)
-    if target == target.parent or target == Path("/") or not archive.is_file() or archive.is_symlink():
-        raise RuntimeError("prepared_target_rollback_path_invalid")
-    parent = target.parent
-    with tarfile.open(archive, "r:gz") as tar:
-        members = tar.getmembers()
-        if not members or any(member.name.startswith("/") or ".." in Path(member.name).parts for member in members):
-            raise RuntimeError("prepared_target_rollback_archive_invalid")
-        top = target.name
-        if any(Path(member.name).parts[:1] != (top,) for member in members):
-            raise RuntimeError("prepared_target_rollback_archive_binding_invalid")
-        shutil.rmtree(target)
-        tar.extractall(parent)
-
-
 def _command_with_user(cmd: list[str], *, as_www_data: bool = False) -> list[str]:
     full = cmd
     if as_www_data:
@@ -875,17 +851,6 @@ def _command_version_line(cmd: list[str], *, cwd: str, as_www_data: bool = False
     return out.splitlines()[0].strip() if out else "ok"
 
 
-def _backup_install(root: str) -> Path:
-    backups = Path("/opt/mcd/backups")
-    backups.mkdir(parents=True, exist_ok=True)
-    out = backups / f"mautic-backup-{Path(root).name}.tar.gz"
-    with tempfile.TemporaryDirectory(prefix="mcd-backup-") as td:
-        tmp = Path(td) / "backup.tar.gz"
-        subprocess.run(["tar", "-czf", str(tmp), "-C", str(Path(root).parent), str(Path(root).name)], check=True)
-        shutil.move(str(tmp), out)
-    return out
-
-
 def _prepare_plugins_for_major_jump(root: str, from_ver: str, to_ver: str) -> None:
     if from_ver != "4.4.13" or to_ver != "5.1.1":
         return
@@ -951,112 +916,34 @@ def _assert_php84_host_safe(config: AgentConfig, upgraded_root: str) -> None:
         )
 
 
-def _php84_package_names() -> list[str]:
-    return [f"php8.4-{suffix}" for suffix in PHP84_PACKAGE_SUFFIXES]
+def _system_php_versions(from_ver: str, to_ver: str) -> tuple[str, str]:
+    source_major = _parse_semver(from_ver)[0]
+    target_major = _parse_semver(to_ver)[0]
+    if (source_major, target_major) in {(6, 7), (7, 7)}:
+        return "8.3", "8.4"
+    if from_ver == "4.4.13" and to_ver == "5.1.1":
+        return "8.0", "8.2"
+    if to_ver == "6.0.7":
+        return "8.2", "8.3"
+    raise RuntimeError(f"No external PHP runtime transition for {from_ver} -> {to_ver}")
 
 
-def _install_php84_packages() -> None:
-    env = dict(os.environ)
-    env["DEBIAN_FRONTEND"] = "noninteractive"
-    subprocess.run(["apt-get", "update", "--allow-releaseinfo-change"], check=True, env=env)
-    subprocess.run(["apt-get", "install", "-y", *_php84_package_names()], check=True, env=env)
-
-
-def _is_custom_php_ini(path: Path) -> bool:
-    name = path.name
-    low = name.lower()
-    if name in PHP_CUSTOM_INI_NAMES:
-        return True
-    if not low.endswith(".ini"):
-        return False
-    return any(hint in low for hint in PHP_CUSTOM_INI_HINTS)
-
-
-def _migrate_php_custom_ini(
+def _verify_upgrade_plan_claim(
+    plan: Any,
     *,
-    from_version: str = "8.3",
-    to_version: str = "8.4",
-    php_etc_root: Path = Path("/etc/php"),
-) -> list[str]:
-    moved: list[str] = []
-    for sapi in ("cli", "fpm"):
-        src_dir = php_etc_root / from_version / sapi / "conf.d"
-        dst_dir = php_etc_root / to_version / sapi / "conf.d"
-        if not src_dir.exists() or not src_dir.is_dir():
-            continue
-        dst_dir.mkdir(parents=True, exist_ok=True)
-        for src in sorted(src_dir.iterdir(), key=lambda p: p.name):
-            if not _is_custom_php_ini(src):
-                continue
-            dst = dst_dir / src.name
-            if dst.exists() or dst.is_symlink():
-                moved.append(f"skip existing {dst}")
-                continue
-            shutil.copy2(str(src), str(dst), follow_symlinks=False)
-            moved.append(f"{src} -> {dst}")
-    return moved
+    target_version: str,
+    mode: str,
+    expected_sha256: str,
+) -> None:
+    from mcd_agent.mautic_patch_resolution import canonical_json_sha256
 
-
-def _rewrite_nginx_php_fpm_references(
-    *,
-    from_version: str = "8.3",
-    to_version: str = "8.4",
-    nginx_roots: tuple[Path, ...] = (Path("/etc/nginx/sites-enabled"), Path("/etc/nginx/sites-available")),
-) -> list[str]:
-    changed: list[str] = []
-    old = f"php{from_version}-fpm"
-    new = f"php{to_version}-fpm"
-    for root in nginx_roots:
-        if not root.exists() or not root.is_dir():
-            continue
-        for path in sorted(root.iterdir(), key=lambda p: p.name):
-            if path.is_dir():
-                continue
-            try:
-                text = path.read_text(encoding="utf-8")
-            except Exception:
-                continue
-            if old not in text:
-                continue
-            path.write_text(text.replace(old, new), encoding="utf-8")
-            changed.append(str(path))
-    return changed
-
-
-def _enable_php84_and_restart_nginx() -> None:
-    subprocess.run(["systemctl", "enable", "--now", "php8.4-fpm"], check=True)
-    test = subprocess.run(["nginx", "-t"], capture_output=True, text=True)
-    if test.returncode != 0:
-        raise RuntimeError(f"nginx -t failed after PHP 8.4 switch: {(test.stderr or test.stdout or '').strip()}")
-    subprocess.run(["systemctl", "restart", "nginx"], check=True)
-    subprocess.run(["systemctl", "restart", "php8.4-fpm"], check=False)
-
-
-def _purge_php83_packages() -> None:
-    env = dict(os.environ)
-    env["DEBIAN_FRONTEND"] = "noninteractive"
-    subprocess.run(["bash", "-lc", "apt-get purge -y 'php8.3*'"], check=True, env=env)
-
-
-def _apply_php84_system_upgrade(config: AgentConfig, upgraded_root: str) -> None:
-    _assert_php84_host_safe(config, upgraded_root)
-    print("PHP 8.4 preflight ok: all discovered host instances are Mautic 7-compatible")
-    _install_php84_packages()
-    moved = _migrate_php_custom_ini()
-    if moved:
-        print("PHP 8.4 custom ini migration:")
-        for item in moved:
-            print(f"  {item}")
-    changed = _rewrite_nginx_php_fpm_references()
-    if changed:
-        print("PHP 8.4 nginx references updated: " + ", ".join(changed))
-    _enable_php84_and_restart_nginx()
-    php84 = str(shutil.which("php8.4") or "/usr/bin/php8.4")
-    probe = subprocess.run([php84, "-v"], capture_output=True, text=True, check=False)
-    if probe.returncode != 0:
-        raise RuntimeError("PHP 8.4 runtime is not runnable; refusing to purge PHP 8.3")
-    _purge_php83_packages()
-    print("PHP 8.4 system upgrade completed")
+    if (
+        not isinstance(plan, dict)
+        or "sha256:" + canonical_json_sha256(plan) != expected_sha256
+        or str(plan.get("target_version") or "") != target_version
+        or str(plan.get("install_type") or "") != mode
+    ):
+        raise RuntimeError("upgrade_plan_claim_mismatch")
 
 
 def _apply_system_upgrade(
@@ -1065,84 +952,25 @@ def _apply_system_upgrade(
     *,
     config: AgentConfig | None = None,
     upgraded_root: str | None = None,
-) -> None:
-    source_major = _parse_semver(from_ver)[0]
-    target_major = _parse_semver(to_ver)[0]
-    if (source_major, target_major) in {(6, 7), (7, 7)}:
-        if config is None or not upgraded_root:
-            raise RuntimeError("PHP 8.4 system upgrade requires config and upgraded root")
-        _apply_php84_system_upgrade(config, upgraded_root)
-        return
-    if from_ver == "4.4.13" and to_ver == "5.1.1":
-        subprocess.run(
-            [
-                "apt",
-                "install",
-                "php8.2-apcu",
-                "php8.2-fpm",
-                "php8.2-cli",
-                "php8.2-curl",
-                "php8.2-mysql",
-                "php8.2-mailparse",
-                "php8.2-gd",
-                "php8.2-mbstring",
-                "php8.2-imagick",
-                "php8.2-bcmath",
-                "php8.2-zip",
-                "php8.2-tidy",
-                "php8.2-soap",
-                "php8.2-intl",
-                "php8.2-xml",
-                "php8.2-imap",
-                "php8.2-redis",
-                "php8.2-opcache",
-                "-y",
-            ],
-            check=True,
-        )
-        _run(["sed", "-i", "s/php8\\.0-fpm/php8.2-fpm/g", "/etc/nginx/sites-enabled/*"], cwd="/")
-        _run(["service", "nginx", "restart"], cwd="/")
-        subprocess.run(["apt", "purge", "php8.0*", "-y"], check=True)
-    if to_ver == "6.0.7":
-        subprocess.run(
-            [
-                "apt",
-                "install",
-                "php8.3-apcu",
-                "php8.3-fpm",
-                "php8.3-cli",
-                "php8.3-curl",
-                "php8.3-mysql",
-                "php8.3-mailparse",
-                "php8.3-gd",
-                "php8.3-mbstring",
-                "php8.3-imagick",
-                "php8.3-bcmath",
-                "php8.3-zip",
-                "php8.3-tidy",
-                "php8.3-soap",
-                "php8.3-intl",
-                "php8.3-xml",
-                "php8.3-imap",
-                "php8.3-redis",
-                "php8.3-opcache",
-                "-y",
-            ],
-            check=True,
-        )
-
-
-def _php84_runtime_observation() -> dict[str, object]:
-    php84 = str(shutil.which("php8.4") or "/usr/bin/php8.4")
-    probe = subprocess.run([php84, "-r", "echo PHP_VERSION;"], capture_output=True, text=True, check=False)
-    service = subprocess.run(["systemctl", "is-active", "php8.4-fpm"], capture_output=True, text=True, check=False)
-    nginx = subprocess.run(["nginx", "-T"], capture_output=True, text=True, check=False)
-    sockets = sorted(set(re.findall(r"fastcgi_pass\\s+unix:([^;]*php8\\.4-fpm[^;]*);", nginx.stdout or "")))
-    return {
-        "cli_version": (probe.stdout or "").strip() if probe.returncode == 0 else "",
-        "fpm_version": "8.4" if service.returncode == 0 and (service.stdout or "").strip() == "active" else "",
-        "nginx_socket": sockets,
-    }
+    operation_id: str,
+) -> dict[str, Any]:
+    if config is None or not upgraded_root:
+        raise RuntimeError("system upgrade requires config and upgraded root")
+    previous_php, target_php = _system_php_versions(from_ver, to_ver)
+    if target_php == "8.4":
+        _assert_php84_host_safe(config, upgraded_root)
+    return run_upgrade_os_operation(
+        config,
+        component="php",
+        operation="php_runtime_transition",
+        operation_input={
+            "operation_id": operation_id,
+            "action": "apply",
+            "target_php_version": target_php,
+            "previous_php_version": previous_php,
+            "dry_run": "false",
+        },
+    )
 
 
 def _insert_migration_hacks_if_needed(root: str, to_ver: str) -> None:
@@ -1187,7 +1015,17 @@ def _patch_lifecycle_phase(hook, root: str, phase: str) -> None:
         callback(root, phase)
 
 
-def _prepare_patch_target_stage(config, root: str, current: str, target: str, mode: str, plan, facts_provider=None, prepared_target=None):
+def _prepare_patch_target_stage(
+    config,
+    root: str,
+    current: str,
+    target: str,
+    mode: str,
+    plan,
+    facts_provider=None,
+    prepared_target=None,
+    composer_bin: str = "",
+):
     from mcd_agent.mautic_patch_stage import TargetStage, application_root
     from mcd_agent.mautic_patch_plan import _target_version
     package_identity = {}
@@ -1202,8 +1040,9 @@ def _prepare_patch_target_stage(config, root: str, current: str, target: str, mo
             updated, _count = _replace_version_tokens(text, current, target)
             updated, _count = _normalize_mautic7_composer_constraints(updated, target)
             cjson.write_text(updated, encoding="utf-8")
-            composer = _resolve_composer_bin(config.php_bin)
-            _run([composer, *_composer_update_args(), "--no-scripts"], cwd=str(stage_root), as_www_data=False)
+            if not composer_bin:
+                raise RuntimeError("external composer host preparation is required")
+            _run([composer_bin, *_composer_update_args(), "--no-scripts"], cwd=str(stage_root), as_www_data=False)
             package_identity["sha256"] = hashlib.sha256((stage_root / "composer.lock").read_bytes()).hexdigest()
         elif mode == "zip":
             import zipfile
@@ -1360,15 +1199,26 @@ def _apply_prepared_target(
     target: str,
     prepared_target,
     after_source_install=None,
+    *,
+    operation_id: str,
+    backup_id: str,
 ) -> None:
     """Apply an MCC-built skeleton through the existing upgrade lifecycle."""
-    from mcd_agent.mautic_patch_stage import application_root
-    from mcd_agent.prepared_target import merge_into_live
-
-    live_application = application_root(Path(root))
     if prepared_target.input["target_version"] != target:
         raise RuntimeError("prepared_target_target_binding_mismatch")
-    merge_into_live(prepared_target.root, live_application)
+    run_upgrade_os_operation(
+        config,
+        component="filesystem",
+        operation="upgrade_tree_transition",
+        operation_input={
+            "operation_id": operation_id,
+            "instance_root": root,
+            "prepared_root": str(prepared_target.root),
+            "backup_id": backup_id,
+            "action": "activate",
+            "dry_run": "false",
+        },
+    )
     print(
         "MCD_PREPARED_TARGET_EVIDENCE="
         + json.dumps(
@@ -1379,7 +1229,7 @@ def _apply_prepared_target(
                 "target_version": target,
                 "artifact_sha256": prepared_target.artifact_sha256,
                 "host_composer_invoked": False,
-                "preserved_paths": ["config", "app/config", "var"],
+                "tree_handoff": "external_upgrade_tree_transition",
             },
             ensure_ascii=True,
             sort_keys=True,
@@ -1442,14 +1292,26 @@ def _resolve_composer_project_root(root: str) -> str:
     return root
 
 
-def _ensure_www_data_composer_cache() -> None:
-    cache_root = Path("/var/www/.cache/composer")
-    (cache_root / "vcs").mkdir(parents=True, exist_ok=True)
-    for path in (Path("/var/www/.cache"), cache_root, cache_root / "vcs"):
-        try:
-            os.chown(path, 33, 33)
-        except Exception:
-            subprocess.run(["chown", "www-data:www-data", str(path)], check=False)
+def _prepare_composer_host(
+    config: AgentConfig,
+    *,
+    working_root: str,
+    operation_id: str,
+) -> str:
+    receipt = run_upgrade_os_operation(
+        config,
+        component="composer",
+        operation="composer_host_prepare",
+        operation_input={
+            "operation_id": operation_id,
+            "working_root": working_root,
+            "dry_run": "false",
+        },
+    )
+    composer_bin = str(receipt.get("composer_binary") or "").strip()
+    if not composer_bin or receipt.get("composer_dependency_commands_owned_by_mcd") is not True:
+        raise RuntimeError("external composer host preparation receipt is invalid")
+    return composer_bin
 
 
 def _doctrine_migrate_command(project_root: str, console_path: str, php_bin: str) -> str:
@@ -1704,14 +1566,20 @@ def _apply_mautic7_twig_include_hotfix(root: str, target: str) -> bool:
     return False
 
 
-def _apply_composer(root: str, console_path: str, php_bin: str, current: str, target: str, after_source_install=None) -> None:
+def _apply_composer(
+    root: str,
+    console_path: str,
+    php_bin: str,
+    current: str,
+    target: str,
+    after_source_install=None,
+    *,
+    composer_bin: str,
+) -> None:
     project_root = _resolve_composer_project_root(root)
     cjson = Path(project_root) / "composer.json"
     if not cjson.exists():
         raise RuntimeError("composer.json not found")
-    composer_bin = _resolve_composer_bin(php_bin)
-    _ensure_node20()
-    _ensure_www_data_composer_cache()
     composer_version = _command_version_line(
         [composer_bin, "-V", "--no-interaction", "--no-ansi"],
         cwd=project_root,
@@ -1979,32 +1847,6 @@ def _pre_upgrade_permissions_check(config: AgentConfig, root: str) -> None:
     _permissions_check(config, root, stage_label="pre-upgrade")
 
 
-def _active_php_fpm_services() -> list[str]:
-    proc = subprocess.run(
-        [
-            "systemctl",
-            "list-units",
-            "--type",
-            "service",
-            "--state",
-            "active",
-            "--plain",
-            "--no-legend",
-            "php*-fpm.service",
-        ],
-        capture_output=True,
-        text=True,
-    )
-    if proc.returncode != 0:
-        return []
-    out: list[str] = []
-    for raw in (proc.stdout or "").splitlines():
-        name = raw.strip().split(None, 1)[0].strip()
-        if name.endswith(".service"):
-            out.append(name)
-    return out
-
-
 def _curl_probe(url: str, *, resolve_local_host: str | None = None, follow_redirects: bool = True, timeout_sec: int = 20) -> UpgradeProbeResult:
     cmd = ["curl", "-ksS", "--max-time", str(max(5, int(timeout_sec)))]
     if follow_redirects:
@@ -2030,31 +1872,26 @@ def _curl_probe(url: str, *, resolve_local_host: str | None = None, follow_redir
     return UpgradeProbeResult(False, f"{url} -> HTTP {code}", body[:600])
 
 
-def _verify_nginx_and_php_services() -> None:
-    proc = subprocess.run(["systemctl", "is-active", "nginx"], capture_output=True, text=True)
-    nginx_state = (proc.stdout or proc.stderr or "").strip()
-    if proc.returncode != 0:
-        print(f"Post-check: nginx inactive ({nginx_state or 'unknown'}), attempting start")
-        start = subprocess.run(["systemctl", "start", "nginx"], capture_output=True, text=True)
-        if start.returncode != 0:
-            raise RuntimeError(f"Post-check failed: cannot start nginx: {(start.stderr or start.stdout or '').strip()}")
-        proc = subprocess.run(["systemctl", "is-active", "nginx"], capture_output=True, text=True)
-        nginx_state = (proc.stdout or proc.stderr or "").strip()
-        if proc.returncode != 0:
-            raise RuntimeError(f"Post-check failed: nginx still inactive after start: {nginx_state or 'unknown'}")
-        print("Post-check: nginx auto-start OK")
-    else:
-        print("Post-check: nginx service OK")
-
-    test = subprocess.run(["nginx", "-t"], capture_output=True, text=True)
-    if test.returncode != 0:
-        raise RuntimeError(f"Post-check failed: nginx -t: {(test.stderr or test.stdout or '').strip()}")
-    print("Post-check: nginx -t OK")
-
-    php_services = _active_php_fpm_services()
-    if not php_services:
-        raise RuntimeError("Post-check failed: no active php-fpm service found")
-    print("Post-check: php-fpm active: " + ", ".join(php_services))
+def _verify_nginx_and_php_services(
+    config: AgentConfig,
+    *,
+    target_php_version: str,
+) -> dict[str, Any]:
+    receipt = run_upgrade_os_operation(
+        config,
+        component="nginx",
+        operation="nginx_service_transition",
+        operation_input={
+            "operation_id": "",
+            "target_php_version": target_php_version,
+            "action": "status",
+            "dry_run": "false",
+        },
+    )
+    if receipt.get("required_runtime_active") is not True:
+        raise RuntimeError("Post-check failed: external runtime status is not active")
+    print("Post-check: nginx and php-fpm active; nginx configuration valid")
+    return receipt
 
 
 def _best_probe_domain(inst: MauticInstall) -> str:
@@ -2108,9 +1945,14 @@ def _site_url_domain_from_install(inst: MauticInstall) -> str:
     return ""
 
 
-def _post_upgrade_verify(config: AgentConfig, inst: MauticInstall) -> None:
+def _post_upgrade_verify(
+    config: AgentConfig,
+    inst: MauticInstall,
+    *,
+    target_php_version: str,
+) -> None:
     _permissions_check(config, inst.root, stage_label="post-upgrade")
-    _verify_nginx_and_php_services()
+    _verify_nginx_and_php_services(config, target_php_version=target_php_version)
     domain = _best_probe_domain(inst)
     if not domain:
         print("Post-check: no instance domain detected, skipping local/external HTTP probes")
@@ -2253,6 +2095,9 @@ def run_upgrade_apply(
     prepared_target_json: str | None = None,
     prepared_target_file: str | None = None,
     prepared_target_sha256: str = "",
+    operation_id: str | None = None,
+    upgrade_plan_ref: str = "",
+    upgrade_plan_sha256: str = "",
 ) -> int:
     inst = _pick_install_record(config, root)
     if str(getattr(inst, "runtime", "host") or "host").strip().lower() == "docker":
@@ -2268,6 +2113,23 @@ def run_upgrade_apply(
     patch_evidence_failure: dict[str, Any] | None = None
     patch_evidence_reported = False
     target = _clean_target_version(target_override)
+    upgrade_operation_id = str(operation_id or f"upgrade-{uuid4().hex}")
+    upgrade_backup_id = "baseline"
+    composer_bin = ""
+    php_transition_applied = False
+    previous_php_version = ""
+    target_php_version = ""
+    b = ""
+    claimed_upgrade_plan = bool(upgrade_plan_ref or upgrade_plan_sha256)
+    claimed_upgrade_plan_verified = False
+    if claimed_upgrade_plan and (
+        not upgrade_plan_ref
+        or len(upgrade_plan_ref) > 512
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", upgrade_plan_sha256) is None
+        or patch_plan_json
+        or patch_run_id
+    ):
+        raise RuntimeError("upgrade_plan_claim_invalid")
     if mcc_preflighted_single_instance and not allow_release_transition:
         from mcd_agent.mautic_manual_upgrade import ManualUpgradePreflightError, validate_preflighted_single_instance
         from mcd_agent.mautic_patch_plan import rejected_preflight
@@ -2366,7 +2228,7 @@ def run_upgrade_apply(
         target=target,
         mode=mode,
     )
-    prepared_rollback_backup: Path | None = None
+    prepared_rollback_backup: str | None = None
     if prepared_target is not None:
         # A prepared artifact is a complete source replacement. Keep a local
         # rollback point even when the operator did not request the optional
@@ -2375,6 +2237,16 @@ def run_upgrade_apply(
         chosen_mode = prepared_target.input["install_type"]
     if manual_system_upgrade:
         _assert_php84_host_safe(config, install_root)
+    if with_system_upgrade:
+        previous_php_version, target_php_version = _system_php_versions(current, target)
+    else:
+        configured_php = re.search(r"php(?:/|)(\d+\.\d+)", str(config.php_bin or ""))
+        target_php_version = configured_php.group(1) if configured_php else {
+            7: "8.4",
+            6: "8.3",
+            5: "8.2",
+            4: "8.0",
+        }.get(_parse_semver(target)[0], "8.4")
     if requirements.get("database_compatibility") == "mautic7":
         database_ok, database_reason = mautic7_database_compatibility(_database_state())
         if not database_ok:
@@ -2402,9 +2274,22 @@ def run_upgrade_apply(
         if selected["status"] == "blocked":
             raise RuntimeError("Mautic catalog upgrade resolution blocked: " + str(selected.get("reason")))
         if selected["status"] == "selected":
+            if claimed_upgrade_plan:
+                plan = selected.get("plan")
+                _verify_upgrade_plan_claim(
+                    plan,
+                    target_version=target,
+                    mode=chosen_mode,
+                    expected_sha256=upgrade_plan_sha256,
+                )
+                claimed_upgrade_plan_verified = True
             patch_resolution = selected
             patch_plan_json = json.dumps(selected["plan"], ensure_ascii=True, separators=(",", ":"))
             patch_run_id = selected["plan"]["run_id"]
+        elif claimed_upgrade_plan:
+            raise RuntimeError("upgrade_plan_claim_not_selected")
+    if claimed_upgrade_plan and not claimed_upgrade_plan_verified:
+        raise RuntimeError("upgrade_plan_claim_not_resolved")
     patch_hook = None
     target_stage = None
     patch_facts_provider = None
@@ -2512,9 +2397,15 @@ def run_upgrade_apply(
             if any(set(record["phases"]) - supported_phases for record in validated_patch_plan["patches"]):
                 raise RuntimeError("Selected upgrade plan contains a phase unavailable in this upgrade workflow")
             try:
+                if chosen_mode == "composer" and not composer_bin:
+                    composer_bin = _prepare_composer_host(
+                        config,
+                        working_root=_resolve_composer_project_root(install_root),
+                        operation_id=upgrade_operation_id,
+                    )
                 target_stage = _prepare_patch_target_stage(config, _resolve_composer_project_root(install_root) if chosen_mode == "composer" else install_root,
                                                            current, target, chosen_mode, validated_patch_plan, facts_provider=patch_facts_provider,
-                                                           prepared_target=prepared_target)
+                                                           prepared_target=prepared_target, composer_bin=composer_bin)
             except Exception as exc:
                 patch_evidence_failure = getattr(exc, "evidence", None) or {
                     "failure": {"id": "", "gates": []}, "completed": list(patch_evidence_outcomes),
@@ -2542,7 +2433,11 @@ def run_upgrade_apply(
     try:
         if cross_line:
             require_live_release_authorization()
-        guard = _enter_upgrade_maintenance(config)
+        guard = _enter_upgrade_maintenance(
+            config,
+            operation_id=upgrade_operation_id,
+            target_php_version=target_php_version,
+        )
     except Exception:
         if target_stage is not None:
             target_stage.close()
@@ -2576,9 +2471,24 @@ def run_upgrade_apply(
             print("Mautic import tag remediation rollback: " + str(restore.get("status", "clean")))
 
         if do_backup or prepared_target is not None:
-            b = _backup_install(install_root)
+            backup_receipt = run_upgrade_os_operation(
+                config,
+                component="filesystem",
+                operation="upgrade_tree_transition",
+                operation_input={
+                    "operation_id": upgrade_operation_id,
+                    "instance_root": install_root,
+                    "prepared_root": "",
+                    "backup_id": upgrade_backup_id,
+                    "action": "backup",
+                    "dry_run": "false",
+                },
+            )
+            b = str(backup_receipt.get("backup_ref") or "")
+            if not b:
+                raise RuntimeError("external upgrade backup receipt is missing backup_ref")
             if prepared_target is not None:
-                prepared_rollback_backup = Path(b)
+                prepared_rollback_backup = b
             print(f"Backup created: {b}")
 
         if requirements.get("requires_json_repair"):
@@ -2631,7 +2541,17 @@ def run_upgrade_apply(
                 require_live_release_authorization()
             elif not mcc_preflighted_single_instance:
                 _require_release_approval(config, target, current)
-            _apply_prepared_target(config, install_root, console, config.php_bin, target, prepared_target, patch_hook)
+            _apply_prepared_target(
+                config,
+                install_root,
+                console,
+                config.php_bin,
+                target,
+                prepared_target,
+                patch_hook,
+                operation_id=upgrade_operation_id,
+                backup_id=upgrade_backup_id,
+            )
         elif chosen_mode == "zip":
             if cross_line:
                 require_live_release_authorization()
@@ -2643,7 +2563,21 @@ def run_upgrade_apply(
                 require_live_release_authorization()
             elif not mcc_preflighted_single_instance:
                 _require_release_approval(config, target, current)
-            _apply_composer(install_root, console, config.php_bin, current, target, patch_hook)
+            if not composer_bin:
+                composer_bin = _prepare_composer_host(
+                    config,
+                    working_root=_resolve_composer_project_root(install_root),
+                    operation_id=upgrade_operation_id,
+                )
+            _apply_composer(
+                install_root,
+                console,
+                config.php_bin,
+                current,
+                target,
+                patch_hook,
+                composer_bin=composer_bin,
+            )
         else:
             raise RuntimeError(f"Unsupported mode: {mode}")
 
@@ -2735,9 +2669,19 @@ def run_upgrade_apply(
                 "rollback": {"attempted": False, "succeeded": False},
             }
             try:
-                _apply_system_upgrade(current, target, config=config, upgraded_root=install_root)
+                _apply_system_upgrade(
+                    current,
+                    target,
+                    config=config,
+                    upgraded_root=install_root,
+                    operation_id=upgrade_operation_id,
+                )
+                php_transition_applied = True
                 config = replace(config, php_bin=rebind_php_after_system_upgrade(config.php_bin))
-                system_evidence["observed"] = _php84_runtime_observation()
+                system_evidence["observed"] = _verify_nginx_and_php_services(
+                    config,
+                    target_php_version=target_php_version,
+                )
                 system_evidence["status"] = "success"
             except Exception as exc:
                 system_evidence.update(status="error", reason=str(exc), error_type=type(exc).__name__)
@@ -2745,9 +2689,16 @@ def run_upgrade_apply(
                 raise
             print("MCD_MANUAL_SYSTEM_UPGRADE_EVIDENCE=" + json.dumps(system_evidence, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
         elif with_system_upgrade:
-            _apply_system_upgrade(current, target, config=config, upgraded_root=install_root)
+            _apply_system_upgrade(
+                current,
+                target,
+                config=config,
+                upgraded_root=install_root,
+                operation_id=upgrade_operation_id,
+            )
+            php_transition_applied = True
             config = replace(config, php_bin=rebind_php_after_system_upgrade(config.php_bin))
-        _post_upgrade_verify(config, inst)
+        _post_upgrade_verify(config, inst, target_php_version=target_php_version)
         cache_count = _write_upgrade_version_cache(install_root, final_version)
         print(f"Mautic version cache refreshed: {final_version} ({cache_count} path(s))")
         print(f"Upgrade completed: {current} -> {final_version}")
@@ -2766,7 +2717,19 @@ def run_upgrade_apply(
                 rollback_state = {"available": True, "attempted": True, "succeeded": False}
         if prepared_rollback_backup is not None:
             try:
-                _restore_prepared_target_backup(install_root, prepared_rollback_backup)
+                run_upgrade_os_operation(
+                    config,
+                    component="filesystem",
+                    operation="upgrade_tree_transition",
+                    operation_input={
+                        "operation_id": upgrade_operation_id,
+                        "instance_root": install_root,
+                        "prepared_root": "",
+                        "backup_id": upgrade_backup_id,
+                        "action": "rollback",
+                        "dry_run": "false",
+                    },
+                )
                 print("MCD_PREPARED_TARGET_EVIDENCE=" + json.dumps({
                     "schema": "mcd-mautic-prepared-target-receipt-v1",
                     "status": "rolled_back",
@@ -2783,6 +2746,22 @@ def run_upgrade_apply(
                     "reason": type(prepared_rollback_error).__name__,
                 }, ensure_ascii=True, sort_keys=True, separators=(",", ":")), flush=True)
                 raise
+        if php_transition_applied:
+            try:
+                run_upgrade_os_operation(
+                    config,
+                    component="php",
+                    operation="php_runtime_transition",
+                    operation_input={
+                        "operation_id": upgrade_operation_id,
+                        "action": "rollback",
+                        "target_php_version": target_php_version,
+                        "previous_php_version": previous_php_version,
+                        "dry_run": "false",
+                    },
+                )
+            except Exception as php_rollback_error:
+                print(f"WARN external PHP runtime rollback failed: {type(php_rollback_error).__name__}")
         if validated_patch_plan is not None and validated_patch_plan.get("schema") == "mcd-mautic-patch-plan-v3" and not patch_evidence_reported:
             failure = patch_evidence_failure.get("failure") if isinstance(patch_evidence_failure, dict) else None
             completed = patch_evidence_failure.get("completed") if isinstance(patch_evidence_failure, dict) else None

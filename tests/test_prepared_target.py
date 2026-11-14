@@ -2,6 +2,7 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import shutil
 import unittest
 import zipfile
 from unittest.mock import patch
@@ -75,9 +76,9 @@ class PreparedTargetTests(unittest.TestCase):
     contract = json.loads(
         (Path(__file__).parents[1] / "mcd_agent/contracts/mautic-prepared-target-v1.json").read_text()
     )
-    self.assertEqual(__version__, "1.6.14")
+    self.assertEqual(__version__, "1.7.0.dev0")
     self.assertEqual(contract["candidate"], {
-        "agent_version": "1.6.14",
+        "agent_version": "1.7.0.dev0",
         "lineage": "current-mcd-prepared-target",
         "approved_baseline": "1.5.268",
         "baseline_role": "historical-rollback-audit-only",
@@ -227,13 +228,20 @@ class PreparedTargetTests(unittest.TestCase):
         (live / "config/local.php").write_text("keep config")
         (live / "var/state.json").write_text("keep var")
         commands = []
+        def external(_config, *, component, operation, operation_input):
+          self.assertEqual((component, operation), ("filesystem", "upgrade_tree_transition"))
+          self.assertEqual(operation_input["action"], "activate")
+          shutil.copytree(target.root / "app", live / "app", dirs_exist_ok=True)
+          return {"status": "ok"}
         with patch.object(upgrade, "_run", side_effect=lambda command, **_kwargs: commands.append(command)), \
              patch.object(upgrade, "_doctrine_migrate_command", return_value="doctrine:migrations:migrate"), \
              patch.object(upgrade, "_run_doctrine_migrate_with_reconcile"), \
              patch.object(upgrade, "_verify_or_reconcile_doctrine_migrations"), \
-             patch.object(upgrade, "_patch_lifecycle_phase"):
+             patch.object(upgrade, "_patch_lifecycle_phase"), \
+             patch.object(upgrade, "run_upgrade_os_operation", side_effect=external):
           upgrade._apply_prepared_target(
               SimpleNamespace(), str(live), "bin/console", "php", "7.1.4", target,
+              operation_id="upgrade-test", backup_id="baseline",
           )
         self.assertTrue(all("composer" not in " ".join(command) for command in commands))
         self.assertEqual((live / "app/target.php").read_bytes(), b"prepared target\n")

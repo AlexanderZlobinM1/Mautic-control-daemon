@@ -39,10 +39,6 @@ from mcd_agent.backup import (
     cluster_backup_retention_plan,
     cluster_backup_status,
 )
-from mcd_agent.apt_profile import (
-    clear_apt_repo_profile_markers,
-    collect_apt_state,
-)
 from mcd_agent.admin_user import clear_hostnet_auth_mfa, hostnet_auth_mfa_status, reset_admin_password
 from mcd_agent.config import load_config
 from mcd_agent.commercial_portal import CommercialState, PortalClient
@@ -67,7 +63,6 @@ from mcd_agent.mautic_version_cache import collect_mautic_version
 from mcd_agent.custom_scripts import (
     fetch_custom_manifest,
     format_custom_scripts_list,
-    run_configured_external_operation,
     run_custom_script_by_key,
 )
 from mcd_agent.db import MauticDB
@@ -113,6 +108,8 @@ from mcd_agent.instance_migrate import (
 )
 from mcd_agent.source_operation import source_operation_lease
 from mcd_agent.inventory import InstanceInventory, ensure_seeded
+from mcd_agent.host_identity import resolve_agent_identity
+from mcd_agent.instance_uid import canonical_instance_uid, instance_uid_matches
 from mcd_agent.install_type import detect_install_type
 from mcd_agent.hardware_profile import (
     profile_selection_path,
@@ -184,7 +181,7 @@ from mcd_agent.runtime_overrides import (
     touch_poll_trigger,
 )
 from mcd_agent.shorteners import check_yourls_update, discover_yourls, update_yourls, yourls_version
-from mcd_agent.service_profiles import fetch_service_profile, service_profiles_apply_once
+from mcd_agent.service_profiles import fetch_service_profile, service_profiles_apply_once, _configured_external_operation
 from mcd_agent.signals import collect_signals, format_signals_json, format_signals_text
 from mcd_agent.state_push import push_state_now, queue_profile_event
 from mcd_agent.state_backend import create_state_database_with_admin, state_backend_status, state_database_exists
@@ -583,13 +580,22 @@ def _default_config_path() -> str:
     return candidates[0]
 
 
+def _mcc_host_name(cfg) -> str:
+    try:
+        identity = resolve_agent_identity(cfg)
+    except Exception:
+        return ""
+    return str(identity.get("effective_mcc_host_name") or "").strip()
+
+
 def _select_root_for_ops(cfg, root: str | None, *, allow_missing_absolute: bool = False) -> str:
     inv = InstanceInventory(cfg.state_db_path)
     ensure_seeded(inv, cfg)
     installs = inv.list_instances()
     if root:
+        host_name = _mcc_host_name(cfg)
         for inst in installs:
-            if inst.root == root or inst.instance_uid == root:
+            if inst.root == root or instance_uid_matches(root, inst.instance_uid, host_name):
                 return inst.root
         if allow_missing_absolute and Path(root).is_absolute():
             return root
@@ -606,7 +612,8 @@ def _resolve_registered_command_runtime(cfg, instance_uid: str) -> tuple[str, st
     """Resolve an exact stable identity; never infer a first instance or PHP."""
     inv = InstanceInventory(cfg.state_db_path)
     try:
-        matches = [inst for inst in inv.list_instances() if inst.instance_uid == instance_uid]
+        host_name = _mcc_host_name(cfg)
+        matches = [inst for inst in inv.list_instances() if instance_uid_matches(instance_uid, inst.instance_uid, host_name)]
     finally:
         inv.conn.close()
     if len(matches) != 1:
@@ -626,11 +633,12 @@ def _select_instance_for_ops(cfg, root: str | None):
     installs = inv.list_instances()
     target = str(root or "").strip()
     if target:
+        host_name = _mcc_host_name(cfg)
         for inst in installs:
             domains = [str(x).strip().lower() for x in (getattr(inst, "domains", []) or [])]
             if (
                 inst.root == target
-                or inst.instance_uid == target
+                or instance_uid_matches(target, inst.instance_uid, host_name)
                 or inst.name == target
                 or str(inst.primary_domain or "").strip().lower() == target.lower()
                 or target.lower() in domains
@@ -920,7 +928,8 @@ def _select_installs_for_patch(cfg, root: str | None):
     ensure_seeded(inv, cfg)
     installs = inv.list_instances()
     if root:
-        return [x for x in installs if x.root == root or x.instance_uid == root]
+        host_name = _mcc_host_name(cfg)
+        return [x for x in installs if x.root == root or instance_uid_matches(root, x.instance_uid, host_name)]
     return installs
 
 
@@ -2178,7 +2187,7 @@ def _build_parser() -> argparse.ArgumentParser:
     scheduler.add_argument("--verbose", action="store_true", help="Show tracked running task details on status")
     scheduler.add_argument("--json", action="store_true")
 
-    apt_upg = sub.add_parser("apt-upgrade", help="Run apt update + dist-upgrade preserving local config files")
+    apt_upg = sub.add_parser("apt-upgrade", help="Run the MCC-bound APT upgrade preserving local config files")
     apt_upg.add_argument("--config", default=default_cfg)
     apt_upg.add_argument("--yes", action="store_true", help="Do not ask confirmation")
     apt_upg.add_argument("--json", action="store_true")
@@ -2910,7 +2919,8 @@ def main() -> int:
         installs = inv.list_instances()
         target_root = str(getattr(args, "root", "") or "").strip()
         if target_root:
-            installs = [i for i in installs if i.root == target_root or i.instance_uid == target_root]
+            host_name = _mcc_host_name(cfg)
+            installs = [i for i in installs if i.root == target_root or instance_uid_matches(target_root, i.instance_uid, host_name)]
             if not installs:
                 msg = f"Mautic install not found for root: {target_root}"
                 if bool(getattr(args, "json", False)):
@@ -3507,8 +3517,9 @@ def main() -> int:
         ensure_seeded(inv, cfg)
         if args.op == "list":
             rows = inv.list_instances()
+            host_name = _mcc_host_name(cfg)
             if args.instance_uid:
-                rows = [row for row in rows if row.instance_uid == args.instance_uid]
+                rows = [row for row in rows if instance_uid_matches(args.instance_uid, row.instance_uid, host_name)]
                 if len(rows) != 1:
                     if args.json:
                         print("[]")
@@ -3516,7 +3527,12 @@ def main() -> int:
                         print("Mautic instance identity is unknown or ambiguous", file=sys.stderr)
                     return 2
             if args.json:
-                print(json.dumps([row.safe_dict() for row in rows], ensure_ascii=True, indent=2))
+                payload = []
+                for row in rows:
+                    item = row.safe_dict()
+                    item["instance_uid"] = canonical_instance_uid(row.instance_uid)
+                    payload.append(item)
+                print(json.dumps(payload, ensure_ascii=True, indent=2))
                 return 0
             if not rows:
                 print("No instances")
@@ -3529,7 +3545,7 @@ def main() -> int:
                 runtime = str(getattr(i, "runtime", "host") or "host")
                 install_type = str(i.install_type or detect_install_type(i.root)).strip().lower() or "unknown"
                 print(
-                    f"{i.name}\t{i.root}\t{i.source}\tmajor={i.mautic_major}\tuid={i.instance_uid}"
+                    f"{i.name}\t{i.root}\t{i.source}\tmajor={i.mautic_major}\tuid={canonical_instance_uid(i.instance_uid)}"
                     f"\tdomains={domains_cell}\truntime={runtime}\tinstall_type={install_type}"
                 )
             return 0
@@ -3570,7 +3586,14 @@ def main() -> int:
         if args.op == "remove":
             if args.operation_id or args.instance_uid or args.json:
                 try:
-                    removed = inv.remove_owned_registration(instance_uid=args.instance_uid, root=args.root, registering_operation_id=args.operation_id)
+                    remove_uid = args.instance_uid
+                    if remove_uid:
+                        host_name = _mcc_host_name(cfg)
+                        matches = [row for row in inv.list_instances() if instance_uid_matches(remove_uid, row.instance_uid, host_name)]
+                        if len(matches) != 1:
+                            raise ValueError("Mautic instance identity is unknown or ambiguous")
+                        remove_uid = matches[0].instance_uid
+                    removed = inv.remove_owned_registration(instance_uid=remove_uid, root=args.root, registering_operation_id=args.operation_id)
                 except ValueError as exc:
                     print(str(exc), file=sys.stderr)
                     return 2
@@ -3806,7 +3829,13 @@ def main() -> int:
             if comp not in {"apt"}:
                 print(json.dumps({"status": "error", "reason": "rescan is supported only for --component apt"}, ensure_ascii=True))
                 return 2
-            cleared = clear_apt_repo_profile_markers(cfg=cfg)
+            cleared = _configured_external_operation(
+                "apt", {}, cfg=cfg, operation="apt_repo_profile_markers_clear",
+                operation_input={"dry_run": bool(args.dry_run)},
+            )
+            if cleared is None:
+                print(json.dumps({"status": "error", "reason": "apt_repo_profile_markers_clear_binding_not_configured"}, ensure_ascii=True))
+                return 1
             res = service_profiles_apply_once(
                 cfg,
                 component=comp,
@@ -3840,8 +3869,15 @@ def main() -> int:
             print(f"NOTICE: {note}")
         op = str(args.op or "status").strip().lower()
         if op == "status":
-            payload = collect_apt_state(timeout_sec=25, cfg=cfg, auto_bootstrap_zabbix=False)
-            zbx_state = payload.get("zabbix_mysql_monitor") if isinstance(payload, dict) else {}
+            payload = _configured_external_operation(
+                "apt", {}, cfg=cfg, operation="zabbix_state_observe", operation_input={},
+            )
+            if payload is None:
+                print(json.dumps({"status": "error", "reason": "zabbix_state_observe_binding_not_configured"}, ensure_ascii=True))
+                return 1
+            # The external operation returns the durable marker itself;
+            # preserve the established CLI envelope around that raw state.
+            zbx_state = payload
             out = {"status": "ok", "zabbix_mysql_monitor": zbx_state}
             print(json.dumps(out, ensure_ascii=True, indent=2))
             return 0
@@ -3856,22 +3892,15 @@ def main() -> int:
         profile = fetched.get("profile") if isinstance(fetched, dict) else None
         if not isinstance(profile, dict):
             profile = {}
-        code, output = run_configured_external_operation(
-            cfg,
-            component="apt",
+        res = _configured_external_operation(
+            "apt",
+            profile,
+            cfg=cfg,
             operation="zabbix_mysql_monitor_bootstrap",
-            profile=profile,
             operation_input={"force": bool(args.force), "dry_run": False, "trigger": "explicit"},
         )
-        if code == 0:
-            try:
-                res = json.loads(output)
-            except (TypeError, ValueError):
-                res = {"status": "error", "reason": "custom_operation_receipt_invalid"}
-            if not isinstance(res, dict):
-                res = {"status": "error", "reason": "custom_operation_receipt_invalid"}
-        else:
-            res = {"status": "error", "reason": output or "custom_operation_failed"}
+        if res is None:
+            res = {"status": "error", "reason": "zabbix_mysql_monitor_bootstrap_binding_not_configured"}
         out = {
             "status": "ok" if str(res.get("status", "")).strip().lower() in {"applied", "already_present", "noop", "skipped", "disabled"} else "error",
             "fetch_status": str(fetched.get("status", "n/a")) if isinstance(fetched, dict) else "n/a",
@@ -4041,7 +4070,7 @@ def main() -> int:
             print(f"NOTICE: {note}")
         if not bool(args.yes):
             ans = _ask(
-                "Run apt-get update && apt-get dist-upgrade -y with keep-local-config behavior? [y/N]: "
+                "Run the MCC-bound APT upgrade with keep-local-config behavior? [y/N]: "
             ).strip().lower()
             if ans not in {"y", "yes"}:
                 if bool(args.json):
@@ -4049,64 +4078,40 @@ def main() -> int:
                 else:
                     print("cancelled")
                 return 1
-        env = dict(os.environ)
-        env["DEBIAN_FRONTEND"] = "noninteractive"
-        cmd_update = ["apt-get", "update", "--allow-releaseinfo-change"]
-        cmd_upgrade = [
-            "apt-get",
-            "dist-upgrade",
-            "-y",
-            "-o",
-            "Dpkg::Options::=--force-confdef",
-            "-o",
-            "Dpkg::Options::=--force-confold",
-        ]
-        started = time.time()
-        p_update = subprocess.run(cmd_update, capture_output=True, text=True, env=env)
-        update_stdout = p_update.stdout or ""
-        update_stderr = p_update.stderr or ""
-        if update_stdout:
-            print(update_stdout, end="")
-        if update_stderr:
-            print(update_stderr, end="", file=sys.stderr)
-        p_upgrade = None
-        if p_update.returncode == 0:
-            p_upgrade = subprocess.run(cmd_upgrade, capture_output=True, text=True, env=env)
-            up_stdout = p_upgrade.stdout or ""
-            up_stderr = p_upgrade.stderr or ""
-            if up_stdout:
-                print(up_stdout, end="")
-            if up_stderr:
-                print(up_stderr, end="", file=sys.stderr)
-        duration = int(max(0, time.time() - started))
-        update_rc = int(p_update.returncode)
-        upgrade_rc = int(p_upgrade.returncode) if p_upgrade is not None else None
-        ok = update_rc == 0 and (upgrade_rc in {0, None})
-        postcheck_lines: list[str] = []
-        if ok:
-            post_ok, postcheck_lines = _apt_service_postcheck(cfg)
-            for line in postcheck_lines:
-                print(line)
-            ok = ok and post_ok
-        payload = {
-            "status": ("ok" if ok else "error"),
-            "update_rc": update_rc,
-            "upgrade_rc": upgrade_rc,
-            "duration_sec": duration,
-            "dpkg_conf_policy": "force-confdef + force-confold",
-            "postcheck_lines": postcheck_lines,
-        }
-        if bool(args.json):
-            print(json.dumps(payload, ensure_ascii=True, indent=2))
-        else:
-            print(
-                "apt_upgrade={status} update_rc={update_rc} upgrade_rc={upgrade_rc} duration_sec={duration_sec} conf=force-confold".format(
-                    **payload
+        external = _configured_external_operation(
+            "apt", {}, cfg=cfg, operation="apt_upgrade", operation_input={},
+        )
+        if external is not None:
+            events = external.get("output_events") if isinstance(external, dict) else None
+            if isinstance(events, list):
+                for event in events:
+                    if not isinstance(event, dict):
+                        continue
+                    text = str(event.get("text") or "")
+                    if str(event.get("stream") or "stdout") == "stderr":
+                        print(text, end="", file=sys.stderr)
+                    else:
+                        print(text, end="")
+            payload = external.get("payload") if isinstance(external, dict) else None
+            if not isinstance(payload, dict):
+                payload = {"status": "error", "reason": "apt_upgrade_external_payload_invalid"}
+            if bool(args.json):
+                print(json.dumps(payload, ensure_ascii=True, indent=2))
+            else:
+                print(
+                    "apt_upgrade={status} update_rc={update_rc} upgrade_rc={upgrade_rc} duration_sec={duration_sec} conf=force-confold".format(
+                        status=payload.get("status", "error"),
+                        update_rc=payload.get("update_rc", "-"),
+                        upgrade_rc=payload.get("upgrade_rc", "-"),
+                        duration_sec=payload.get("duration_sec", "-"),
+                    )
                 )
-            )
-        if ok:
-            _push_state_after_change(cfg, "apt-upgrade")
-        return 0 if ok else 1
+            ok = str(external.get("status") or "").strip().lower() == "ok" and str(payload.get("status") or "").strip().lower() == "ok"
+            if ok:
+                _push_state_after_change(cfg, "apt-upgrade")
+            return 0 if ok else 1
+        print(json.dumps({"status": "error", "reason": "apt_upgrade_binding_not_configured"}, ensure_ascii=True))
+        return 1
 
     if args.cmd == "tasks-lifecycle":
         cfg = load_config(args.config)

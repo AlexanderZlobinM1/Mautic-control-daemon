@@ -16,6 +16,21 @@ from mcd_agent.service_profile_external import (
 )
 
 
+_MANAGED_RECEIPT_KEYS = {
+    'schema', 'operation_id', 'domain', 'site', 'available_path', 'enabled_path',
+    'enabled_target', 'available_sha256', 'created_available',
+    'created_enabled_symlink',
+}
+
+
+class ManagedNginxVhostError(RuntimeError):
+    """A validated managed-vhost failure with its bounded public result."""
+
+    def __init__(self, public_result: dict[str, Any]):
+        super().__init__('nginx_vhost_operation_failed')
+        self.public_result = dict(public_result)
+
+
 def _invoke(operation: str, operation_input: dict[str, Any], *,
             profile: Any = _PROFILE_NOT_SUPPLIED, cfg: Any = None,
             cache_dir: str | None = None) -> dict[str, Any]:
@@ -110,6 +125,100 @@ def nginx_vhost_operation(operation: str, parameters: dict[str, Any], *,
         raise RuntimeError(result['error'])
     expected = {'site'} if operation == 'write_nginx_vhost' else {'active', 'backup'}
     if set(result) != expected or any(not isinstance(value, str) for value in result.values()):
+        raise CustomSelectedTaskError('custom_selected_task_result_invalid')
+    return result
+
+
+def _managed_receipt_valid(receipt: Any, *, operation_id: str,
+                           domain: str, site: str | None = None) -> bool:
+    return (
+        isinstance(receipt, dict)
+        and set(receipt) == _MANAGED_RECEIPT_KEYS
+        and receipt.get('schema') == 'mcc-nginx-managed-vhost-ownership-v1'
+        and receipt.get('operation_id') == operation_id
+        and receipt.get('domain') == domain
+        and all(isinstance(receipt.get(key), str) and receipt[key] for key in (
+            'operation_id', 'domain', 'site', 'available_path', 'enabled_path',
+            'enabled_target', 'available_sha256'))
+        and len(receipt['available_sha256']) == 64
+        and all(char in '0123456789abcdef' for char in receipt['available_sha256'])
+        and type(receipt.get('created_available')) is bool
+        and type(receipt.get('created_enabled_symlink')) is bool
+        and (site is None or receipt.get('site') == site)
+    )
+
+
+def write_managed_nginx_vhost(*, operation_id: str, root: Path, domains: list[str],
+                              php_version: str, cfg: Any = None,
+                              cache_dir: str | None = None) -> dict[str, Any]:
+    """Create an image-owned vhost and retain the external ownership receipt."""
+    parameters = {
+        'operation_id': operation_id,
+        'root': str(root),
+        'domains': domains,
+        'php_version': php_version,
+    }
+    if not nginx_operation_input_valid('write_managed_nginx_vhost', parameters):
+        raise CustomSelectedTaskError('nginx_operation_input_invalid')
+    if not operation_id or not domains:
+        raise CustomSelectedTaskError('nginx_operation_input_invalid')
+    result = _invoke('write_managed_nginx_vhost', parameters, profile=None,
+                     cfg=cfg, cache_dir=cache_dir)
+    if (set(result) != {'site', 'ownership_receipt'}
+            or not isinstance(result.get('site'), str) or not result['site']
+            or not _managed_receipt_valid(
+                result.get('ownership_receipt'), operation_id=operation_id,
+                domain=domains[0], site=result['site'])):
+        raise CustomSelectedTaskError('custom_selected_task_result_invalid')
+    return result
+
+
+def cleanup_managed_vhost(*, operation_id: str, domain: str,
+                          ownership_receipt: dict[str, Any], cfg: Any = None,
+                          cache_dir: str | None = None) -> dict[str, Any]:
+    """Remove only the vhost objects proven owned by a managed-write receipt."""
+    if not _managed_receipt_valid(
+            ownership_receipt, operation_id=operation_id, domain=domain):
+        raise CustomSelectedTaskError('nginx_operation_input_invalid')
+    parameters = {
+        'operation_id': operation_id,
+        'domain': domain,
+        'ownership_receipt': ownership_receipt,
+    }
+    if not nginx_operation_input_valid('cleanup_managed_vhost', parameters):
+        raise CustomSelectedTaskError('nginx_operation_input_invalid')
+    result = _invoke('cleanup_managed_vhost', parameters, profile=None,
+                     cfg=cfg, cache_dir=cache_dir)
+    common = (
+        isinstance(result, dict)
+        and set(result) in ({'schema', 'status', 'operation_id', 'domain',
+                             'ownership_receipt_sha256', 'removed',
+                             'mutation_started', 'rollback_available'},
+                            {'schema', 'status', 'operation_id', 'domain',
+                             'ownership_receipt_sha256', 'removed',
+                             'mutation_started', 'rollback_available', 'error'})
+        and result.get('schema') == 'mcc-nginx-managed-vhost-cleanup-v1'
+        and result.get('operation_id') == operation_id
+        and result.get('domain') == domain
+        and isinstance(result.get('ownership_receipt_sha256'), str)
+        and len(result['ownership_receipt_sha256']) == 64
+        and all(char in '0123456789abcdef' for char in result['ownership_receipt_sha256'])
+        and isinstance(result.get('removed'), dict)
+        and set(result['removed']) == {'available', 'enabled'}
+        and all(type(result['removed'][key]) is bool for key in ('available', 'enabled'))
+        and type(result.get('mutation_started')) is bool
+        and result.get('rollback_available') is False
+    )
+    if not common:
+        raise CustomSelectedTaskError('custom_selected_task_result_invalid')
+    if result.get('status') == 'error':
+        if set(result) != {'schema', 'status', 'operation_id', 'domain',
+                           'ownership_receipt_sha256', 'removed',
+                           'mutation_started', 'rollback_available', 'error'} or not isinstance(result.get('error'), str):
+            raise CustomSelectedTaskError('custom_selected_task_result_invalid')
+        raise ManagedNginxVhostError(result)
+    if (result.get('status') not in {'applied', 'noop'}
+            or 'error' in result):
         raise CustomSelectedTaskError('custom_selected_task_result_invalid')
     return result
 

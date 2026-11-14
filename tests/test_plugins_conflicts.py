@@ -26,7 +26,6 @@ from mcd_agent.plugins import (
     _assert_plugin_bundles_registered,
     _ensure_plugin_reload_runtime_packages,
     _registration_aware_status,
-    _read_installed_version,
     _reset_plugin_prod_cache,
     _run_plugin_cache_clear,
     _run_plugin_cache_warmup,
@@ -36,9 +35,7 @@ from mcd_agent.plugins import (
     _run_plugin_template,
     _plugin_selection_digest,
     _protected_plugin_path_names,
-    _remove_plugin_path,
     _apply_plugin_config_metadata_patch,
-    _plugin_config_metadata_paths,
     _prealign_metadataless_plugin_versions,
     _run_manifest_sql_fixes,
     _exclusive_counterparts,
@@ -47,6 +44,24 @@ from mcd_agent.plugins import (
 
 
 class PluginConflictPathTests(unittest.TestCase):
+    def setUp(self) -> None:
+        def external(_config, *, operation, runtime):
+            if operation == "plugin_filesystem_status":
+                bundle = str(runtime.get("bundle") or "")
+                if bundle in {"OtherBundle", "MigratingBundle"}:
+                    return {"schema": "mcd-plugin-filesystem-status-v1", "status": "ok", "plugin_status": "ok", "installed_version": "1.2.3", "digest": "0" * 64, "state": None, "has_doctrine_entity_metadata": False, "has_native_migrations": bundle == "MigratingBundle", "bundles": []}
+                return {"schema": "mcd-plugin-filesystem-status-v1", "status": "ok", "plugin_status": "missing", "installed_version": "-", "digest": "0" * 64, "state": None, "has_doctrine_entity_metadata": False, "has_native_migrations": False, "bundles": []}
+            if operation == "plugin_filesystem_apply":
+                return {"status": "applied", "changed_paths": ["plugins"]}
+            if operation in {"plugin_filesystem_cleanup", "plugin_alias_cleanup", "plugin_cache_reset"}:
+                return {"status": "noop", "changed_paths": []}
+            return {"status": "error", "reason": "unsupported_test_operation"}
+        self._external_patch = patch("mcd_agent.plugins._configured_plugin_filesystem_operation", side_effect=external)
+        self._external_patch.start()
+
+    def tearDown(self) -> None:
+        self._external_patch.stop()
+
     def test_plugin_reload_passes_discovered_table_prefix_to_mautic(self) -> None:
         cfg = SimpleNamespace(php_bin="/usr/bin/php", mautic_run_as_user="www-data", command_timeout_sec=60)
         install = SimpleNamespace(
@@ -134,19 +149,15 @@ class PluginConflictPathTests(unittest.TestCase):
     def test_plugin_status_treats_custom_patch_version_as_current(self) -> None:
         with TemporaryDirectory() as tmp:
             plugins_dir = Path(tmp)
-            cfg = plugins_dir / "AmazonSesBundle" / "Config"
-            cfg.mkdir(parents=True)
-            (cfg / "config.php").write_text(
-                "<?php\nreturn ['version' => '1.0.36.1'];\n",
-                encoding="utf-8",
-            )
-
-            status, reason, installed = _plugin_status(
-                plugins_dir,
-                {"bundle": "AmazonSesUpstreamBundle", "version": "1.0.36", "install_bundle": "AmazonSesBundle"},
-                ".mcd-plugin-state.json",
-                install_bundle="AmazonSesBundle",
-            )
+            external = {"schema":"mcd-plugin-filesystem-status-v1","status":"ok","plugin_status":"ok","installed_version":"1.0.36.1","digest":"a"*64,"state":None,"has_doctrine_entity_metadata":False,"has_native_migrations":False}
+            with patch("mcd_agent.plugins._plugin_filesystem_status_external", return_value=external):
+                status, reason, installed = _plugin_status(
+                    plugins_dir,
+                    {"bundle": "AmazonSesUpstreamBundle", "version": "1.0.36", "install_bundle": "AmazonSesBundle"},
+                    ".mcd-plugin-state.json",
+                    install_bundle="AmazonSesBundle",
+                    config=SimpleNamespace(plugins_state_filename=".mcd-plugin-state.json"),
+                )
 
             self.assertEqual(status, "OK")
             self.assertEqual(installed, "1.0.36.1")
@@ -188,14 +199,7 @@ class PluginConflictPathTests(unittest.TestCase):
 
             # AmazonSesBundleDev is a manifest variant that installs into the same
             # runtime directory. Auto-clean must not remove the selected path.
-            removed = []
-            for name in {"AmazonSesBundleDev", "AmazonSesBundle"}:
-                if name in protected:
-                    continue
-                if _remove_plugin_path(plugins_dir / name):
-                    removed.append(name)
-
-            self.assertEqual(removed, [])
+            self.assertIn("AmazonSesBundle", protected)
             self.assertTrue(selected_path.is_dir())
 
     def test_dependency_matrix_can_make_enhanced_variant_displace_callback_plugins(self) -> None:
@@ -246,17 +250,9 @@ class PluginConflictPathTests(unittest.TestCase):
         ]
 
         with TemporaryDirectory() as tmp:
-            plugins_dir = Path(tmp)
-            managed = plugins_dir / "AmazonSesBundle"
-            (managed / "Config").mkdir(parents=True)
-            (managed / "Config" / "config.php").write_text(
-                "<?php\nreturn ['version' => '1.0.36.1'];\n",
-                encoding="utf-8",
-            )
-
             removed = _auto_remove_conflicting_installed_bundles(
                 selected,
-                plugins_dir,
+                Path(tmp),
                 context={
                     "sender_type": "mautic+ses+api",
                     "installed_plugins": {
@@ -324,23 +320,19 @@ class PluginConflictPathTests(unittest.TestCase):
         self.assertTrue(_cluster_plugin_local_is_reference(cfg))
 
     def test_plugin_selection_digest_tracks_bundle_content(self) -> None:
-        with TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            bundle = root / "plugins" / "DemoBundle"
-            bundle.mkdir(parents=True)
-            (bundle / "DemoBundle.php").write_text("<?php\n", encoding="utf-8")
-
-            first = _plugin_selection_digest(str(root), ["DemoBundle"])
-            (bundle / "Config").mkdir()
-            (bundle / "Config" / "config.php").write_text("<?php return [];\n", encoding="utf-8")
-            second = _plugin_selection_digest(str(root), ["DemoBundle"])
+        with patch("mcd_agent.plugins._plugin_filesystem_status_external", side_effect=[
+            {"digest": "a" * 64, "plugin_status": "ok", "details": {}},
+            {"digest": "b" * 64, "plugin_status": "ok", "details": {}},
+        ]):
+            first = _plugin_selection_digest("/srv/app", ["DemoBundle"], config=SimpleNamespace(plugins_state_filename=".mcd-plugin.json"))
+            second = _plugin_selection_digest("/srv/app", ["DemoBundle"], config=SimpleNamespace(plugins_state_filename=".mcd-plugin.json"))
 
             self.assertEqual(first["status"], "ok")
             self.assertEqual(second["status"], "ok")
             self.assertNotEqual(first["digest"], second["digest"])
 
     def test_remove_action_deletes_manifest_bundle_and_install_alias(self) -> None:
-        cfg = SimpleNamespace(plugins_post_cache_clear=False, plugins_post_install=False)
+        cfg = SimpleNamespace(plugins_post_cache_clear=False, plugins_post_install=False, plugins_managed_root="/srv/app")
         install = SimpleNamespace(root="", db=None, mautic_major=6)
         selected = [
             {
@@ -353,10 +345,14 @@ class PluginConflictPathTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             plugins = root / "plugins"
-            (plugins / "DemoBundle").mkdir(parents=True)
-            (plugins / "DemoBundleDev").mkdir(parents=True)
-
-            changed = _apply_plugin_file_changes(
+            calls = []
+            def external(_config, *, operation, runtime):
+                calls.append((operation, runtime))
+                if operation == "plugin_filesystem_status":
+                    return {"schema":"mcd-plugin-filesystem-status-v1","status":"ok","plugin_status":"missing","installed_version":"-","digest":"a"*64,"state":None,"bundles":[],"has_doctrine_entity_metadata":False,"has_native_migrations":False}
+                return {"status": "cleaned", "changed_paths": runtime.get("paths", [runtime.get("bundle")])}
+            with patch("mcd_agent.plugins._configured_plugin_filesystem_operation", side_effect=external):
+              changed = _apply_plugin_file_changes(
                 config=cfg,
                 install=install,
                 install_root=str(root),
@@ -370,8 +366,14 @@ class PluginConflictPathTests(unittest.TestCase):
             )
 
             self.assertTrue(changed)
-            self.assertFalse((plugins / "DemoBundle").exists())
-            self.assertFalse((plugins / "DemoBundleDev").exists())
+            self.assertEqual(
+                [runtime for operation, runtime in calls if operation == "plugin_filesystem_cleanup"],
+                [
+                    {"plugins_root": str(plugins), "bundle": "DemoBundle"},
+                    {"plugins_root": str(plugins), "bundle": "DemoBundleDev"},
+                ],
+            )
+            self.assertNotIn("plugin_alias_cleanup", [operation for operation, _runtime in calls])
 
     def test_cluster_plugin_signature_changes_with_package_version(self) -> None:
         base = [
@@ -590,35 +592,15 @@ class PluginConflictPathTests(unittest.TestCase):
                 self.assertNotIn('"metadata"    => []', text)
 
 
-    def test_plugin_config_metadata_paths_ignores_non_bundle_directories(self) -> None:
-        with TemporaryDirectory() as tmp:
-            plugins_dir = Path(tmp)
-            (plugins_dir / "DemoBundle").mkdir()
-            (plugins_dir / "node_modules").mkdir()
-            rows = [{"bundle": "SelectedBundle", "install_bundle": "SelectedBundle", "item": {}}]
-
-            names = [name for name, _ in _plugin_config_metadata_paths(plugins_dir, rows)]
-
-            self.assertEqual(names, ["SelectedBundle", "DemoBundle"])
-
     def test_m6_metadataless_plugin_version_prealign_updates_db_row(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
-            config = root / "plugins" / "DemoBundle" / "Config" / "config.php"
-            config.parent.mkdir(parents=True)
-            config.write_text(
-                "<?php\nreturn [\n"
-                "    'name'    => 'Demo',\n"
-                "    'version' => '1.2.3',\n"
-                "];\n",
-                encoding="utf-8",
-            )
             install = SimpleNamespace(root=str(root), mautic_major=6, db={"driver": "pdo_mysql"})
             selected = [{"bundle": "DemoBundle", "install_bundle": "DemoBundle", "item": {}}]
             db = SimpleNamespace(align_plugin_version=Mock(return_value=1))
 
-            with patch("mcd_agent.plugins.MauticDB", return_value=db):
-                changed = _prealign_metadataless_plugin_versions(install, selected)
+            with patch("mcd_agent.plugins.MauticDB", return_value=db), patch("mcd_agent.plugins._plugin_filesystem_status_external", return_value={"plugin_status":"ok","installed_version":"1.2.3","has_doctrine_entity_metadata":False,"has_native_migrations":False,"digest":"a"*64}):
+                changed = _prealign_metadataless_plugin_versions(install, selected, config=SimpleNamespace(plugins_state_filename=".mcd-plugin.json"))
 
             self.assertTrue(changed)
             db.align_plugin_version.assert_called_once_with("DemoBundle", "1.2.3")
@@ -626,16 +608,14 @@ class PluginConflictPathTests(unittest.TestCase):
     def test_m6_plugin_version_prealign_covers_installed_metadataless_plugins(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
-            for bundle, version in (("DemoBundle", "1.2.3"), ("OtherBundle", "2.0.1")):
-                config = root / "plugins" / bundle / "Config" / "config.php"
-                config.parent.mkdir(parents=True)
-                config.write_text(f"<?php\nreturn ['version' => '{version}'];\n", encoding="utf-8")
             install = SimpleNamespace(root=str(root), mautic_major=6, db={"driver": "pdo_mysql"})
-            selected = [{"bundle": "DemoBundle", "install_bundle": "DemoBundle", "item": {}}]
+            selected = [{"bundle": b, "install_bundle": b, "item": {}} for b in ("DemoBundle", "OtherBundle")]
             db = SimpleNamespace(align_plugin_version=Mock(side_effect=[1, 1]))
 
-            with patch("mcd_agent.plugins.MauticDB", return_value=db):
-                changed = _prealign_metadataless_plugin_versions(install, selected)
+            def status(_config, *, bundle, **_kwargs):
+                return {"plugin_status":"ok","installed_version":{"DemoBundle":"1.2.3","OtherBundle":"2.0.1"}[bundle],"has_doctrine_entity_metadata":False,"has_native_migrations":False,"digest":"a"*64}
+            with patch("mcd_agent.plugins.MauticDB", return_value=db), patch("mcd_agent.plugins._plugin_filesystem_status_external", side_effect=status):
+                changed = _prealign_metadataless_plugin_versions(install, selected, config=SimpleNamespace(plugins_state_filename=".mcd-plugin.json"))
 
             self.assertTrue(changed)
             db.align_plugin_version.assert_any_call("DemoBundle", "1.2.3")
@@ -645,19 +625,14 @@ class PluginConflictPathTests(unittest.TestCase):
     def test_m6_plugin_version_prealign_preserves_selected_native_migration_bundle(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
-            for bundle, version in (("MigratingBundle", "1.2.3"), ("OtherBundle", "2.0.1")):
-                config = root / "plugins" / bundle / "Config" / "config.php"
-                config.parent.mkdir(parents=True)
-                config.write_text(f"<?php\nreturn ['version' => '{version}'];\n", encoding="utf-8")
-            migration = root / "plugins" / "MigratingBundle" / "Migrations" / "Version_1_2_3.php"
-            migration.parent.mkdir(parents=True)
-            migration.write_text("<?php\n", encoding="utf-8")
             install = SimpleNamespace(root=str(root), mautic_major=6, db={"driver": "pdo_mysql"})
-            selected = [{"bundle": "MigratingBundle", "install_bundle": "MigratingBundle", "item": {}}]
+            selected = [{"bundle": b, "install_bundle": b, "item": {}} for b in ("MigratingBundle", "OtherBundle")]
             db = SimpleNamespace(align_plugin_version=Mock(return_value=1))
 
-            with patch("mcd_agent.plugins.MauticDB", return_value=db):
-                changed = _prealign_metadataless_plugin_versions(install, selected)
+            def status(_config, *, bundle, **_kwargs):
+                return {"plugin_status":"ok","installed_version":{"MigratingBundle":"1.2.3","OtherBundle":"2.0.1"}[bundle],"has_doctrine_entity_metadata":False,"has_native_migrations":bundle == "MigratingBundle","digest":"a"*64}
+            with patch("mcd_agent.plugins.MauticDB", return_value=db), patch("mcd_agent.plugins._plugin_filesystem_status_external", side_effect=status):
+                changed = _prealign_metadataless_plugin_versions(install, selected, config=SimpleNamespace(plugins_state_filename=".mcd-plugin.json"))
 
             self.assertTrue(changed)
             db.align_plugin_version.assert_called_once_with("OtherBundle", "2.0.1")
@@ -748,7 +723,7 @@ class PluginConflictPathTests(unittest.TestCase):
             selected = [{"bundle": "DemoBundle", "install_bundle": "DemoBundle", "item": {}}]
 
             with patch("mcd_agent.plugins.MauticDB") as db_cls:
-                changed = _prealign_metadataless_plugin_versions(install, selected)
+                changed = _prealign_metadataless_plugin_versions(install, selected, config=SimpleNamespace(plugins_state_filename=".mcd-plugin.json"))
 
             self.assertFalse(changed)
             db_cls.assert_not_called()
@@ -763,7 +738,7 @@ class PluginConflictPathTests(unittest.TestCase):
             selected = [{"bundle": "DemoBundle", "install_bundle": "DemoBundle", "item": {}}]
 
             with patch("mcd_agent.plugins.MauticDB") as db_cls:
-                changed = _prealign_metadataless_plugin_versions(install, selected)
+                changed = _prealign_metadataless_plugin_versions(install, selected, config=SimpleNamespace(plugins_state_filename=".mcd-plugin.json"))
 
             self.assertFalse(changed)
             db_cls.assert_not_called()
@@ -866,6 +841,7 @@ class PluginConflictPathTests(unittest.TestCase):
                 plugins_post_cache_clear=True,
                 plugins_post_install=True,
                 plugins_state_filename=".mcd-plugin.json",
+                plugins_cache_relative_paths=["var/cache/prod"],
                 mcc_token="",
                 cluster_id="",
             )
@@ -901,9 +877,7 @@ class PluginConflictPathTests(unittest.TestCase):
                 "mcd_agent.plugins._apply_plugin_config_metadata_patch", return_value=False
             ), patch("mcd_agent.plugins._prealign_metadataless_plugin_versions", return_value=False), patch(
                 "mcd_agent.plugins._run_manifest_sql_fixes"
-            ), patch("mcd_agent.plugins._cleanup_conflicting_plugin_rows"), patch(
-                "mcd_agent.plugins._set_owner_group"
-            ), patch("mcd_agent.plugins._run_plugin_template", side_effect=post_step):
+            ), patch("mcd_agent.plugins._cleanup_conflicting_plugin_rows"), patch("mcd_agent.plugins._plugin_interaction_context", return_value={"installed_plugins": {}}), patch("mcd_agent.plugins._run_plugin_template", side_effect=post_step):
                 with self.assertRaisesRegex(RuntimeError, "cache:warmup failed"):
                     _apply_plugin_file_changes(
                         config=cfg,
@@ -918,7 +892,6 @@ class PluginConflictPathTests(unittest.TestCase):
                         run_post_steps=True,
                     )
 
-            self.assertEqual(_read_installed_version(root / "plugins" / "SalesSnapBundle"), "2.8.3")
             results = [
                 json.loads(line.split("=", 1)[1])
                 for line in output.getvalue().splitlines()
@@ -938,11 +911,6 @@ class PluginConflictPathTests(unittest.TestCase):
     def test_inventory_confirmation_requires_exact_selected_target_version(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
-            plugin = root / "plugins" / "DemoBundle"
-            config_file = plugin / "Config" / "config.php"
-            config_file.parent.mkdir(parents=True)
-            config_file.write_text("<?php return ['version' => '2.0.3'];\n", encoding="utf-8")
-            (plugin / "DemoBundle.php").write_text("<?php class DemoBundle {}\n", encoding="utf-8")
             cfg = SimpleNamespace(plugins_state_filename=".mcd-plugin.json")
             selected = [{
                 "bundle": "DemoBundle",
@@ -950,10 +918,11 @@ class PluginConflictPathTests(unittest.TestCase):
                 "item": {"bundle": "DemoBundle", "version": "2.0.4"},
             }]
 
-            with self.assertRaisesRegex(
+            with patch("mcd_agent.plugins._plugin_filesystem_status_external", return_value={"schema":"mcd-plugin-filesystem-status-v1","status":"ok","plugin_status":"ok","installed_version":"2.0.3","digest":"a"*64,"state":None,"has_doctrine_entity_metadata":False,"has_native_migrations":False}):
+              with self.assertRaisesRegex(
                 RuntimeError,
                 "target version mismatch expected=2.0.4 installed=2.0.3",
-            ):
+              ):
                 _confirm_plugin_apply_inventory(
                     config=cfg,
                     install_root=str(root),
@@ -1298,103 +1267,6 @@ class PluginConflictPathTests(unittest.TestCase):
 
         self.assertEqual(rc, 0)
         wait_sync.assert_called_once()
-
-    def test_stale_removed_bundle_cache_is_reset_before_two_queued_plugin_jobs(self) -> None:
-        for cache_relative in (Path("var/cache/prod"), Path("app/cache/prod")):
-            with self.subTest(cache_relative=str(cache_relative)), TemporaryDirectory() as tmp:
-                root = Path(tmp)
-                cache_path = root / cache_relative
-                stale = cache_path / "ContainerOld.php"
-                stale.parent.mkdir(parents=True)
-                stale.write_text(
-                    "require '/MauticPlugin/AdvancedReportsBundle/EventListener/VoidOrderSubscriber.php';\n",
-                    encoding="utf-8",
-                )
-                install = SimpleNamespace(root=str(root), db=None, mautic_major=7)
-                cfg = SimpleNamespace(plugins_post_cache_clear=True, plugins_post_install=True)
-                boots = 0
-
-                def console_boot(_config, _install, template):
-                    nonlocal boots
-                    self.assertFalse(stale.exists())
-                    self.assertEqual(cache_path.stat().st_mode & 0o777, 0o775)
-                    if template == "cache:clear":
-                        return 0, "cache cleared"
-                    if template == "cache:warmup":
-                        return 0, "cache warmed"
-                    boots += 1
-                    generated = cache_path / f"ContainerFresh{boots}.php"
-                    generated.write_text("<?php // clean generated cache\n", encoding="utf-8")
-                    return 0, "plugins reloaded"
-
-                with patch("mcd_agent.plugins._set_owner_group"), patch(
-                    "mcd_agent.plugins._run_plugin_template", side_effect=console_boot
-                ):
-                    _run_post_steps(cfg, install, expected_bundles=set())
-                    first_generation = cache_path / "ContainerFresh1.php"
-                    self.assertTrue(first_generation.exists())
-                    _run_post_steps(cfg, install, expected_bundles={"QueuedBundle"})
-
-                self.assertFalse(first_generation.exists())
-                self.assertTrue((cache_path / "ContainerFresh2.php").exists())
-                self.assertEqual(boots, 2)
-
-    def test_failed_cache_clear_does_not_restore_stale_compiled_container(self) -> None:
-        with TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            cache_path = root / "var" / "cache" / "prod"
-            stale = cache_path / "ContainerOld.php"
-            stale.parent.mkdir(parents=True)
-            stale.write_text("MauticPlugin/RemovedBundle stale\n", encoding="utf-8")
-            install = SimpleNamespace(root=str(root))
-            cfg = SimpleNamespace()
-
-            with patch("mcd_agent.plugins._set_owner_group"), patch(
-                "mcd_agent.plugins._run_plugin_template", return_value=(1, "boot failed")
-            ):
-                with self.assertRaisesRegex(RuntimeError, "cache:clear failed"):
-                    _run_plugin_cache_clear(cfg, install)
-
-            self.assertTrue(cache_path.is_dir())
-            self.assertFalse(stale.exists())
-            self.assertEqual(cache_path.stat().st_mode & 0o777, 0o775)
-
-    def test_cache_reset_evidence_lists_only_existing_layouts(self) -> None:
-        with TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "var" / "cache").mkdir(parents=True)
-            install = SimpleNamespace(root=str(root))
-
-            with patch("mcd_agent.plugins._set_owner_group"):
-                evidence = _reset_plugin_prod_cache(install)
-
-            self.assertEqual(evidence["schema"], "mcd-plugin-cache-reset-v1")
-            self.assertEqual(evidence["reset_paths"], ["var/cache/prod"])
-            self.assertEqual(evidence["mode"], "0775")
-
-    def test_cache_reset_ignores_disposable_retired_cleanup_race(self) -> None:
-        import errno
-
-        with TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            cache_path = root / "var" / "cache" / "prod"
-            cache_path.mkdir(parents=True)
-            stale = cache_path / "stale.php"
-            stale.write_text("stale", encoding="utf-8")
-            install = SimpleNamespace(root=str(root))
-
-            def fail_retired_cleanup(path: Path) -> None:
-                raise OSError(errno.ENOTEMPTY, "Directory not empty", str(path / "system"))
-
-            with patch("mcd_agent.plugins._set_owner_group"), patch(
-                "mcd_agent.plugins._remove_plugin_path", side_effect=fail_retired_cleanup
-            ):
-                evidence = _reset_plugin_prod_cache(install)
-
-            self.assertTrue(cache_path.is_dir())
-            self.assertFalse(stale.exists())
-            self.assertEqual(cache_path.stat().st_mode & 0o777, 0o775)
-            self.assertEqual(len(evidence["cleanup_pending_paths"]), 1)
 
     def test_canonical_plugin_uid_matches_catalog_selector_contract(self) -> None:
         self.assertEqual(

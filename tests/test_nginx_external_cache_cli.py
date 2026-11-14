@@ -110,6 +110,58 @@ def test_failed_vhost_terminal_preserves_exact_legacy_error_without_fallback(man
     assert json.loads(capsys.readouterr().out)=={'status':'error','reason':error}
 
 
+def _managed_receipt(tmp_path, operation_id='image-1', domain='qa.example.invalid'):
+    site=str(tmp_path/(domain+'.conf'))
+    return {
+        'schema':'mcc-nginx-managed-vhost-ownership-v1',
+        'operation_id':operation_id,
+        'domain':domain,
+        'site':site,
+        'available_path':site,
+        'enabled_path':str(tmp_path/'enabled'/(domain+'.conf')),
+        'enabled_target':site,
+        'available_sha256':'a'*64,
+        'created_available':True,
+        'created_enabled_symlink':True,
+    }
+
+
+def test_managed_vhost_write_and_receipt_cleanup_use_additive_operations(manual_cache,tmp_path):
+    from mcd_agent import nginx_external
+    root,_=manual_cache
+    operation_id='image-1';domain='qa.example.invalid'
+    parameters={'operation_id':operation_id,'root':str(tmp_path/'app'),'domains':[domain],'php_version':'8.5'}
+    receipt=_managed_receipt(tmp_path,operation_id,domain)
+    write_result={'site':receipt['site'],'ownership_receipt':receipt}
+    select_vhost(root,'write_managed_nginx_vhost',parameters,write_result)
+    assert nginx_external.write_managed_nginx_vhost(
+        operation_id=operation_id,root=Path(parameters['root']),domains=[domain],php_version='8.5'
+    )==write_result
+
+    cleanup_parameters={'operation_id':operation_id,'domain':domain,'ownership_receipt':receipt}
+    cleanup_result={
+        'schema':'mcc-nginx-managed-vhost-cleanup-v1','status':'applied',
+        'operation_id':operation_id,'domain':domain,'ownership_receipt_sha256':'b'*64,
+        'removed':{'available':True,'enabled':True},'mutation_started':True,
+        'rollback_available':False,
+    }
+    select_vhost(root,'cleanup_managed_vhost',cleanup_parameters,cleanup_result)
+    assert nginx_external.cleanup_managed_vhost(
+        operation_id=operation_id,domain=domain,ownership_receipt=receipt
+    )==cleanup_result
+
+
+def test_managed_cleanup_rejects_foreign_receipt_before_recipe(manual_cache,tmp_path,monkeypatch):
+    from mcd_agent import nginx_external
+    from mcd_agent.commercial_self_hosted import ExternalProcessPolicy
+    receipt=_managed_receipt(tmp_path,operation_id='foreign')
+    monkeypatch.setattr(ExternalProcessPolicy,'_run_bounded',lambda *a,**kw:pytest.fail('foreign receipt must not start recipe'))
+    with pytest.raises(custom.CustomSelectedTaskError,match='nginx_operation_input_invalid'):
+        nginx_external.cleanup_managed_vhost(
+            operation_id='image-1',domain='qa.example.invalid',ownership_receipt=receipt
+        )
+
+
 @pytest.mark.parametrize('problem',['input-changed','extra-flag','wrong-type','status','no-reload'])
 def test_vhost_unselected_inputs_or_invented_modes_never_start_recipe(manual_cache,tmp_path,monkeypatch,capsys,problem):
     from mcd_agent.commercial_self_hosted import ExternalProcessPolicy

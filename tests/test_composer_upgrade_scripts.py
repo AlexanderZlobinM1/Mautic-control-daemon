@@ -19,10 +19,8 @@ class ComposerUpgradeScriptTests(unittest.TestCase):
             stale.parent.mkdir(parents=True)
             stale.write_text("old services")
             stack.enter_context(patch("mcd_agent.mautic_upgrade._resolve_composer_project_root", return_value=td))
-            stack.enter_context(patch("mcd_agent.mautic_upgrade._resolve_composer_bin", return_value="composer"))
             stack.enter_context(patch("mcd_agent.mautic_upgrade._command_version_line", return_value=version))
-            for name in ("_ensure_node20", "_ensure_www_data_composer_cache", "_apply_mautic7_twig_include_hotfix",
-                         "_normalize_mautic7_loopback_redis_cache"):
+            for name in ("_apply_mautic7_twig_include_hotfix", "_normalize_mautic7_loopback_redis_cache"):
                 stack.enter_context(patch("mcd_agent.mautic_upgrade." + name, return_value=False))
             stack.enter_context(patch("mcd_agent.composer_permissions.prepare_composer_paths", return_value={}))
 
@@ -61,7 +59,14 @@ class ComposerUpgradeScriptTests(unittest.TestCase):
                     record("finish")()
 
             stack.enter_context(patch("mcd_agent.mautic_upgrade._run", side_effect=run))
-            _apply_composer(td, "bin/console", "php", "7.1.3", "7.2.0")
+            _apply_composer(
+                td,
+                "bin/console",
+                "php",
+                "7.1.3",
+                "7.2.0",
+                composer_bin="composer",
+            )
 
     def test_update_purges_stale_container_before_replaying_hooks_and_migrations(self):
         self.run_upgrade(scripts={"post-autoload-dump": "callback", "post-update-cmd": ["@generate-assets"]})

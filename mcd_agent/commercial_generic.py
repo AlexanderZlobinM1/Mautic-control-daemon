@@ -132,9 +132,16 @@ def _capability(value: object, code: str) -> dict[str, Any]:
         target_scope = command.get("target_scope", "host")
         if command.get("execution") != "generic_primitive" or not isinstance(command.get("mutates_state"), bool) or target_scope not in {"host", "instance"}:
             raise _error(code)
+        binding_schema = command.get("binding_schema")
+        binding_sha256 = command.get("binding_sha256")
+        if (binding_schema is None) != (binding_sha256 is None):
+            raise _error(code)
         parsed_command = {"command_id": _identifier(command.get("command_id"), code), "version": _identifier(command.get("version"), code, 64), "execution": "generic_primitive", "mutates_state": command["mutates_state"], "input_schema_ref": _text(command.get("input_schema_ref"), code)}
         if "target_scope" in command:
             parsed_command["target_scope"] = target_scope
+        if binding_schema is not None:
+            parsed_command["binding_schema"] = _identifier(binding_schema, code, 128)
+            parsed_command["binding_sha256"] = _sha(binding_sha256, code)
         parsed.append(parsed_command)
     keys = [f"{item['command_id']}:{item['version']}" for item in parsed]
     if len(set(keys)) != len(keys):
@@ -184,7 +191,15 @@ def validate_generic_command_job(value: object, inventory: Mapping[str, Any] | N
     target_scope = command.get("target_scope", "host")
     if item.get("schema") != COMMAND_JOB_SCHEMA or item.get("contract_version") != CONTRACT_VERSION or isinstance(cursor, bool) or not isinstance(cursor, int) or cursor < 1 or not isinstance(parsed, Mapping) or command.get("execution") != "generic_primitive" or not isinstance(command.get("mutates_state"), bool) or target_scope not in {"host", "instance"}:
         raise _error("portal_mcd_generic_command_job_invalid")
-    result = {"schema": COMMAND_JOB_SCHEMA, "contract_version": CONTRACT_VERSION, "job_id": _identifier(item.get("job_id"), "portal_mcd_generic_command_job_invalid"), "request_id": _identifier(item.get("request_id"), "portal_mcd_generic_command_job_invalid"), "idempotency_key": _identifier(item.get("idempotency_key"), "portal_mcd_generic_command_job_invalid"), "command_id": _identifier(item.get("command_id"), "portal_mcd_generic_command_job_invalid"), "delivery_cursor": cursor, "installation": installation, "capability": {"capability_id": _identifier(capability.get("capability_id"), "portal_mcd_generic_command_job_invalid"), "version": _identifier(capability.get("version"), "portal_mcd_generic_command_job_invalid", 64)}, "command": {"command_id": _identifier(command.get("command_id"), "portal_mcd_generic_command_job_invalid"), "version": _identifier(command.get("version"), "portal_mcd_generic_command_job_invalid", 64), "execution": "generic_primitive", "mutates_state": command["mutates_state"], "target_scope": target_scope}, "input": dict(parsed), "issued_at": _text(item.get("issued_at"), "portal_mcd_generic_command_job_invalid"), "expires_at": _text(item.get("expires_at"), "portal_mcd_generic_command_job_invalid")}
+    binding_schema = command.get("binding_schema")
+    binding_sha256 = command.get("binding_sha256")
+    if (binding_schema is None) != (binding_sha256 is None):
+        raise _error("portal_mcd_generic_command_job_invalid")
+    parsed_command = {"command_id": _identifier(command.get("command_id"), "portal_mcd_generic_command_job_invalid"), "version": _identifier(command.get("version"), "portal_mcd_generic_command_job_invalid", 64), "execution": "generic_primitive", "mutates_state": command["mutates_state"], "target_scope": target_scope}
+    if binding_schema is not None:
+        parsed_command["binding_schema"] = _identifier(binding_schema, "portal_mcd_generic_command_job_invalid", 128)
+        parsed_command["binding_sha256"] = _sha(binding_sha256, "portal_mcd_generic_command_job_invalid")
+    result = {"schema": COMMAND_JOB_SCHEMA, "contract_version": CONTRACT_VERSION, "job_id": _identifier(item.get("job_id"), "portal_mcd_generic_command_job_invalid"), "request_id": _identifier(item.get("request_id"), "portal_mcd_generic_command_job_invalid"), "idempotency_key": _identifier(item.get("idempotency_key"), "portal_mcd_generic_command_job_invalid"), "command_id": _identifier(item.get("command_id"), "portal_mcd_generic_command_job_invalid"), "delivery_cursor": cursor, "installation": installation, "capability": {"capability_id": _identifier(capability.get("capability_id"), "portal_mcd_generic_command_job_invalid"), "version": _identifier(capability.get("version"), "portal_mcd_generic_command_job_invalid", 64)}, "command": parsed_command, "input": dict(parsed), "issued_at": _text(item.get("issued_at"), "portal_mcd_generic_command_job_invalid"), "expires_at": _text(item.get("expires_at"), "portal_mcd_generic_command_job_invalid")}
     if inventory is not None:
         match = next((entry for entry in inventory.get("capabilities", []) if entry["capability_id"] == result["capability"]["capability_id"] and entry["version"] == result["capability"]["version"]), None)
         advertised = next((entry for entry in (match or {}).get("commands", []) if entry["command_id"] == result["command"]["command_id"] and entry["version"] == result["command"]["version"]), None)
@@ -195,7 +210,10 @@ def validate_generic_command_job(value: object, inventory: Mapping[str, Any] | N
         # below because tenant isolation cannot rely on an absent field.
         if "target_scope" not in command and not installation.get("account_id"):
             result["command"]["target_scope"] = advertised_scope
-        if advertised is None or advertised["mutates_state"] != result["command"]["mutates_state"] or advertised_scope != result["command"]["target_scope"]:
+        if (advertised is None or advertised["mutates_state"] != result["command"]["mutates_state"]
+                or advertised_scope != result["command"]["target_scope"]
+                or advertised.get("binding_schema") != result["command"].get("binding_schema")
+                or advertised.get("binding_sha256") != result["command"].get("binding_sha256")):
             raise _error("portal_mcd_generic_command_not_advertised")
         advertised_installation = inventory.get("installation")
         if isinstance(advertised_installation, Mapping) and advertised_installation.get("account_id") != result["installation"].get("account_id"):

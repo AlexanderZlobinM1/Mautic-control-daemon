@@ -23,6 +23,142 @@ MCC через существующий `record_mautic_patch_evidence`; stdout m
 успех без фактической проверки. Повторный запуск использует тот же immutable
 plan и остаётся идемпотентным.
 
+Разрешение Mautic application root для Composer split-layout проверяет сначала
+project root с `composer.json` и `bin/console`, затем `docroot/` или `public/` с
+валидированными `app/` и `plugins/`. Если в project root остался только
+`app/upgrade` и пустой `plugins/`, это известный wrapper residue и он не создаёт
+вторую кандидатуру: выбирается полный `docroot/` или `public/`. Настоящие две
+полные application-структуры остаются неоднозначными и блокируются; обычные
+root-only, docroot-only и symlink layouts сохраняют fail-closed semantics.
+
+### Stable instance UID and MCC wire identity
+
+Локальный inventory и все публичные интерфейсы сохраняют стабильный bare
+`instance_uid`; host/local identity передаётся отдельной routing/binding
+координатой. State/inventory payloads, CLI, jobs и receipts не формируют
+`uid@host`. Admission и selectors временно принимают bare UID и legacy
+same-host `uid@host`, немедленно нормализуют их к bare UID и отклоняют qualifier
+другого хоста fail-closed. Patch context, migration selectors, command
+resolution и instance list/remove используют одну проверку без угадывания по
+root, DNS или первой найденной записи. Полное удаление legacy qualified input
+требует синхронного MCC/MCD перехода и отложено до 1.8.
+
+### Mail OS boundary
+
+MCD сохраняет mail-domain/material (включая приватный mail material, который передаётся
+только во framed private input для key binding и не попадает в public receipt), identity/DNS
+read-only checks, quota, receive/submit,
+Mautic mail configuration, progress and typed receipts. Установка пакетов, генерация
+MTA/OpenDKIM/inbound/firewall файлов, service lifecycle и host-level mail status не
+исполняются из MCD. Они вызываются через существующий generic external-operation seam
+MCC bindings: `mail_os_filesystem_apply`, `mail_os_filesystem_cleanup`,
+`mail_os_opendkim_key_apply`, `mail_os_opendkim_key_cleanup`,
+`mail_os_opendkim_key_status`, `mail_os_submit_interface_apply`,
+`mail_os_submit_interface_cleanup`, `mail_os_submit_interface_status`,
+`mail_os_lifecycle_apply`, `mail_os_lifecycle_cleanup` и
+`mail_os_lifecycle_status`.
+
+Key materialization/ownership/status under `/etc/opendkim/keys` and the submit
+interface (wrapper, root helper and sudoers/visudo validation) belong to the
+external MCC binding. MCD resolves the private material and passes it in framed
+private input only; it stores no external key filesystem path and never writes,
+chowns or removes those host objects itself. Historical `key_path` fields are
+ignored and removed on the next MCD domains-state write without touching the OS.
+The external submit binding returns a typed, non-secret `submit_command` capability;
+MCD uses that returned value to build the Mautic DSN and has no local command-path
+fallback.
+`CONFIG_ROOT` and `STATE_ROOT` remain MCD application state and are not an external
+OS recipe. Missing or invalid bindings fail closed; there is no local fallback.
+
+Каждый вызов передаёт только разрешённый runtime map (`mta`, `mail_hostname`, `domains`,
+`selector`) и принимает typed result. Отсутствующий binding, невалидный result или
+failure дают fail-closed; MCD не содержит fallback на `apt-get`, `systemctl`, `iptables`,
+`postconf`, `postmap`, `makemap`, `m4` или другие host-level команды. Rollback использует
+тот же apply/cleanup/lifecycle seam и не удаляет чужие host-файлы. При первом включении
+откат выполняется в порядке `mail_os_lifecycle_cleanup` →
+`mail_os_submit_interface_cleanup` → `mail_os_filesystem_cleanup` →
+`mail_os_opendkim_key_cleanup`; при удалении последнего домена используется тот же порядок,
+чтобы lifecycle и submit security успели убрать активные helper/правила до удаления
+файлов, а key material удалялся последним для сохранения возможности отката.
+При добавлении следующего домена shared submit interface не удаляется; удаляется только
+его managed key после успешной перенастройки оставшихся доменов. Внешний artifact и
+его cache/receipt-проверки остаются ответственностью MCC; MCD проверяет exact
+binding/result через существующий executor.
+
+### Security blocklist boundary (MCC security-os v1.0.1 bind2)
+
+MCD retains the MCC policy fetch and identity envelope, address normalization,
+control-plane allowlist derivation, single-flight lock, typed result decoding and
+daemon poll scheduling. Host security materialization and ban/unban operations
+belong to the exact component-qualified MCC bindings:
+
+| MCD operation | MCC binding | Runtime contract |
+| --- | --- | --- |
+| security reconcile | `security_blocklist_apply` | normalized allowlist/blocked policy, required control-plane allowlist, root-relative managed paths and externally declared commands |
+| read-only observation | `security_blocklist_status` | root-relative managed root and declared managed paths |
+| cleanup | `security_blocklist_cleanup` | root-relative managed root and declared managed paths |
+
+The bindings use the existing custom artifact cache, framed capture, synchronous
+supervision and `offline_only=true`. MCD normalizes an absolute managed root to
+the runner's root-relative contract and rejects empty, absolute-root or traversal
+values that cannot be represented safely. A configured binding failure is typed
+and terminal; MCD does not silently return to the former Fail2ban/apt/systemd/
+firewall implementation. The former concrete closure is retired after the
+authoritative two-host bind2 proof; missing binding is a typed configuration
+error. The external result retains add-before-remove, allowlist unban, rollback,
+status and cleanup semantics, while daemon poll is clamped to 30..3600 seconds
+with a 300-second default.
+
+### Plugin filesystem boundary (MCC v1.0.2 pending authoritative proof)
+
+MCD сохраняет retrieval/cache/integrity выбранного package, manifest retrieval и
+inventory comparison, canonical UID и bundle/install-bundle resolution, Mautic
+registration/bin-console commands, plugin cache semantics and cluster protocol/
+receipts. Core MCD does not invent filesystem ownership, group or mode defaults.
+Materialization, ownership, modes and concrete filesystem state belong to the
+MCC-owned recipe through the existing generic external operation seam:
+
+| Old MCD operation | MCC binding | Runtime contract |
+| --- | --- | --- |
+| archive extraction, bundle root discovery, replacement, state file, ownership/modes, backup/rollback | `plugin_filesystem_apply` | `archive_path`, `managed_root`, `plugins_root`, `bundle`, `state_filename`, `state_payload`, externally declared `owner`, `group`, `mode` |
+| bundle removal | `plugin_filesystem_cleanup` | `managed_root`, `plugins_root`, `bundle` |
+| canonical alias removal | `plugin_alias_cleanup` | `managed_root`, managed root-relative `paths` only |
+| retired `var/cache/prod` / `app/cache/prod` reset and cleanup | `plugin_cache_reset` | `managed_root`, managed root-relative `paths` only, externally declared `owner`, `group`, `mode` |
+| read-only filesystem observation | `plugin_filesystem_status` | `managed_root`, `plugins_root`, `bundle`, `state_filename` |
+
+The binding is selected by the exact cached MCC artifact and executed with framed
+`capture_result=true`, synchronous supervision and `offline_only=true`. MCD does
+not silently fall back after a configured binding returns a terminal error. Until
+MCC v1.0.2 has an immutable artifact plus authoritative bound apply/noop/status/
+cleanup/cache-reset/rollback proof, the concrete implementation remains as a
+temporary compatibility path only when the corresponding binding is absent; no
+cutover is declared by this document. The external recipe must reject traversal,
+absolute paths and archive links, constrain `plugins_root`, restore the previous
+bundle on partial failure, recreate cache directories with the declared mode and
+owner semantics, and preserve unrelated sentinel paths.
+
+The nested public status result is exactly `mcd-plugin-filesystem-status-v1`.
+The framed `mcd_resolved_plugin_filesystem` input additionally requires
+`managed_root`, supplied from the effective external `[plugins].managed_root`
+configuration value. MCD rejects a missing, relative or traversal-containing
+managed root before invoking a configured binding; it never derives or copies
+this value from the operation override or local path resolution. The external
+recipe owns the containment decision and returns a typed failure when
+`plugins_root` is outside `managed_root`.
+For apply/noop and cache reset, `owner`, `group` and `mode` are likewise
+required from effective external `[plugins].filesystem_owner`,
+`[plugins].filesystem_group` and `[plugins].filesystem_mode`; missing or
+invalid values fail before the configured runner. MCD supplies no ownership,
+group or mode default and does not accept these values from operation input.
+For a single bundle it contains `status`/`plugin_status`, a 64-hex `digest`,
+`installed_version`, `state` (object or null), and boolean
+`has_doctrine_entity_metadata` / `has_native_migrations`. Inventory uses
+`bundle=""` and additionally returns validated bundle rows with the same
+fields; a canonical empty inventory is valid with `bundles=[]`, the canonical
+empty digest/top fields, and no local row synthesis. Malformed, invalid-name or
+duplicate rows are terminal validation errors. The outer executable result must
+remain the existing `mcd-self-hosted-executable-output-v1` runner frame.
+
 Upgrade maintenance fencing is a cross-process admission barrier, not only a
 marker file. The upgrade owner acquires the exclusive
 `maintenance.dispatch.fence.lock` beside `scheduler.pause` before publishing
@@ -1803,14 +1939,13 @@ no-side-effect rejection and enabled/disabled package/service plans. Live
 acceptance uses the unchanged service-profile CLI and scoped server profile.
 
 По APT для Portal 1.7 принят cache delivery: существующий `scenario.apply`
-доставил на DEV135 точный артефакт и binding, но runtime cutover ещё не
-завершён. Следующий обязательный этап — штатный MCD
-`service-profile apply --component apt --dry-run` с исходным профилем и
-доказательством вызова exact artifact; до этого нельзя объявлять 1.7
-завершённым. MCC владеет сценарием, профилем и их authority; Portal доставляет
-и координирует immutable artifact и lifecycle receipts. Старая builtin-
-совместимость допускается только как временный путь до доказанного
-переключения и не является финальным 1.7 решением.
+доставил на DEV135 точные артефакты и bindings. MCD caller cutover выполнен в
+DEV worktree и подтверждён bound manifest/receipt regression; MCC владеет
+сценарием, профилем и их authority, Portal доставляет и координирует
+immutable artifact и lifecycle receipts. После proof MCD не содержит
+builtin APT implementation, прямых APT imports или fallback: отсутствующий
+binding даёт typed configuration error. Whole 1.7 acceptance и publication
+по-прежнему требуют общего owner acceptance.
 
 Для offline service-profile через Portal 1.7 существующий custom-cache
 manifest может объявить в operation binding единственный `profile_source`:
@@ -1836,6 +1971,55 @@ receipts contain only the typed non-secret terminal result. The legacy Wazuh
 registration-password contract remains compatible. The extracted Zabbix
 monitor-user bootstrap must be an explicit operation; routine APT observation
 must not invoke it implicitly.
+
+В DEV 1.7 оставшиеся APT contract callsites подключены к одному generic
+dispatcher поверх тех же operation bindings, без нового runner или отдельного
+registry: `state_push` вызывает
+`apt_state_observe` для непрозрачного probe-key и collect, readiness вызывает
+`zabbix_agent_state_observe`, CLI rescan вызывает
+`apt_repo_profile_markers_clear`, CLI `zabbix status` вызывает
+`zabbix_state_observe`, а CLI `apt-upgrade` вызывает `apt_upgrade`. Внешние
+операции получают только объявленные generic runtime-input поля и возвращают
+типизированный результат через существующий framed executor. Для
+`zabbix_state_observe` MCD сохраняет прежнюю CLI-оболочку вокруг raw durable
+marker; для `apt_upgrade` воспроизводит captured stdout/stderr в исходном
+порядке, печатает прежний payload и отправляет state только после успеха.
+Семантический `status=error` наблюдения APT остаётся валидным наблюдаемым
+состоянием и не превращается в transport failure. Отсутствующий binding даёт
+явную typed configuration error; concrete `apt_profile` closure и
+APT-specific MCD dispatcher удалены после bound proof. В affected MCD source
+не остаётся package-manager command/path implementation: её algorithm,
+ordering и system facts принадлежат доставленному MCC artifact.
+
+### Upgrade OS and fresh-image system boundary
+
+MCD сохраняет выбор Mautic-инстанса и версии, Mautic `bin/console` lifecycle,
+очередь, supervision, progress и receipts. Конкретные пакеты, host services,
+владельцы, режимы, системные пути и генераторы принадлежат внешним MCC recipes.
+Восемь обязательных Upgrade OS bindings (`apt`, `certificate`, `composer`,
+`database`, `filesystem`, `nginx`, `php`, `service`) образуют одну pinned
+closure; отсутствие либо неоднозначность любого binding/profile/artifact
+останавливает операцию без локального fallback.
+
+Fresh image распаковывается только во временный staging MCD. Финальный webroot
+создаёт `filesystem:upgrade_tree_transition` с action `materialize_fresh`,
+применяя profile-owned ownership/mode policy; rollback использует тот же
+operation ID и `rollback_materialized`. MCD не выполняет прямой recursive
+`chown`, не удаляет финальный webroot и не объявляет staging успешным до
+runtime warmup.
+
+Legacy `write_nginx_vhost` остаётся неизменным только для migration callers.
+Image install использует отдельный `write_managed_nginx_vhost` с существующим
+image operation ID и сохраняет typed ownership receipt. Ошибка после публикации
+вызывает `cleanup_managed_vhost`; cleanup принимает только receipt той же
+operation/domain и может удалить только доказанные recipe-owned regular file и
+symlink. MCD не вычисляет `/etc/nginx` paths и не удаляет соседние vhosts.
+После managed write и cleanup nginx test/reload по-прежнему выполняются через
+`nginx_service_transition`. Эти границы проверяются
+`tests/test_mautic_image_install_nginx.py`,
+`tests/test_image_install_runtime_acceptance.py`,
+`tests/test_nginx_external_cache_cli.py` и
+`tests/test_upgrade_os_caller_cutover.py`.
 
 ### Corporate HTTP client identity
 
@@ -1943,6 +2127,22 @@ Inventory содержит безопасные read-only-примитивы:
 `check_mysql` и `check_redis` (каждый `version=1.0`,
 `execution=generic_primitive`, `mutates_state=false`, с собственным
 `input_schema_ref`). Вход этих примитивов обязан быть пустым объектом.
+При наличии полной восьмиоперационной Upgrade OS binding closure inventory
+дополнительно публикует host-scoped read-only capability
+`maintenance/read_service_status@1.0` с
+`input_schema_ref=portal://mcd/input/maintenance-service-status-v1` и exact
+binding schema/SHA. Единственный допустимый input — `{"action":"status"}`.
+Handler повторно вычисляет текущую binding identity, требует её точного
+совпадения с advertised job и вызывает тот же `collect_maintenance_state`, что
+использует `mcd-cli maintenance ... status --json`. Конкретная Debian operation
+остаётся внешней: `service:upgrade_service_transition` с action `status` и
+только read-only service probes. Terminal generic result содержит binding echo,
+maintenance summary и bounded external receipt; `mutation_started` обязан быть
+`false`, иначе команда закрывается failed. Отсутствующая, изменившаяся или
+неполная binding closure не рекламируется и fail-closed до external dispatch.
+Host binding pins используют существующие generic `binding_schema`/
+`binding_sha256` поля; managed tenant jobs по-прежнему требуют instance scope и
+не получают host-scoped operation.
 С MCD 1.6.32 дополнительно объявлен `capability_id=inventory`,
 `command_id=rescan_inventory`, `version=1.0`, `execution=generic_primitive`,
 `mutates_state=true`, `input_schema_ref=portal://mcd/input/inventory-rescan-v1`.

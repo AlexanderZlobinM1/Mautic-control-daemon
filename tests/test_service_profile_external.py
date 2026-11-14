@@ -199,33 +199,29 @@ def test_offline_profile_cache_is_not_used_when_mcc_is_configured(monkeypatch, t
 def test_apt_owner_binding_runs_as_one_external_operation_without_builtin_composition(fetched, monkeypatch):
     fetched.update(component='apt', resolved_plan_key='apt:profile')
     monkeypatch.setattr(profiles, 'fetch_service_profile', lambda *a, **kw: fetched)
-    monkeypatch.setattr(profiles.os, 'geteuid', lambda: 0)
     calls = []
     monkeypatch.setattr(
-        profiles, '_configured_apt_apply',
+        profiles, '_configured_external_operation',
         lambda *args, **kwargs: calls.append((args, kwargs)) or {'status': 'applied', 'actions': ['owner-composition']},
     )
-    monkeypatch.setattr(profiles, 'apply_apt_profile', lambda *a, **kw: pytest.fail('builtin must not compose selected owner operation'))
-    monkeypatch.setattr(profiles, '_configured_zabbix_bootstrap', lambda *a, **kw: pytest.fail('owner composition already owns monitor stage'))
     result = profiles.service_profiles_apply_once(
         SimpleNamespace(cluster_id=None), component='apt', dry_run=False,
     )
 
     assert result['status'] == 'ok'
     assert len(calls) == 1
-    assert calls[0][1]['dry_run'] is False
+    assert calls[0][0] == ('apt', fetched['profile'])
+    assert calls[0][1]['operation_input']['dry_run'] is False
     assert result['apply'] == {'status': 'applied', 'actions': ['owner-composition']}
 
 
 def test_apt_external_failure_does_not_fallback_to_builtin(fetched, monkeypatch):
     fetched.update(component='apt', resolved_plan_key='apt:profile')
     monkeypatch.setattr(profiles, 'fetch_service_profile', lambda *a, **kw: fetched)
-    monkeypatch.setattr(profiles.os, 'geteuid', lambda: 0)
     monkeypatch.setattr(
-        profiles, '_configured_apt_apply',
+        profiles, '_configured_external_operation',
         lambda *args, **kwargs: {'status': 'error', 'reason': 'owner_composition_failed'},
     )
-    monkeypatch.setattr(profiles, 'apply_apt_profile', lambda *a, **kw: pytest.fail('must not fall back'))
 
     result = profiles.service_profiles_apply_once(
         SimpleNamespace(cluster_id=None), component='apt', dry_run=True,
@@ -248,7 +244,8 @@ def test_configured_operation_preserves_typed_result_from_failed_terminal(fetche
         lambda *args, **kwargs: (1, json.dumps(terminal)),
     )
 
-    result = profiles._configured_apt_operation(
+    result = profiles._configured_external_operation(
+        'apt',
         fetched['profile'],
         cfg=SimpleNamespace(),
         operation='apt_apply',
@@ -264,7 +261,8 @@ def test_configured_operation_preserves_typed_result_from_failed_terminal(fetche
         'run_configured_external_operation',
         lambda *args, **kwargs: (1, json.dumps(terminal)),
     )
-    result = profiles._configured_apt_operation(
+    result = profiles._configured_external_operation(
+        'apt',
         fetched['profile'],
         cfg=SimpleNamespace(),
         operation='apt_apply',
@@ -335,73 +333,13 @@ def test_configured_apt_binding_preserves_exact_private_input_contract(tmp_path,
     }
 
 
-def test_unselected_apt_handler_keeps_explicit_legacy_compatibility_path(fetched, monkeypatch):
-    fetched.update(component='apt', resolved_plan_key='apt:legacy')
-    fetched['external_handler'].update(component='apt', resolved_plan_key='apt:legacy', state='candidate', active=False)
+def test_missing_apt_binding_fails_closed(fetched, monkeypatch):
+    fetched.update(component='apt', resolved_plan_key='apt:profile')
     monkeypatch.setattr(profiles, 'fetch_service_profile', lambda *a, **kw: fetched)
-    monkeypatch.setattr(profiles.os, 'geteuid', lambda: 0)
-    monkeypatch.setattr(profiles, 'apply_apt_profile', lambda *a, **kw: {'status': 'planned', 'actions': []})
-    monkeypatch.setattr(profiles, 'apply_external_service_profile', lambda *a, **kw: pytest.fail('candidate apt handler must not execute'))
+    monkeypatch.setattr(profiles, '_configured_external_operation', lambda *a, **kw: None)
     result = profiles.service_profiles_apply_once(SimpleNamespace(cluster_id=None), component='apt', dry_run=True)
-    assert result['status'] == 'ok'
-    assert result['apply'] == {'status': 'planned', 'actions': []}
-
-
-def test_apt_monitor_does_not_bypass_early_apply_gate(fetched, monkeypatch):
-    fetched.update(component='apt', resolved_plan_key='apt:zabbix-monitor-bootstrap')
-    fetched['external_handler'].update(component='apt', resolved_plan_key='apt:zabbix-monitor-bootstrap')
-    monkeypatch.setattr(profiles, 'fetch_service_profile', lambda *a, **kw: fetched)
-    monkeypatch.setattr(profiles.os, 'geteuid', lambda: 0)
-    monkeypatch.setattr(
-        profiles,
-        'apply_apt_profile',
-        lambda *a, **kw: {
-            'status': 'error',
-            'reason': 'apt_profile_repo_failed',
-            'actions': [],
-            'changed_files': [],
-        },
-    )
-    calls = []
-    monkeypatch.setattr(
-        profiles,
-        '_configured_zabbix_bootstrap',
-        lambda *a, **kw: calls.append((a, kw)) or {'status': 'already_present'},
-    )
-
-    result = profiles.service_profiles_apply_once(SimpleNamespace(cluster_id=None), component='apt')
-
     assert result['status'] == 'error'
-    assert calls == []
-    assert result['apply']['zabbix_mysql_monitor'] == {
-        'status': 'skipped',
-        'reason': 'apt_profile_gate_failed',
-        'apt_profile_status': 'error',
-    }
-
-
-def test_apt_monitor_runs_at_the_former_reached_operation_step(fetched, monkeypatch):
-    fetched.update(component='apt', resolved_plan_key='apt:zabbix-monitor-bootstrap')
-    fetched['external_handler'].update(component='apt', resolved_plan_key='apt:zabbix-monitor-bootstrap')
-    monkeypatch.setattr(profiles, 'fetch_service_profile', lambda *a, **kw: fetched)
-    monkeypatch.setattr(profiles.os, 'geteuid', lambda: 0)
-    monkeypatch.setattr(
-        profiles,
-        'apply_apt_profile',
-        lambda *a, **kw: {'status': 'applied', 'actions': [], 'state': {}},
-    )
-    calls = []
-    monkeypatch.setattr(
-        profiles,
-        '_configured_zabbix_bootstrap',
-        lambda *a, **kw: calls.append((a, kw)) or {'status': 'already_present'},
-    )
-
-    result = profiles.service_profiles_apply_once(SimpleNamespace(cluster_id=None), component='apt')
-
-    assert result['status'] == 'ok'
-    assert len(calls) == 1
-    assert result['apply']['zabbix_mysql_monitor'] == {'status': 'already_present'}
+    assert result['apply'] == {'status': 'error', 'reason': 'apt_apply_binding_not_configured'}
 
 
 def test_profile_pin_uses_authority_utf8_without_ascii_escaping(fetched,monkeypatch):
@@ -735,10 +673,12 @@ def nginx_fetched(fetched,monkeypatch):
     ('ensure_nginx_baseline',{'reload_service':False}),('ensure_cloudflare_real_ip',{'reload_service':True}),
     ('nginx_baseline_satisfied',{}),('cloudflare_real_ip_state',{}),
     ('write_nginx_vhost',{'root':'/explicit-qa-root','domains':['qa.example.invalid'],'php_version':'8.5'}),
+    ('write_managed_nginx_vhost',{'operation_id':'image-1','root':'/explicit-qa-root','domains':['qa.example.invalid'],'php_version':'8.5'}),
+    ('cleanup_managed_vhost',{'operation_id':'image-1','domain':'qa.example.invalid','ownership_receipt':{'schema':'fixture'}}),
     ('write_switched_vhost',{'source_root':'/explicit-old','nginx_root':'/explicit-new/docroot','php_version':'8.5','site_available':'/explicit-site.conf','site_enabled':None})])
 def test_nginx_operation_and_input_are_bound_before_same_offline_runner(nginx_fetched,monkeypatch,operation,flags):
     nginx_fetched.update(operation=operation,operation_input=flags)
-    if operation in {'write_nginx_vhost','write_switched_vhost'}:
+    if operation in {'write_nginx_vhost','write_managed_nginx_vhost','cleanup_managed_vhost','write_switched_vhost'}:
         nginx_fetched['profile']=None
         nginx_fetched['external_handler']['profile_input']['sha256']=hashlib.sha256(b'null').hexdigest()
     nginx_fetched['external_handler'].update(operation=operation,operation_input=copy.deepcopy(flags))

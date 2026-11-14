@@ -111,3 +111,17 @@ def test_split_composer_context_roundtrip_readonly(tmp_path, monkeypatch):
     after = {str(path): (path.read_bytes(), path.stat().st_mtime_ns)
              for path in tmp_path.rglob("*") if path.is_file()}
     assert after == before
+
+
+def test_qualified_mcc_uid_is_preserved_and_other_host_is_rejected(tmp_path, monkeypatch):
+    config, roots = fixture(tmp_path, monkeypatch)
+    config.write_text(config.read_text() + '\n[mcc]\nhost_name = "MauticFarm-02"\n')
+    root = roots[0]
+    bare_uid = build_domain_uid(domain=None, root=str(root), name=root.name)
+    qualified_uid = f"{bare_uid}@MauticFarm-02"
+
+    output = preflight(str(config), str(root), qualified_uid)
+    assert output["execution_context"]["instance_uid"] == qualified_uid
+
+    with pytest.raises(ValueError, match="unknown_or_mismatch"):
+        preflight(str(config), str(root), f"{bare_uid}@MauticFarm-01")

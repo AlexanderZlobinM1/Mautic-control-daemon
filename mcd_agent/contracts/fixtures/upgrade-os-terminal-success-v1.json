@@ -1,0 +1,54 @@
+{
+  "schema": "portal-mcd-generic-terminal-receipt-v1",
+  "contract_version": "1.0",
+  "job_id": "job-upgrade-001",
+  "request_id": "request-upgrade-001",
+  "command_id": "command-upgrade-001",
+  "installation": {
+    "installation_id": "installation-upgrade-001",
+    "dns_name": "upgrade.example.invalid"
+  },
+  "sequence": 13,
+  "status": "succeeded",
+  "started_at": "2026-11-02T20:00:00Z",
+  "completed_at": "2026-11-02T20:15:00Z",
+  "result": {
+    "status": "succeeded",
+    "operation_id": "job-upgrade-001",
+    "instance_uid": "upgrade.example.invalid",
+    "target_version": "7.2.0",
+    "mode": "composer",
+    "upgrade_plan": {
+      "ref": "mcc:upgrade-plan:plan-001",
+      "sha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    "binding": {
+      "schema": "mcd-upgrade-os-binding-v1",
+      "sha256": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "artifact_sha256": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "profile_sha256": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "entrypoints_sha256": "sha256:5555555555555555555555555555555555555555555555555555555555555555"
+    },
+    "lifecycle": {
+      "completed_stage": "finalize",
+      "mutation_started": true,
+      "rollback": {
+        "available": true,
+        "attempted": false,
+        "succeeded": null
+      }
+    },
+    "external_receipt": {
+      "schema": "mcd-upgrade-os-external-receipt-v1",
+      "status": "applied",
+      "operation_count": 8,
+      "mutation_started": true,
+      "attempt_count": 8,
+      "rollback": {
+        "available": true,
+        "attempted": false,
+        "succeeded": null
+      }
+    }
+  }
+}

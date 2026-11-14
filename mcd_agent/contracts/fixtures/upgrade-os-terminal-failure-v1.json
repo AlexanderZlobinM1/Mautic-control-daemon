@@ -1,0 +1,59 @@
+{
+  "schema": "portal-mcd-generic-terminal-receipt-v1",
+  "contract_version": "1.0",
+  "job_id": "job-upgrade-002",
+  "request_id": "request-upgrade-002",
+  "command_id": "command-upgrade-002",
+  "installation": {
+    "installation_id": "installation-upgrade-002",
+    "dns_name": "upgrade-failure.example.invalid"
+  },
+  "sequence": 9,
+  "status": "failed",
+  "started_at": "2026-11-02T21:00:00Z",
+  "completed_at": "2026-11-02T21:08:00Z",
+  "result": {
+    "status": "failed",
+    "reason": "upgrade_os_external_operation_failed",
+    "operation_id": "job-upgrade-002",
+    "instance_uid": "upgrade-failure.example.invalid",
+    "target_version": "7.2.0",
+    "mode": "composer",
+    "upgrade_plan": {
+      "ref": "mcc:upgrade-plan:plan-002",
+      "sha256": "sha256:6666666666666666666666666666666666666666666666666666666666666666"
+    },
+    "binding": {
+      "schema": "mcd-upgrade-os-binding-v1",
+      "sha256": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+      "artifact_sha256": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+      "profile_sha256": "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+      "entrypoints_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "lifecycle": {
+      "failed_stage": "host_transition",
+      "mutation_started": true,
+      "rollback": {
+        "available": true,
+        "attempted": true,
+        "succeeded": true
+      }
+    },
+    "external_receipt": {
+      "schema": "mcd-upgrade-os-external-receipt-v1",
+      "status": "error",
+      "error_code": "php_service_transition_failed",
+      "mutation_started": true,
+      "attempt_count": 4,
+      "rollback": {
+        "available": true,
+        "attempted": true,
+        "succeeded": true
+      }
+    }
+  },
+  "error": {
+    "code": "upgrade_os_external_operation_failed",
+    "message": "Upgrade OS external operation failed and rollback completed"
+  }
+}

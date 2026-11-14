@@ -8,10 +8,12 @@ import shutil
 import subprocess
 import tempfile
 import urllib.request
+from uuid import uuid4
 
 from mcd_agent.config import AgentConfig
 from mcd_agent.install_type import detect_install_type, plugin_dir_candidates
 from mcd_agent.runtime_descriptor import descriptor_for_root
+from mcd_agent.upgrade_os_external import run_upgrade_os_operation
 
 
 AMAZON_MAILER_REQUIRED_BUNDLES: set[str] = {
@@ -115,12 +117,6 @@ def _mautic_console_healthy(
     return proc.returncode == 0 and bool(re.search(r"\bMautic\s+\d+\.\d+\.\d+\b", out, re.IGNORECASE))
 
 
-def _resolve_composer_bin(php_bin: str = "php") -> str:
-    from mcd_agent.mautic_upgrade_contract import ensure_composer_binary
-
-    return ensure_composer_binary(php_bin=php_bin)
-
-
 def _verify_composer_as_www_data(project_root: str, composer_bin: str) -> None:
     _run(
         [composer_bin, "-V", "--no-interaction", "--no-ansi"],
@@ -131,44 +127,18 @@ def _verify_composer_as_www_data(project_root: str, composer_bin: str) -> None:
     )
 
 
-def _node_major() -> int:
-    found = shutil.which("node")
-    if not found:
-        return 0
-    proc = subprocess.run([found, "-v"], capture_output=True, text=True, timeout=20)
-    if proc.returncode != 0:
-        return 0
-    raw = (proc.stdout or "").strip()
-    m = re.search(r"v?(\d+)", raw)
-    if not m:
-        return 0
-    return int(m.group(1))
-
-
-def _npm_ok() -> bool:
-    found = shutil.which("npm")
-    if not found:
-        return False
-    proc = subprocess.run([found, "-v"], capture_output=True, text=True, timeout=20)
-    return proc.returncode == 0 and bool((proc.stdout or "").strip())
-
-
-def _ensure_node20() -> None:
-    if _node_major() >= 20 and _npm_ok():
-        return
-    if _node_major() < 20:
-        subprocess.run(["apt-get", "remove", "--purge", "-y", "nodejs", "libnode-dev"], check=False)
-        subprocess.run(["bash", "-lc", "curl -fsSL https://deb.nodesource.com/setup_20.x | bash -"], check=True, timeout=300)
-        subprocess.run(["apt-get", "install", "-y", "nodejs"], check=True, timeout=300)
-    else:
-        # Node without npm is usually a broken package source state. Refresh
-        # NodeSource first so reinstalling `nodejs` restores npm as well.
-        subprocess.run(["bash", "-lc", "curl -fsSL https://deb.nodesource.com/setup_20.x | bash -"], check=True, timeout=300)
-        subprocess.run(["apt-get", "install", "--reinstall", "-y", "nodejs"], check=True, timeout=300)
-    if _node_major() < 20:
-        raise RuntimeError("Node.js 20 preflight failed (node -v is not v20+)")
-    if not _npm_ok():
-        raise RuntimeError("Node.js 20 preflight failed (npm -v is not available)")
+def _prepare_node_runtime(config: AgentConfig) -> None:
+    run_upgrade_os_operation(
+        config,
+        component="apt",
+        operation="apt_apply",
+        operation_input={
+            "package_role": "node_prerequisite",
+            "package_state": "present",
+            "force_repo_rescan": "true",
+            "dry_run": "false",
+        },
+    )
 
 
 def _composer_show_name(package_name: str) -> str:
@@ -485,20 +455,33 @@ def _ensure_composer_packages(
         return False
     if not _mautic_console_healthy(project_root=project_root, console_path=console_path, php_bin=config.php_bin):
         raise RuntimeError(f"Mautic console is not healthy before composer package preflight: {project_root}")
-    composer_bin = _resolve_composer_bin()
+    host_receipt = run_upgrade_os_operation(
+        config,
+        component="composer",
+        operation="composer_host_prepare",
+        operation_input={
+            "operation_id": f"mailer-{uuid4().hex}",
+            "working_root": project_root,
+            "dry_run": "false",
+        },
+    )
+    composer_bin = str(host_receipt.get("composer_binary") or "").strip()
+    if not composer_bin or host_receipt.get("composer_dependency_commands_owned_by_mcd") is not True:
+        raise RuntimeError("external composer host preparation receipt is invalid")
     _verify_composer_as_www_data(project_root, composer_bin)
 
+    node_prepared = False
     if ensure_node:
-        _ensure_node20()
+        _prepare_node_runtime(config)
+        node_prepared = True
 
     missing = sorted([pkg for pkg in required if not _composer_has_package(project_root, composer_bin, pkg)])
     if not missing:
         logging.info("[%s] composer packages already installed required=%s (%s)", root, ",".join(sorted(required)), reason)
         return False
 
-    # For zip installs we also normalize Node.js runtime to v20 before composer require.
-    if install_type == "zip":
-        _ensure_node20()
+    if install_type == "zip" and not node_prepared:
+        _prepare_node_runtime(config)
 
     for pkg in missing:
         _composer_update_targeted_package(

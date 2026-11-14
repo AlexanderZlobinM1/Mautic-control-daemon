@@ -8,13 +8,11 @@ import json
 import ipaddress
 import logging
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shutil
 import socket
-import subprocess
 import sys
-import tarfile
 import tempfile
 import threading
 import time
@@ -23,17 +21,17 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-import zipfile
 
 from mcd_agent import __version__, plugin_registration
 from mcd_agent.amazon_mailer_dep import ensure_composer_runtime_packages, ensure_mailer_packages_for_bundles
 from mcd_agent.cluster_routing import cluster_local_identity_values, cluster_route_targets
 from mcd_agent.config import AgentConfig
+from mcd_agent.custom_scripts import run_configured_external_operation
 from mcd_agent.db import MauticDB
 from mcd_agent.discovery import discover_mautic
 from mcd_agent.executor import build_mautic_exec_args, execute_mautic_command_template
 from mcd_agent.host_identity import resolve_agent_identity
-from mcd_agent.install_type import is_complete_plugin_bundle, plugin_dir_candidates
+from mcd_agent.install_type import plugin_dir_candidates
 from mcd_agent.plugin_interactions import selection_conflicts_for_rules
 from mcd_agent.runtime_overrides import fetch_runtime_overrides
 from mcd_agent.runtime_descriptor import descriptor_for_root
@@ -59,11 +57,10 @@ _CLUSTER_PLUGIN_ACTIVE_PHASES = {
     "plugin_install",
 }
 _CLUSTER_PLUGIN_STALE_SEC = 3 * 60 * 60
-_PLUGIN_SYNC_IGNORED_NAMES = {".DS_Store", "__MACOSX", ".stfolder", ".stversions"}
-_PLUGIN_SYNC_IGNORED_RE = re.compile(r"(sync-conflict|\.sync-conflict|\.syncthing\..*\.tmp$|\.tmp$|\.part$)", re.IGNORECASE)
 _MAUTIC7_PLUGIN_RUNTIME_PACKAGES = {"nikic/php-parser:^5.0"}
 _PLUGIN_CACHE_RESET_SCHEMA = "mcd-plugin-cache-reset-v1"
 _PLUGIN_APPLY_RESULT_SCHEMA = "mcd-plugin-apply-result-v1"
+_PLUGIN_FILESYSTEM_STATUS_SCHEMA = "mcd-plugin-filesystem-status-v1"
 _CATALOG_COMPATIBILITY_BLOCK_REASONS = frozenset({
     "agent_patch_contract_mismatch",
     "agent_patch_contract_fields_mismatch",
@@ -751,24 +748,39 @@ def _normalize_action(raw: str) -> str | None:
     return mapping.get(v)
 
 
-def _installed_plugins_from_dir(plugins_dir: Path) -> dict[str, str]:
+def _installed_plugins_from_dir(
+    plugins_dir: Path,
+    *,
+    config: AgentConfig | None = None,
+    state_filename: str = "",
+    bundle_names: list[str] | None = None,
+) -> dict[str, str]:
+    if config is None or bundle_names is None:
+        raise RuntimeError("plugin_filesystem_status_binding_required")
     out: dict[str, str] = {}
-    if not plugins_dir.exists() or not plugins_dir.is_dir():
-        return out
-    for child in plugins_dir.iterdir():
-        if not child.is_dir():
-            continue
-        name = str(child.name or "").strip()
-        if not _is_valid_bundle_name(name):
-            continue
-        if not is_complete_plugin_bundle(child, name):
-            continue
-        out[name] = _read_installed_version(child)
+    observed = _plugin_status_bundle_rows(_plugin_filesystem_status_external(
+        config, plugins_dir=plugins_dir, bundle="", state_filename=state_filename,
+    ))
+    for name in bundle_names:
+        row = observed.get(str(name).strip())
+        if row and str(row.get("plugin_status") or row.get("status") or "").strip().lower() not in {"missing", "broken"}:
+            out[str(name).strip()] = _plugin_status_version(row)
     return out
 
 
-def _plugin_interaction_context(install_root: str, plugins_dir: Path) -> dict[str, Any]:
-    installed_plugins = _installed_plugins_from_dir(plugins_dir)
+def _plugin_interaction_context(
+    install_root: str,
+    plugins_dir: Path,
+    *,
+    config: AgentConfig | None = None,
+    bundle_names: list[str] | None = None,
+) -> dict[str, Any]:
+    installed_plugins = _installed_plugins_from_dir(
+        plugins_dir,
+        config=config,
+        state_filename=getattr(config, "plugins_state_filename", "") if config is not None else "",
+        bundle_names=bundle_names,
+    )
     sender_type = ""
     try:
         from mcd_agent.state_push import _detect_sender_profile
@@ -875,7 +887,8 @@ def _auto_remove_conflicting_installed_bundles(
         for conflict in _exclusive_counterparts(bundle, item_dict, context=context):
             if conflict in selected_set:
                 continue
-            if conflict not in explicit_replaces and not ((plugins_dir / conflict).exists() or (plugins_dir / conflict).is_symlink()):
+            installed = set((context or {}).get("installed_plugins", {}) or {})
+            if conflict not in explicit_replaces and conflict not in installed:
                 continue
             remove.add(conflict)
     return sorted(remove, key=lambda x: x.lower())
@@ -905,115 +918,361 @@ def _protected_plugin_path_names(selected: list[dict[str, Any]]) -> set[str]:
     return protected
 
 
-def _remove_plugin_path(path: Path) -> bool:
-    if not (path.exists() or path.is_symlink()):
+def _configured_plugin_filesystem_operation(
+    config: AgentConfig,
+    *,
+    operation: str,
+    runtime: dict[str, Any],
+) -> dict[str, Any]:
+    """Dispatch one MCC-owned plugin filesystem recipe.
+
+    Every required operation is fail-closed when its MCC binding is absent.
+    """
+    operation_runtime = dict(runtime)
+    if operation in {
+        "plugin_filesystem_status",
+        "plugin_filesystem_apply",
+        "plugin_filesystem_cleanup",
+        "plugin_alias_cleanup",
+        "plugin_cache_reset",
+    }:
+        if _plugin_filesystem_binding_present(config, operation):
+            try:
+                operation_runtime["managed_root"] = _plugin_managed_root_from_config(config)
+                if operation in {"plugin_filesystem_apply", "plugin_cache_reset"}:
+                    operation_runtime.update(_plugin_filesystem_attributes_from_config(config))
+            except RuntimeError as exc:
+                return {"status": "error", "reason": str(exc)}
+    code, output = run_configured_external_operation(
+        config,
+        component="plugin",
+        operation=operation,
+        profile={},
+        operation_input=operation_runtime,
+    )
+    if code == 2 and output == "custom_operation_binding_not_configured":
+        return {"status": "error", "reason": "plugin_filesystem_binding_not_configured"}
+    try:
+        result = json.loads(output)
+    except (TypeError, ValueError):
+        return {"status": "error", "reason": output or "plugin_filesystem_receipt_invalid"}
+    if not isinstance(result, dict):
+        return {"status": "error", "reason": "plugin_filesystem_receipt_invalid"}
+    if code != 0:
+        # Preserve the typed public result from the generic terminal envelope.
+        if (
+            result.get("schema") == "mcd-self-hosted-executable-output-v1"
+            and result.get("frame_type") == "result"
+            and result.get("status") == "failed"
+            and isinstance(result.get("result"), dict)
+        ):
+            nested = dict(result["result"])
+            nested["status"] = "error"
+            nested.setdefault("reason", result.get("error_code") or "plugin_filesystem_failed")
+            return nested
+        return {
+            "status": "error",
+            "reason": str(result.get("reason") or result.get("error_code") or "plugin_filesystem_failed"),
+        }
+    return result
+
+
+def _plugin_filesystem_binding_present(config: AgentConfig, operation: str) -> bool:
+    """Detect an existing plugin binding without creating or mutating cache."""
+    try:
+        path = Path(str(getattr(config, "custom_cache_dir"))) / "manifest.json"
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > 256 * 1024:
+            return False
+        document = json.loads(path.read_text(encoding="utf-8"))
+        bindings = document.get("operation_bindings") if isinstance(document, dict) else None
+        return isinstance(bindings, list) and any(
+            isinstance(item, dict)
+            and item.get("component") == "plugin"
+            and item.get("operation") == operation
+            for item in bindings
+        )
+    except (AttributeError, OSError, UnicodeError, ValueError, TypeError):
         return False
-    if path.is_symlink() or path.is_file():
-        path.unlink()
-        return True
-    if path.is_dir():
-        shutil.rmtree(path)
-        return True
-    return False
 
 
-def _plugin_sync_ignore(path: Path, rel: str) -> bool:
-    if any(part in _PLUGIN_SYNC_IGNORED_NAMES for part in path.parts):
-        return True
-    return bool(rel and rel != "." and _PLUGIN_SYNC_IGNORED_RE.search(rel))
+def _plugin_managed_root_from_config(config: AgentConfig) -> str:
+    """Return the externally supplied managed root without local path resolution."""
+    value = getattr(config, "plugins_managed_root", None)
+    if not isinstance(value, str) or not value.strip():
+        raise RuntimeError("plugin_filesystem_managed_root_invalid")
+    candidate = Path(value.strip())
+    if not candidate.is_absolute() or any(part in {"", ".", ".."} for part in candidate.parts):
+        raise RuntimeError("plugin_filesystem_managed_root_invalid")
+    return value.strip()
 
 
-def _sha256_file(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as fh:
-        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
+def _plugin_filesystem_attributes_from_config(config: AgentConfig) -> dict[str, str]:
+    """Return externally declared ownership/mode values without local defaults."""
+    values = {
+        "owner": getattr(config, "plugins_filesystem_owner", None),
+        "group": getattr(config, "plugins_filesystem_group", None),
+        "mode": getattr(config, "plugins_filesystem_mode", None),
+    }
+    if any(not isinstance(value, str) or not value.strip() for value in values.values()):
+        raise RuntimeError("plugin_filesystem_attributes_invalid")
+    if any("\x00" in value or any(char.isspace() for char in value) for value in values.values()):
+        raise RuntimeError("plugin_filesystem_attributes_invalid")
+    if not re.fullmatch(r"[0-7]{3,4}", values["mode"]):
+        raise RuntimeError("plugin_filesystem_attributes_invalid")
+    return {key: value.strip() for key, value in values.items()}
 
 
-def _plugin_selection_digest(root: str, bundle_names: list[str]) -> dict[str, Any]:
+def _plugin_filesystem_runtime(
+    *,
+    plugins_dir: Path,
+    bundle: str,
+    archive_path: Path | str = "",
+    state_filename: str = "",
+    state_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build the exact non-secret map declared by MCC's plugin binding."""
+    return {
+        "archive_path": str(archive_path),
+        "plugins_root": str(plugins_dir),
+        "bundle": str(bundle),
+        "state_filename": str(state_filename),
+        "state_payload": dict(state_payload or {}),
+    }
+
+
+def _plugin_filesystem_status_external(
+    config: AgentConfig,
+    *,
+    plugins_dir: Path,
+    bundle: str,
+    state_filename: str,
+) -> dict[str, Any]:
+    """Read plugin filesystem state through the MCC-owned status binding.
+
+    A configured binding is authoritative: malformed or failed output is a
+    terminal error and never falls back to local path walks.
+    """
+    result = _configured_plugin_filesystem_operation(
+        config,
+        operation="plugin_filesystem_status",
+        runtime={
+            "plugins_root": str(plugins_dir),
+            "bundle": str(bundle),
+            "state_filename": str(state_filename),
+        },
+    )
+    if str(result.get("status") or "").strip().lower() == "error":
+        raise RuntimeError(str(result.get("error") or result.get("reason") or "plugin_filesystem_status_failed"))
+    if result.get("schema") != _PLUGIN_FILESYSTEM_STATUS_SCHEMA:
+        raise RuntimeError("plugin_filesystem_status_schema_invalid")
+    status = str(result.get("plugin_status") or result.get("status") or "").strip().lower()
+    if status not in {"ok", "missing", "broken", "noop", "observed", "success"}:
+        raise RuntimeError("plugin_filesystem_status_result_invalid")
+    inventory = not str(bundle).strip()
+    required = {"digest", "installed_version", "state"}
+    if inventory:
+        required.add("bundles")
+    else:
+        required.update({"has_doctrine_entity_metadata", "has_native_migrations"})
+    missing = sorted(name for name in required if name not in result)
+    if missing:
+        raise RuntimeError("plugin_filesystem_status_fields_missing:" + ",".join(missing))
+    digest = result.get("digest")
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest.lower()):
+        raise RuntimeError("plugin_filesystem_status_digest_invalid")
+    installed_version = result.get("installed_version", result.get("version", "-"))
+    if not isinstance(installed_version, str):
+        raise RuntimeError("plugin_filesystem_status_version_invalid")
+    normalized = dict(result)
+    normalized["schema"] = str(result.get("schema") or _PLUGIN_FILESYSTEM_STATUS_SCHEMA)
+    normalized["plugin_status"] = status
+    normalized["installed_version"] = installed_version.strip() or "-"
+    state = result.get("state", result.get("state_payload"))
+    if state is not None and not isinstance(state, dict):
+        raise RuntimeError("plugin_filesystem_status_state_invalid")
+    if state is not None:
+        normalized["state"] = dict(state)
+    for field in ("has_doctrine_entity_metadata", "has_native_migrations"):
+        if field in result and not isinstance(result[field], bool):
+            raise RuntimeError(f"plugin_filesystem_status_{field}_invalid")
+    if inventory:
+        raw_rows = result.get("bundles")
+        if isinstance(raw_rows, dict):
+            rows: dict[str, dict[str, Any]] = {}
+            for raw_name, raw_row in raw_rows.items():
+                name = str(raw_name or "").strip()
+                if not _is_valid_bundle_name(name) or not isinstance(raw_row, dict):
+                    raise RuntimeError("plugin_filesystem_status_bundle_rows_invalid")
+                declared_name = raw_row.get("bundle", name)
+                if not isinstance(declared_name, str) or declared_name.strip() != name:
+                    raise RuntimeError("plugin_filesystem_status_bundle_name_invalid")
+                rows[name] = dict(raw_row)
+        elif isinstance(raw_rows, list):
+            rows = {}
+            seen_names: set[str] = set()
+            for raw_row in raw_rows:
+                if not isinstance(raw_row, dict):
+                    raise RuntimeError("plugin_filesystem_status_bundle_rows_invalid")
+                name = raw_row.get("bundle")
+                if not isinstance(name, str) or not _is_valid_bundle_name(name):
+                    raise RuntimeError("plugin_filesystem_status_bundle_name_invalid")
+                normalized_name = name.strip()
+                duplicate_key = normalized_name.casefold()
+                if duplicate_key in seen_names:
+                    raise RuntimeError("plugin_filesystem_status_bundle_duplicate")
+                seen_names.add(duplicate_key)
+                rows[normalized_name] = dict(raw_row)
+        else:
+            raise RuntimeError("plugin_filesystem_status_bundle_rows_invalid")
+        if any(
+            not {"digest", "installed_version", "state", "has_doctrine_entity_metadata", "has_native_migrations"}.issubset(row)
+            for row in rows.values()
+        ):
+            raise RuntimeError("plugin_filesystem_status_bundle_rows_invalid")
+        for row in rows.values():
+            if not isinstance(row["digest"], str) or not re.fullmatch(r"[0-9a-f]{64}", row["digest"].lower()):
+                raise RuntimeError("plugin_filesystem_status_bundle_digest_invalid")
+            if not isinstance(row["installed_version"], str) or not isinstance(row["state"], (dict, type(None))):
+                raise RuntimeError("plugin_filesystem_status_bundle_fields_invalid")
+            for field in ("has_doctrine_entity_metadata", "has_native_migrations"):
+                if not isinstance(row[field], bool):
+                    raise RuntimeError(f"plugin_filesystem_status_bundle_{field}_invalid")
+    return normalized
+
+
+def _plugin_status_version(result: dict[str, Any] | None) -> str:
+    if not isinstance(result, dict):
+        return "-"
+    return str(result.get("installed_version") or result.get("version") or "-").strip() or "-"
+
+
+def _plugin_status_bundle_rows(result: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    if not isinstance(result, dict):
+        return {}
+    raw = result.get("bundles")
+    if isinstance(raw, dict):
+        return {
+            str(name).strip(): dict(value)
+            for name, value in raw.items()
+            if str(name).strip() and isinstance(value, dict)
+        }
+    if isinstance(raw, list):
+        return {
+            str(value.get("bundle") or "").strip(): dict(value)
+            for value in raw
+            if isinstance(value, dict) and str(value.get("bundle") or "").strip()
+        }
+    return {}
+
+
+def _remove_plugin_bundle_path(
+    *,
+    config: AgentConfig,
+    plugins_dir: Path,
+    bundle: str,
+) -> bool:
+    """Remove one bundle through MCC when the external binding is present."""
+    result = _configured_plugin_filesystem_operation(
+        config,
+        operation="plugin_filesystem_cleanup",
+        runtime={"plugins_root": str(plugins_dir), "bundle": str(bundle)},
+    )
+    status = str(result.get("status") or "").strip().lower()
+    if status not in {"cleaned", "noop"}:
+        raise RuntimeError(str(result.get("error") or result.get("reason") or "plugin_filesystem_cleanup_failed"))
+    return status == "cleaned" or bool(result.get("changed_paths"))
+
+
+def _plugin_alias_relative_path(*, install_root: str, plugins_dir: Path, bundle: str) -> str:
+    root = Path(install_root).absolute()
+    base = Path(plugins_dir).absolute()
+    try:
+        relative_root = base.relative_to(root)
+    except ValueError as exc:
+        raise RuntimeError("plugin_alias_root_outside_instance") from exc
+    if not relative_root.parts or any(part in {"", ".", ".."} for part in relative_root.parts):
+        raise RuntimeError("plugin_alias_root_invalid")
+    name = str(bundle or "").strip()
+    if not _is_valid_bundle_name(name):
+        raise RuntimeError("plugin_alias_bundle_invalid")
+    return PurePosixPath(*relative_root.parts, name).as_posix()
+
+
+def _remove_plugin_alias_path(
+    *,
+    config: AgentConfig,
+    install_root: str,
+    plugins_dir: Path,
+    bundle: str,
+) -> bool:
+    """Remove a manifest alias through the external managed-path binding."""
+    result = _configured_plugin_filesystem_operation(
+        config,
+        operation="plugin_alias_cleanup",
+        # Keep the lexical managed path. Resolving a symlink here could turn a
+        # harmless alias cleanup request into an out-of-tree deletion request;
+        # the MCC recipe must validate the managed root and reject symlinks.
+        runtime={"paths": [_plugin_alias_relative_path(
+            install_root=install_root,
+            plugins_dir=plugins_dir,
+            bundle=bundle,
+        )]},
+    )
+    status = str(result.get("status") or "").strip().lower()
+    if status not in {"cleaned", "noop"}:
+        raise RuntimeError(str(result.get("error") or result.get("reason") or "plugin_alias_cleanup_failed"))
+    return status == "cleaned" or bool(result.get("changed_paths"))
+
+
+def _plugin_cache_reset_external(
+    config: AgentConfig,
+    *,
+    relative_paths: list[str],
+) -> dict[str, Any]:
+    """Reset only the declared managed cache paths through MCC."""
+    result = _configured_plugin_filesystem_operation(
+        config,
+        operation="plugin_cache_reset",
+        runtime={"paths": list(relative_paths)},
+    )
+    status = str(result.get("status") or "").strip().lower()
+    if status not in {"applied", "cleaned", "noop"}:
+        raise RuntimeError(str(result.get("error") or result.get("reason") or "plugin_cache_reset_failed"))
+    return result
+
+
+def _plugin_selection_digest(
+    root: str,
+    bundle_names: list[str],
+    *,
+    config: AgentConfig | None = None,
+) -> dict[str, Any]:
+    if config is None:
+        raise RuntimeError("plugin_filesystem_status_binding_required")
     plugins_dir = _resolve_plugins_dir(root, create=False)
     bundles = _dedupe_text([str(x).strip() for x in bundle_names if str(x).strip()])
     h = hashlib.sha256()
     details: dict[str, Any] = {}
     errors: list[str] = []
     for bundle in sorted(bundles, key=lambda x: x.lower()):
-        base = plugins_dir / bundle
-        h.update(bundle.encode("utf-8", errors="surrogateescape"))
-        h.update(b"\0")
-        if not base.exists():
-            h.update(b"MISSING\0")
-            details[bundle] = {"exists": False, "files": 0, "dirs": 0, "bytes": 0}
-            continue
-        if not base.is_dir():
-            h.update(b"NOTDIR\0")
-            details[bundle] = {"exists": True, "status": "not_directory"}
-            errors.append(f"{bundle}:not_directory")
-            continue
-        files = 0
-        dirs = 0
-        total_bytes = 0
-        try:
-            entries = [base]
-            entries.extend(sorted(base.rglob("*"), key=lambda p: str(p.relative_to(base))))
-            for entry in entries:
-                rel = "." if entry == base else str(entry.relative_to(base))
-                if _plugin_sync_ignore(entry, rel):
-                    continue
-                try:
-                    st = entry.lstat()
-                except Exception as e:
-                    errors.append(f"{bundle}/{rel}:stat:{e}")
-                    continue
-                mode = st.st_mode & 0o7777
-                if entry.is_symlink():
-                    target = os.readlink(entry)
-                    h.update(f"L\0{bundle}/{rel}\0{target}\n".encode("utf-8", errors="surrogateescape"))
-                elif entry.is_dir():
-                    dirs += 1
-                    h.update(f"D\0{bundle}/{rel}\0{mode:o}\n".encode("utf-8", errors="surrogateescape"))
-                elif entry.is_file():
-                    files += 1
-                    total_bytes += int(st.st_size)
-                    try:
-                        file_hash = _sha256_file(entry)
-                    except Exception as e:
-                        errors.append(f"{bundle}/{rel}:hash:{e}")
-                        continue
-                    h.update(f"F\0{bundle}/{rel}\0{st.st_size}\0{file_hash}\n".encode("utf-8", errors="surrogateescape"))
-                else:
-                    h.update(f"O\0{bundle}/{rel}\n".encode("utf-8", errors="surrogateescape"))
-        except Exception as e:
-            errors.append(f"{bundle}:scan:{e}")
-        details[bundle] = {"exists": True, "files": files, "dirs": dirs, "bytes": total_bytes}
-    return {
-        "digest": h.hexdigest(),
-        "bundles": bundles,
-        "details": details,
-        "errors": errors[:20],
-        "status": "error" if errors else "ok",
-    }
-
-
-def _extract_version_from_php_text(text: str) -> str:
-    m = re.search(r"['\"]version['\"]\s*=>\s*['\"]([^'\"]+)['\"]", text, flags=re.IGNORECASE)
-    if m and m.group(1).strip():
-        return m.group(1).strip()
-    m = re.search(r"['\"]version['\"]\s*=\s*['\"]([^'\"]+)['\"]", text, flags=re.IGNORECASE)
-    if m and m.group(1).strip():
-        return m.group(1).strip()
-    return "-"
-
-
-def _read_installed_version(plugin_dir: Path) -> str:
-    cfg = plugin_dir / "Config" / "config.php"
-    if not cfg.exists():
-        return "-"
-    try:
-        text = cfg.read_text(encoding="utf-8", errors="ignore")
-    except Exception:
-        return "-"
-    return _extract_version_from_php_text(text)
+        observed = _plugin_filesystem_status_external(
+            config, plugins_dir=plugins_dir, bundle=bundle,
+            state_filename=getattr(config, "plugins_state_filename", ""),
+        )
+        digest = str(observed.get("digest") or "").strip().lower()
+        if not digest:
+            raise RuntimeError("plugin_filesystem_status_digest_missing")
+        h.update(f"E\\0{bundle}\\0{digest}\\n".encode("utf-8"))
+        details[bundle] = dict(observed.get("details") or {
+            "exists": observed.get("plugin_status") not in {"missing", "broken"},
+            "files": int(observed.get("files") or 0),
+            "dirs": int(observed.get("dirs") or 0),
+            "bytes": int(observed.get("bytes") or 0),
+        })
+        if str(observed.get("plugin_status") or "").strip().lower() == "broken":
+            errors.append(f"{bundle}:external_status_broken")
+    return {"digest": h.hexdigest(), "bundles": bundles, "details": details,
+            "errors": errors[:20], "status": "error" if errors else "ok"}
 
 
 def _version_key(value: str | None) -> tuple[int | str, ...]:
@@ -1146,19 +1405,14 @@ def _build_plugin_rows(
     if not isinstance(plugins, list) or not plugins:
         return manifest_url, fallback_ip, install_root, []
 
-    plugins_dir = _resolve_plugins_dir(install_root, create=True)
-    local_dirs = (
-        sorted(
-            [
-                x
-                for x in plugins_dir.iterdir()
-                if x.is_dir() and not x.name.startswith(".") and _is_valid_bundle_name(x.name)
-            ],
-            key=lambda p: p.name.lower(),
-        )
-        if plugins_dir.exists()
-        else []
+    plugins_dir = _resolve_plugins_dir(install_root, create=False)
+    external_inventory = _plugin_filesystem_status_external(
+        config,
+        plugins_dir=plugins_dir,
+        bundle="",
+        state_filename=config.plugins_state_filename,
     )
+    external_bundle_rows = _plugin_status_bundle_rows(external_inventory)
 
     manifest_by_bundle: dict[str, dict[str, Any]] = {}
     for item in plugins:
@@ -1168,9 +1422,19 @@ def _build_plugin_rows(
         if bundle and _is_valid_bundle_name(bundle):
             manifest_by_bundle[bundle] = item
 
-    local_bundles = {d.name for d in local_dirs}
+    local_bundles = (
+        {name for name, row in external_bundle_rows.items()
+         if str(row.get("plugin_status") or row.get("status") or "").strip().lower() not in {"missing", "broken"}}
+        if external_inventory is not None
+        else set()
+    )
     all_bundles = sorted(set(local_bundles) | set(manifest_by_bundle.keys()), key=lambda x: x.lower())
-    interaction_context = _plugin_interaction_context(install_root, plugins_dir)
+    interaction_context = _plugin_interaction_context(
+        install_root,
+        plugins_dir,
+        config=config,
+        bundle_names=all_bundles,
+    )
     registered_bundles = _registered_plugin_bundles(install)
 
     rows: list[dict[str, Any]] = []
@@ -1178,7 +1442,11 @@ def _build_plugin_rows(
     for bundle in all_bundles:
         item = manifest_by_bundle.get(bundle)
         pdir = plugins_dir / bundle
-        installed_version = _read_installed_version(pdir) if pdir.exists() else "-"
+        installed_version = (
+            _plugin_status_version(external_bundle_rows.get(bundle))
+            if external_inventory is not None
+            else "-"
+        )
         if item is None:
             rows.append(
                 {
@@ -1206,6 +1474,7 @@ def _build_plugin_rows(
             item,
             config.plugins_state_filename,
             install_bundle=install_bundle,
+            config=config,
         )
         status, reason = _registration_aware_status(
             status,
@@ -1256,34 +1525,36 @@ def _plugin_status(
     state_filename: str,
     *,
     install_bundle: str | None = None,
+    config: AgentConfig | None = None,
 ) -> tuple[str, str, str]:
     bundle = str(plugin.get("bundle", "")).strip()
     install_name = str(install_bundle or "").strip() or bundle
-    pdir = plugins_dir / install_name
-    if not pdir.exists():
-        return "MISSING", "not installed", "-"
-
-    required = plugin.get("required_files")
-    if isinstance(required, list):
-        for rel in required:
-            relp = pdir / str(rel)
-            if not relp.exists():
-                return "BROKEN", f"missing {rel}", _read_installed_version(pdir)
-    else:
-        if not _has_php_file_fast(pdir):
-            return "BROKEN", "no php files", _read_installed_version(pdir)
-
-    installed_version = _read_installed_version(pdir)
-    expected_version = str(plugin.get("version", "")).strip() or "-"
-    expected_sha = str(plugin.get("sha256", "")).strip()
-
-    state: dict[str, Any] | None = None
-    state_path = pdir / state_filename
-    if state_path.exists():
-        try:
-            state = json.loads(state_path.read_text(encoding="utf-8"))
-        except Exception:
-            return "BROKEN", "invalid state metadata", installed_version
+    if config is None:
+        raise RuntimeError("plugin_filesystem_status_binding_required")
+    external = _plugin_filesystem_status_external(
+        config, plugins_dir=plugins_dir, bundle=install_name, state_filename=state_filename,
+    )
+    if external is not None:
+        installed_version = _plugin_status_version(external)
+        external_status = str(external.get("plugin_status") or "").strip().lower()
+        if external_status == "missing":
+            return "MISSING", str(external.get("reason") or "not installed"), installed_version
+        if external_status == "broken":
+            return "BROKEN", str(external.get("reason") or "external filesystem status is broken"), installed_version
+        if external_status not in {"ok", "noop", "observed", "success"}:
+            raise RuntimeError("plugin_filesystem_status_result_invalid")
+        expected_version = str(plugin.get("version", "")).strip() or "-"
+        expected_sha = str(plugin.get("sha256", "")).strip()
+        state = external.get("state")
+        if installed_version == expected_version:
+            if state is None or not expected_sha or str(state.get("sha256", "")).strip() == expected_sha:
+                return "OK", str(external.get("reason") or "version match"), installed_version
+            return "OK", "version match", installed_version
+        cmp_val = _version_cmp(installed_version, expected_version)
+        if cmp_val is not None and cmp_val > 0:
+            return "OK", f"installed newer than server={expected_version}", installed_version
+        return "UPDATE", f"installed={installed_version}", installed_version
+    raise RuntimeError("plugin_filesystem_status_external_result_required")
 
     # Canonical-path dev/stable aliases share one install directory.
     # Respect the last installed bundle from state file so UI/CLI won't
@@ -1309,68 +1580,9 @@ def _plugin_status(
     return "UPDATE", f"installed={installed_version}", installed_version
 
 
-def _extract_package(archive_path: Path, staging: Path) -> None:
-    lower = archive_path.name.lower()
-    if lower.endswith(".zip"):
-        with zipfile.ZipFile(archive_path, "r") as zf:
-            zf.extractall(staging)
-    else:
-        with tarfile.open(archive_path, "r:*") as tf:
-            tf.extractall(staging)
-    _cleanup_macos_archive_artifacts(staging)
-
-
-def _cleanup_macos_archive_artifacts(root: Path) -> None:
-    """
-    Remove macOS metadata artifacts (AppleDouble/._* and __MACOSX) that can
-    introduce duplicate PHP classes and crash cache:clear.
-    """
-    if not root.exists():
-        return
-    for dirpath, dirnames, filenames in os.walk(root, topdown=True):
-        cur = Path(dirpath)
-        for d in list(dirnames):
-            if d == "__MACOSX":
-                try:
-                    shutil.rmtree(cur / d, ignore_errors=True)
-                except Exception:
-                    pass
-                dirnames.remove(d)
-        for fn in filenames:
-            if fn.startswith("._"):
-                try:
-                    (cur / fn).unlink(missing_ok=True)
-                except Exception:
-                    pass
-
-
-def _find_bundle_root(staging: Path, bundle: str) -> Path:
-    direct = staging / bundle
-    if direct.exists() and direct.is_dir():
-        return direct
-    dirs = [x for x in staging.iterdir() if x.is_dir()]
-    if len(dirs) == 1:
-        return dirs[0]
-    for d in dirs:
-        if d.name.lower().startswith(bundle.lower()) or d.name.lower().endswith("-main"):
-            return d
-    raise RuntimeError(f"cannot locate bundle root for {bundle} in {staging}")
-
-
-def _set_owner_group(
-    path: Path,
-    *,
-    root: str,
-    owner_group: str = "www-data:www-data",
-) -> None:
-    descriptor = descriptor_for_root(root)
-    if descriptor is not None:
-        owner_group = descriptor.container_user
-    subprocess.run(["chown", "-R", owner_group, str(path)], check=True)
-
-
 def _install_or_replace_plugin(
     *,
+    config: AgentConfig,
     root: str,
     bundle: str,
     package_url: str,
@@ -1379,32 +1591,26 @@ def _install_or_replace_plugin(
     state_filename: str,
     state_payload: dict[str, Any],
 ) -> None:
-    plugins_dir = _resolve_plugins_dir(root, create=True)
-    dst_dir = plugins_dir / bundle
-    ts = int(time.time())
-    backup_dir = plugins_dir / f".{bundle}.bak-{ts}"
-
     with tempfile.TemporaryDirectory(prefix=f"mcd-plugin-{bundle}-") as td:
         td_path = Path(td)
         archive_path = td_path / package_url.rsplit("/", 1)[-1]
         _fetch_file(package_url, token, archive_path, fallback_ip=fallback_ip)
 
-        unpack_dir = td_path / "unpack"
-        unpack_dir.mkdir(parents=True, exist_ok=True)
-        _extract_package(archive_path, unpack_dir)
-        source_dir = _find_bundle_root(unpack_dir, bundle)
-
-        if dst_dir.exists():
-            if backup_dir.exists():
-                shutil.rmtree(backup_dir)
-            dst_dir.rename(backup_dir)
-
-        shutil.copytree(source_dir, dst_dir)
-        (dst_dir / state_filename).write_text(json.dumps(state_payload, ensure_ascii=True, indent=2) + "\n", encoding="utf-8")
-        _set_owner_group(dst_dir, root=root)
-
-        if backup_dir.exists():
-            shutil.rmtree(backup_dir, ignore_errors=True)
+        plugins_dir = _resolve_plugins_dir(root, create=False)
+        external = _configured_plugin_filesystem_operation(
+            config,
+            operation="plugin_filesystem_apply",
+            runtime=_plugin_filesystem_runtime(
+                plugins_dir=plugins_dir,
+                bundle=bundle,
+                archive_path=archive_path,
+                state_filename=state_filename,
+                state_payload=state_payload,
+            ),
+        )
+        status = str(external.get("status") or "").strip().lower()
+        if status not in {"applied", "noop"}:
+            raise RuntimeError(str(external.get("error") or external.get("reason") or "plugin_filesystem_apply_failed"))
 
 
 def _run_plugin_template(config: AgentConfig, install, template: str) -> tuple[int, str]:
@@ -1426,42 +1632,29 @@ def _run_plugin_template(config: AgentConfig, install, template: str) -> tuple[i
     )
 
 
-def _reset_plugin_prod_cache(install) -> dict[str, Any]:
+def _reset_plugin_prod_cache(install, config: AgentConfig | None = None) -> dict[str, Any]:
     root = Path(install.root).resolve()
-    reset_paths: list[str] = []
-    cleanup_pending_paths: list[str] = []
-    for relative in (Path("var/cache/prod"), Path("app/cache/prod")):
-        cache_path = root / relative
-        if not cache_path.parent.is_dir():
-            continue
-        retired_path: Path | None = None
-        if cache_path.exists() or cache_path.is_symlink():
-            retired_path = cache_path.with_name(f".{cache_path.name}.mcd-retired-{uuid.uuid4().hex}")
-            try:
-                cache_path.rename(retired_path)
-            except FileNotFoundError:
-                retired_path = None
-        cache_path.mkdir(parents=True, mode=0o775, exist_ok=True)
-        cache_path.chmod(0o775)
-        _set_owner_group(cache_path, root=str(root))
-        reset_paths.append(str(relative))
-        if retired_path is not None:
-            try:
-                _remove_plugin_path(retired_path)
-            except OSError as exc:
-                cleanup_pending_paths.append(str(retired_path.relative_to(root)))
-                logging.warning("Disposable retired cache cleanup deferred for %s: %s", retired_path, exc)
-    evidence = {
-        "schema": _PLUGIN_CACHE_RESET_SCHEMA,
-        "operation": "plugin_cache_reset",
-        "root": str(root),
-        "status": "success",
-        "reset_paths": reset_paths,
-        "cleanup_pending_paths": cleanup_pending_paths,
-        "mode": "0775",
-    }
-    print("MCD_PLUGIN_CACHE_RESET_EVIDENCE=" + json.dumps(evidence, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
-    return evidence
+    resolved_config = config or getattr(install, "config", None) or getattr(install, "agent_config", None)
+    cache_relative = getattr(resolved_config, "plugins_cache_relative_paths", None) if resolved_config is not None else None
+    if not isinstance(cache_relative, list) or not cache_relative or any(not isinstance(p, str) or not p.strip() for p in cache_relative):
+        raise RuntimeError("plugin_cache_paths_not_configured")
+    external = _plugin_cache_reset_external(resolved_config, relative_paths=list(cache_relative))
+    if external is not None:
+        if str(external.get("status") or "").strip().lower() == "error":
+            raise RuntimeError(str(external.get("reason") or "plugin_cache_reset_failed"))
+        evidence = {
+            "schema": _PLUGIN_CACHE_RESET_SCHEMA,
+            "operation": "plugin_cache_reset",
+            "root": str(root),
+            "status": "success",
+            "reset_paths": list(external.get("reset_paths") or external.get("changed_paths") or []),
+            "cleanup_pending_paths": list(external.get("cleanup_pending_paths") or []),
+            "mode": external.get("mode"),
+            "external": True,
+        }
+        print("MCD_PLUGIN_CACHE_RESET_EVIDENCE=" + json.dumps(evidence, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
+        return evidence
+    raise RuntimeError("plugin_cache_reset_binding_not_configured")
 
 
 def _plugin_apply_selection(selected: list[dict[str, Any]]) -> list[dict[str, str]]:
@@ -1547,7 +1740,11 @@ def _plugin_files_applied_observed(
     install_root: str,
     action: str,
     selected: list[dict[str, Any]],
+    *,
+    config: AgentConfig | None = None,
 ) -> bool:
+    if config is None:
+        raise RuntimeError("plugin_filesystem_status_binding_required")
     plugins_dir = _resolve_plugins_dir(install_root, create=False)
     for row in selected:
         item = row.get("item")
@@ -1556,13 +1753,22 @@ def _plugin_files_applied_observed(
         install_bundle = str(
             row.get("install_bundle") or _install_bundle_for_manifest_bundle(bundle, item_dict)
         ).strip()
-        path = plugins_dir / install_bundle
+        observed = _plugin_filesystem_status_external(
+            config, plugins_dir=plugins_dir, bundle=install_bundle,
+            state_filename=getattr(config, "plugins_state_filename", ""),
+        )
         if action in {"remove", "purge"}:
-            if not path.exists():
-                return True
+            if observed is not None:
+                if str(observed.get("plugin_status") or "").strip().lower() == "missing":
+                    return True
+                continue
             continue
         expected_version = str(item_dict.get("version", "") or "").strip()
-        if expected_version and path.exists() and _read_installed_version(path) == expected_version:
+        if observed is not None:
+            if expected_version and _plugin_status_version(observed) == expected_version:
+                return True
+            continue
+        if expected_version and _plugin_status_version(observed) == expected_version:
             return True
     return False
 
@@ -1599,16 +1805,26 @@ def _confirm_plugin_apply_inventory(
             row.get("install_bundle") or _install_bundle_for_manifest_bundle(bundle, item)
         ).strip()
         if action in {"remove", "purge"}:
-            confirmed = not (plugins_dir / install_bundle).exists()
-            status = "MISSING" if confirmed else "PRESENT"
-            installed_version = "-"
-            reason = "removed" if confirmed else "plugin path remains"
+            observed = _plugin_filesystem_status_external(
+                config,
+                plugins_dir=plugins_dir,
+                bundle=install_bundle,
+                    state_filename=getattr(config, "plugins_state_filename", ""),
+            )
+            if observed is not None:
+                confirmed = str(observed.get("plugin_status") or "").strip().lower() == "missing"
+                status = "MISSING" if confirmed else "PRESENT"
+                installed_version = _plugin_status_version(observed)
+                reason = str(observed.get("reason") or ("removed" if confirmed else "plugin path remains"))
+            else:
+                raise RuntimeError("plugin_filesystem_status_external_result_required")
         else:
             status, reason, installed_version = _plugin_status(
                 plugins_dir,
                 item,
                 config.plugins_state_filename,
                 install_bundle=install_bundle,
+                config=config,
             )
             expected_version = str(item.get("version", "") or "").strip()
             confirmed = bool(expected_version) and installed_version == expected_version
@@ -1633,7 +1849,7 @@ def _confirm_plugin_apply_inventory(
 
 
 def _run_plugin_cache_clear(config: AgentConfig, install) -> None:
-    _reset_plugin_prod_cache(install)
+    _reset_plugin_prod_cache(install, config)
     rc, out = _run_plugin_template(config, install, "cache:clear")
     if rc != 0:
         raise RuntimeError(f"cache:clear failed: {out}")
@@ -1689,7 +1905,7 @@ def _run_post_steps(config: AgentConfig, install, expected_bundles: set[str] | N
     if config.plugins_post_cache_clear:
         _run_plugin_cache_clear(config, install)
     else:
-        _reset_plugin_prod_cache(install)
+        _reset_plugin_prod_cache(install, config)
     if config.plugins_post_install:
         _run_plugin_install_reload(config, install, expected_bundles=expected_bundles)
         _assert_plugin_bundles_registered(install, set(expected_bundles or set()))
@@ -1760,85 +1976,30 @@ def _apply_hostnet_mautic4_tx_patch(install, selected_rows: list[dict[str, Any]]
     return False
 
 
-def _plugin_config_metadata_paths(plugins_dir: Path, selected_rows: list[dict[str, Any]]) -> list[tuple[str, Path]]:
-    paths: list[tuple[str, Path]] = []
-    seen: set[Path] = set()
-
-    def add_bundle(bundle: str) -> None:
-        name = str(bundle or "").strip()
-        if not _is_valid_bundle_name(name):
-            return
-        p = plugins_dir / name / "Config" / "config.php"
-        try:
-            key = p.resolve()
-        except Exception:
-            key = p
-        if key in seen:
-            return
-        seen.add(key)
-        paths.append((name, p))
-
-    for bundle in _selected_install_bundles(selected_rows):
-        add_bundle(bundle)
-
-    if plugins_dir.exists():
-        for child in sorted(plugins_dir.iterdir(), key=lambda x: x.name):
-            if child.is_dir():
-                add_bundle(child.name)
-    return paths
-
-
 def _apply_plugin_config_metadata_patch(install, selected_rows: list[dict[str, Any]]) -> bool:
     """Disabled: compatibility payloads must be declared by the owner catalog."""
     return False
 
 
-def _plugin_has_doctrine_entity_metadata(plugin_dir: Path) -> bool:
-    entity_dir = plugin_dir / "Entity"
-    if not entity_dir.exists() or not entity_dir.is_dir():
-        return False
-    try:
-        return any(p.is_file() and p.suffix == ".php" for p in entity_dir.rglob("*.php"))
-    except Exception:
-        return True
-
-
-def _plugin_has_native_migrations(plugin_dir: Path) -> bool:
-    migrations_dir = plugin_dir / "Migrations"
-    if not migrations_dir.exists() or not migrations_dir.is_dir():
-        return False
-    try:
-        return any(path.is_file() and path.suffix.lower() == ".php" for path in migrations_dir.iterdir())
-    except Exception:
-        return True
-
-
 def _selected_metadataless_native_migration_bundles(
     install,
     selected_rows: list[dict[str, Any]],
+    *,
+    config: AgentConfig | None = None,
 ) -> set[str]:
     if int(getattr(install, "mautic_major", 0) or 0) != 6:
         return set()
+    if config is None:
+        raise RuntimeError("plugin_filesystem_status_binding_required")
     plugins_dir = _resolve_plugins_dir(install.root, create=False)
     out: set[str] = set()
     for bundle in _selected_install_bundles(selected_rows):
-        plugin_dir = plugins_dir / bundle
-        if (
-            plugin_dir.exists()
-            and plugin_dir.is_dir()
-            and not _plugin_has_doctrine_entity_metadata(plugin_dir)
-            and _plugin_has_native_migrations(plugin_dir)
-        ):
+        observed = _plugin_filesystem_status_external(config, plugins_dir=plugins_dir, bundle=bundle, state_filename=getattr(config, "plugins_state_filename", ""))
+        if (str(observed.get("plugin_status") or "").strip().lower() not in {"missing", "broken"}
+                and not bool(observed.get("has_doctrine_entity_metadata"))
+                and bool(observed.get("has_native_migrations"))):
             out.add(bundle)
     return out
-
-
-def _m6_reload_helper_path(root: str) -> Path | None:
-    candidates = (
-        Path(root) / "app" / "bundles" / "PluginBundle" / "Helper" / "ReloadHelper.php",
-        Path(root) / "vendor" / "mautic" / "core-lib" / "bundles" / "PluginBundle" / "Helper" / "ReloadHelper.php",
-    )
-    return next((path for path in candidates if path.exists() and path.is_file()), None)
 
 
 @contextmanager
@@ -1847,25 +2008,45 @@ def _temporary_m6_native_migration_reload_compatibility(install, expected_bundle
     yield
 
 
-def _prealign_metadataless_plugin_versions(install, selected_rows: list[dict[str, Any]]) -> bool:
+def _prealign_metadataless_plugin_versions(
+    install,
+    selected_rows: list[dict[str, Any]],
+    *,
+    config: AgentConfig | None = None,
+) -> bool:
+    if config is None:
+        raise RuntimeError("plugin_filesystem_status_binding_required")
     if int(getattr(install, "mautic_major", 0) or 0) != 6:
         return False
     if not getattr(install, "db", None):
         return False
 
     plugins_dir = _resolve_plugins_dir(install.root, create=False)
-    if not plugins_dir.exists():
-        return False
 
-    preserve_versions = _selected_metadataless_native_migration_bundles(install, selected_rows)
+    preserve_versions = _selected_metadataless_native_migration_bundles(
+        install,
+        selected_rows,
+        config=config,
+    )
     changed_any = False
     db: MauticDB | None = None
-    for bundle, _config_path in _plugin_config_metadata_paths(plugins_dir, selected_rows):
+    bundle_paths = [
+        (bundle, plugins_dir / bundle / "Config" / "config.php")
+        for bundle in _selected_install_bundles(selected_rows)
+    ]
+    for bundle, _config_path in bundle_paths:
         if not _is_valid_bundle_name(bundle):
             continue
         plugin_dir = plugins_dir / bundle
-        if not plugin_dir.exists() or not plugin_dir.is_dir():
-            continue
+        observed = _plugin_filesystem_status_external(
+            config, plugins_dir=plugins_dir, bundle=bundle,
+            state_filename=getattr(config, "plugins_state_filename", ""),
+        )
+        if observed is not None:
+            if str(observed.get("plugin_status") or "").strip().lower() in {"missing", "broken"}:
+                continue
+            if bool(observed.get("has_doctrine_entity_metadata")):
+                continue
         if bundle in preserve_versions:
             logging.info(
                 "[%s] preserving plugin DB version for native migration reload: %s",
@@ -1873,9 +2054,7 @@ def _prealign_metadataless_plugin_versions(install, selected_rows: list[dict[str
                 bundle,
             )
             continue
-        if _plugin_has_doctrine_entity_metadata(plugin_dir):
-            continue
-        version = _read_installed_version(plugin_dir)
+        version = _plugin_status_version(observed)
         if not version or version == "-":
             continue
         try:
@@ -1953,7 +2132,17 @@ def _apply_plugin_file_changes_impl(
         changed = bool(plugin_registration.unregister(MauticDB(install.db), names, purge=action == "purge", allow_schema_creation=not bool(getattr(config, "cluster_id", None))))
     elif action not in {"remove", "purge"} and selected:
         _cleanup_conflicting_plugin_rows(
-            install, selected, context=_plugin_interaction_context(install_root, plugins_dir),
+            install, selected, context=_plugin_interaction_context(
+                install_root,
+                plugins_dir,
+                config=config,
+                bundle_names=_cluster_sync_bundle_names(
+                    selected,
+                    action="install",
+                    auto_remove_bundles=auto_remove_bundles,
+                    rows_by_bundle=rows_by_bundle,
+                ),
+            ),
             extra_conflicts=auto_remove_bundles,
             allow_schema_creation=not bool(getattr(config, "cluster_id", None)),
         )
@@ -1977,8 +2166,11 @@ def _apply_plugin_file_changes_impl(
                         conflict_bundle,
                     )
                     continue
-                pdir = _resolve_plugins_dir(install_root, create=False) / name
-                if _remove_plugin_path(pdir):
+                if _remove_plugin_bundle_path(
+                    config=config,
+                    plugins_dir=_resolve_plugins_dir(install_root, create=False),
+                    bundle=name,
+                ):
                     removed_paths.append(name)
             if removed_paths:
                 changed = True
@@ -2003,8 +2195,11 @@ def _apply_plugin_file_changes_impl(
         if action in {"remove", "purge"}:
             removed_paths: list[str] = []
             for name in _dedupe_text([install_bundle, bundle]):
-                pdir = _resolve_plugins_dir(install_root, create=False) / name
-                if _remove_plugin_path(pdir):
+                if _remove_plugin_bundle_path(
+                    config=config,
+                    plugins_dir=_resolve_plugins_dir(install_root, create=False),
+                    bundle=name,
+                ):
                     removed_paths.append(name)
             if removed_paths:
                 changed = True
@@ -2053,6 +2248,7 @@ def _apply_plugin_file_changes_impl(
         )
 
         _install_or_replace_plugin(
+            config=config,
             root=install_root,
             bundle=install_bundle,
             package_url=package_url,
@@ -2068,28 +2264,41 @@ def _apply_plugin_file_changes_impl(
             },
         )
         if install_bundle != bundle:
-            alias_path = _resolve_plugins_dir(install_root, create=False) / bundle
-            if alias_path.exists() or alias_path.is_symlink():
-                try:
-                    if alias_path.is_symlink() or alias_path.is_file():
-                        alias_path.unlink()
-                    elif alias_path.is_dir():
-                        shutil.rmtree(alias_path)
-                    logging.info("[%s] removed alias plugin path=%s (installed as %s)", install_root, bundle, install_bundle)
-                except Exception as e:
-                    logging.warning("[%s] failed to cleanup alias plugin path=%s: %s", install_root, bundle, e)
+            alias_plugins_dir = _resolve_plugins_dir(install_root, create=False)
+            _remove_plugin_alias_path(
+                config=config,
+                install_root=install_root,
+                plugins_dir=alias_plugins_dir,
+                bundle=bundle,
+            )
+            logging.info("[%s] requested alias cleanup path=%s (installed as %s)", install_root, bundle, install_bundle)
         changed = True
         logging.info("[%s] plugin %s applied action=%s path=%s", install_root, bundle, action, install_bundle)
 
     compatibility_changed = False
-    interaction_context = _plugin_interaction_context(install_root, plugins_dir)
+    interaction_context = _plugin_interaction_context(
+        install_root,
+        plugins_dir,
+        config=config,
+        bundle_names=_cluster_sync_bundle_names(
+            selected,
+            action=action,
+            auto_remove_bundles=auto_remove_bundles,
+            rows_by_bundle=rows_by_bundle,
+        ),
+    )
     if action not in {"remove", "purge"} and selected:
         # Compatibility patches are recovery steps too. A previous run can copy
         # plugin files successfully and then fail during Mautic reload, leaving
         # the plugin version at OK while core reload still needs patching.
         compatibility_changed = _apply_hostnet_mautic4_tx_patch(install, selected) or compatibility_changed
         compatibility_changed = _apply_plugin_config_metadata_patch(install, selected) or compatibility_changed
-        compatibility_changed = _prealign_metadataless_plugin_versions(install, selected) or compatibility_changed
+        prealign_kwargs = {"config": config} if hasattr(config, "plugins_state_filename") else {}
+        compatibility_changed = _prealign_metadataless_plugin_versions(
+            install,
+            selected,
+            **prealign_kwargs,
+        ) or compatibility_changed
 
     files_applied = changed or compatibility_changed
     if files_applied and run_post_steps:
@@ -2239,7 +2448,12 @@ def _apply_plugin_file_changes(
                 action=action,
                 selected=selected,
                 event="completed",
-                files_applied=_plugin_files_applied_observed(install_root, action, selected),
+                files_applied=_plugin_files_applied_observed(
+                    install_root,
+                    action,
+                    selected,
+                    config=config,
+                ),
                 post_step_status="failed",
                 cache_inventory_confirmed=False,
                 overall_status="failed",
@@ -2427,7 +2641,7 @@ def _cluster_plugin_sync_check(
     deadline = time.time() + timeout_sec
     last_digest = ""
     while time.time() < deadline:
-        payload = _plugin_selection_digest(root, bundles)
+        payload = _plugin_selection_digest(root, bundles, config=config)
         last_digest = str(payload.get("digest") or "")
         if last_digest == expected_digest and str(payload.get("status") or "ok") == "ok":
             _cluster_plugin_note_node(
@@ -2466,7 +2680,7 @@ def _cluster_plugin_wait_local_file_sync(
     deadline = time.time() + max(1, int(timeout_sec))
     last_digest = ""
     while time.time() < deadline:
-        payload = _plugin_selection_digest(root, bundles)
+        payload = _plugin_selection_digest(root, bundles, config=config)
         last_digest = str(payload.get("digest") or "")
         if last_digest == expected_digest and str(payload.get("status") or "ok") == "ok":
             _cluster_plugin_note_node(
@@ -2854,7 +3068,7 @@ def _run_cluster_plugin_operation(
             auto_remove_bundles=auto_remove_bundles,
             rows_by_bundle=rows_by_bundle,
         )
-        digest_payload = _plugin_selection_digest(install.root, sync_bundles)
+        digest_payload = _plugin_selection_digest(install.root, sync_bundles, config=config)
         expected_digest = str(digest_payload.get("digest") or "")
         _cluster_plugin_set_phase(
             config,
@@ -3047,8 +3261,13 @@ def run_plugins_interactive(
         return 0
 
     manifest_dir = manifest_url.rsplit("/", 1)[0] + "/"
-    plugins_dir = _resolve_plugins_dir(install_root, create=True)
-    interaction_context = _plugin_interaction_context(install_root, plugins_dir)
+    plugins_dir = _resolve_plugins_dir(install_root, create=False)
+    interaction_context = _plugin_interaction_context(
+        install_root,
+        plugins_dir,
+        config=config,
+        bundle_names=[str(row.get("bundle") or "").strip() for row in rows if str(row.get("bundle") or "").strip()],
+    )
 
     idx_map: dict[int, dict[str, Any]] = {}
     for row in rows:

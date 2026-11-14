@@ -19,12 +19,10 @@ from mcd_agent.mautic_upgrade import (
     _exit_upgrade_maintenance,
     _hard_clear_prod_cache,
     _normalize_mautic7_composer_constraints,
-    _migrate_php_custom_ini,
     _normalize_mautic7_loopback_redis_cache,
     _latest_same_branch,
     _release_family_label,
     _resolve_composer_project_root,
-    _rewrite_nginx_php_fpm_references,
     _safe_mautic7_loopback_redis_dsn,
     _upgrade_target_relation,
 )
@@ -136,7 +134,11 @@ class MauticUpgradeTargetTests(unittest.TestCase):
                 self.assertTrue(guard.owned_pause_flag)
                 self.assertTrue(guard.owned_cron_stop)
                 self.assertEqual(guard.stopped_tasks, 2)
-                stop_cron.assert_called_once_with(cfg)
+                stop_cron.assert_called_once_with(
+                    cfg,
+                    operation_id=None,
+                    target_php_version="",
+                )
                 stop_tasks.assert_called_once_with(cfg, grace_sec=30, kill_orphans=True)
 
                 _exit_upgrade_maintenance(cfg, guard)
@@ -384,36 +386,6 @@ $parameters = array(
     def test_composer_update_uses_full_dependency_resolution_and_dry_run(self) -> None:
         self.assertEqual(_composer_update_args(), ["update", "--with-all-dependencies"])
         self.assertEqual(_composer_update_args(dry_run=True), ["update", "--with-all-dependencies", "--dry-run"])
-
-    def test_php_custom_ini_migration_copies_only_custom_files(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            src = root / "8.3" / "cli" / "conf.d"
-            dst = root / "8.4" / "cli" / "conf.d"
-            src.mkdir(parents=True)
-            dst.mkdir(parents=True)
-            (src / "60-custom.ini").write_text("memory_limit=512M\n", encoding="utf-8")
-            (src / "20-curl.ini").write_text("extension=curl.so\n", encoding="utf-8")
-
-            moved = _migrate_php_custom_ini(php_etc_root=root)
-
-            self.assertTrue((dst / "60-custom.ini").exists())
-            self.assertTrue((src / "60-custom.ini").exists())
-            self.assertTrue((src / "20-curl.ini").exists())
-            self.assertIn(str(dst / "60-custom.ini"), moved[0])
-
-    def test_nginx_php_fpm_rewrite_updates_socket_reference(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            site = root / "sites-enabled"
-            site.mkdir()
-            conf = site / "app.conf"
-            conf.write_text("fastcgi_pass unix:/run/php/php8.3-fpm.sock;\n", encoding="utf-8")
-
-            changed = _rewrite_nginx_php_fpm_references(nginx_roots=(site,))
-
-            self.assertEqual(changed, [str(conf)])
-            self.assertIn("php8.4-fpm.sock", conf.read_text(encoding="utf-8"))
 
     def test_mautic7_twig_include_hotfix_casts_markup_return(self) -> None:
         with tempfile.TemporaryDirectory() as td:
