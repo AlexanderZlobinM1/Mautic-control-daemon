@@ -415,3 +415,13 @@ evidence-проверка исходника фиксирует SHA256
   UID and acknowledged with that stable UID; a different-host alias is ignored.
 - Segment and campaign super-priority regression gates remain green after the
   identity normalization change.
+
+## Stable package/patch-contract identity
+
+Перед публикацией stable package обязательный release regression загружает
+канонический `mautic-patch-resolution-v1` через runtime-код и проверяет, что
+его exact `minimum_agent_version` равен `mcd_agent.__version__`. Несовпадение
+блокирует выпуск до сборки артефакта и не исправляется ручным редактированием
+контракта на целевом хосте.
+Prepared-target regression дополнительно проверяет current package metadata и
+полное exact-count observation, включая неизменяемый needle.

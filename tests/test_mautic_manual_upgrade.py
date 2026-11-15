@@ -164,7 +164,15 @@ def wire_upgrade(invocation, monkeypatch, kind="composer"):
     events = []
     monkeypatch.setattr("mcd_agent.mautic_patch_stage.application_root", lambda root: Path(root))
     monkeypatch.setattr("mcd_agent.mautic_patch_plan_v3.verify_applied", lambda *a, **kw: {"status": "success"})
-    monkeypatch.setattr(upgrade, "_prepare_patch_target_stage", lambda *a, **kw: events.append("stage") or SimpleNamespace(close=lambda: None, verify_original=lambda *a: None))
+    monkeypatch.setattr(
+        upgrade,
+        "_prepare_patch_target_stage",
+        lambda *a, **kw: events.append("stage") or SimpleNamespace(
+            close=lambda: None,
+            verify_original=lambda *a: None,
+            read_version=lambda *a: invocation["target"],
+        ),
+    )
     installed = [False]
     cfg = SimpleNamespace(php_bin="php", mautic_run_as_user="www-data",
                           state_db_path=str(root / "state.db"),

@@ -1,3 +1,17 @@
+## 1.6.85 - 2026-11-15
+
+- Bind the packaged `mautic-patch-resolution-v1` contract identity to MCD
+  `1.6.85`, restoring fail-closed plugin reload admission without changing the
+  patch-resolution policy or Warmup Mail release history.
+- Add the patch-resolution identity suite to the mandatory release regression
+  so a package whose `__version__` differs from the contract's exact
+  `minimum_agent_version` cannot be published again.
+- Align prepared-target package metadata with the same release identity and
+  validate the complete `exact_count` observation, including its bound needle,
+  in check-only target verification. Refresh upgrade test doubles to the
+  current target-stage interface now that the identity gate no longer masks
+  those paths.
+
 ## 1.6.84 - 2026-11-14
 
 - Treat a complaint for a contact with any existing email DNC as handled when
