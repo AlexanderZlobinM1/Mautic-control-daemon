@@ -1222,7 +1222,7 @@ def _prepare_patch_target_stage(config, root: str, current: str, target: str, mo
             raise RuntimeError("Unsupported target stage install type")
     read_version = (lambda candidate: _target_version(candidate, prefer_lock=True)) if mode == "composer" else _target_version
     staged = TargetStage(root, plan, prepare, read_version, application_root, facts_provider=facts_provider,
-                         defer_conditions=True)
+                         defer_conditions=True, read_source_version=_target_version)
     staged.read_version = read_version
     staged.target_package_sha256 = package_identity["sha256"]
     return staged

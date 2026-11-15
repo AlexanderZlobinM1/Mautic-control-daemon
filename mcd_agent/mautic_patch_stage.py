@@ -86,7 +86,8 @@ def application_root(value: str | Path) -> Path:
 class TargetStage:
     def __init__(self, source: str, plan: dict[str, Any], prepare: Callable[[Path], None],
                  read_version: Callable[[Path], str | None], root_binding: Callable[[Path], Path] | None = None, facts_provider=None,
-                 defer_conditions: bool = False):
+                 defer_conditions: bool = False, read_source_version: Callable[[Path], str | None] | None = None):
+        self.read_source_version = read_source_version or read_version
         self.plan_sha256 = _validate_plan(plan)
         self.target_version = plan["target_version"]
         self.directory = Path(tempfile.mkdtemp(prefix="mcd-target-stage-"))
@@ -103,7 +104,7 @@ class TargetStage:
             if not defer_conditions:
                 self.facts_receipt = _observe_facts(plan, facts_provider, "verify", plan["phase"])
             original = _root(source)
-            if read_version(original) != plan["source_version"]:
+            if self.read_source_version(original) != plan["source_version"]:
                 raise PatchPlanV3Error("target_stage_source_version_mismatch")
             original_application = self.root_binding(original)
             tracked = list(dict.fromkeys(path for record in plan["patches"] for path in record["source_paths"]))
@@ -147,7 +148,7 @@ class TargetStage:
     def verify_original(self, root: str, plan: dict[str, Any], read_version: Callable[[Path], str | None]) -> None:
         self.verify_facts(plan)
         live = _root(root)
-        if canonical_json_sha256(plan) != self.plan_sha256 or read_version(live) != plan["source_version"]:
+        if canonical_json_sha256(plan) != self.plan_sha256 or self.read_source_version(live) != plan["source_version"]:
             raise PatchPlanV3Error("target_stage_source_binding_changed")
         live_application = self.root_binding(live)
         for path, expected in self.original_hashes.items():
