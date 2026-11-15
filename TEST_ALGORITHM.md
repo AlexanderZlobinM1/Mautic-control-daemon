@@ -1,5 +1,10 @@
 # Segment scheduler liveness test algorithm
 
+Install-type gate: ZIP/source with composer.json, composer.lock, config/local.php,
+bin/console and docroot/public stays zip and uses update-package then finish.
+Explicit recommended-project remains composer; competing project owners return
+unknown. Existing descriptor tests preserve declared runtime installation type.
+
 Upgrade identity regression: an exact source release with a same-major dev
 Composer lock must pass source admission; an exact prepared target package
 must pass its separate check. Source metadata drift before mutation must

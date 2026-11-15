@@ -1,3 +1,10 @@
+## 1.6.88 - 2026-11-15
+
+- Require explicit recommended-project or runtime descriptor evidence to
+  classify an installation as Composer. ZIP/source trees retain the ZIP update
+  path even with Composer files and docroot/public directories. Competing
+  recommended-project owners fail closed.
+
 ## 1.6.87 - 2026-11-15
 
 - Validate the upgrade source using its application release identity,
