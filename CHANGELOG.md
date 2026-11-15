@@ -1,5 +1,8 @@
 ## 1.7.0 — Unreleased architecture candidate
 
+- Classify ZIP/source installations independently of incidental Composer files
+  or directory layout; require explicit Composer project ownership or descriptor.
+
 - Bind upgrade source admission and its final recheck to application identity
   independently of the prepared target version reader.
 
