@@ -3582,3 +3582,12 @@ classic unsubscribe. Ручная очистка mailbox и перемотка c
 доставляет ту же instance-настройку как `<uid>@<host>`, MCD сопоставляет её
 существующим instance-scoped alias-механизмом; это не меняет локальную
 идентичность и не требует появления `@host` в пользовательском интерфейсе.
+
+## Package and patch-resolution identity
+
+Опубликованный package и встроенный `mautic-patch-resolution-v1` образуют один
+неизменяемый артефакт. В v1 поле `minimum_agent_version` является точным
+package identity и совпадает с `mcd_agent.__version__`; mismatch блокирует
+plugin reload до мутаций и не исправляется редактированием клиентского хоста.
+Check-only `exact_count` evidence связывает group, path, needle, expected и
+actual count до принятия fixed-результата.

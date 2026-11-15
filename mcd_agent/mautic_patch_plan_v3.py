@@ -120,7 +120,7 @@ def _gate(root: Path, gate: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
             actual = 0 if gate.get("allow_missing_path") is True else None
         else:
             actual = value.count(gate["needle"].encode("utf-8"))
-        row.update(expected=gate["expected_count"], actual=actual)
+        row.update(needle=gate["needle"], expected=gate["expected_count"], actual=actual)
         return actual == gate["expected_count"], row
     raise PatchPlanV3Error("patch_gate_kind_unsupported")
 

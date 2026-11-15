@@ -451,3 +451,10 @@ evidence-проверка исходника фиксирует SHA256
   alias is ignored.
 - Segment and campaign super-priority ring suites stay green after identity
   normalization.
+
+## Package/contract identity
+
+Mandatory release regression загружает канонический patch-resolution contract
+через runtime-код и требует точного совпадения `minimum_agent_version` с
+`mcd_agent.__version__`. Target verification отдельно проверяет полный
+exact-count observation, включая неизменяемый needle.

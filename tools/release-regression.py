@@ -17,6 +17,7 @@ REQUIRED_TESTS = (
     "test_production_runtime_boundary.py",
     "test_unit_repair.py",
     "test_apt_external_callers.py",
+    "test_mautic_patch_resolution.py",
 )
 
 
@@ -49,7 +50,7 @@ def main() -> int:
     except RuntimeError as exc:
         print(f"release regression failed: {exc}", file=sys.stderr)
         return 1
-    print("release regression passed: DB upgrade gate and cron/version matrix")
+    print("release regression passed: DB upgrade gate, cron/version matrix and package/contract identity")
     return 0
 
 
