@@ -40,21 +40,13 @@ def detect_host_install_type(root: str) -> str:
     parent = p.parent
     base = p.name.lower()
 
-    # Custom composer-like layout used in production:
-    # <instance>/config/local.php + <instance>/bin/console + web in <instance>/docroot.
-    if (p / "config" / "local.php").exists() and (p / "bin" / "console").exists():
-        if (p / "docroot").exists() or (p / "public").exists():
-            return "composer"
-
-    # If web root points directly to docroot/public, project root is parent.
-    if base in {"docroot", "public"}:
-        if (parent / "config" / "local.php").exists() and (parent / "bin" / "console").exists():
-            return "composer"
-
-    # Official composer pattern: recommended-project with web root in ./docroot.
-    if _is_recommended_project(parent) and base in {"docroot", "public"}:
-        return "composer"
-    if _is_recommended_project(p):
+    # Layout and dependency files are also present in official ZIP releases.
+    # Only explicit project ownership identifies the Composer update method.
+    own_project = _is_recommended_project(p)
+    parent_project = base in {"docroot", "public"} and _is_recommended_project(parent)
+    if own_project and parent_project:
+        return "unknown"
+    if own_project or parent_project:
         return "composer"
 
     # Conservative fallback:
