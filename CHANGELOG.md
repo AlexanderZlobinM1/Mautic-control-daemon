@@ -1,3 +1,10 @@
+## 1.6.87 - 2026-11-15
+
+- Validate the upgrade source using its application release identity,
+  separately from the prepared Composer target package. Recheck the same
+  source identity before mutation; preserve immutable plan and file binding.
+  Package contract identity follows agent 1.6.87.
+
 ## 1.6.86 - 2026-11-15
 
 - Define exact Mautic release metadata as application identity while treating
