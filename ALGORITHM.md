@@ -2226,11 +2226,11 @@ Prepared-target candidate metadata carries that same package version. A
 check-only `exact_count` observation binds group, path, needle, expected count
 and actual count before it can be accepted as fixed evidence.
 
-## Legacy Composer version evidence
+## Mautic release version evidence
 
-Для старых Composer-сборок точная версия Mautic берётся из штатного
-`release_metadata`, если `composer.lock` и установленный package inventory
-единогласно содержат только same-major placeholder `X.0.0-dev`. Placeholder
-означает ветку сборки, а не конкурирующую точную patch-версию. Любое другое
-расхождение версий остаётся блокирующим. Проверка только читает метаданные,
-ничего не исправляет в приложении и отдаёт точную версию migration preflight.
+Точная версия Mautic берётся из штатного `release_metadata`. Composer-версия с
+суффиксом `-dev` описывает исходную ветку, а не точный application release, и
+не конфликтует с `release_metadata` только при совпадении major во всех
+доступных package inventories. Любая другая точная или нераспознанная версия
+остаётся блокирующим конфликтом. Проверка только читает метаданные, ничего не
+исправляет в приложении и отдаёт точную версию migration preflight.
