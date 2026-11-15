@@ -1,3 +1,12 @@
+## 1.6.86 - 2026-11-15
+
+- Resolve legacy packaged Mautic Composer metadata safely when exact release
+  metadata is paired only with same-major `X.0.0-dev` core placeholders in
+  both `composer.lock` and installed package evidence. Exact disagreements
+  continue to fail closed. This restores read-only instance version and
+  migration-context discovery without editing application files or invoking
+  Mautic during the observation.
+
 ## 1.6.85 - 2026-11-15
 
 - Bind the packaged `mautic-patch-resolution-v1` contract identity to MCD

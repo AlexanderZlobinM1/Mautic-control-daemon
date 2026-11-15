@@ -425,3 +425,12 @@ evidence-проверка исходника фиксирует SHA256
 контракта на целевом хосте.
 Prepared-target regression дополнительно проверяет current package metadata и
 полное exact-count observation, включая неизменяемый needle.
+
+## Legacy Composer version evidence
+
+- `release_metadata=6.0.9`, `composer.lock=6.0.0-dev` и такой же installed
+  package marker дают авторитетную read-only версию `6.0.9`.
+- Любой неплейсхолдерный installed/lock conflict остаётся
+  `conflicting_static_metadata`.
+- Local context для migration preflight принимает разрешённый legacy-набор без
+  запуска внешней команды, запроса БД или изменения файлов приложения.
