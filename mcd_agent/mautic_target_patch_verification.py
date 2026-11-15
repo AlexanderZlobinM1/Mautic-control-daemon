@@ -46,9 +46,13 @@ def validate_result(result, *, snapshot):
                 "path_state": ("expected_state", "actual_state", gate.get("expected_state")),
                 "sha256": ("expected_sha256", "actual_sha256", gate.get("expected_sha256")),
             }[gate["kind"]]
+            observed_fields = {"group", "kind", "path", expected_key, actual_key}
+            if gate["kind"] == "exact_count":
+                observed_fields.add("needle")
             if (not isinstance(observed, dict)
-                    or set(observed) != {"group", "kind", "path", expected_key, actual_key}
+                    or set(observed) != observed_fields
                     or any(observed[key] != gate[key] for key in ("group", "kind", "path"))
+                    or (gate["kind"] == "exact_count" and observed["needle"] != gate["needle"])
                     or type(observed[expected_key]) is not type(wanted) or observed[expected_key] != wanted):
                 raise ValueError("verification_result_gate_binding_invalid")
             actual = observed[actual_key]

@@ -2212,3 +2212,16 @@ classic unsubscribe. Ручная очистка mailbox и перемотка c
 ещё содержит историческую настройку `<uid>@<host>`, MCD принимает её только как
 входной migration alias текущего хоста и materialize-ит под stable UID; это не
 меняет локальную идентичность и не возвращает `@host` в интерфейс или ACK.
+
+# Stable package and patch-resolution identity
+
+Опубликованный MCD package и встроенный `mautic-patch-resolution-v1` являются
+одним неизменяемым артефактом. В текущем v1-контракте
+`minimum_agent_version` — точный package identity и обязан совпадать с
+`mcd_agent.__version__`. Несовпадение закрывает plugin reload до мутаций и
+исправляется только новым штатно опубликованным MCD package; контракт на
+клиентском хосте вручную не редактируется. Исходный failed receipt сохраняется,
+а recovery создаёт отдельный bounded operation receipt.
+Prepared-target candidate metadata carries that same package version. A
+check-only `exact_count` observation binds group, path, needle, expected count
+and actual count before it can be accepted as fixed evidence.

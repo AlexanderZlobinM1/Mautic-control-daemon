@@ -54,7 +54,8 @@ def wire(root, plan, monkeypatch, *, drift=False):
                           state_db_path=str(root / "state.db"))
     stage = SimpleNamespace(close=lambda: events.append("stage_close"),
         verify_original=lambda *a: events.append("original_bound"),
-        verify_live=lambda *a: events.append("target_bound") or {"status": "success"})
+        verify_live=lambda *a: events.append("target_bound") or {"status": "success"},
+        read_version=lambda *a: "7.2.1")
     for name, value in [("_pick_install_record", inst), ("_ensure_upgrade_target_allowed", True),
             ("_require_release_approval", None), ("_prepare_patch_target_stage", stage),
             ("_pre_upgrade_permissions_check", None), ("installed_required_bundles", []),
