@@ -459,11 +459,11 @@ Mandatory release regression загружает канонический patch-r
 `mcd_agent.__version__`. Target verification отдельно проверяет полный
 exact-count observation, включая неизменяемый needle.
 
-## Legacy Composer version evidence
+## Mautic release version evidence
 
-- `release_metadata=6.0.9`, `composer.lock=6.0.0-dev` и такой же installed
-  package marker дают авторитетную read-only версию `6.0.9`.
-- Любой неплейсхолдерный installed/lock conflict остаётся
+- `release_metadata=6.0.9`, `composer.lock=6.0.0-dev` и такая же same-major
+  non-exact installed source version дают авторитетную read-only версию `6.0.9`.
+- Любой конкурирующий exact или нераспознанный installed/lock conflict остаётся
   `conflicting_static_metadata`.
-- Local context для migration preflight принимает разрешённый legacy-набор без
+- Local context для migration preflight принимает согласованный набор без
   запуска внешней команды, запроса БД или изменения файлов приложения.
