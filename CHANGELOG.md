@@ -1,5 +1,9 @@
 ## 1.7.0 — Unreleased architecture candidate
 
+- Resolve legacy packaged Mautic version evidence when exact release metadata
+  is paired only with same-major `X.0.0-dev` Composer placeholders. Exact
+  disagreements remain fail-closed; migration context stays read-only.
+
 - Make the package/patch-contract identity suite a mandatory release
   regression and validate the complete check-only `exact_count` observation,
   including its immutable needle. The 1.7 identity remains `1.7.0.dev0`.

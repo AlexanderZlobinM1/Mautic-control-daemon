@@ -232,6 +232,44 @@ class MauticVersionCacheTest(unittest.TestCase):
                 {"version": None, "source": "conflicting_static_metadata"},
             )
 
+    def test_read_only_evidence_accepts_legacy_same_major_composer_dev_placeholder(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "site"
+            (root / "app").mkdir(parents=True)
+            (root / "vendor/composer").mkdir(parents=True)
+            (root / "app/release_metadata.json").write_text('{"version":"6.0.9"}', encoding="utf-8")
+            package = {"name": "mautic/core-lib", "version": "6.0.0-dev"}
+            (root / "composer.lock").write_text(json.dumps({"packages": [package]}), encoding="utf-8")
+            (root / "vendor/composer/installed.json").write_text(
+                json.dumps({"packages": [package]}), encoding="utf-8"
+            )
+
+            with patch("mcd_agent.mautic_version_cache.subprocess.run", side_effect=AssertionError("external command")):
+                self.assertEqual(
+                    mautic_version_cache.read_mautic_version_evidence_read_only(root),
+                    {"version": "6.0.9", "source": "static_metadata"},
+                )
+
+    def test_read_only_evidence_rejects_non_placeholder_installed_conflict(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "site"
+            (root / "app").mkdir(parents=True)
+            (root / "vendor/composer").mkdir(parents=True)
+            (root / "app/release_metadata.json").write_text('{"version":"6.0.9"}', encoding="utf-8")
+            (root / "composer.lock").write_text(
+                json.dumps({"packages": [{"name": "mautic/core-lib", "version": "6.0.0-dev"}]}),
+                encoding="utf-8",
+            )
+            (root / "vendor/composer/installed.json").write_text(
+                json.dumps({"packages": [{"name": "mautic/core-lib", "version": "6.0.8"}]}),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                mautic_version_cache.read_mautic_version_evidence_read_only(root),
+                {"version": None, "source": "conflicting_static_metadata"},
+            )
+
     def test_inventory_refreshes_cache_downward_from_static_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td) / "site"

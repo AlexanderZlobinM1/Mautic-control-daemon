@@ -1,3 +1,4 @@
+import json
 import subprocess
 
 import pytest
@@ -36,3 +37,21 @@ def test_split_discovery_v2_both_entry_points_readonly(tmp_path, monkeypatch):
     after = {str(p): (p.read_bytes(), p.stat().st_mtime_ns, p.stat().st_mode)
              for p in tmp_path.rglob("*") if p.is_file()}
     assert after == before
+
+
+def test_legacy_composer_dev_placeholder_keeps_migration_context_readonly(tmp_path, monkeypatch):
+    config_path, roots = fixture(tmp_path, monkeypatch)
+    root = roots[0]
+    (root / "app/release_metadata.json").write_text('{"version":"6.0.9"}')
+    package = {"name": "mautic/core-lib", "version": "6.0.0-dev"}
+    (root / "composer.lock").write_text(json.dumps({"packages": [package]}))
+    (root / "vendor/composer").mkdir(parents=True)
+    (root / "vendor/composer/installed.json").write_text(json.dumps({"packages": [package]}))
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: pytest.fail("external command"))
+    monkeypatch.setattr("pymysql.connect", lambda **kw: pytest.fail("database query"))
+    monkeypatch.setattr("mcd_agent.config.load_config", lambda *a, **kw: pytest.fail("mutating loader"))
+
+    result = read_local_context(load_readonly_discovery_config(str(config_path)), root=str(root))
+
+    assert result["source_version"] == "6.0.9"
+    assert result["version_evidence_source"] == "static_metadata"
