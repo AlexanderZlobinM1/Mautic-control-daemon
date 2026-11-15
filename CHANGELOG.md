@@ -1,5 +1,8 @@
 ## 1.7.0 — Unreleased architecture candidate
 
+- Bind upgrade source admission and its final recheck to application identity
+  independently of the prepared target version reader.
+
 - Define exact Mautic release metadata as application identity and same-major
   Composer `*-dev` versions as non-exact source metadata. Exact or unknown
   disagreements remain fail-closed; migration context stays read-only.

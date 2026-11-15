@@ -1060,7 +1060,7 @@ def _prepare_patch_target_stage(
         else:
             raise RuntimeError("Unsupported target stage install type")
     staged = TargetStage(root, plan, prepare, _target_version, application_root, facts_provider=facts_provider,
-                         defer_conditions=True)
+                         defer_conditions=True, read_source_version=_target_version)
     staged.target_package_sha256 = package_identity["sha256"]
     return staged
 

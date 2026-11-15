@@ -1,5 +1,11 @@
 # Segment scheduler liveness test algorithm
 
+Upgrade identity regression: an exact source release with a same-major dev
+Composer lock must pass source admission; an exact prepared target package
+must pass its separate check. Source metadata drift before mutation must
+fail even when the target reader still returns its original lock value.
+Evidence: test_source_identity_is_independent_of_composer_target_identity.
+
 Этот документ описывает исполняемую матрицу M6/M7 для ordinary segment
 cycles. Локальная unit-матрица не использует production host, не запускает
 реальный Mautic и не меняет profile/config/data; её зелёный результат не

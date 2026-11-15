@@ -71,6 +71,34 @@ def test_bad_target_gate_never_changes_original_source(tmp_path):
     assert version(root) == '7.1.3'
 
 
+def test_source_identity_is_independent_of_composer_target_identity(tmp_path):
+    from mcd_agent.mautic_patch_plan import _target_version
+    root, path, plan, _, _ = scenario(tmp_path)
+    metadata = root / 'docroot/app/release_metadata.json'
+    metadata.write_text(json.dumps({'version': '7.1.3'}))
+    lock = root / 'composer.lock'
+    lock.write_text(json.dumps({'packages': [{'name': 'mautic/core-lib', 'version': '7.0.0-dev'}]}))
+
+    def package_version(candidate):
+        return json.loads((candidate / 'composer.lock').read_text())['packages'][0]['version']
+
+    def prepare(candidate):
+        (candidate / 'composer.lock').write_text(json.dumps({
+            'packages': [{'name': 'mautic/core-lib', 'version': '7.2.0'}]}))
+
+    stage = TargetStage(str(root), plan, prepare, package_version,
+                        read_source_version=_target_version)
+    try:
+        assert package_version(root) == '7.0.0-dev'
+        stage.verify_original(str(root), plan, package_version)
+        assert path.read_bytes() == b'before\n'
+        metadata.write_text(json.dumps({'version': '7.1.4'}))
+        with pytest.raises(PatchPlanV3Error, match='source_binding_changed'):
+            stage.verify_original(str(root), plan, package_version)
+    finally:
+        stage.close()
+
+
 def test_source_change_during_admission_and_plan_change_are_rejected(tmp_path):
     root, path, plan, prepare, version = scenario(tmp_path)
     stage = TargetStage(str(root), plan, prepare, version)
