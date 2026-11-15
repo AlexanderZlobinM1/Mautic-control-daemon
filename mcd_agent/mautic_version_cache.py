@@ -155,23 +155,25 @@ def _read_composer_core_version_tokens(root: Path) -> tuple[set[str], ...]:
     return tuple(evidence) if evidence else (set(),)
 
 
-def _release_resolves_legacy_composer_placeholder(root: Path, release: str, composer: str) -> bool:
-    """Accept an exact release over Mautic's same-major X.0.0-dev package marker.
+def _composer_dev_major(token: str) -> int | None:
+    normalized = str(token or "").strip().lower().removeprefix("v")
+    match = re.fullmatch(r"(\d+)(?:\.(?:\d+|x)){1,2}-dev", normalized)
+    if match is None:
+        match = re.fullmatch(r"dev-(\d+)(?:\.(?:\d+|x)){0,2}", normalized)
+    return int(match.group(1)) if match is not None else None
 
-    Some legacy Composer distributions keep the branch placeholder in both
-    composer.lock and installed.json after packaging a later patch release.
-    It is not an exact competing version.  Every available Composer source
-    must still agree on that placeholder (or the exact release), otherwise the
-    conflict remains ambiguous and fails closed.
-    """
+
+def _composer_core_tokens_match_release(root: Path, release: str) -> bool:
+    """Bind exact application identity to non-exact Composer source metadata."""
     release_tuple = _version_tuple(release)
-    composer_tuple = _version_tuple(composer)
-    if release_tuple is None or composer_tuple is None or release_tuple[0] != composer_tuple[0]:
+    if release_tuple is None:
         return False
-    allowed = {release.removeprefix("v"), f"{composer_tuple[0]}.0.0-dev"}
-    evidence = _read_composer_core_version_tokens(root)
-    tokens = set().union(*evidence)
-    return bool(tokens) and f"{composer_tuple[0]}.0.0-dev" in tokens and tokens <= allowed
+    exact_release = release.removeprefix("v")
+    tokens = set().union(*_read_composer_core_version_tokens(root))
+    return all(
+        token.removeprefix("v") == exact_release or _composer_dev_major(token) == release_tuple[0]
+        for token in tokens
+    )
 
 
 def _newer_local_version_metadata(root: Path, cached: str) -> str | None:
@@ -189,14 +191,18 @@ def _newer_local_version_metadata(root: Path, cached: str) -> str | None:
 def _read_static_mautic_version_evidence(root: Path) -> tuple[str | None, str]:
     release = _read_version_from_release_metadata(root)
     composer = _read_version_from_composer_lock(root)
-    static_versions = [value for value in (release, composer) if value]
-    if not static_versions:
-        return None, "unavailable_read_only"
-    if len({_version_tuple(value) for value in static_versions}) != 1:
-        if release and composer and _release_resolves_legacy_composer_placeholder(root, release, composer):
-            return release, "static_metadata"
-        return None, "conflicting_static_metadata"
-    return max(static_versions, key=lambda value: _version_tuple(value) or (0, 0, 0)), "static_metadata"
+    if release:
+        if not _composer_core_tokens_match_release(root, release):
+            return None, "conflicting_static_metadata"
+        return release, "static_metadata"
+    if composer:
+        tokens = set().union(*_read_composer_core_version_tokens(root))
+        if any(_composer_dev_major(token) is not None for token in tokens):
+            return None, "unavailable_read_only"
+        if any(token.removeprefix("v") != composer.removeprefix("v") for token in tokens):
+            return None, "conflicting_static_metadata"
+        return composer, "static_metadata"
+    return None, "unavailable_read_only"
 
 
 def _read_static_mautic_version(root: Path) -> str | None:

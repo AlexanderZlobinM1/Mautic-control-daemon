@@ -232,7 +232,7 @@ class MauticVersionCacheTest(unittest.TestCase):
                 {"version": None, "source": "conflicting_static_metadata"},
             )
 
-    def test_read_only_evidence_accepts_legacy_same_major_composer_dev_placeholder(self) -> None:
+    def test_exact_release_identity_accepts_same_major_non_exact_composer_source(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td) / "site"
             (root / "app").mkdir(parents=True)
@@ -250,7 +250,7 @@ class MauticVersionCacheTest(unittest.TestCase):
                     {"version": "6.0.9", "source": "static_metadata"},
                 )
 
-    def test_read_only_evidence_rejects_non_placeholder_installed_conflict(self) -> None:
+    def test_exact_release_identity_rejects_competing_installed_version(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td) / "site"
             (root / "app").mkdir(parents=True)

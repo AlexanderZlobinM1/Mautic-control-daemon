@@ -1,9 +1,9 @@
 ## 1.6.86 - 2026-11-15
 
-- Resolve legacy packaged Mautic Composer metadata safely when exact release
-  metadata is paired only with same-major `X.0.0-dev` core placeholders in
-  both `composer.lock` and installed package evidence. Exact disagreements
-  continue to fail closed. This restores read-only instance version and
+- Define exact Mautic release metadata as application identity while treating
+  same-major Composer `*-dev` core versions as non-exact source metadata.
+  Exact or unrecognized disagreements continue to fail closed across both
+  `composer.lock` and installed package evidence. This restores instance and
   migration-context discovery without editing application files or invoking
   Mautic during the observation.
 

@@ -39,7 +39,7 @@ def test_split_discovery_v2_both_entry_points_readonly(tmp_path, monkeypatch):
     assert after == before
 
 
-def test_legacy_composer_dev_placeholder_keeps_migration_context_readonly(tmp_path, monkeypatch):
+def test_non_exact_composer_source_keeps_exact_migration_context_readonly(tmp_path, monkeypatch):
     config_path, roots = fixture(tmp_path, monkeypatch)
     root = roots[0]
     (root / "app/release_metadata.json").write_text('{"version":"6.0.9"}')
