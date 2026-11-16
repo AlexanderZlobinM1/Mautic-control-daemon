@@ -2178,26 +2178,83 @@ def _runtime_reconciliation_previous(
     remote: Mapping[str, Any],
     resolution: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Make a pending local delta for fields where local LWW won."""
-    previous = deepcopy(dict(baseline))
-    local_fields = _runtime_snapshot_fields(current)
+    """Keep local winners pending while accepting independent MCC winners."""
+    previous_fields = _runtime_snapshot_fields(baseline)
     remote_fields = _runtime_snapshot_fields(remote)
+
+    def remove_logical(path: tuple[str, str, str]) -> None:
+        logical = _runtime_logical_path(path)
+        for candidate in list(previous_fields):
+            if _runtime_logical_path(candidate) == logical:
+                previous_fields.pop(candidate, None)
+
+    def remote_path_for(path: tuple[str, str, str]) -> tuple[str, str, str] | None:
+        logical = _runtime_logical_path(path)
+        matches = [candidate for candidate in remote_fields if _runtime_logical_path(candidate) == logical]
+        return matches[0] if len(matches) == 1 else None
+
     for path in resolution.get("local_push", []):
-        scope, key, uid = path
-        entries = previous.get(key) if scope == "instance" else None
-        if scope == "host":
-            previous.pop(key, None)
+        if isinstance(path, (tuple, list)) and len(path) == 3:
+            remove_logical((str(path[0]), str(path[1]), str(path[2])))
+
+    for path in resolution.get("remote_wins", []):
+        if not isinstance(path, (tuple, list)) or len(path) != 3:
             continue
-        if isinstance(entries, dict):
-            next_entries = dict(entries)
-            for entry_uid in list(next_entries):
-                if str(entry_uid) == uid or str(entry_uid).split("@", 1)[0] == uid.split("@", 1)[0]:
-                    next_entries.pop(entry_uid, None)
-            if next_entries:
-                previous[key] = next_entries
-            else:
-                previous.pop(key, None)
-    return previous
+        candidate = (str(path[0]), str(path[1]), str(path[2]))
+        remote_path = remote_path_for(candidate)
+        if remote_path is None:
+            remove_logical(candidate)
+            continue
+        remove_logical(remote_path)
+        previous_fields[remote_path] = deepcopy(remote_fields[remote_path])
+
+    return _runtime_snapshot_from_fields(previous_fields)
+
+
+def _reconcile_pending_local_runtime_after_remote(
+    store: object,
+    *,
+    current_local_runtime: Mapping[str, Any],
+    remote_runtime: Mapping[str, Any],
+    resolution: Mapping[str, Any],
+    local_metadata: Mapping[str, Any],
+) -> bool:
+    """Keep only still-winning local fields after a remote reconciliation."""
+
+    pending_before = _read_local_runtime_push_pending(store)
+    resolved_runtime = resolution.get("runtime")
+    resolved_runtime = (
+        dict(resolved_runtime)
+        if isinstance(resolved_runtime, Mapping)
+        else dict(current_local_runtime)
+    )
+    if not resolution.get("local_push"):
+        if pending_before is not None:
+            _clear_local_runtime_push_pending(store)
+            store.put_runtime_sync("local_runtime", resolved_runtime)
+        return False
+
+    baseline = (
+        pending_before["previous"]
+        if pending_before is not None
+        else store.get_runtime_sync("local_runtime")
+    )
+    baseline = baseline if isinstance(baseline, dict) else {}
+    previous = _runtime_reconciliation_previous(
+        baseline,
+        current_local_runtime,
+        remote_runtime,
+        resolution,
+    )
+    next_pending = {"previous": previous, "current": deepcopy(resolved_runtime)}
+    if next_pending["previous"] == next_pending["current"]:
+        _clear_local_runtime_push_pending(store)
+        store.put_runtime_sync("local_runtime", next_pending["current"])
+        return False
+    store.put_runtime_sync(_LOCAL_RUNTIME_PUSH_PENDING_KEY, next_pending)
+    store.put_runtime_sync("local_runtime", previous)
+    store.put_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY, dict(local_metadata))
+    return True
 
 
 def _persist_recovered_instance_runtime(
@@ -2642,6 +2699,28 @@ def _runtime_resolution_needs_full_snapshot(
     return False
 
 
+def _drop_invalid_required_remote_runtime_values(
+    runtime: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Treat invalid required MCC placeholders as absent, never as settings.
+
+    MCC may expose ``null`` for a required typed host field while carrying a
+    valid update for an independent instance lane in the same snapshot. Such
+    placeholders cannot be applied or persisted and therefore must not enter
+    LWW metadata, the local retry queue, or block the valid lane update.
+    """
+    cleaned = deepcopy(dict(runtime))
+    invalid = _invalid_required_runtime_values(cleaned)
+    if invalid:
+        logging.warning(
+            "runtime-overrides ignored invalid required MCC placeholders: keys=%s",
+            ",".join(invalid),
+        )
+        for key in invalid:
+            cleaned.pop(key, None)
+    return cleaned
+
+
 def _bootstrap_remote_runtime_before_local_baseline(
     config: AgentConfig,
     store: object,
@@ -2681,6 +2760,7 @@ def _bootstrap_remote_runtime_before_local_baseline(
         response,
         (accepted_runtime, previous_mcc_runtime),
     )
+    remote_runtime = _drop_invalid_required_remote_runtime_values(remote_runtime)
 
     # During the first start after an MCD package/source transition, the
     # mutable include may contain a reset snapshot that was self-stamped by
@@ -2709,14 +2789,15 @@ def _bootstrap_remote_runtime_before_local_baseline(
         remote_metadata,
     )
     _store_runtime_fetch_snapshot(store, response, remote_runtime, remote_metadata)
-    if resolution.get("local_push"):
-        # Keep the local event for the normal accepted-push path. Do not apply
-        # a remote snapshot over a newer offline MCD edit during bootstrap.
-        store.put_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY, local_metadata)
-        return "local_pending"
-
     resolved_runtime = resolution["runtime"]
     resolved_metadata = resolution["metadata"]
+    local_push_pending = _reconcile_pending_local_runtime_after_remote(
+        store,
+        current_local_runtime=current_local_runtime,
+        remote_runtime=remote_runtime,
+        resolution=resolution,
+        local_metadata=local_metadata,
+    )
     _persist_resolved_runtime_to_config(
         config,
         current_local_runtime,
@@ -2729,10 +2810,15 @@ def _bootstrap_remote_runtime_before_local_baseline(
         ),
         profile_name=desired_profile_from_runtime_response(response),
     )
-    store.put_runtime_sync("local_runtime", resolved_runtime)
-    store.put_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY, resolved_metadata)
-    _clear_local_runtime_push_pending(store)
-    _clear_local_runtime_accepted(store)
+    if local_push_pending:
+        logging.info(
+            "runtime-overrides applied independent MCC winners while local fields remain pending"
+        )
+    else:
+        store.put_runtime_sync("local_runtime", resolved_runtime)
+        store.put_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY, resolved_metadata)
+        _clear_local_runtime_push_pending(store)
+        _clear_local_runtime_accepted(store)
     return "applied"
 
 
@@ -21699,6 +21785,7 @@ def run_loop(
                         ro,
                         (accepted_runtime, previous_mcc_runtime),
                     )
+                    remote_runtime = _drop_invalid_required_remote_runtime_values(remote_runtime)
                     current_local_runtime = local_runtime_overrides(config)
                     local_runtime_was_reset = _runtime_snapshot_loss_detected(
                         current_local_runtime,
@@ -21720,33 +21807,21 @@ def run_loop(
                         local_metadata,
                         remote_metadata,
                     )
-                    if resolution.get("local_push"):
-                        baseline = store.get_runtime_sync("local_runtime")
-                        baseline = baseline if isinstance(baseline, dict) else {}
-                        previous = _runtime_reconciliation_previous(
-                            baseline,
-                            current_local_runtime,
-                            remote_runtime,
-                            resolution,
-                        )
-                        pending = {
-                            "previous": previous,
-                            "current": deepcopy(current_local_runtime),
-                        }
-                        store.put_runtime_sync(_LOCAL_RUNTIME_PUSH_PENDING_KEY, pending)
-                        store.put_runtime_sync("local_runtime", previous)
-                        store.put_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY, local_metadata)
-                        local_runtime_push_pending = True
-                        status = "deferred_local_delta"
-                    else:
-                        if _runtime_metadata_has_accepted(store):
-                            _clear_local_runtime_accepted(store)
-                        ro["_mcd_remote_runtime"] = remote_runtime
-                        ro["_mcd_remote_metadata"] = remote_metadata
-                        ro["_mcd_resolved_runtime"] = resolution["runtime"]
-                        ro["_mcd_resolved_metadata"] = resolution["metadata"]
-                        store.put_runtime_sync("mcc_runtime", remote_runtime)
-                        store.put_runtime_sync(_MCC_RUNTIME_METADATA_KEY, remote_metadata)
+                    local_runtime_push_pending = _reconcile_pending_local_runtime_after_remote(
+                        store,
+                        current_local_runtime=current_local_runtime,
+                        remote_runtime=remote_runtime,
+                        resolution=resolution,
+                        local_metadata=local_metadata,
+                    )
+                    if not local_runtime_push_pending and _runtime_metadata_has_accepted(store):
+                        _clear_local_runtime_accepted(store)
+                    ro["_mcd_remote_runtime"] = remote_runtime
+                    ro["_mcd_remote_metadata"] = remote_metadata
+                    ro["_mcd_resolved_runtime"] = resolution["runtime"]
+                    ro["_mcd_resolved_metadata"] = resolution["metadata"]
+                    store.put_runtime_sync("mcc_runtime", remote_runtime)
+                    store.put_runtime_sync(_MCC_RUNTIME_METADATA_KEY, remote_metadata)
             if status == "ok":
                 overrides_raw = ro.get("runtime_overrides")
                 instance_states = ro.get("instance_desired_states")

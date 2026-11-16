@@ -2624,6 +2624,138 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
                 12,
             )
 
+    def test_explicit_poll_applies_newer_instance_lane_with_unrelated_local_pending(self) -> None:
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        class MemoryStore:
+            def __init__(self, values):
+                self.values = dict(values)
+
+            def get_runtime_sync(self, key):
+                return self.values.get(key)
+
+            def put_runtime_sync(self, key, value):
+                self.values[key] = dict(value)
+
+            def delete_runtime_sync(self, keys):
+                for key in keys:
+                    self.values.pop(key, None)
+                return 1
+
+        instance_uid = "electronic.sales-snap.com@MauticFarm-02"
+        local_runtime = {
+            "backup_enabled": True,
+            "campaign_super_priority_instance_settings": {
+                instance_uid: {"campaign_super_priority": [82]},
+            },
+        }
+        local_metadata = daemon._runtime_metadata_empty()
+        daemon._runtime_metadata_set(
+            local_metadata,
+            "host",
+            "backup_enabled",
+            daemon._runtime_metadata_stamp(
+                source="mcd", updated_at=800.0, revision=8, event_id="mcd:backup"
+            ),
+        )
+        daemon._runtime_metadata_set(
+            local_metadata,
+            "instance",
+            "campaign_super_priority_instance_settings",
+            daemon._runtime_metadata_stamp(
+                source="mcd", updated_at=600.0, revision=6, event_id="mcd:campaign"
+            ),
+            instance_uid,
+        )
+        response = {
+            "status": "ok",
+            "runtime_overrides": {
+                "import_stall_timeout_sec": None,
+                "segment_lazy_update_enabled": None,
+            },
+            "desired_state": {
+                "scope_key": "Farm-02",
+                "revision": 222,
+                "updated_at": 700.0,
+                "runtime_overrides": {
+                    "import_stall_timeout_sec": None,
+                    "segment_lazy_update_enabled": None,
+                },
+            },
+            "instance_desired_states": {
+                instance_uid: {
+                    "revision": 12,
+                    "updated_at": 700.0,
+                    "runtime_overrides": {
+                        "campaign_super_priority_instance_settings": {
+                            "campaign_super_priority": [82, 83]
+                        },
+                    },
+                },
+            },
+        }
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "mcd.toml"
+            path.write_text(
+                '[profile]\nname = "custom"\n[runtime]\nbackup_enabled = true\n'
+                'campaign_super_priority_instance_settings = '
+                '{ "electronic.sales-snap.com@MauticFarm-02" = '
+                '{ campaign_super_priority = [82] } }\n',
+                encoding="utf-8",
+            )
+            cfg = replace(
+                load_config(str(path), allow_recover_from_mcc=False),
+                mcc_url="https://mcc.example",
+                mcc_token="token",
+                state_db_path=str(Path(directory) / "state.db"),
+            )
+            store = MemoryStore(
+                {
+                    "local_runtime": {
+                        "campaign_super_priority_instance_settings": {
+                            instance_uid: {"campaign_super_priority": [82]},
+                        },
+                    },
+                    "local_runtime_push_pending": {
+                        "previous": {
+                            "campaign_super_priority_instance_settings": {
+                                instance_uid: {"campaign_super_priority": [82]},
+                            },
+                        },
+                        "current": local_runtime,
+                    },
+                    "local_runtime_metadata": local_metadata,
+                }
+            )
+            install = SimpleNamespace(instance_uid=instance_uid)
+            trigger = Path(runtime_overrides.touch_poll_trigger(cfg))
+            with patch("mcd_agent.daemon.fetch_runtime_overrides", return_value=response), patch(
+                "mcd_agent.daemon.acknowledge_desired_runtime_states",
+                return_value=[],
+            ) as acknowledge:
+                result = daemon._consume_explicit_runtime_poll(cfg, store, [install])
+
+            self.assertEqual(result["status"], "applied")
+            self.assertFalse(trigger.exists())
+            effective = local_runtime_overrides(result["config"])
+            self.assertEqual(
+                effective["campaign_super_priority_instance_settings"],
+                {instance_uid: {"campaign_super_priority": [82, 83]}},
+            )
+            self.assertTrue(effective["backup_enabled"])
+            self.assertNotIn("import_stall_timeout_sec", effective)
+            pending = daemon._read_local_runtime_push_pending(store)
+            self.assertIsNotNone(pending)
+            self.assertEqual(
+                pending["current"]["campaign_super_priority_instance_settings"],
+                {instance_uid: {"campaign_super_priority": [82, 83]}},
+            )
+            self.assertTrue(pending["current"]["backup_enabled"])
+            acknowledge.assert_called_once()
+            self.assertEqual(acknowledge.call_args.kwargs["desired_state"]["revision"], 222)
+
     def test_runtime_poll_full_snapshot_is_required_for_nonstable_mcc_winner(self) -> None:
         self.assertTrue(
             daemon._runtime_resolution_needs_full_snapshot(

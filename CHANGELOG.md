@@ -1,5 +1,9 @@
 ## 1.7.0 — Unreleased architecture candidate
 
+- Apply newer MCC winners field by field during the independent runtime control
+  poll even while unrelated local settings remain queued. Ignore invalid
+  required `null` placeholders without blocking valid campaign/segment lanes.
+
 - Preserve pending field event timestamps across delivery retries and restart;
   timestamp only actual new local edits.
 
