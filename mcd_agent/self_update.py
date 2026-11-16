@@ -90,7 +90,7 @@ def assert_production_runtime_origin(install_dir: str | Path = "/opt/mcd") -> No
     except ValueError:
         pass
     else:
-        raise RuntimeError("production MCD must not run from /opt/mcd/src")
+        raise RuntimeError("production MCD must not run from the forbidden checkout path")
     for entry in (os.environ.get("PYTHONPATH", "").split(os.pathsep) + list(sys.path)):
         if not entry:
             continue
@@ -98,7 +98,7 @@ def assert_production_runtime_origin(install_dir: str | Path = "/opt/mcd") -> No
             Path(entry).resolve().relative_to(forbidden)
         except ValueError:
             continue
-        raise RuntimeError("production MCD must not use /opt/mcd/src via PYTHONPATH or sys.path")
+        raise RuntimeError("production MCD must not use the forbidden checkout via PYTHONPATH or sys.path")
 
 
 def _semver(v: str) -> tuple[int, int, int]:

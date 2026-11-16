@@ -151,6 +151,7 @@ from mcd_agent.runtime_overrides import (
     overrides_fingerprint,
     push_runtime_sync_v3,
     push_runtime_overrides,
+    touch_poll_trigger,
 )
 from mcd_agent.runtime_sync_v3 import (
     STATE_KEY as _RUNTIME_SYNC_V3_KEY,
@@ -2733,6 +2734,62 @@ def _bootstrap_remote_runtime_before_local_baseline(
     _clear_local_runtime_push_pending(store)
     _clear_local_runtime_accepted(store)
     return "applied"
+
+
+def _apply_runtime_poll_trigger_now(
+    config: AgentConfig,
+    store: object,
+    installs: Sequence[object],
+) -> dict[str, Any]:
+    """Apply one explicit MCC poll without waiting for an ordinary scheduler pass."""
+    status = _bootstrap_remote_runtime_before_local_baseline(
+        config,
+        store,
+        [str(getattr(inst, "instance_uid", "") or "") for inst in installs],
+    )
+    if status != "applied":
+        return {"status": status, "config": config, "ack_failures": []}
+
+    next_config = load_config(config.config_file_path, allow_recover_from_mcc=False)
+    desired_state = store.get_runtime_sync("mcc_runtime_desired_state") or {}
+    desired_state = desired_state if isinstance(desired_state, dict) else {}
+    instance_states = desired_state.get("instance_desired_states")
+    instance_states = instance_states if isinstance(instance_states, dict) else {}
+    host_runtime = desired_state.get("runtime_overrides")
+    host_runtime = host_runtime if isinstance(host_runtime, dict) else {}
+    effective_runtime = local_runtime_overrides(next_config)
+    ack_failures = acknowledge_desired_runtime_states(
+        next_config,
+        store,
+        desired_state=desired_state,
+        host_runtime=host_runtime,
+        instance_states=instance_states,
+        runtime_fingerprint=overrides_fingerprint(effective_runtime),
+    )
+    return {
+        "status": "applied",
+        "config": next_config,
+        "effective_runtime": effective_runtime,
+        "ack_failures": ack_failures,
+    }
+
+
+def _consume_explicit_runtime_poll(
+    config: AgentConfig,
+    store: object,
+    installs: Sequence[object],
+) -> dict[str, Any]:
+    """Consume one marker and retain it until an apply or disabled result."""
+    if not consume_poll_trigger(config):
+        return {"status": "idle", "config": config, "ack_failures": []}
+    try:
+        result = _apply_runtime_poll_trigger_now(config, store, installs)
+    except Exception as exc:
+        touch_poll_trigger(config)
+        return {"status": "error", "config": config, "ack_failures": [], "reason": str(exc)}
+    if str(result.get("status") or "error") not in {"applied", "disabled"}:
+        touch_poll_trigger(config)
+    return result
 
 
 def _rebase_local_runtime_payload(
@@ -18638,6 +18695,7 @@ def run_loop(
     next_inventory_auto_rescan_at = time.time() + min(300, max(60, int(getattr(config, "poll_interval_sec", 60) or 60)))
     last_inventory_signature = ""
     runtime_overrides_sync_requested = False
+    runtime_overrides_sync_lock = threading.Lock()
     form_embed_reconcile_requested = False
     local_runtime_push_pending = _read_local_runtime_push_pending(store) is not None
     # Always perform an initial runtime-overrides sync after daemon start/restart.
@@ -21179,6 +21237,63 @@ def run_loop(
                 )
             time.sleep(1.0)
 
+    def _runtime_poll_control_worker() -> None:
+        """Keep explicit runtime sync responsive while ordinary planning is busy."""
+        nonlocal config, base_config, profile_authority, campaign_whitelist
+        nonlocal next_plan_refresh_at, next_update_check_at, next_service_profile_apply_at
+        nonlocal last_local_runtime_fp, last_runtime_overrides_fp
+        while _test_stop_event is None or not _test_stop_event.is_set():
+            with runtime_overrides_sync_lock:
+                result = _consume_explicit_runtime_poll(config, store, list(installs))
+                status = str(result.get("status") or "error")
+                if status != "idle":
+                    try:
+                        if status == "applied" and isinstance(result.get("config"), AgentConfig):
+                            config = result["config"]
+                            base_config = config
+                            profile_authority = str(config.profile_name or "").strip().lower()
+                            pusher.cfg = config
+                            campaign_whitelist = set(config.campaign_whitelist) | _load_id_file(
+                                config.campaign_whitelist_file
+                            )
+                            if config.disable_whitelist:
+                                campaign_whitelist = set()
+                            _refresh_dedicated_super_priority_workers(
+                                config=config,
+                                installs=list(installs),
+                                store=store,
+                                running=running,
+                                popens=popens,
+                                segment_loop=segment_super_priority_loop,
+                                campaign_loop=campaign_super_priority_loop,
+                            )
+                            effective = result.get("effective_runtime")
+                            effective = effective if isinstance(effective, dict) else local_runtime_overrides(config)
+                            last_local_runtime_fp = overrides_fingerprint(effective)
+                            last_runtime_overrides_fp = last_local_runtime_fp
+                            next_plan_refresh_at = 0.0
+                            next_update_check_at = 0.0
+                            next_service_profile_apply_at = 0.0
+                            failures = result.get("ack_failures")
+                            for failure in (failures if isinstance(failures, list) else []):
+                                logging.warning("runtime desired-state acknowledgement failed: %s", failure)
+                            logging.info(
+                                "runtime-overrides poll trigger applied by control worker: keys=%s",
+                                ",".join(sorted(effective)) if effective else "-",
+                            )
+                        elif status != "disabled":
+                            logging.warning(
+                                "runtime-overrides poll trigger deferred by control worker: status=%s",
+                                status,
+                            )
+                    except Exception as exc:
+                        touch_poll_trigger(config)
+                        logging.warning("runtime-overrides poll trigger control worker failed: %s", exc)
+            if _test_stop_event is not None:
+                _test_stop_event.wait(1.0)
+            else:
+                time.sleep(1.0)
+
     if not single_cycle:
         threading.Thread(
             target=_active_cycle_observation_worker,
@@ -21199,6 +21314,11 @@ def run_loop(
         threading.Thread(
             target=_campaign_rebuild_liveness_scheduler,
             name="mcd-campaign-rebuild-liveness",
+            daemon=True,
+        ).start()
+        threading.Thread(
+            target=_runtime_poll_control_worker,
+            name="mcd-runtime-poll-control",
             daemon=True,
         ).start()
 
@@ -21307,6 +21427,7 @@ def run_loop(
             _prune_entity_launch_guard(max_age_sec=3600, now_ts=now)
             last_launch_guard_prune_ts = now
 
+        runtime_overrides_sync_lock.acquire()
         local_runtime = local_runtime_overrides(config)
         local_fp = overrides_fingerprint(local_runtime)
         pending_local_runtime = None
@@ -21468,6 +21589,7 @@ def run_loop(
                         last_local_runtime_fp = overrides_fingerprint(local_runtime_overrides(config))
                         store.put_runtime_sync("local_runtime", local_runtime_overrides(config))
                         logging.warning("runtime-sync-v3 durable conflict awaiting operator resolution")
+                        runtime_overrides_sync_lock.release()
                         continue
                     local_runtime_push_pending = True
                     logging.warning(
@@ -21948,6 +22070,7 @@ def run_loop(
                 next_runtime_overrides_poll_at = now + max(30, poll_interval)
             if status not in {"deferred_local_delta", "deferred_remote_stale"}:
                 runtime_overrides_sync_requested = False
+        runtime_overrides_sync_lock.release()
 
         # Reconcile the effective config after LWW adoption, including a
         # no-change trigger. ACK/network failures cannot gate local effects.

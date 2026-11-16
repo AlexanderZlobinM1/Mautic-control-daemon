@@ -12,8 +12,19 @@ from mcd_agent.self_update import assert_production_runtime_origin
 class ProductionRuntimeBoundaryTests(unittest.TestCase):
     def test_production_runtime_rejects_source_path_in_pythonpath(self) -> None:
         with patch.dict(os.environ, {"PYTHONPATH": "/opt/mcd/src"}):
-            with self.assertRaisesRegex(RuntimeError, "must not use /opt/mcd/src"):
+            with self.assertRaisesRegex(RuntimeError, "must not use the forbidden checkout"):
                 assert_production_runtime_origin("/opt/mcd")
+
+    def test_runtime_package_contains_no_forbidden_checkout_literal(self) -> None:
+        package = Path(__file__).parents[1] / "mcd_agent"
+        offenders = [
+            str(path.relative_to(package))
+            for path in package.rglob("*")
+            if path.is_file()
+            and path.suffix in {".py", ".json", ".toml"}
+            and "/opt/mcd/src" in path.read_text(encoding="utf-8", errors="ignore")
+        ]
+        self.assertEqual(offenders, [])
 
     def test_non_production_checkout_remains_testable(self) -> None:
         with patch.dict(os.environ, {"PYTHONPATH": str(Path(__file__).parents[1])}):
