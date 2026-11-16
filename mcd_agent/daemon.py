@@ -80,6 +80,7 @@ from mcd_agent.db_watchdog import collect_db_watchdog_snapshot, effective_db_wat
 from mcd_agent.email_counters import repair_campaign_email_counters
 from mcd_agent.executor import render_mautic_command
 from mcd_agent.native_comparator import shared_root_fence_path
+from mcd_agent.empty_leads_cleanup import CleanupBusy, delete_empty_leads_safely
 from mcd_agent.fail2ban_guard import ensure_nginx_4xx_scan_safety
 from mcd_agent.security_blocklist import sync_security_blocklist_once
 from mcd_agent.web_ingress_firewall import ensure_managed_web_firewall_loopback
@@ -26941,10 +26942,10 @@ def run_loop(
 
             if selected_service_cleanup == "empty_leads_cleanup":
                 try:
-                    result = db.delete_empty_leads(
+                    result = delete_empty_leads_safely(
+                        db, root,
                         mode=empty_cleanup_mode,
                         batch_size=empty_cleanup_batch_size,
-                        max_batches=1,
                     )
                     deleted = int(result.get("total_deleted", 0) or 0)
                     if deleted > 0:
@@ -26964,11 +26965,14 @@ def run_loop(
                         if empty_cleanup_window_key:
                             empty_leads_cleanup_done_window_keys[root] = empty_cleanup_window_key
                         logging.debug("[%s] empty_leads_cleanup idle mode=%s", root, empty_cleanup_mode)
+                except CleanupBusy:
+                    logging.debug("[%s] empty_leads_cleanup deferred: instance work active", root)
                 except Exception as e:
                     logging.warning("[%s] empty_leads_cleanup failed: %s", root, e)
-                last_empty_leads_cleanup_ts[root] = now
-                if empty_cleanup_window_key:
-                    empty_leads_cleanup_window_counts[root] = empty_leads_cleanup_window_counts.get(root, 0) + 1
+                else:
+                    last_empty_leads_cleanup_ts[root] = now
+                    if empty_cleanup_window_key:
+                        empty_leads_cleanup_window_counts[root] = empty_leads_cleanup_window_counts.get(root, 0) + 1
             elif (
                 empty_cleanup_enabled
                 and cluster_cron_allowed
