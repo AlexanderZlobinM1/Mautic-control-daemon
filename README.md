@@ -290,6 +290,7 @@ Production CLI (recommended):
 - `mcd-cli campaigns:trigger -i 83`
 - `mcd-cli import`
 - `mcd-cli plugins`
+- `mcd-cli plugins --machine-result --instance-uid <bare-uid> --plugin-uid <plugin-uid> --action auto --operation-id <id>` (one terminal result without root/host identity)
 - `mcd-cli mautic-upgrade` (interactive)
 - `mcd-cli mautic-upgrade check`
 - `mcd-cli mautic-upgrade apply --mode zip --backup --yes`

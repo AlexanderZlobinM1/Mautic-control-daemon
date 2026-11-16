@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from mcd_agent.mcc_transport import mcc_request
 
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stdout
 import hashlib
+import io
 import json
 import ipaddress
 import logging
@@ -34,6 +35,7 @@ from mcd_agent.discovery import discover_mautic
 from mcd_agent.executor import build_mautic_exec_args, execute_mautic_command_template
 from mcd_agent.host_identity import resolve_agent_identity
 from mcd_agent.install_type import is_complete_plugin_bundle, plugin_dir_candidates
+from mcd_agent.instance_uid import canonical_instance_uid, instance_uid_matches
 from mcd_agent.plugin_interactions import selection_conflicts_for_rules
 from mcd_agent.runtime_overrides import fetch_runtime_overrides
 from mcd_agent.runtime_descriptor import descriptor_for_root
@@ -64,6 +66,9 @@ _PLUGIN_SYNC_IGNORED_RE = re.compile(r"(sync-conflict|\.sync-conflict|\.syncthin
 _MAUTIC7_PLUGIN_RUNTIME_PACKAGES = {"nikic/php-parser:^5.0"}
 _PLUGIN_CACHE_RESET_SCHEMA = "mcd-plugin-cache-reset-v1"
 _PLUGIN_APPLY_RESULT_SCHEMA = "mcd-plugin-apply-result-v1"
+_PLUGIN_OPERATION_RESULT_SCHEMA = "mcd-plugin-operation-result-v2"
+_PLUGIN_OPERATION_RESULT_PREFIX = "MCD_PLUGIN_OPERATION_RESULT="
+_PLUGIN_OPERATION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _CATALOG_COMPATIBILITY_BLOCK_REASONS = frozenset({
     "agent_patch_contract_mismatch",
     "agent_patch_contract_fields_mismatch",
@@ -189,8 +194,13 @@ def _select_install_with_db(config: AgentConfig, root: str | None):
         config.custom_instances,
     )
     if root:
+        try:
+            identity = resolve_agent_identity(config)
+        except Exception:
+            identity = {}
+        host_name = str(identity.get("effective_mcc_host_name") or "").strip()
         for inst in installs:
-            if inst.root == root:
+            if inst.root == root or instance_uid_matches(root, inst.instance_uid, host_name):
                 return inst
         raise RuntimeError(f"Mautic install not found for root: {root}")
     if not installs:
@@ -1472,6 +1482,7 @@ def _plugin_apply_selection(selected: list[dict[str, Any]]) -> list[dict[str, st
         bundle = str(row.get("bundle", "") or "").strip()
         result.append(
             {
+                "plugin_uid": str(row.get("plugin_uid", "") or "").strip(),
                 "bundle": bundle,
                 "install_bundle": str(
                     row.get("install_bundle") or _install_bundle_for_manifest_bundle(bundle, item_dict)
@@ -2215,8 +2226,9 @@ def _apply_plugin_file_changes(
     auto_remove_bundles: list[str],
     rows_by_bundle: dict[str, dict[str, Any]],
     run_post_steps: bool,
+    operation_id: str | None = None,
 ) -> bool:
-    operation_id = uuid.uuid4().hex
+    resolved_operation_id = str(operation_id or "").strip() or uuid.uuid4().hex
     try:
         return _apply_plugin_file_changes_impl(
             config=config,
@@ -2229,12 +2241,12 @@ def _apply_plugin_file_changes(
             auto_remove_bundles=auto_remove_bundles,
             rows_by_bundle=rows_by_bundle,
             run_post_steps=run_post_steps,
-            operation_id=operation_id,
+            operation_id=resolved_operation_id,
         )
     except Exception as exc:
         if run_post_steps and not bool(getattr(exc, "_mcd_plugin_apply_result_emitted", False)):
             _emit_plugin_apply_result(
-                operation_id=operation_id,
+                operation_id=resolved_operation_id,
                 install_root=install_root,
                 action=action,
                 selected=selected,
@@ -2255,6 +2267,7 @@ def _cluster_plugin_cli_args(
     root: str,
     action: str,
     selected: list[dict[str, Any]],
+    operation_id: str | None = None,
     force_bundles: list[str] | None = None,
     extra_args: list[str] | None = None,
 ) -> list[str]:
@@ -2271,6 +2284,8 @@ def _cluster_plugin_cli_args(
         "--yes",
         "--no-color",
     ]
+    if operation_id:
+        args.extend(["--operation-id", str(operation_id)])
     if force_bundles is not None:
         for bundle in force_bundles:
             args.extend(["--bundle", str(bundle)])
@@ -2641,8 +2656,15 @@ def _cluster_plugin_delegate_to_reference(
     key: str,
     request_hash: str,
     reference_host: str,
+    operation_id: str,
 ) -> int:
-    args = _cluster_plugin_cli_args(config, root=install.root, action=action, selected=selected)
+    args = _cluster_plugin_cli_args(
+        config,
+        root=install.root,
+        action=action,
+        selected=selected,
+        operation_id=operation_id,
+    )
     req_id = _cluster_plugin_enqueue_manual_request(
         config,
         root=install.root,
@@ -2679,6 +2701,7 @@ def _run_cluster_plugin_operation(
     selected: list[dict[str, Any]],
     auto_remove_bundles: list[str],
     rows_by_bundle: dict[str, dict[str, Any]],
+    operation_id: str | None = None,
 ) -> int:
     if not mysql_state_enabled(config):
         raise RuntimeError("cluster plugin operation requires mysql_hybrid state backend")
@@ -2687,7 +2710,7 @@ def _run_cluster_plugin_operation(
     expected_hosts = _cluster_plugin_expected_hosts(config)
     key = _cluster_plugin_sync_key(config, install.root)
     request_hash = _cluster_plugin_row_signature(action, selected, auto_remove_bundles)
-    operation_id = uuid.uuid4().hex
+    resolved_operation_id = str(operation_id or "").strip() or uuid.uuid4().hex
     if not _cluster_plugin_local_is_reference(config):
         try:
             rc = _cluster_plugin_delegate_to_reference(
@@ -2698,6 +2721,7 @@ def _run_cluster_plugin_operation(
                 key=key,
                 request_hash=request_hash,
                 reference_host=reference_host,
+                operation_id=resolved_operation_id,
             )
             if rc != 0:
                 raise RuntimeError(f"cluster reference operation failed rc={rc}")
@@ -2710,11 +2734,11 @@ def _run_cluster_plugin_operation(
             inventory_sync = _sync_plugin_inventory_before_terminal(
                 config,
                 install,
-                operation_id=operation_id,
+                operation_id=resolved_operation_id,
                 action=action,
             )
             _emit_plugin_apply_result(
-                operation_id=operation_id,
+                operation_id=resolved_operation_id,
                 install_root=install_root,
                 action=action,
                 selected=selected,
@@ -2730,7 +2754,7 @@ def _run_cluster_plugin_operation(
             return 0
         except Exception as exc:
             _emit_plugin_apply_result(
-                operation_id=operation_id,
+                operation_id=resolved_operation_id,
                 install_root=install_root,
                 action=action,
                 selected=selected,
@@ -2767,7 +2791,7 @@ def _run_cluster_plugin_operation(
         print(msg)
         if not ok:
             _emit_plugin_apply_result(
-                operation_id=operation_id,
+                operation_id=resolved_operation_id,
                 install_root=install_root,
                 action=action,
                 selected=selected,
@@ -2789,11 +2813,11 @@ def _run_cluster_plugin_operation(
         inventory_sync = _sync_plugin_inventory_before_terminal(
             config,
             install,
-            operation_id=operation_id,
+            operation_id=resolved_operation_id,
             action=action,
         )
         _emit_plugin_apply_result(
-            operation_id=operation_id,
+            operation_id=resolved_operation_id,
             install_root=install_root,
             action=action,
             selected=selected,
@@ -2833,10 +2857,11 @@ def _run_cluster_plugin_operation(
             auto_remove_bundles=auto_remove_bundles,
             rows_by_bundle=rows_by_bundle,
             run_post_steps=False,
+            operation_id=resolved_operation_id,
         )
         if changed:
             _emit_plugin_apply_result(
-                operation_id=operation_id,
+                operation_id=resolved_operation_id,
                 install_root=install_root,
                 action=action,
                 selected=selected,
@@ -2911,11 +2936,11 @@ def _run_cluster_plugin_operation(
         inventory_sync = _sync_plugin_inventory_before_terminal(
             config,
             install,
-            operation_id=operation_id,
+            operation_id=resolved_operation_id,
             action=action,
         )
         _emit_plugin_apply_result(
-            operation_id=operation_id,
+            operation_id=resolved_operation_id,
             install_root=install_root,
             action=action,
             selected=selected,
@@ -2941,7 +2966,7 @@ def _run_cluster_plugin_operation(
         return 0
     except Exception as e:
         _emit_plugin_apply_result(
-            operation_id=operation_id,
+            operation_id=resolved_operation_id,
             install_root=install_root,
             action=action,
             selected=selected,
@@ -2983,6 +3008,7 @@ def run_plugins_interactive(
     catalog_json: bool = False,
     cluster_sync_check_key: str | None = None,
     cluster_sync_check_digest: str | None = None,
+    operation_id: str | None = None,
 ) -> int:
     if (list_available or list_installed) and root is None:
         installs = discover_mautic(
@@ -3012,6 +3038,7 @@ def run_plugins_interactive(
                     catalog_json=catalog_json,
                     cluster_sync_check_key=cluster_sync_check_key,
                     cluster_sync_check_digest=cluster_sync_check_digest,
+                    operation_id=operation_id,
                 )
             except Exception as e:
                 rc = 1
@@ -3261,6 +3288,7 @@ def run_plugins_interactive(
             selected=selected,
             auto_remove_bundles=auto_remove_bundles,
             rows_by_bundle=rows_by_bundle,
+            operation_id=operation_id,
         )
 
     changed = _apply_plugin_file_changes(
@@ -3274,12 +3302,161 @@ def run_plugins_interactive(
         auto_remove_bundles=auto_remove_bundles,
         rows_by_bundle=rows_by_bundle,
         run_post_steps=True,
+        operation_id=operation_id,
     )
     if changed:
         print("Plugins applied and post-steps completed")
     else:
         print("No plugin changes required")
     return 0
+
+
+def _terminal_plugin_apply_result(output: str) -> dict[str, Any] | None:
+    prefix = "MCD_PLUGIN_APPLY_RESULT="
+    for raw in reversed(str(output or "").splitlines()):
+        line = raw.strip()
+        if not line.startswith(prefix):
+            continue
+        try:
+            payload = json.loads(line[len(prefix):])
+        except (TypeError, ValueError):
+            continue
+        if (
+            isinstance(payload, dict)
+            and payload.get("schema") == _PLUGIN_APPLY_RESULT_SCHEMA
+            and payload.get("operation") == "plugin_apply"
+            and payload.get("event") == "completed"
+            and payload.get("terminal") is True
+        ):
+            return payload
+    return None
+
+
+def _plugin_operation_terminal_payload(
+    *,
+    operation_id: str,
+    instance_uid: str,
+    plugin_uids: list[str],
+    action: str,
+    status: str,
+    rc: int,
+    terminal: dict[str, Any] | None = None,
+    error_code: str = "",
+    error: str = "",
+) -> dict[str, Any]:
+    terminal_payload = terminal if isinstance(terminal, dict) else {}
+    selected = terminal_payload.get("selected")
+    inventory = terminal_payload.get("inventory")
+    payload: dict[str, Any] = {
+        "schema": _PLUGIN_OPERATION_RESULT_SCHEMA,
+        "operation": "plugin_apply",
+        "operation_id": operation_id,
+        "instance_uid": canonical_instance_uid(instance_uid),
+        "plugin_uids": list(plugin_uids),
+        "action": action,
+        "terminal": True,
+        "status": status,
+        "rc": int(rc),
+        "selected": list(selected) if isinstance(selected, list) else [],
+        "inventory": list(inventory) if isinstance(inventory, list) else [],
+        "error_code": str(error_code or ""),
+        "error": str(error or terminal_payload.get("error") or ""),
+        "mcd_version": __version__,
+    }
+    canonical = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    payload["receipt_sha256"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return payload
+
+
+def run_plugins_machine(
+    *,
+    config: AgentConfig,
+    instance_uid: str,
+    plugin_uids: list[str],
+    action: str,
+    operation_id: str,
+    legacy_root: str | None = None,
+) -> int:
+    """Run the local plugin transaction and expose one terminal receipt."""
+    raw_instance_uid = str(instance_uid or "").strip()
+    safe_instance_uid = canonical_instance_uid(raw_instance_uid)
+    normalized_uids = sorted({
+        _normalize_plugin_uid(value)
+        for value in (plugin_uids or [])
+        if _normalize_plugin_uid(value)
+    })
+    normalized_action = _normalize_action(action)
+    normalized_operation_id = str(operation_id or "").strip()
+    terminal: dict[str, Any] | None = None
+    error_code = ""
+    error = ""
+    rc = 1
+    captured = io.StringIO()
+
+    try:
+        if str(legacy_root or "").strip():
+            raise ValueError("plugin_machine_root_forbidden")
+        if not raw_instance_uid or "@" in raw_instance_uid:
+            raise ValueError("plugin_instance_uid_must_be_bare")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}", raw_instance_uid):
+            raise ValueError("plugin_instance_uid_invalid")
+        if not _PLUGIN_OPERATION_ID_RE.fullmatch(normalized_operation_id):
+            raise ValueError("plugin_operation_id_invalid")
+        if not normalized_uids or any(not _valid_plugin_uid(value) for value in normalized_uids):
+            raise ValueError("plugin_uid_invalid")
+        if normalized_action not in {"auto", "install", "update", "reinstall", "remove", "purge"}:
+            raise ValueError("plugin_action_invalid")
+
+        install = _select_install_with_db(config, raw_instance_uid)
+        actual_uid = canonical_instance_uid(str(getattr(install, "instance_uid", "") or ""))
+        if not actual_uid or actual_uid != raw_instance_uid:
+            raise ValueError("plugin_instance_uid_not_found")
+
+        with redirect_stdout(captured):
+            rc = run_plugins_interactive(
+                config=config,
+                root=raw_instance_uid,
+                selection=None,
+                bundles=None,
+                plugin_uids=normalized_uids,
+                action=normalized_action,
+                no_color=True,
+                yes=True,
+                operation_id=normalized_operation_id,
+            )
+        terminal = _terminal_plugin_apply_result(captured.getvalue())
+        if terminal is None:
+            error_code = "plugin_terminal_receipt_missing"
+            error = "MCD plugin transaction ended without a terminal receipt"
+            rc = 1
+        elif int(terminal.get("rc") or 0) != 0 or terminal.get("overall_status") != "success":
+            error_code = "plugin_operation_failed"
+            error = str(terminal.get("error") or "plugin operation failed")
+            rc = int(terminal.get("rc") or 1)
+    except Exception as exc:
+        terminal = terminal or _terminal_plugin_apply_result(captured.getvalue())
+        error = str((terminal or {}).get("error") or exc)
+        error_code = error if re.fullmatch(r"plugin_[a-z0-9_]+", error) else "plugin_operation_failed"
+        rc = int((terminal or {}).get("rc") or 1)
+
+    success = rc == 0 and terminal is not None and terminal.get("overall_status") == "success"
+    payload = _plugin_operation_terminal_payload(
+        operation_id=normalized_operation_id,
+        instance_uid=safe_instance_uid,
+        plugin_uids=normalized_uids,
+        action=str(normalized_action or action or ""),
+        status="success" if success else "failed",
+        rc=0 if success else max(1, int(rc)),
+        terminal=terminal,
+        error_code="" if success else error_code,
+        error="" if success else error,
+    )
+    print(
+        _PLUGIN_OPERATION_RESULT_PREFIX
+        + json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+        flush=True,
+    )
+    return 0 if success else 1
 
 
 def datetime_now_iso() -> str:
