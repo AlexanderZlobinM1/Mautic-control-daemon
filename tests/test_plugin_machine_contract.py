@@ -161,6 +161,21 @@ def test_plugin_apply_selection_carries_stable_uid():
     }]
 
 
+def test_plugin_filesystem_closure_fails_before_transaction(monkeypatch):
+    present = {"plugin_filesystem_status"}
+    monkeypatch.setattr(
+        plugins,
+        "_plugin_filesystem_binding_present",
+        lambda _config, operation: operation in present,
+    )
+
+    with pytest.raises(RuntimeError, match="plugin_filesystem_bindings_missing"):
+        plugins._require_plugin_filesystem_bindings(
+            SimpleNamespace(),
+            plugins._PLUGIN_FILESYSTEM_REQUIRED_OPERATIONS,
+        )
+
+
 def test_machine_contract_same_operation_replays_deterministic_terminal_receipt(monkeypatch, capsys):
     monkeypatch.setattr(
         plugins,

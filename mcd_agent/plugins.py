@@ -65,6 +65,13 @@ _PLUGIN_APPLY_RESULT_SCHEMA = "mcd-plugin-apply-result-v1"
 _PLUGIN_OPERATION_RESULT_SCHEMA = "mcd-plugin-operation-result-v2"
 _PLUGIN_OPERATION_RESULT_PREFIX = "MCD_PLUGIN_OPERATION_RESULT="
 _PLUGIN_OPERATION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+_PLUGIN_FILESYSTEM_REQUIRED_OPERATIONS = (
+    "plugin_filesystem_status",
+    "plugin_filesystem_apply",
+    "plugin_filesystem_cleanup",
+    "plugin_alias_cleanup",
+    "plugin_cache_reset",
+)
 _PLUGIN_FILESYSTEM_STATUS_SCHEMA = "mcd-plugin-filesystem-status-v1"
 _CATALOG_COMPATIBILITY_BLOCK_REASONS = frozenset({
     "agent_patch_contract_mismatch",
@@ -1003,6 +1010,16 @@ def _plugin_filesystem_binding_present(config: AgentConfig, operation: str) -> b
         )
     except (AttributeError, OSError, UnicodeError, ValueError, TypeError):
         return False
+
+
+def _require_plugin_filesystem_bindings(
+    config: AgentConfig,
+    operations: tuple[str, ...],
+) -> None:
+    missing = [name for name in operations if not _plugin_filesystem_binding_present(config, name)]
+    if missing:
+        logging.error("required plugin filesystem bindings are missing: %s", ",".join(missing))
+        raise RuntimeError("plugin_filesystem_bindings_missing")
 
 
 def _plugin_managed_root_from_config(config: AgentConfig) -> str:
@@ -3275,6 +3292,12 @@ def run_plugins_interactive(
             expected_digest=digest,
             bundles=check_bundles,
         )
+    required_bindings = (
+        ("plugin_filesystem_status",)
+        if list_available or list_installed or catalog_json
+        else _PLUGIN_FILESYSTEM_REQUIRED_OPERATIONS
+    )
+    _require_plugin_filesystem_bindings(config, required_bindings)
     major = install.mautic_major or 6
     if not catalog_json:
         print("Loading plugin manifest...")
