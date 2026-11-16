@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Disposable proof for the legacy-source to runtime-only bridge.
+"""Disposable proof for runtime-only MCD activation and rollback.
 
 The helper creates a temporary MCD-shaped install, starts a real long-lived
 worker, persists queue/running state in TaskStore, runs the component bridge
@@ -138,13 +138,31 @@ def _cfg(root: Path) -> SimpleNamespace:
     )
 
 
-def _write_legacy_source(install: Path, *, version: str = "1.5.177") -> None:
+def _write_forbidden_production_tree(install: Path) -> None:
     source = install / "src"
-    package = source / "mcd_agent"
+    source.mkdir(parents=True)
+    (source / "must-not-be-read").write_text("forbidden production checkout\n", encoding="utf-8")
+
+
+def _write_previous_runtime(install: Path, *, version: str = "1.5.177") -> None:
+    runtime = install / "runtime"
+    package = runtime / "mcd_agent"
     package.mkdir(parents=True)
-    # This is the exact old-agent failure layout: the runtime-only archive
-    # cannot satisfy the legacy updater's pyproject-based source install.
     (package / "__init__.py").write_text(f'__version__ = "{version}"\n', encoding="utf-8")
+    (runtime / "mcd-runtime-manifest.json").write_text(
+        json.dumps({"schema": "mcd-runtime-package-v1", "version": version}) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _write_installed_metadata(path: Path, version: str, *, current: bool = False) -> None:
+    path.mkdir()
+    (path / "INSTALLER").write_text("runtime-qa\n", encoding="utf-8")
+    if current:
+        (path / "METADATA").write_text(
+            f"Metadata-Version: 2.1\nName: mcd-agent\nVersion: {version}\n",
+            encoding="utf-8",
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -201,7 +219,7 @@ def main(argv: list[str] | None = None) -> int:
         selection_path = (install / "var" / "hardware-profile-selection.json").resolve()
         selection_bytes = b'{"mode":"manual","profile":"farm-hiload"}\n'
         selection_path.write_bytes(selection_bytes)
-        _write_legacy_source(install)
+        _write_forbidden_production_tree(install)
         _run([args.python, "-m", "venv", str(install / "venv")])
         site_dir = bridge._site_dir(bridge._venv_python(install))
         legacy_version = "1.5.177"
@@ -212,8 +230,7 @@ def main(argv: list[str] | None = None) -> int:
             site_dir / "mcd_agent-1.5.181.dist-info",
         ]
         for path in stale_metadata:
-            path.mkdir()
-            (path / "INSTALLER").write_text("legacy\n", encoding="utf-8")
+            _write_installed_metadata(path, legacy_version, current=path.name == f"mcd_agent-{legacy_version}.dist-info")
         unrelated_metadata = site_dir / "unrelated-7.2.dist-info"
         unrelated_metadata.mkdir()
         (unrelated_metadata / "METADATA").write_text("Name: unrelated\nVersion: 7.2\n", encoding="utf-8")
@@ -291,8 +308,10 @@ def main(argv: list[str] | None = None) -> int:
             raise RuntimeError("TaskStore queue/claim/running/retry/monitor state changed")
         if worker.poll() is not None:
             raise RuntimeError("ordinary worker did not survive bridge")
-        if not (install / "src" / "mcd-runtime-manifest.json").is_file():
-            raise RuntimeError("runtime source switch did not install the detached manifest")
+        if not (install / "runtime" / "mcd-runtime-manifest.json").is_file():
+            raise RuntimeError("runtime activation did not install the detached manifest")
+        if (install / "src").exists():
+            raise RuntimeError("successful runtime activation left the forbidden production tree")
         if not (install / "var" / "runtime-bootstrap-receipt.json").is_file():
             raise RuntimeError("bridge receipt is missing")
         remaining_metadata = sorted(path.name for path in site_dir.glob("mcd_agent-*.dist-info"))
@@ -309,13 +328,8 @@ def main(argv: list[str] | None = None) -> int:
         if rows and not any(int(row.get("pid") or 0) == worker.pid for row in rows if isinstance(row, dict)):
             raise RuntimeError("running TaskStore row was not preserved")
 
-        old_source_path = Path(str(receipt["before"]["source_path"]))
-        legacy_source_without_pyproject = not (old_source_path / "pyproject.toml").exists()
-        if not legacy_source_without_pyproject:
-            raise RuntimeError("success bridge QA did not use the no-pyproject legacy layout")
-
-        # Inject a post-switch failure after the package/source mutation and
-        # verify the exact rollback contract for a legacy 1.5.133 layout.
+        # Inject a post-switch failure after package/runtime mutation and
+        # verify runtime-only rollback without reading or restoring src.
         failure_root = root / "failure"
         failure_install = failure_root / "install"
         (failure_install / "var").mkdir(parents=True)
@@ -331,7 +345,8 @@ def main(argv: list[str] | None = None) -> int:
         (failure_install / "var" / "hardware-profile-selection.json").write_bytes(
             b'{"mode":"manual","profile":"farm-hiload"}\n'
         )
-        _write_legacy_source(failure_install, version="1.5.177")
+        _write_forbidden_production_tree(failure_install)
+        _write_previous_runtime(failure_install, version="1.5.177")
         _run([args.python, "-m", "venv", str(failure_install / "venv")])
         failure_site = bridge._site_dir(bridge._venv_python(failure_install))
         failure_stale_metadata = [
@@ -341,8 +356,11 @@ def main(argv: list[str] | None = None) -> int:
             failure_site / "mcd_agent-1.5.181.dist-info",
         ]
         for path in failure_stale_metadata:
-            path.mkdir()
-            (path / "INSTALLER").write_text("legacy\n", encoding="utf-8")
+            _write_installed_metadata(
+                path,
+                "1.5.177",
+                current=path.name == "mcd_agent-1.5.177.dist-info",
+            )
         failure_unrelated = failure_site / "unrelated-7.2.dist-info"
         failure_unrelated.mkdir()
         (failure_unrelated / "METADATA").write_text("Name: unrelated\nVersion: 7.2\n", encoding="utf-8")
@@ -408,6 +426,7 @@ def main(argv: list[str] | None = None) -> int:
         failure_rows = failure_reopened.running_rows()
         failure_reopened.close()
         failure_source = failure_install / "src"
+        failure_runtime = failure_install / "runtime"
         failure_agent_entries = sorted(
             entry.name for entry in failure_site.iterdir() if bridge._is_agent_runtime_entry(entry)
         )
@@ -417,9 +436,12 @@ def main(argv: list[str] | None = None) -> int:
         failure_pause = failure_install / "var" / "scheduler.pause"
         failure_updates = failure_install / "var" / "updates"
         failure_rollback = {
-            "source_restored": (failure_source / "mcd_agent" / "__init__.py").is_file()
-            and not (failure_source / "pyproject.toml").exists()
-            and not (failure_source / "mcd-runtime-manifest.json").exists(),
+            "previous_runtime_restored": json.loads(
+                (failure_runtime / "mcd-runtime-manifest.json").read_text(encoding="utf-8")
+            ).get("version") == "1.5.177",
+            "forbidden_tree_untouched_on_failure": (
+                failure_source / "must-not-be-read"
+            ).read_text(encoding="utf-8") == "forbidden production checkout\n",
             "owned_pause_removed": not failure_pause.exists(),
             "state_restored": failure_state_path.read_text(encoding="utf-8")
             == json.dumps(failure_state, sort_keys=True) + "\n",
@@ -433,17 +455,19 @@ def main(argv: list[str] | None = None) -> int:
             "managed_venv_entries_restored": failure_agent_entries == sorted(path.name for path in failure_stale_metadata),
             "unrelated_metadata_preserved": failure_unrelated_after == failure_unrelated_before,
             "temporary_snapshots_cleaned": not any(
-                path.name.startswith("legacy-runtime-") for path in failure_updates.iterdir()
+                path.name.startswith("installed-runtime-") for path in failure_updates.iterdir()
             ),
             "error": failure_error,
-            "source_path": str(failure_source),
+            "runtime_path": str(failure_runtime),
+            "forbidden_path": str(failure_source),
             "state_path": str(failure_state_path),
             "pause_path": str(failure_pause),
         }
         if not all(
             bool(failure_rollback[key])
             for key in (
-                "source_restored",
+                "previous_runtime_restored",
+                "forbidden_tree_untouched_on_failure",
                 "owned_pause_removed",
                 "state_restored",
                 "queue_state_preserved",
@@ -453,7 +477,7 @@ def main(argv: list[str] | None = None) -> int:
                 "temporary_snapshots_cleaned",
             )
         ):
-            raise RuntimeError(f"legacy rollback contract failed: {failure_rollback}")
+            raise RuntimeError(f"runtime-only rollback contract failed: {failure_rollback}")
 
         regression_env = dict(os.environ)
         regression_env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
@@ -493,9 +517,9 @@ def main(argv: list[str] | None = None) -> int:
             "taskstore_preserved": preserved,
             "worker_pid_preserved": worker.poll() is None,
             "runtime_manifest_present": True,
-            "legacy_layout": {
+            "runtime_only_layout": {
                 "versions": ["1.5.177"],
-                "source_without_pyproject": legacy_source_without_pyproject,
+                "forbidden_tree_removed_after_success": True,
                 "runtime_archive_without_pyproject": archive_has_no_pyproject,
                 "normal_apply_target": expected_target,
                 "stale_metadata_removed": True,

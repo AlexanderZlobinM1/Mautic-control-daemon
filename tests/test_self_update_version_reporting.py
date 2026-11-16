@@ -324,7 +324,7 @@ class SelfUpdateVersionReportingTests(unittest.TestCase):
 
         self.assertEqual(
             out["last_cluster_update_result"],
-            "update applied -> 0.9.98; source switched, service restart scheduled",
+            "update applied -> 0.9.98; runtime package activated, service restart scheduled",
         )
 
     def test_apply_update_releases_session_when_only_restart_is_needed(self) -> None:
@@ -485,7 +485,7 @@ class SelfUpdateVersionReportingTests(unittest.TestCase):
         self.assertIn("update applied -> 0.9.97", msg)
         self.assertEqual(
             state["last_cluster_update_result"],
-            "update applied -> 0.9.97; source switched, service restart scheduled",
+            "update applied -> 0.9.97; runtime package activated, service restart scheduled",
         )
         self.assertNotIn("active_campaign_processes", state)
 

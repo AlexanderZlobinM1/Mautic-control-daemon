@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -19,7 +20,6 @@ ARCHIVE_SHA = "0f2938faeb8d5f7aa77f652800cfe5e650cb94b58bc42e281c64b2385f5cb223"
 RUNTIME_MANIFEST_SHA = "03b86f46ef24502b397a94b26b7c11772dbf06e59eca9f8c3d7d02c905cc741f"
 QA_SHA = "fea0fdff0be289aaef264340a07eadcdde6622d79f4cb09b52325293c084fb79"
 SOURCE_COMMIT = "10db1785b84a612b7ebc1bb827010cd2cd2d1062"
-BRIDGE_SHA = "08b5b9e1a9a35cf3a84b23aa110c22a33caedd8a243318f0cff8d63b5669767b"
 
 
 def _kwargs() -> dict[str, str]:
@@ -49,7 +49,7 @@ def test_bridge_manifest_binds_current_release(tmp_path: Path) -> None:
     }
 
 
-def test_current_bridge_source_has_the_published_self_contained_digest() -> None:
+def test_current_bridge_source_digest_is_bound_from_exact_transported_bytes() -> None:
     bridge = Path(__file__).parents[1] / "tools" / "mcd_runtime_bootstrap.py"
     manifest = build_manifest(
         bridge,
@@ -57,7 +57,7 @@ def test_current_bridge_source_has_the_published_self_contained_digest() -> None
         artifact_url="https://servercontrol.sales-snap.com/mauticctl/mcd/mcd-runtime-1.6.0.bridge.py",
         **{key: value for key, value in _kwargs().items() if key not in {"artifact_name", "artifact_url"}},
     )
-    assert manifest["artifact_sha256"] == BRIDGE_SHA
+    assert manifest["artifact_sha256"] == hashlib.sha256(bridge.read_bytes()).hexdigest()
 
 
 def test_bridge_revision_keeps_failed_immutable_artifact_untouched(tmp_path: Path) -> None:

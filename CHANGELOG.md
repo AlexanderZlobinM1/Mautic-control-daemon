@@ -1,3 +1,16 @@
+## 1.6.93 - 2026-11-16
+
+- Preserve valid runtime settings from a mixed MCC snapshot when separate
+  required typed fields are empty or malformed; reject only the invalid fields
+  and restore the complete valid campaign/segment configuration after update.
+- Activate production updates only from the verified runtime package and
+  managed venv. Migrate managed default includes to `/opt/mcd/runtime`, remove
+  `/opt/mcd/src` only after verified success, and never install or roll back
+  from a production checkout.
+- Release a missing segment owner immediately after PID/PGID absence, a clear
+  DB probe and a free exact Mautic segment lock are all proven. Live long tasks
+  retain their claim; queued segment and campaign work continues independently.
+
 ## 1.6.91 - 2026-11-16
 
 - Preserve original field event timestamps while retrying an unchanged local

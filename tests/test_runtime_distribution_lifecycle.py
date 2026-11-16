@@ -82,50 +82,15 @@ def test_post_install_verification_failure_can_restore_previous_owned_files(inst
     install_stage(backend,installation,old);assert (package/'templates/nginx/instance_migrate_vhost.conf').is_file();assert not (package/'new-owned.json').exists();assert foreign.read_bytes()==b'preserve' and config.read_bytes()==before
 
 
-def recorded_legacy_cache(install):
-    legacy = install / 'src'
-    stage_wheel(legacy, '1.6.39', retired=True)
-    manifest = json.loads((legacy / 'mcd-runtime-manifest.json').read_text())
-    receipt = {'schema': 'mcd-runtime-package-receipt-v1', 'runtime_only': True,
-               'package_version': '1.6.39', 'source_tree': str(legacy),
-               'wheel_sha256': hashlib.sha256((legacy / manifest['wheel']).read_bytes()).hexdigest(),
-               'manifest_sha256': hashlib.sha256((legacy / 'mcd-runtime-manifest.json').read_bytes()).hexdigest()}
-    path = install / 'var/runtime-package-receipt.json'
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(receipt))
-    return legacy
-
-
-@pytest.mark.parametrize('damage', ['none', 'foreign', 'symlink', 'receipt', 'version'])
-def test_legacy_cache_retirement_requires_exact_existing_ownership(tmp_path, damage):
-    install = tmp_path / 'installed'
-    install.mkdir()
-    legacy = recorded_legacy_cache(install)
-    if damage == 'foreign':
-        (legacy / 'foreign.keep').write_bytes(b'preserve')
-    elif damage == 'symlink':
-        (legacy / 'operator-link').symlink_to(tmp_path)
-    elif damage == 'receipt':
-        (install / 'var/runtime-package-receipt.json').write_text('{}')
-    if damage == 'none':
-        assert self_update._verified_legacy_runtime_cache(install, '1.6.39') == legacy
-    else:
-        with pytest.raises(RuntimeError):
-            self_update._verified_legacy_runtime_cache(install, '1.6.38' if damage == 'version' else '1.6.39')
-    assert legacy.is_dir()
-    if damage == 'foreign':
-        assert (legacy / 'foreign.keep').read_bytes() == b'preserve'
-
-
 @pytest.mark.parametrize('fail_successor', [False, True])
-@pytest.mark.parametrize('parallel_runtime', [False, True])
-def test_ordinary_apply_retires_verified_legacy_only_after_successor_verification(tmp_path, monkeypatch, fail_successor, parallel_runtime):
+def test_ordinary_apply_never_uses_legacy_tree_and_retires_it_only_after_successor_verification(tmp_path, monkeypatch, fail_successor):
     from types import SimpleNamespace
     install = tmp_path / 'installed'
     install.mkdir()
-    legacy = recorded_legacy_cache(install)
-    if parallel_runtime:
-        stage_wheel(install / 'runtime', '1.6.38')
+    legacy = install / 'src'
+    legacy.mkdir()
+    (legacy / 'must-not-be-read').write_bytes(b'forbidden production source')
+    stage_wheel(install / 'runtime', '1.6.38')
     cfg = SimpleNamespace(mcd_install_dir=str(install), config_file_path='', mcd_update_cleanup_enabled=False)
     installs = []
     for name in ('_read_state', 'capture_profile_authority'):
@@ -141,19 +106,48 @@ def test_ordinary_apply_retires_verified_legacy_only_after_successor_verificatio
     monkeypatch.setattr(self_update, '_install_requirements_for_staged_source', lambda *a: None)
     monkeypatch.setattr(self_update, '_pre_switch_smoke_check', lambda *a: None)
     def install_package(root, source):
-        installs.append(source)
+        version = json.loads((source / 'mcd-runtime-manifest.json').read_text())['version']
+        installs.append(version)
         assert legacy.is_dir(), 'legacy must survive until successor verification finishes'
-        if source == install / 'runtime' and fail_successor:
+        if version == '1.6.40' and fail_successor:
             raise RuntimeError('injected successor verification failure')
     monkeypatch.setattr(self_update, '_install_agent_package_for_source', install_package)
     ok, message = self_update._apply_update_locked(cfg, {'status': 'update', 'target': '1.6.40',
                                                         'package_url': 'https://qa.invalid/selected.tar.gz'}, None)
     if fail_successor:
         assert not ok and 'successor verification failure' in message
-        assert legacy.is_dir() and (install / 'runtime').exists() is parallel_runtime
-        if parallel_runtime:
-            assert json.loads((install / 'runtime/mcd-runtime-manifest.json').read_text())['version'] == '1.6.38'
-        assert installs == [install / 'runtime', legacy]
+        assert legacy.is_dir() and (install / 'runtime').is_dir()
+        assert json.loads((install / 'runtime/mcd-runtime-manifest.json').read_text())['version'] == '1.6.38'
+        assert installs == ['1.6.40', '1.6.38']
     else:
         assert ok and (install / 'runtime').is_dir() and not legacy.exists()
-        assert len(list((install / 'var/updates').glob('runtime.legacy-prev-*'))) == 1
+        assert installs == ['1.6.40']
+        assert not list((install / 'var/updates').glob('*legacy*'))
+
+
+def test_runtime_include_migration_rewrites_only_managed_forbidden_defaults(tmp_path):
+    install = tmp_path / 'installed'
+    runtime_etc = install / 'runtime/etc'
+    runtime_etc.mkdir(parents=True)
+    for name in ('mcd-agent.system.example.toml', 'mcd-agent.operator.example.toml'):
+        (runtime_etc / name).write_text('[runtime]\n')
+    config = install / 'etc/mcd.toml'
+    config.parent.mkdir(parents=True)
+    foreign = install / 'etc/operator.toml'
+    foreign.write_text('[runtime]\n')
+    config.write_text(
+        '[include]\nfiles = ['
+        f'"{install}/src/etc/mcd-agent.system.example.toml", '
+        f'"{install}/src/etc/mcd-agent.operator.example.toml", '
+        f'"{foreign}"'
+        ']\n'
+    )
+
+    result = self_update._migrate_forbidden_runtime_includes(str(config), install, install / 'runtime')
+
+    assert result['changed'] is True
+    updated = config.read_text()
+    assert f'{install}/runtime/etc/mcd-agent.system.example.toml' in updated
+    assert f'{install}/runtime/etc/mcd-agent.operator.example.toml' in updated
+    assert str(foreign) in updated
+    assert f'{install}/src/' not in updated

@@ -6,6 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 
 def _load_bridge():
     path = Path(__file__).parents[1] / "tools" / "mcd_runtime_bootstrap.py"
@@ -80,25 +82,24 @@ def test_bridge_removes_only_stale_mcd_distribution_metadata(tmp_path: Path) -> 
     assert unrelated.is_dir()
 
 
-def test_bridge_selects_runtime_only_layout_without_legacy_source(tmp_path: Path) -> None:
+def test_bridge_selects_runtime_and_forbidden_cleanup_target(tmp_path: Path) -> None:
     bridge = _load_bridge()
     runtime = tmp_path / "runtime"
     runtime.mkdir()
 
-    active, legacy, observed_runtime = bridge._active_source_layout(tmp_path)
+    observed_runtime, forbidden = bridge._runtime_layout(tmp_path)
 
-    assert active == runtime
     assert observed_runtime == runtime
-    assert legacy == tmp_path / "src"
-    assert not legacy.exists()
+    assert forbidden == tmp_path / "src"
+    assert not forbidden.exists()
 
 
 def test_bridge_successful_replay_is_read_only_and_hash_bound(tmp_path: Path) -> None:
     bridge = _load_bridge()
     install = tmp_path / "install"
-    source = install / "src"
-    source.mkdir(parents=True)
-    (source / "mcd-runtime-manifest.json").write_text('{"version":"1.5.182"}\n', encoding="utf-8")
+    runtime = install / "runtime"
+    runtime.mkdir(parents=True)
+    (runtime / "mcd-runtime-manifest.json").write_text('{"version":"1.5.182"}\n', encoding="utf-8")
     receipt_path = install / "var" / "runtime-bootstrap-receipt.json"
     receipt_path.parent.mkdir(parents=True)
     receipt = {
@@ -116,3 +117,33 @@ def test_bridge_successful_replay_is_read_only_and_hash_bound(tmp_path: Path) ->
     assert observed["readback"] == {"metadata_version": "1.5.182"}
     probe.assert_called_once_with(install, "1.5.182")
     assert receipt_path.read_text(encoding="utf-8") == json.dumps(receipt) + "\n"
+
+
+def test_backup_lock_probe_uses_declared_toml_without_importing_mcd(tmp_path: Path) -> None:
+    bridge = _load_bridge()
+    install = tmp_path / "install"
+    config_dir = install / "etc"
+    config_dir.mkdir(parents=True)
+    lock_dir = tmp_path / "locks"
+    (config_dir / "mcd.toml").write_text(
+        '[include]\nfiles = ["mcd.local.toml"]\n',
+        encoding="utf-8",
+    )
+    (config_dir / "mcd.local.toml").write_text(
+        f'[backup]\nenabled = true\nlock_dir = "{lock_dir}"\nhost_name = "qa-host"\n',
+        encoding="utf-8",
+    )
+
+    observed = bridge._backup_lock_probe(install, config_dir / "mcd.toml")
+    assert observed["enabled"] is True
+    assert observed["active"] is False
+
+    lock_path = lock_dir / "backup-qa-host.lock"
+    held = lock_path.open("a+", encoding="utf-8")
+    try:
+        bridge.fcntl.flock(held.fileno(), bridge.fcntl.LOCK_EX | bridge.fcntl.LOCK_NB)
+        with pytest.raises(bridge.BridgeError, match="backup lock"):
+            bridge._backup_lock_probe(install, config_dir / "mcd.toml")
+    finally:
+        bridge.fcntl.flock(held.fileno(), bridge.fcntl.LOCK_UN)
+        held.close()
