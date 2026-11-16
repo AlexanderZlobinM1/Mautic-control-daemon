@@ -5,6 +5,38 @@ catalog metadata, HTTPS readback and channel promotion. MCD Inbox owns runtime
 source and tests. MCC owns its channel consumers and host assignments. Portal
 owns external recipes. Do not modify another owner's checkout.
 
+## Mandatory Definition of Done
+
+A runtime fix is complete only after all applicable gates below have evidence:
+
+1. Reproduce the original failure and add a regression for it. Exercise the
+   affected queue/ring, identities and instances, including unrelated work
+   continuing; a single host or happy-path unit test is not global acceptance.
+2. Commit and push the owner changes, merge them into canonical release source,
+   and verify the remote merge commit. A worktree, feature branch or live-only
+   patch is not delivery. Apply the two-line hotfix policy below.
+3. Publish through Publish MCD from the verified canonical commit. Record the
+   immutable package and QA SHA-256, manifest and channel readback. Never
+   overwrite or republish different bytes under an existing version.
+4. Operations performs the authorized standard rollout, preserving configuration
+   and running post-checks. Read back installed/running/package identity and
+   health; keep MCC server marker evidence distinct from MCD package evidence.
+   A repository-cache hash is not the published runtime archive hash.
+5. Accept the original scenario through the ordinary workflow: queue/status/
+   receipts, settings desired/effective/ACK, restart/recovery and continued
+   unrelated work as applicable. Do not manufacture acceptance by clearing
+   state, editing host configuration or manually running the affected task.
+6. Return source and merge refs, tests and their limits, published artifact or
+   server marker, remote readback, health and timestamped acceptance evidence.
+   Clean the owner's worktree and coordinate remaining work with its owner.
+
+Code complete, merged, published, deployed and accepted are distinct states.
+Keep the fix open when a required gate is pending; report the concrete blocker
+and owner rather than declaring success. Never leave an accepted fix only in a
+working branch or on one host. Documentation/test-only changes are published
+by canonical Git merge and remote readback; they do not authorize rebuilding an
+already immutable runtime version. The 1.7 architecture HOLD remains binding.
+
 ## Channels
 
 Approved identifies accepted runtime releases. Test selects the candidate under
@@ -22,7 +54,8 @@ Dev selection is explicit. It must not become latest, a missing-channel fallback
 an enrollment default or an automatic host assignment. Adding Dev changes no host
 assignment. Initial operator policy assigns zero hosts to Dev. Record a verified
 assignment count from the assignment owner rather than inferring it from catalog
-contents. Stable Approved/latest remains 1.6.39 until separately authorized.
+contents. Stable Approved/latest is read from the authoritative release catalog;
+changing it requires the ordinary authorized release process.
 
 Test and Dev are independent; never reinterpret Test as Dev. A Dev publication
 does not imply Test/Approved promotion or whole-1.7 acceptance. Preserve historical
