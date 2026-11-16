@@ -14,7 +14,6 @@ from urllib.error import HTTPError, URLError
 from mcd_agent import __version__
 from mcd_agent.config import (
     AgentConfig,
-    _PROFILE_LOCKED_RUNTIME_KEYS,
     apply_runtime_overrides,
     runtime_overrides_from_config_file,
     runtime_effective_map,
@@ -792,8 +791,6 @@ def runtime_key_observation(
             status, origin, reason = "rejected", "none", "unsupported_key"
         elif key not in runtime_remote_allowed_keys():
             status, origin, reason = "rejected", "none", "remote_blocked"
-        elif key in _PROFILE_LOCKED_RUNTIME_KEYS and profile not in {"", "custom"}:
-            status, origin, reason = "profile_locked", "profile", "profile_authority"
         elif effective_value == desired:
             status, origin, reason = "unchanged", source, "already_effective"
         else:

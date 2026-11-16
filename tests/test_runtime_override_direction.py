@@ -310,7 +310,7 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             },
         )
 
-    def test_runtime_key_observation_reports_profile_lock_and_effective_readback(self) -> None:
+    def test_runtime_key_observation_reports_actual_profile_override_readback(self) -> None:
         cfg = SimpleNamespace(
             profile_name="farm-hiload",
             scheduler_host_max_parallel=12,
@@ -323,9 +323,10 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             revision=91,
             source="mcc",
         )
-        self.assertEqual(observed["keys"]["scheduler_host_max_parallel"]["status"], "profile_locked")
+        self.assertEqual(observed["keys"]["scheduler_host_max_parallel"]["status"], "rejected")
+        self.assertEqual(observed["keys"]["scheduler_host_max_parallel"]["reason"], "effective_value_mismatch")
         self.assertEqual(observed["keys"]["scheduler_host_max_parallel"]["effective"], 12)
-        self.assertEqual(observed["keys"]["scheduler_host_max_parallel"]["source"], "profile")
+        self.assertEqual(observed["keys"]["scheduler_host_max_parallel"]["source"], "mcc")
         self.assertEqual(observed["keys"]["jobs_max_workers"]["status"], "unchanged")
         self.assertEqual(observed["keys"]["jobs_max_workers"]["effective"], 6)
         self.assertEqual(observed["keys"]["jobs_max_workers"]["revision"], 91)
@@ -333,6 +334,9 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             "scheduler_host_max_parallel": 12,
             "jobs_max_workers": 6,
         })
+        cfg.scheduler_host_max_parallel = 6
+        applied = runtime_key_observation(cfg, {"scheduler_host_max_parallel": 6}, revision=91, source="mcc")
+        self.assertEqual(applied["keys"]["scheduler_host_max_parallel"]["status"], "unchanged")
 
     def test_host_ack_projects_sparse_instance_map_without_default_rows(self) -> None:
         cfg = SimpleNamespace(
