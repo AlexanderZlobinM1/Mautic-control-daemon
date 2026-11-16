@@ -2681,6 +2681,28 @@ def _runtime_resolution_needs_full_snapshot(
     return False
 
 
+def _drop_invalid_required_remote_runtime_values(
+    runtime: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Treat invalid required MCC placeholders as absent, never as settings.
+
+    MCC may expose ``null`` for a required typed host field while carrying a
+    valid update for an independent instance lane in the same snapshot.  Such
+    placeholders cannot be applied or persisted and therefore must not enter
+    LWW metadata, the local retry queue, or block the valid lane update.
+    """
+    cleaned = deepcopy(dict(runtime))
+    invalid = _invalid_required_runtime_values(cleaned)
+    if invalid:
+        logging.warning(
+            "runtime-overrides ignored invalid required MCC placeholders: keys=%s",
+            ",".join(invalid),
+        )
+        for key in invalid:
+            cleaned.pop(key, None)
+    return cleaned
+
+
 def _bootstrap_remote_runtime_before_local_baseline(
     config: AgentConfig,
     store: object,
@@ -2720,6 +2742,7 @@ def _bootstrap_remote_runtime_before_local_baseline(
         response,
         (accepted_runtime, previous_mcc_runtime),
     )
+    remote_runtime = _drop_invalid_required_remote_runtime_values(remote_runtime)
 
     # During the first start after an MCD package/source transition, the
     # mutable include may contain a reset snapshot that was self-stamped by
@@ -2749,14 +2772,15 @@ def _bootstrap_remote_runtime_before_local_baseline(
         remote_authoritative_keys=_runtime_response_authoritative_declaration_keys(response),
     )
     _store_runtime_fetch_snapshot(store, response, remote_runtime, remote_metadata)
-    if resolution.get("local_push"):
-        # Keep the local event for the normal accepted-push path. Do not apply
-        # a remote snapshot over a newer offline MCD edit during bootstrap.
-        store.put_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY, local_metadata)
-        return "local_pending"
-
     resolved_runtime = resolution["runtime"]
     resolved_metadata = resolution["metadata"]
+    local_push_pending = _reconcile_pending_local_runtime_after_remote(
+        store,
+        current_local_runtime=current_local_runtime,
+        remote_runtime=remote_runtime,
+        resolution=resolution,
+        local_metadata=local_metadata,
+    )
     _persist_resolved_runtime_to_config(
         config,
         current_local_runtime,
@@ -2768,10 +2792,18 @@ def _bootstrap_remote_runtime_before_local_baseline(
             local_runtime_was_reset=local_runtime_was_reset,
         ),
     )
-    store.put_runtime_sync("local_runtime", resolved_runtime)
-    store.put_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY, resolved_metadata)
-    _clear_local_runtime_push_pending(store)
-    _clear_local_runtime_accepted(store)
+    if local_push_pending:
+        # A pending local edit is field-scoped.  Its winning fields remain in
+        # the durable retry queue while unrelated MCC winners are already
+        # materialized above and may be acknowledged immediately.
+        logging.info(
+            "runtime-overrides applied independent MCC winners while local fields remain pending"
+        )
+    else:
+        store.put_runtime_sync("local_runtime", resolved_runtime)
+        store.put_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY, resolved_metadata)
+        _clear_local_runtime_push_pending(store)
+        _clear_local_runtime_accepted(store)
     return "applied"
 
 
@@ -22280,6 +22312,7 @@ def run_loop(
                         ro,
                         (accepted_runtime, previous_mcc_runtime),
                     )
+                    remote_runtime = _drop_invalid_required_remote_runtime_values(remote_runtime)
                     current_local_runtime = local_runtime_overrides(config)
                     local_runtime_was_reset = _runtime_snapshot_loss_detected(
                         current_local_runtime,

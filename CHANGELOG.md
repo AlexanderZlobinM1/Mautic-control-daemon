@@ -1,3 +1,12 @@
+## 1.6.95 - 2026-11-16
+
+- Apply newer MCC winners field by field during the independent runtime control
+  poll even while unrelated local settings remain queued for delivery. Persist
+  and acknowledge the valid instance lane immediately without discarding the
+  local retry.
+- Treat invalid required MCC `null` placeholders as absent settings so they
+  cannot enter LWW state or block valid campaign/segment lane updates.
+
 ## 1.6.94 - 2026-11-16
 
 - Consume an explicit runtime-overrides poll trigger in an independent control
