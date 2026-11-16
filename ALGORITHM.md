@@ -3654,15 +3654,33 @@ actual count до принятия fixed-результата.
 
 ## MCD 1.8 distribution contract
 
-MCD 1.8 production distribution uses the native APT repository published at
-`repo.sales-snap.com`. APT owns package retrieval, signature verification,
-installation and package-version transitions; MCD runtime state and host
-configuration remain outside package-owned mutable paths. Future supported
-distributions use their native repository/package format from the same
-`repo.sales-snap.com` host. This is one distribution authority with
-distro-specific repository adapters, not parallel update engines. Until 1.8
-is implemented and accepted, this is a future contract and does not change the
-current verified runtime-package release path.
+MCD 1.8 changes both distribution and package composition. The main `mcd-agent`
+package contains only the distro-neutral scheduler core: typed tasks, durable
+queues/lanes/claims, generic priority and budget mechanics, supervision and
+re-adoption, progress/liveness, retries, terminal state and receipts. Component
+and operation identities/payloads are opaque to the core. Mautic commands,
+campaign/segment planning, backup, plugin operations, reports, transports and
+all host/system behavior are independently versioned external components or
+plugins. They use the single core task lifecycle and must not introduce another
+scheduler, task store, retry engine or receipt authority.
+
+Executable providers are distro-family specific. Debian-family implementations
+are delivered as DEB packages through the native APT repository at
+`repo.sales-snap.com`; Red Hat-family implementations are delivered as RPM
+packages through the corresponding native repository on the same host. Future
+families use their native repository/package format there. There is no implicit
+cross-family or unknown-distro fallback. Shared implementation source is allowed,
+but installable artifacts, dependencies and acceptance evidence are specific to
+the selected family.
+
+APT/RPM owns package retrieval, signature verification, installation and
+package-version transitions; MCD runtime state and host configuration remain
+outside package-owned mutable paths. This is one distribution authority and one
+task engine, not parallel update or execution engines. The full boundary and
+cutover rules are in `docs/mcd-1.8-core-boundary.md`; its machine-readable source
+is `etc/mcd-1.8-package-boundary.toml`. Until 1.8 is implemented and accepted,
+this future contract does not remove behavior from the current verified 1.7
+runtime-package path.
 
 ## Mautic release version evidence
 

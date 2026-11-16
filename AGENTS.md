@@ -71,6 +71,14 @@ never prefer or recreate /opt/mcd/src for version/import/update logic. Legacy
 migration validates all consumers and successor runtime before retiring the old
 tree. Preserve working tasks, config and original baseline evidence.
 
+Future 1.8 package boundary is separate from the 1.7 extraction boundary. The
+main 1.8 package contains only the distro-neutral scheduler/task lifecycle core;
+all domain and system implementations are external components/plugins with
+family-specific Debian and Red Hat packages. Follow
+`docs/mcd-1.8-core-boundary.md` and
+`etc/mcd-1.8-package-boundary.toml`. Do not use that future target as permission
+to remove current 1.7 behavior before provider parity and cutover evidence.
+
 Every fix follows the mandatory Definition of Done in
 docs/mcd-publication-workflow.md: original-scenario regression, canonical merge
 and remote readback, immutable publication, authorized standard rollout, health

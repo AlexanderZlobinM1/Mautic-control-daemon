@@ -1,0 +1,61 @@
+schema = "mcd-package-boundary-v1"
+target_version = "1.8"
+main_package = "mcd-agent"
+main_package_role = "scheduler-core"
+task_provider_contract = "mcd-task-provider-v1"
+distribution_host = "repo.sales-snap.com"
+
+[core]
+domain_neutral = true
+owns = [
+  "task-contract",
+  "durable-task-store",
+  "queue-and-lane-scheduling",
+  "claims-and-idempotency",
+  "generic-priority-and-budget-policy",
+  "process-supervision-and-readoption",
+  "progress-and-liveness",
+  "retry-and-terminal-state",
+  "receipts-and-evidence",
+  "provider-discovery-and-contract-validation",
+]
+forbids = [
+  "mautic-command-implementation",
+  "campaign-or-segment-domain-planning",
+  "backup-or-restore-implementation",
+  "plugin-operation-implementation",
+  "host-service-configuration",
+  "package-manager-command",
+  "distro-specific-path-owner-or-service-name",
+  "hardware-or-provider-formula",
+  "mcc-or-portal-transport-implementation",
+]
+
+[providers]
+task_input_is_opaque_to_core = true
+progress_is_structured = true
+terminal_receipt_is_structured = true
+shell_dispatch_forbidden = true
+implicit_cross_family_fallback_forbidden = true
+duplicate_provider_selection_forbidden = true
+
+[families.debian]
+package_family = "deb"
+repository_kind = "apt"
+repository_host = "repo.sales-snap.com"
+provider_package_suffix = "-debian"
+os_ids = ["debian", "ubuntu"]
+
+[families.redhat]
+package_family = "rpm"
+repository_kind = "rpm"
+repository_host = "repo.sales-snap.com"
+provider_package_suffix = "-redhat"
+os_ids = ["rhel", "redhat", "rocky", "almalinux", "centos", "fedora"]
+
+[migration]
+current_line = "1.7"
+remove_from_1_7_before_1_8_cutover = false
+parallel_engine_forbidden = true
+compatibility_requires_same_task_result = true
+declare_1_8_only_after_core_artifact_audit = true

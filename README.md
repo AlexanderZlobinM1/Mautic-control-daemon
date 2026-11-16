@@ -6,6 +6,20 @@ MCD (MauticControlDaemon) is a host-level service that can run in two modes:
 - standalone (without MCC)
 - connected (managed by MCC over SSH and event callbacks)
 
+## Target package boundary for 1.8
+
+The main 1.8 package is the distro-neutral scheduler core only. It owns typed
+tasks, durable queues/claims, generic lanes and priorities, supervision,
+re-adoption, progress, retries and receipts. Mautic operations and every other
+domain/system operation are external components or plugins. Their executable
+packages are built separately for Debian and Red Hat families and distributed
+through the native repositories on `repo.sales-snap.com`; there is no implicit
+cross-family fallback. See `docs/mcd-1.8-core-boundary.md` and
+`etc/mcd-1.8-package-boundary.toml`.
+
+This is a future cutover contract and does not remove working behavior from the
+maintained 1.7 line before external-provider parity and acceptance evidence.
+
 ## Current capabilities
 
 - Mautic 7 dependency planning preserves every ordinary published due
