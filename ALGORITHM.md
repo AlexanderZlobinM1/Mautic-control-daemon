@@ -86,6 +86,36 @@ root-only, docroot-only и symlink layouts сохраняют fail-closed semant
 и наружу больше не передаётся; qualified UID другого хоста отклоняется fail-closed.
 Patch context, migration selectors и state sync используют одну и ту же проверку.
 
+Для внешнего запуска установки существует один машинный путь MCD. Вызывающая
+система передаёт только bare `instance_uid`, стабильный `plugin_uid`, действие и
+свой `operation_id`. MCD на выбранном хосте сам разрешает UID в локальный root,
+получает и проверяет manifest/package, выполняет файловую транзакцию через
+внешний handler, запускает native Mautic registration/reload, очищает и
+прогревает cache, проверяет точную версию в inventory и при ошибке выполняет
+собственное восстановление. Внешняя система не повторяет эти этапы и не
+вычисляет успех по промежуточному состоянию файлов.
+
+Канонический машинный вызов:
+
+```text
+mcd-cli plugins --machine-result \
+  --instance-uid <bare-instance-uid> \
+  --plugin-uid <plugin-uid> \
+  --action <auto|install|update|reinstall|remove|purge> \
+  --operation-id <caller-operation-id>
+```
+
+В этом пути `--root` и `instance_uid@host` запрещены. Квалифицированная форма
+может сохраняться только как вход старого совместимого transport-пути и никогда
+не попадает в новый request/result, интерфейс или identity операции. После
+окончания MCD выдаёт ровно один `mcd-plugin-operation-result-v2`: terminal
+success только после native registration, cache warmup и точного inventory;
+terminal failure — после завершения локального error/rollback пути. Receipt не
+содержит host или root, включает bare UID, plugin UID, caller operation ID,
+package/inventory evidence и SHA-256 канонического результата. Старые
+`mcd-plugin-apply-result-v1` progress-записи остаются compatibility-механикой
+внутри обычного CLI и не являются MCC workflow.
+
 Upgrade maintenance fencing is a cross-process admission barrier, not only a
 marker file. The upgrade owner acquires the exclusive
 `maintenance.dispatch.fence.lock` beside `scheduler.pause` before publishing

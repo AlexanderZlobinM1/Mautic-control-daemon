@@ -47,6 +47,11 @@ def qualify_instance_uid(instance_uid: str, host_name: str | None) -> str:
     return f"{uid}@{host}"
 
 
+def canonical_instance_uid(instance_uid: str) -> str:
+    """Return the stable instance identity without a legacy transport host suffix."""
+    return str(instance_uid or "").strip().split("@", 1)[0]
+
+
 def instance_uid_matches(requested: str, local: str, host_name: str | None) -> bool:
     """Match canonical, legacy bare, and same-host qualified instance UIDs."""
     requested_uid = str(requested or "").strip()
