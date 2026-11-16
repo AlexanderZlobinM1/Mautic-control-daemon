@@ -1,5 +1,12 @@
 # Segment scheduler liveness test algorithm
 
+Queued runtime intent regression: after restart, observe the same immutable
+intent with identical key/base/changes; rate-limit repeated observations.
+Idempotent applied takes canonical settings and retains independent segment
+lists; idempotent queued/conflict remain distinct. Missing intent status or
+canonical runtime fails without clearing pending/defaulting settings.
+Evidence: tests/test_runtime_intent_observation.py.
+
 Empty-contact cleanup gate: either existing task fence held shared prevents
 SQL deletion; exclusive cleanup prevents new shared admission on both fences.
 Failure releases all acquired fences; a second instance remains independent.

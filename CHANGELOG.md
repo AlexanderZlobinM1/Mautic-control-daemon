@@ -1,5 +1,8 @@
 ## 1.7.0 — Unreleased architecture candidate
 
+- Observe durable queued runtime intents after restart and consume their
+  terminal status instead of freezing synchronization on queued/idempotent.
+
 - Exclude empty-contact cleanup from concurrent supervised instance work
   using the existing segment/import and campaign task fences.
 
