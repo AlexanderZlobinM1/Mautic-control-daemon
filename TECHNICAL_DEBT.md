@@ -1,10 +1,12 @@
 # MCD Technical Debt
 
-## MCD-TD-004
+## MCC-TD-005
 
 - Status: open; explicitly deferred, do not change the current repository now
 - Title: Require authenticated access to plugin manifests and package archives
-- Owner scope: MCC/plugin repository ingress and MCD download compatibility; repository rollout remains MCC/Operations-owned
+- Primary owner: MCC/plugin repository catalog, authentication and access-control rollout
+- Secondary owner: MCD authenticated download compatibility and fail-closed consumer regression
+- Operations role: staged repository deployment, rollback and production access evidence
 - Source task: `01a07d46-213b-7e62-b910-08c7a9dacde1`
 - Last updated: 2026-11-16
 
@@ -15,10 +17,14 @@ HTTP 200. A range GET without an Authorization header for the Mautic 7
 bytes `1f8b`. MCD already supplies its MCC Bearer token when configured, but the
 repository does not currently require it for these resources.
 
-This is a future security correction, not authorization to change the live
-repository, manifests, package URLs or MCD downloader now. Existing plugin
-installation and recovery paths must remain available until the coordinated
-cutover is implemented and accepted.
+This is primarily MCC technical debt: MCC/repository currently publishes the
+catalog and package bytes without enforcing the credential that MCD already
+sends. The MCD part is limited to proving authenticated consumer compatibility,
+typed authorization failure and unchanged install/recovery behavior. This is a
+future security correction, not authorization to change the live repository,
+manifests, package URLs or MCD downloader now. Existing plugin installation and
+recovery paths must remain available until the coordinated cutover is
+implemented and accepted.
 
 Acceptance for the later coordinated change:
 
