@@ -850,7 +850,15 @@ def _runtime_sync_v3_attempt(
         str(state.get("status") or "").strip().lower() == "queued"
         and str(state.get("current_digest") or "") == current_digest
     ):
-        return {"handled": True, "status": "queued", "response": {"status": "queued", "v3_supported": True}}
+        # Reobserve the original durable intent. A queued response is not a
+        # terminal ACK and must not freeze local/remote synchronization.
+        if time.time() < float(state.get("next_observe_at") or 0):
+            return {"handled": True, "status": "queued",
+                    "response": {"status": "queued", "reason": "runtime_intent_pending", "v3_supported": True}}
+        changes = dict(state.get("changes") or changes)
+        stored_groups = state.get("semantic_conflict_groups")
+        if isinstance(stored_groups, list):
+            groups = [dict(item) for item in stored_groups if isinstance(item, Mapping)]
     key = str(state.get("idempotency_key") or "")
     if not key or str(state.get("current_digest") or "") != current_digest:
         key = _runtime_sync_v3_intent_id(
@@ -885,6 +893,19 @@ def _runtime_sync_v3_attempt(
         _runtime_sync_v3_mark(store, next_state)
         return {"handled": False, "reason": response.get("reason", "runtime_sync_v3_unsupported")}
     status = str(response.get("status") or "error").strip().lower()
+    if status == "idempotent":
+        intent = response.get("intent")
+        if not isinstance(intent, Mapping):
+            status = "error"
+            response = {**response, "reason": "runtime_sync_v3_intent_status_missing"}
+        elif intent.get("idempotency_key") != key:
+            status = "error"
+            response = {**response, "reason": "runtime_sync_v3_intent_identity_mismatch"}
+        else:
+            status = str(intent.get("status") or "error").strip().lower()
+            if status not in {"queued", "applied", "merged", "conflict"}:
+                status = "error"
+                response = {**response, "reason": "runtime_sync_v3_intent_status_invalid"}
     if status in {"applied", "merged"}:
         revision, canonical = _runtime_sync_v3_desired_runtime(response)
         if revision is not None and isinstance(canonical, dict):
@@ -895,15 +916,19 @@ def _runtime_sync_v3_attempt(
             normalized["runtime_overrides"] = canonical
             normalized["desired_state"] = {**dict(normalized.get("desired_state") or {}), "revision": revision, "runtime_overrides": canonical}
             return {"handled": True, "status": "ok", "response": normalized, "runtime": canonical}
+        response = {**response, "reason": "runtime_sync_v3_terminal_missing_desired"}
     if status == "conflict" or isinstance(response.get("conflict"), Mapping):
         conflict = response.get("conflict")
         next_state.update({"status": "conflict", "conflict": dict(conflict) if isinstance(conflict, Mapping) else {}})
         _runtime_sync_v3_mark(store, next_state)
         return {"handled": True, "status": "conflict", "response": {"status": "conflict", "conflict": next_state.get("conflict")}}
-    if status in {"queued", "idempotent"}:
+    if status == "queued":
         next_state["status"] = "queued"
+        next_state["next_observe_at"] = time.time() + max(
+            1.0, min(30.0, float(getattr(config, "poll_interval_sec", 5) or 5)))
         _runtime_sync_v3_mark(store, next_state)
-        return {"handled": True, "status": "queued", "response": {"status": "queued", "v3_supported": True}}
+        return {"handled": True, "status": "queued",
+                "response": {"status": "queued", "reason": "runtime_intent_pending", "v3_supported": True}}
     reason = str(response.get("reason", "runtime_sync_v3_failed") or "runtime_sync_v3_failed")
     if reason.lower() == "http_409":
         # A transport-level 409 has no canonical three-way conflict payload.
@@ -21927,6 +21952,9 @@ def run_loop(
                         "runtime-overrides local change rebase deferred for MCC reconciliation: %s",
                         pushed.get("reason", "unknown"),
                     )
+                elif p_status == "queued":
+                    local_runtime_push_pending = True
+                    logging.debug("runtime-sync-v3 intent pending terminal observation")
                 elif p_status != "disabled":
                     local_runtime_push_pending = True
                     logging.warning("runtime-overrides local push failed: %s", pushed.get("reason", "unknown"))

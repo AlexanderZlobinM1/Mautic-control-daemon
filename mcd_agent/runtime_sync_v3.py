@@ -130,6 +130,8 @@ def desired_runtime_from_response(response: Mapping[str, Any]) -> tuple[int | No
         revision = desired.get("desired_revision")
     revision = revision if isinstance(revision, int) and not isinstance(revision, bool) else None
     runtime = desired.get("runtime_overrides")
+    if not isinstance(runtime, Mapping):
+        return None, {}
     return revision, dict(runtime) if isinstance(runtime, Mapping) else {}
 
 

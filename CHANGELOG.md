@@ -1,3 +1,10 @@
+## 1.6.90 - 2026-11-16
+
+- Resume rate-limited observation of queued runtime intents using the original
+  idempotency key and payload. Read the durable intent status in idempotent
+  responses; accept complete canonical settings, retain explicit conflicts
+  and reject incomplete terminal replies without erasing pending state.
+
 ## 1.6.89 - 2026-11-16
 
 - Fence empty-contact deletion against supervised segment/import and campaign
