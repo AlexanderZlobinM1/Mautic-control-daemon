@@ -1,5 +1,10 @@
 # Segment scheduler liveness test algorithm
 
+Pending event-clock regression: repeat delivery and restart preserve field
+timestamps and revisions; a later MCC event still wins. A second local edit
+updates only its changed fields and retains the first pending event stamp.
+Evidence: tests/test_pending_runtime_event_clock.py.
+
 Queued runtime intent regression: after restart, observe the same immutable
 intent with identical key/base/changes; rate-limit repeated observations.
 Idempotent applied takes canonical settings and retains independent segment
