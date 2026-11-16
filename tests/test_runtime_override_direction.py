@@ -892,7 +892,7 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             self.assertEqual(reloaded.campaign_rebuild_priority_parallel, 3)
             self.assertEqual(reloaded.scheduler_host_max_parallel, 12)
 
-    def test_named_profile_keeps_external_capacity_authority(self) -> None:
+    def test_named_profile_baseline_allows_explicit_operator_override(self) -> None:
         from pathlib import Path
         from tempfile import TemporaryDirectory
 
@@ -911,7 +911,7 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             reloaded = load_config(str(path), allow_recover_from_mcc=False)
             self.assertEqual(reloaded.campaign_total_parallel, 0)
             applied = apply_remote_overrides(reloaded, explicit)["config"]
-            self.assertEqual(applied.campaign_total_parallel, 0)
+            self.assertEqual(applied.campaign_total_parallel, 1)
 
     def test_restart_profile_snapshot_without_local_provenance_does_not_push(self) -> None:
         class MemoryStore:
