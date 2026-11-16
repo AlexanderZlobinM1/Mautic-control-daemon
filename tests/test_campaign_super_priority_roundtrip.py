@@ -6,7 +6,7 @@ import pytest
 from mcd_agent.daemon import (
     _campaign_super_priority_effective_setting,
     _segment_super_priority_effective_setting,
-    _split_campaign_circles_with_super_priority,
+    _exclude_campaign_super_priority_ids,
 )
 from mcd_agent.runtime_overrides import merge_instance_desired_states, runtime_key_observation
 
@@ -34,14 +34,11 @@ def test_campaign_list_roundtrips_without_changing_other_instances_or_segments(c
                                        source="mcc", scope_key=first)
     assert observed["keys"][key]["status"] == "unchanged"
     assert observed["keys"][key]["effective"] == campaigns
-    super_ids, priority, regular = _split_campaign_circles_with_super_priority(
-        [78, 82, 90], weights={78: 1, 82: 1, 90: 1},
-        whitelist={78}, super_priority=set(campaigns),
-        priority_size=1, latest_priority_ids=[])
-    assert set(super_ids) == set(campaigns)
+    ordinary = _exclude_campaign_super_priority_ids([78, 82, 90], set(campaigns))
+    assert set(ordinary) == {78, 82, 90} - set(campaigns)
     if not campaigns:
-        assert 78 in priority
-        assert 82 in regular
+        assert 78 in ordinary
+        assert 82 in ordinary
 
 
 def test_authoritative_row_without_campaign_field_does_not_invent_campaigns():
