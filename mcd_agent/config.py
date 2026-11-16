@@ -6,11 +6,12 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 import hashlib
 import json
+import logging
 from pathlib import Path
 import re
 import socket
 import time
-from typing import Any, cast, get_args, get_type_hints
+from typing import Any, cast, get_args, get_origin, get_type_hints
 from urllib import request
 from urllib.error import HTTPError, URLError
 from mcd_agent.fs_permissions import default_guard_paths, normalize_guard_paths
@@ -1665,9 +1666,37 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
     return out
 
 
+def _invalid_required_runtime_values(values: dict[str, Any]) -> list[str]:
+    return sorted(
+        key for key, value in values.items()
+        if _RUNTIME_TO_ATTR.get(key) in _RUNTIME_REQUIRED_TYPED_ATTRS
+        and (value is None or isinstance(value, str) and not value.strip())
+    )
+
+
+def _validate_required_runtime_values(values: dict[str, Any]) -> None:
+    invalid = _invalid_required_runtime_values(values)
+    if invalid:
+        raise ValueError("runtime settings require non-null typed values: " + ", ".join(invalid))
+
+
+def _without_invalid_runtime_values(data: dict[str, Any], path: Path) -> dict[str, Any]:
+    runtime = data.get("runtime")
+    if not isinstance(runtime, dict):
+        return data
+    invalid = _invalid_required_runtime_values(runtime)
+    if not invalid:
+        return data
+    # A broken override is not a zero/false setting or an operator deletion.
+    # Retain any lower include's valid value and leave disk bytes untouched;
+    # normal MCC reconciliation can then restore the saved settings.
+    logging.warning("invalid empty runtime settings in %s ignored: %s", path, ", ".join(invalid))
+    return {**data, "runtime": {key: value for key, value in runtime.items() if key not in invalid}}
+
+
 def _load_toml_with_includes(path: str) -> dict[str, Any]:
     cfg_path = Path(path)
-    root = tomllib.loads(cfg_path.read_text(encoding="utf-8"))
+    root = _without_invalid_runtime_values(tomllib.loads(cfg_path.read_text(encoding="utf-8")), cfg_path)
     include = root.get("include", {})
     files_raw = include.get("files", []) if isinstance(include, dict) else []
     files = _normalize_list(files_raw)
@@ -1681,7 +1710,7 @@ def _load_toml_with_includes(path: str) -> dict[str, Any]:
             p = (cfg_path.parent / p).resolve()
         if not p.exists():
             continue
-        child = tomllib.loads(p.read_text(encoding="utf-8"))
+        child = _without_invalid_runtime_values(tomllib.loads(p.read_text(encoding="utf-8")), p)
         merged = _deep_merge(merged, child)
     return merged
 
@@ -1751,6 +1780,8 @@ def upsert_section_values(config_path: str, section_name: str, updates: dict[str
     Upsert plain key-value entries in mutable config section and return
     (mutable_path, changed).
     """
+    if section_name == "runtime":
+        _validate_required_runtime_values(updates)
     p = _resolve_mutable_config_path(config_path)
     if not updates:
         return str(p), False
@@ -2612,6 +2643,11 @@ _RUNTIME_NULLABLE_ATTRS = frozenset(
     if type(None) in get_args(annotation)
 )
 
+_RUNTIME_REQUIRED_TYPED_ATTRS = frozenset(
+    name for name, annotation in get_type_hints(AgentConfig).items()
+    if annotation in {bool, int, float, list, dict} or get_origin(annotation) in {list, dict}
+)
+
 _RUNTIME_REMOTE_BLOCKED_KEYS: set[str] = {
     # Changing runtime DB path mid-process is unsafe because stores are
     # opened at daemon startup and should stay stable.
@@ -2754,6 +2790,7 @@ def apply_runtime_overrides(
             blocked.append(raw_key)
             continue
         applicable[raw_key] = raw_val
+    _validate_required_runtime_values(applicable)
     merged = _reapply_manual_runtime_overrides(cfg, applicable)
     return merged, sorted(applicable.keys()), sorted(set(unsupported)), sorted(set(blocked))
 
