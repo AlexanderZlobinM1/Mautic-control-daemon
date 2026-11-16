@@ -315,6 +315,14 @@ Startup-флаг и ручной poll-trigger сбрасываются, а сл�
 Таким образом, durable pending сохраняется при реальном втором локальном
 изменении, а независимые изменения MCC будут приняты следующим штатным poll.
 
+Явный `runtime-overrides trigger` обслуживается отдельным control worker и не
+ждёт окончания большого ordinary scheduler pass на farm-host. Worker применяет
+тот же canonical MCC snapshot, field-level LWW, полное сохранение разрешённых
+настроек и scope ACK, затем сразу обновляет выделенные campaign/segment workers.
+Он не создаёт второй механизм настроек и не редактирует config в обход общего
+runtime-overrides пути; при временном конфликте или сетевой ошибке trigger
+остаётся pending и повторяется штатно.
+
 `local_runtime_push_pending` является field-scoped очередью, а не глобальным
 барьером для MCC. Если её push временно завершается ошибкой, следующий poll
 всё равно читает canonical desired state MCC и применяет remote winners по

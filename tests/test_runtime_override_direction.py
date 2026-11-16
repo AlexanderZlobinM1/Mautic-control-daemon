@@ -3163,6 +3163,85 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             self.assertEqual(restored, desired_runtime)
             self.assertEqual(store.get_runtime_sync("local_runtime"), desired_runtime)
 
+    def test_explicit_poll_control_applies_instance_map_and_acks_without_scheduler_pass(self) -> None:
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        class MemoryStore:
+            def __init__(self):
+                self.values = {}
+
+            def get_runtime_sync(self, key):
+                return self.values.get(key)
+
+            def put_runtime_sync(self, key, value):
+                self.values[key] = dict(value)
+
+            def delete_runtime_sync(self, keys):
+                for key in keys:
+                    self.values.pop(key, None)
+                return 1
+
+        desired = {
+            "campaign_super_priority_instance_settings": {
+                "electronic": {"campaigns": [82, 83]},
+            },
+        }
+        instance_runtime = {
+            "campaign_super_priority_instance_settings": {"campaigns": [82, 83]},
+        }
+        response = {
+            "status": "ok",
+            "runtime_overrides": {},
+            "desired_state": {
+                "scope_key": "Farm-02",
+                "revision": 222,
+                "updated_at": 700.0,
+                "runtime_overrides": {},
+            },
+            "instance_desired_states": {
+                "electronic": {
+                    "revision": 12,
+                    "updated_at": 700.0,
+                    "runtime_overrides": instance_runtime,
+                },
+            },
+        }
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "mcd.toml"
+            path.write_text(
+                '[profile]\nname = "custom"\n[runtime]\n'
+                'campaign_super_priority_instance_settings = { electronic = { campaigns = [82] } }\n',
+                encoding="utf-8",
+            )
+            cfg = replace(
+                load_config(str(path), allow_recover_from_mcc=False),
+                mcc_url="https://mcc.example",
+                mcc_token="token",
+                state_db_path=str(Path(directory) / "state.db"),
+            )
+            store = MemoryStore()
+            install = SimpleNamespace(instance_uid="electronic")
+            trigger = Path(runtime_overrides.touch_poll_trigger(cfg))
+            self.assertTrue(trigger.is_file())
+            with patch("mcd_agent.daemon.fetch_runtime_overrides", return_value=response), patch(
+                "mcd_agent.daemon.acknowledge_desired_runtime_states",
+                return_value=[],
+            ) as acknowledge:
+                result = daemon._consume_explicit_runtime_poll(cfg, store, [install])
+
+            self.assertEqual(result["status"], "applied")
+            self.assertFalse(trigger.exists())
+            effective = local_runtime_overrides(result["config"])
+            self.assertEqual(effective, desired)
+            acknowledge.assert_called_once()
+            self.assertEqual(acknowledge.call_args.kwargs["desired_state"]["revision"], 222)
+            self.assertEqual(
+                acknowledge.call_args.kwargs["instance_states"]["electronic"]["revision"],
+                12,
+            )
+
     def test_runtime_poll_full_snapshot_is_required_for_nonstable_mcc_winner(self) -> None:
         self.assertTrue(
             daemon._runtime_resolution_needs_full_snapshot(
