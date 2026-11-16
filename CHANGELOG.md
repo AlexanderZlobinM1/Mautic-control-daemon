@@ -1,3 +1,9 @@
+## 1.6.89 - 2026-11-16
+
+- Fence empty-contact deletion against supervised segment/import and campaign
+  work on the same instance using existing task locks. Busy cleanup is deferred
+  without consuming its window or blocking other instances.
+
 ## 1.6.88 - 2026-11-15
 
 - Require explicit recommended-project or runtime descriptor evidence to
