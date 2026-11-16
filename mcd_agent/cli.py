@@ -165,7 +165,7 @@ from mcd_agent.nginx_external import (
     default_stub_operation, ensure_nginx_baseline, ensure_cloudflare_real_ip,
     cloudflare_real_ip_state, nginx_baseline_satisfied, nginx_vhost_operation,
 )
-from mcd_agent.plugins import run_plugins_interactive
+from mcd_agent.plugins import run_plugins_interactive, run_plugins_machine
 from mcd_agent.plugin_operations import (
     effective_values,
     operation_command_tokens,
@@ -1922,6 +1922,13 @@ def _build_parser() -> argparse.ArgumentParser:
     def _add_plugins_args(p: argparse.ArgumentParser) -> None:
         p.add_argument("--config", default=default_cfg)
         p.add_argument("--root")
+        p.add_argument("--instance-uid", help="Stable bare instance UID for machine plugin operations")
+        p.add_argument("--operation-id", help="Caller-supplied plugin operation correlation ID")
+        p.add_argument(
+            "--machine-result",
+            action="store_true",
+            help="Emit exactly one terminal host-independent plugin result",
+        )
         p.add_argument(
         "--action",
         choices=["auto", "install", "update", "reinstall", "remove", "purge"],
@@ -3264,12 +3271,24 @@ def main() -> int:
 
     if args.cmd in {"plugins", "plugin"}:
         cfg = load_config(args.config)
+        if bool(args.machine_result):
+            rc = run_plugins_machine(
+                config=cfg,
+                instance_uid=str(args.instance_uid or ""),
+                plugin_uids=list(args.plugin_uid or []),
+                action=str(args.action or ""),
+                operation_id=str(args.operation_id or ""),
+                legacy_root=args.root,
+            )
+            if rc == 0:
+                _push_state_after_change(cfg, "plugins-machine")
+            return rc
         note = maybe_notify_update(cfg)
         if note and not bool(args.catalog_json):
             print(f"NOTICE: {note}")
         rc = run_plugins_interactive(
             config=cfg,
-            root=args.root,
+            root=args.instance_uid or args.root,
             selection=args.select,
             bundles=list(args.bundle or []),
             plugin_uids=list(args.plugin_uid or []),
@@ -3281,6 +3300,7 @@ def main() -> int:
             catalog_json=bool(args.catalog_json),
             cluster_sync_check_key=getattr(args, "cluster_sync_check_key", None),
             cluster_sync_check_digest=getattr(args, "cluster_sync_check_digest", None),
+            operation_id=getattr(args, "operation_id", None),
         )
         if rc == 0:
             _push_state_after_change(cfg, "plugins")
