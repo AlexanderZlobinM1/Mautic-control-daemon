@@ -1201,6 +1201,10 @@ class SegmentLivenessTests(unittest.TestCase):
         hot_b = "/var/www/berlitz/public_html"
         added_root = "/var/www/new-root/public_html"
         roots = [hot_a, hot_b, tail_root]
+        daemon._set_scheduler_distribution_roots([], worker_slots=1, cursor=0)
+        daemon._set_scheduler_priority_pending_roots(set())
+        daemon._set_scheduler_important_pending_roots(())
+        daemon._set_scheduler_fairness_promoted_roots(())
         store = TaskStore(":memory:")
         config = self._config()
         config.scheduler_host_max_parallel = 1
@@ -1410,6 +1414,9 @@ class SegmentLivenessTests(unittest.TestCase):
             )
         finally:
             daemon._set_scheduler_distribution_roots([], worker_slots=1)
+            daemon._set_scheduler_priority_pending_roots(set())
+            daemon._set_scheduler_important_pending_roots(())
+            daemon._set_scheduler_fairness_promoted_roots(())
             store.close()
 
     def test_actual_persisted_refill_worker_serves_cold_root_while_hot_planner_is_busy(self) -> None:
@@ -2809,6 +2816,117 @@ class SegmentLivenessTests(unittest.TestCase):
             self.assertNotIn(task_b.task_key, running)
             self.assertIn(task_a.task_key, running)
             store.close()
+
+    def test_missing_segment_pid_with_clear_db_and_lock_releases_claim_immediately(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = str(Path(td) / "instance")
+            Path(root, "var/cache/run").mkdir(parents=True)
+            store = TaskStore(str(Path(td) / "state.db"))
+            cycle, _added, _started = sync_cycle(
+                None,
+                planned_ids=[21, 22],
+                never_built=[],
+                running_ids=[],
+                now_ts=100.0,
+            )
+            cycle["claimed"] = [21]
+            cycle["running"] = [21]
+            cycle["status"] = "active"
+            store.put_runtime_sync(cycle_key(root), cycle)
+            segment = RunningTask(
+                row_id=0,
+                root=root,
+                task_key=f"{root}|segment|21",
+                task_type="segment",
+                entity_id=21,
+                command_str="php bin/console mautic:segments:update -i 21",
+                timeout_sec=3600,
+                attempts=1,
+                started_at=time.time(),
+                pid=407825,
+            )
+            campaign = RunningTask(
+                row_id=0,
+                root=root,
+                task_key=f"{root}|campaign_trigger|82",
+                task_type="campaign_trigger",
+                entity_id=82,
+                command_str="php bin/console mautic:campaigns:trigger -i 82",
+                timeout_sec=3600,
+                attempts=1,
+                started_at=time.time(),
+                pid=407826,
+            )
+            segment.row_id = store.add_running(segment)
+            campaign.row_id = store.add_running(campaign)
+            store.put_runtime_sync(
+                daemon._segment_runtime_marker_key(root, 21),
+                {
+                    "schema": "mcd-segment-runtime-marker-v1",
+                    "root": root,
+                    "entity_id": 21,
+                    "status": "running",
+                    "started_at": segment.started_at,
+                    "last_independent_at": time.time(),
+                    "pid": segment.pid,
+                },
+            )
+            running = {segment.task_key: segment, campaign.task_key: campaign}
+            popens = {campaign.task_key: SimpleNamespace(poll=lambda: 0)}
+            config = SimpleNamespace(
+                worker_watchdog_sec=0,
+                segment_kill_grace_sec=1,
+                task_retry_max=1,
+                task_retry_delay_sec=0,
+                worker_stuck_policy="skip",
+                worker_stuck_restart_limit=0,
+            )
+            wake = threading.Event()
+
+            with patch.object(daemon, "_is_pid_alive", return_value=False):
+                daemon._monitor_running(
+                    config=config,
+                    store=store,
+                    running=running,
+                    popens=popens,
+                    segment_liveness_probe=lambda _task: {
+                        "pid_alive": False,
+                        "process_group_alive": False,
+                        "db_probe_ok": True,
+                        "db_active": False,
+                        "lock_probe_ok": True,
+                        "lock_active": False,
+                        "confirmed_clear": True,
+                    },
+                    segment_terminal_callback=lambda task, success, note: daemon._segment_terminal_and_wake(
+                        store, wake, task, success, note
+                    ),
+                )
+
+            self.assertEqual(running, {})
+            self.assertEqual(store.running_rows(), [])
+            repaired = store.get_runtime_sync(cycle_key(root))
+            self.assertEqual(repaired.get("claimed"), [])
+            self.assertEqual(repaired.get("running"), [])
+            self.assertIn(22, _segment_cycle_pending_order(repaired))
+            self.assertTrue(wake.is_set())
+            store.close()
+
+    def test_segment_lock_probe_distinguishes_live_and_dead_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            run_dir = root / "var/cache/run"
+            run_dir.mkdir(parents=True)
+            lock = run_dir / "sf.mautic-segments-update21.qa.lock"
+            lock.write_text(str(12345))
+            with patch.object(daemon, "_is_pid_alive", return_value=True):
+                active = daemon._segment_runtime_lock_evidence(str(root), [21])
+            self.assertTrue(active["lock_probe_ok"])
+            self.assertTrue(active["lock_active"])
+            with patch.object(daemon, "_is_pid_alive", return_value=False):
+                clear = daemon._segment_runtime_lock_evidence(str(root), [21])
+            self.assertTrue(clear["lock_probe_ok"])
+            self.assertFalse(clear["lock_active"])
 
     def test_persisted_full_scan_item_bypasses_stale_repeat_cadence(self) -> None:
         root = "/var/www/full-scan/public_html"

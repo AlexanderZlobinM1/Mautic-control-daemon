@@ -2790,7 +2790,14 @@ def apply_runtime_overrides(
             blocked.append(raw_key)
             continue
         applicable[raw_key] = raw_val
-    _validate_required_runtime_values(applicable)
+    invalid = set(_invalid_required_runtime_values(applicable))
+    if invalid:
+        blocked.extend(invalid)
+        applicable = {
+            key: value
+            for key, value in applicable.items()
+            if key not in invalid
+        }
     merged = _reapply_manual_runtime_overrides(cfg, applicable)
     return merged, sorted(applicable.keys()), sorted(set(unsupported)), sorted(set(blocked))
 

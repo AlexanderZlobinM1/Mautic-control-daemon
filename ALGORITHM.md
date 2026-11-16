@@ -294,6 +294,8 @@ MCC. После MCD update этот режим включается всегда
 из остальных файлов и продолжает штатное восстановление из MCC. Само повреждение
 не отправляется в MCC как операторская правка. Явные `0`, `false`, пустые списки
 и карты, а также очистка действительно необязательных полей сохраняют свой смысл.
+Ошибочное поле отклоняется отдельно: оно не отменяет применение и сохранение
+остальных корректных настроек из того же snapshot.
 
 Если настройка изменилась одновременно на MCD и MCC, MCD сначала запрашивает
 актуальное состояние MCC. Для каждого затронутого поля сравниваются время и
@@ -557,28 +559,30 @@ config на его profile baseline и только после этого при
 6. Release packaging and self-update use a detached runtime payload. The
    production archive contains the installed `mcd_agent` runtime package,
    resources, requirements, wheel and `mcd-runtime-manifest.json`, but no
-   checkout docs/tests/build files or `.git` data. The source checkout is
-   retained only as bounded `src`/`src.next` staging or rollback material;
-   after runtime import/smoke, systemd verification and adoption proof it is
-   not an active production runtime or duplicate test tree. The manifest binds
+   checkout docs/tests/build files or `.git` data. Development checkouts stay
+   only in development worktrees. Production uses the installed wheel and the
+   verified `/opt/mcd/runtime` artifact cache; `/opt/mcd/src` is never an
+   install, import, version, staging or rollback source. The manifest binds
    payload hashes while an external receipt binds archive/source/wheel
    identity, avoiding self-referential provenance. See
    `docs/mcd-update-invariants-v1.md` for the release evidence contract. A
-   host running the pre-runtime-only updater transitions through the
-   separately transported `tools/mcd_runtime_bootstrap.py` bridge and its
-   read-only `tools/mcd_profile_authority_probe.py` sidecar: the bridge
-   verifies the exact archive/manifest, uses the same update lease and
-   scheduler barrier, installs and imports the wheel before the atomic source
-   switch, retains bounded rollback material, and records a bootstrap receipt.
+   A host transitions through the separately transported
+   `tools/mcd_runtime_bootstrap.py` installer and its read-only
+   `tools/mcd_profile_authority_probe.py` sidecar: the installer verifies the
+   exact archive/manifest, uses the same update lease and scheduler barrier,
+   installs and imports the wheel before the atomic runtime switch, retains
+   only the previous runtime artifact as bounded rollback material, and records
+   a bootstrap receipt. A pre-existing `/opt/mcd/src` is not read and is
+   removed only after package/import/service verification succeeds.
    The bridge is delivered as the detached HTTPS artifact
    `mcd-runtime-<version>.bridge[-rN].py`; `mcd-runtime-bridge-package-v1` binds
    its SHA-256, source commit, runtime archive SHA, runtime manifest SHA, and
    bridge-QA sidecar SHA. The host accepts it only after exact SHA checks and
    runs the bridge locally; the runtime archive remains unchanged.
-   The bridge admits either the legacy `src` layout or an already active
-   `runtime` layout, but rejects both together; an existing runtime-only host
-   therefore receives a normal pinned forward update without a source-tree
-   fallback or symlink.
+   The installer admits only a ready runtime archive. An existing runtime-only
+   host receives a normal pinned forward update without a source-tree fallback
+   or symlink; a failed activation restores only the previous runtime artifact
+   and installed package state.
    The sidecar must accept the complete valid split TOML graph, including
    array-of-table sections, while never writing configuration.
    The MCD runtime always supplies an MCD-owned default
@@ -1326,7 +1330,7 @@ cycle без ручного `segments:update`, profile/capacity/data changes. Ad
 | persisted cycle, never-built admission и atomic claim | `mcd_agent/segment_admission.py`, `daemon.py` | `tests/test_segment_admission.py` |
 | host/instance slots и rotation | `mcd_agent/daemon.py` | `tests/test_campaign_ring_dispatch.py` |
 | external Mautic logical-task dedupe by root/type/entity and regular-slot reservation | `mcd_agent/daemon.py:list_external_runtime_task_summaries`, `_effective_segment_priority_slot_limit`, ordinary segment dispatch | `tests/test_external_task_admission.py`, `tests/test_segment_liveness.py` |
-| adopted external segment PID/process-group progress watchdog with stale re-admission | `mcd_agent/daemon.py:_external_segment_process_liveness_signal`, `_external_segment_watchdog_keepalive` | `tests/test_external_task_admission.py` |
+| adopted segment PID/process-group progress watchdog and fast missing-owner reconciliation only after PID/PGID absent, DB probe clear and exact Mautic segment lock free | `mcd_agent/daemon.py:_external_segment_process_liveness_signal`, `_segment_runtime_lock_evidence`, `_external_segment_watchdog_keepalive` | `tests/test_external_task_admission.py`, `tests/test_segment_liveness.py` |
 | normal hard caps, manual per-instance N+1 и dedicated super budget не смешиваются | `mcd_agent/daemon.py:_scheduler_host_slots_available`, `_scheduler_instance_slots_available`, `_submit_if_slot_uncoordinated` | `tests/test_campaign_ring_dispatch.py` hard-cap/3+ root rows; `tests/test_segment_admission.py` cap-4 и `11+3→14→...→10→11` receipts |
 | важный root с заполненной capacity не ставит global remaining barrier | `mcd_agent/daemon.py:_scheduler_segment_entity_allowed`, `_scheduler_important_root_dispatchable` | `test_remaining_root_uses_free_host_slot_when_important_root_is_instance_full` |
 | root-local continuous monitor/refill, live durable occupancy, eligibility-aware terminal hand-off/rotation and shared claim lifecycle | `mcd_agent/daemon.py:_iter_instances_with_root_dispatch_gate`, `_SchedulerRuntimeRegistry`, `_scheduler_store_running_rows`, `_scheduler_live_task_capacity_keys`, `_scheduler_notify_refill_priority`, `_ordinary_persisted_refill_worker` (`_refill_priority_root_ready`) | `tests/test_segment_liveness.py`; `tests/test_dispatcher_production_sandbox.py` full `run_loop` paths with unavailable static graph, dead TaskStore rows and terminal-root hand-off |
@@ -1337,7 +1341,7 @@ cycle без ручного `segments:update`, profile/capacity/data changes. Ad
 | monitor queued/running/done/error receipt | `mcd_agent/daemon.py` | `tests/test_scheduler_monitor_cycle.py`, `tests/test_signals_scheduler_history.py` |
 | heavy-plan deferral and durable pending guard | `mcd_agent/daemon.py` | `tests/test_segment_liveness.py`, live M6/M7 acceptance receipt |
 | self-update preserves ordinary application work and all durable queues | `mcd_agent/self_update.py`, `daemon.py`, systemd unit | `tests/test_self_update_version_reporting.py`, `tools/runtime_bridge_qa.py` (`mcd-runtime-bridge-qa-v1`) |
-| legacy source-tree to runtime-only transition is authority-safe and accepts complete split TOML config | `tools/mcd_runtime_bootstrap.py`, `tools/mcd_profile_authority_probe.py` | `tests/test_profile_authority_probe.py`, `tests/test_runtime_bootstrap_capture.py`, live `mcd-runtime-bootstrap-receipt-v1` |
+| runtime-only activation is authority-safe, removes a forbidden production checkout only after verified success, and accepts complete split TOML config | `tools/mcd_runtime_bootstrap.py`, `tools/mcd_profile_authority_probe.py` | `tests/test_profile_authority_probe.py`, `tests/test_runtime_bootstrap.py`, `tests/test_runtime_bootstrap_capture.py`, live `mcd-runtime-bootstrap-receipt-v1` |
 | activation-derived Portal material is imported atomically without new auth/job issuance; commercial API-key transport, host binding and installation IDs are validated and persisted while legacy agent/Portal signing-key state is scrubbed | `mcd_agent/commercial_registration.py`, `mcd_agent/commercial_portal.py` | `tests/test_commercial_registration.py`, `tests/test_commercial_outbound_boundary.py`, redacted `mcd-portal-registration-receipt-v1` |
 | host-first Portal registration binds an activated MCD host before any Mautic instance exists; request contains only local DNS identity/display name, and the response must create a passive host installation with an active empty-inventory connection | `mcd_agent/commercial_portal.py`, `mcd_agent/commercial_host_registration.py`, `mcd_agent/cli.py` | `tests/test_commercial_portal.py`, redacted `portal-mcd-host-register-response-v1` |
 | self-hosted v2.1 jobs select exactly one ordered external stage through `stage_selection` plus matching `execution.stage`; MCD verifies dependencies and emits the existing typed stage/terminal receipts without adding a launcher or recipe layer | `mcd_agent/commercial_portal.py`, `mcd_agent/commercial_self_hosted.py`, `mcd_agent/scenario_launcher.py` | `tests/test_commercial_self_hosted_v2.py`, redacted stage/terminal receipts |
@@ -2159,30 +2163,36 @@ dist-info directory declared by the target wheel. Do not manually delete
 package files or operator data. Package verification and existing rollback
 remain mandatory.
 
-The prerequisite maintenance release is based on published 1.6.38 and retains
-its entire previous owned package layout. It changes only updater ownership
-handling (including the independently transported bootstrap). This allows the
-old updater to install the maintenance package without retiring any files; the
-corrected updater can subsequently uninstall retired owned files normally.
-The externalization candidate and its global 1.7 release hold are separate.
+The maintenance updater and independently transported installer accept only
+verified detached runtime packages. Development checkout trees are not
+production artifacts. A successful activation uses site-packages plus
+`/opt/mcd/runtime` and removes an exact forbidden `/opt/mcd/src` path only
+after the successor package, import path, runtime manifest and service contract
+have been verified. Failure preserves that path for diagnosis but never reads,
+installs or rolls back from it. The externalization candidate and its global
+1.7 release hold are separate.
 
 Validation: tests/test_runtime_distribution_lifecycle.py runs real pip for
 clean install, upgrade/repeat, package rollback and verification-failure
 recovery, preserving untracked package data and configuration. Synthetic
 fixtures are not proof of the published-version channel transition.
 
-The maintenance updater also requires verified detached runtime packages and
-activates successors in /opt/mcd/runtime; checkout installation is rejected.
-The immutable 1.6.38 first hop can transiently activate its ready artifact in
-the legacy src cache. The 1.6.39 second hop validates that cache against the
-existing package receipt, manifest, wheel and installed version before any
-update mutation. After successor package/import verification, it moves the
-verified legacy cache to the existing update rollback artifacts. Unverified
-or foreign legacy content is preserved and blocks this retirement. Failure
-restores cache locations and the previous verified package. Imports always
-come from installed site-packages; the legacy directory is never a source
-installation, import or version fallback. The historical first hop, package
-phase, and full HTTPS/restart acceptance are recorded separately.
+The current updater activates successors in `/opt/mcd/runtime`; checkout
+installation is rejected. Rollback restores the previous verified runtime
+artifact and package, never a development tree. The package phase and full
+HTTPS/restart acceptance are recorded separately.
+
+## MCD 1.8 distribution contract
+
+MCD 1.8 production distribution uses the native APT repository published at
+`repo.sales-snap.com`. APT owns package retrieval, signature verification,
+installation and package-version transitions; MCD runtime state and host
+configuration remain outside package-owned mutable paths. Future supported
+distributions use their native repository/package format from the same
+`repo.sales-snap.com` host. This is one distribution authority with
+distro-specific repository adapters, not parallel update engines. Until 1.8
+is implemented and accepted, this section is a future contract and does not
+change the current verified runtime-package release path.
 
 
 ## Shared 1.6 / 1.7 hotfix invariants (2026-11-01)

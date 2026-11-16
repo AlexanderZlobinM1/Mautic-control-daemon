@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Bridge a legacy source-tree MCD install to a runtime-only package.
+"""Activate a verified runtime-only MCD package without a project checkout.
 
-The normal 1.5.127 updater expects ``pyproject.toml`` in the downloaded
-archive.  A runtime-only release intentionally does not contain that checkout
-file, so the legacy updater cannot perform the first transition by itself.
-This small, separately transported component installer performs that one
-transition without editing MCC, changing update policy, or touching Mautic
-configuration/data.
+This separately transported component installer accepts only a ready runtime
+artifact.  It never installs, imports, versions, or rolls back from
+``/opt/mcd/src``.  A pre-existing forbidden tree is only a cleanup target and
+is removed after the successor package, runtime artifact, service contract,
+and post-restart import have all been verified.
 
 The bridge is deliberately fail-closed:
 
@@ -14,15 +13,14 @@ The bridge is deliberately fail-closed:
 * it takes the same durable MCD update lease and scheduler admission barrier;
 * an unreadable/active backup lock aborts before mutation;
 * the wheel is installed and imported from the managed venv before restart;
-* a legacy ``/opt/mcd/src`` or already active ``/opt/mcd/runtime`` layout is
-  switched atomically and remains bounded rollback material until the
-  supervisor is healthy;
+* ``/opt/mcd/runtime`` is switched atomically and remains bounded rollback
+  material until the supervisor is healthy;
 * the supervisor uses ``WorkingDirectory=/opt/mcd`` and ``KillMode=process``;
-* failure restores the old source, managed-venv package and running service,
-  even when the legacy source has no ``pyproject.toml``.
+* failure restores only the prior runtime artifact, managed-venv package and
+  running service; the forbidden tree is never rollback material.
 
-It is not part of the runtime archive.  The source tree is the transport
-input for the bridge only; the active supervisor imports the installed wheel.
+It is not part of the runtime archive.  The active supervisor imports only the
+installed wheel from managed-venv site-packages.
 """
 
 from __future__ import annotations
@@ -37,11 +35,13 @@ import os
 from pathlib import Path
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tarfile
 import tempfile
 import time
+import tomllib
 import zipfile
 from datetime import datetime, timezone
 from typing import Any, Iterator
@@ -248,8 +248,9 @@ def _site_dir(python: Path) -> Path:
     return path
 
 
-def _remove_agent_shadow_hooks(site_dir: Path, source_dir: Path) -> list[str]:
-    roots = {str(source_dir.resolve()), str((source_dir / "mcd_agent").resolve())}
+def _remove_agent_shadow_hooks(site_dir: Path, forbidden_root: Path) -> list[str]:
+    """Remove editable/path hooks that point at the forbidden project tree."""
+    roots = {str(forbidden_root.resolve()), str((forbidden_root / "mcd_agent").resolve())}
     removed: list[str] = []
     for candidate in sorted(site_dir.iterdir()):
         lower = candidate.name.lower()
@@ -338,16 +339,10 @@ def _remove_runtime_entry(path: Path) -> None:
         path.unlink(missing_ok=True)
 
 
-def _snapshot_legacy_runtime_package(install_dir: Path) -> Path:
-    """Snapshot old MCD venv entries before installing the successor.
-
-    Old source-tree installations can be valid with no ``pyproject.toml`` in
-    ``src`` (the supervisor may import that tree through its service
-    environment). A pip reinstall cannot reconstruct such a package during
-    rollback, so retain the exact managed-venv entries instead.
-    """
+def _snapshot_installed_runtime_package(install_dir: Path) -> Path:
+    """Snapshot installed MCD venv entries before installing the successor."""
     site_dir = _site_dir(_venv_python(install_dir))
-    snapshot = install_dir / "var" / "updates" / f"legacy-runtime-{os.getpid()}-{time.time_ns()}"
+    snapshot = install_dir / "var" / "updates" / f"installed-runtime-{os.getpid()}-{time.time_ns()}"
     snapshot.mkdir(parents=True, exist_ok=False)
     (snapshot / "site-dir").write_text(str(site_dir.resolve()) + "\n", encoding="utf-8")
     for entry in sorted(site_dir.iterdir(), key=lambda item: item.name):
@@ -356,8 +351,8 @@ def _snapshot_legacy_runtime_package(install_dir: Path) -> Path:
     return snapshot
 
 
-def _restore_legacy_runtime_package(install_dir: Path, snapshot: Path) -> None:
-    """Restore pre-bridge MCD venv entries without source packaging."""
+def _restore_installed_runtime_package(install_dir: Path, snapshot: Path) -> None:
+    """Restore pre-update MCD venv entries without using a project tree."""
     site_dir_file = snapshot / "site-dir"
     site_dir = (
         Path(site_dir_file.read_text(encoding="utf-8").strip())
@@ -442,26 +437,122 @@ def _install_runtime(install_dir: Path, stage: Path, manifest: dict[str, Any]) -
     }
 
 
-def _backup_lock_probe(install_dir: Path, config: Path) -> dict[str, Any]:
-    """Read the legacy agent's backup lock without writing config/state."""
-    if not config.is_file():
-        raise BridgeError(f"MCD config not found for backup-lock probe: {config}")
-    python = _venv_python(install_dir)
-    code = (
-        "import json, sys; "
-        "from mcd_agent.config import load_config; "
-        "from mcd_agent.backup import backup_lock_active; "
-        "cfg=load_config(sys.argv[1], allow_recover_from_mcc=False); "
-        "print(json.dumps({'enabled': bool(cfg.backup_enabled), 'active': bool(backup_lock_active(cfg))}))"
-    )
-    result = _run([str(python), "-c", code, str(config)], cwd=Path("/"))
+def _merge_toml(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in overlay.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _merge_toml(dict(merged[key]), value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _runtime_config_snapshot(
+    config: Path,
+    seen: set[Path] | None = None,
+    forbidden_default_root: Path | None = None,
+) -> dict[str, Any]:
+    """Read the declared TOML graph without importing any installed MCD code."""
+    resolved = config.resolve()
+    visited = seen if seen is not None else set()
+    if resolved in visited:
+        raise BridgeError(f"config include cycle detected: {resolved}")
+    visited.add(resolved)
     try:
-        payload = json.loads((result.stdout or "").strip().splitlines()[-1])
-    except Exception as exc:
-        raise BridgeError(f"backup-lock probe returned invalid JSON: {result.stdout!r}") from exc
-    if not isinstance(payload, dict) or bool(payload.get("active")):
-        raise BridgeError("MCD update deferred: backup lock is active")
-    return {"enabled": bool(payload.get("enabled")), "active": False}
+        payload = tomllib.loads(resolved.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise BridgeError(f"cannot parse declared config file {resolved}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise BridgeError(f"declared config is not a TOML table: {resolved}")
+    merged: dict[str, Any] = {}
+    include = payload.get("include")
+    files = include.get("files", []) if isinstance(include, dict) else []
+    if not isinstance(files, list) or any(not isinstance(item, str) or not item.strip() for item in files):
+        raise BridgeError(f"include.files must be a string array in {resolved}")
+    for raw in files:
+        child = Path(raw)
+        if not child.is_absolute():
+            child = resolved.parent / child
+        child = child.resolve()
+        if not child.is_file() and forbidden_default_root is not None and (
+            child.parent == forbidden_default_root.resolve()
+            and child.name in {"mcd-agent.system.example.toml", "mcd-agent.operator.example.toml"}
+        ):
+            continue
+        merged = _merge_toml(
+            merged,
+            _runtime_config_snapshot(child, visited, forbidden_default_root),
+        )
+    result = _merge_toml(merged, payload)
+    visited.remove(resolved)
+    return result
+
+
+def _slug(value: Any, fallback: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9._-]+", "-", str(value or "").strip()).strip("-") or fallback
+
+
+def _lock_is_active(path: Path) -> bool:
+    if fcntl is None:
+        raise BridgeError("POSIX flock is required for the backup-lock probe")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("a+", encoding="utf-8")
+    try:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return False
+    finally:
+        handle.close()
+
+
+def _backup_lock_probe(install_dir: Path, config: Path) -> dict[str, Any]:
+    """Probe backup activity without importing from the installed runtime."""
+    snapshot = _runtime_config_snapshot(config, forbidden_default_root=install_dir / "src" / "etc")
+    backup = snapshot.get("backup") if isinstance(snapshot.get("backup"), dict) else {}
+    cluster_backup = backup.get("cluster") if isinstance(backup.get("cluster"), dict) else {}
+    cluster = snapshot.get("cluster") if isinstance(snapshot.get("cluster"), dict) else {}
+    lock_dir = Path(str(backup.get("lock_dir") or "/opt/mcd/var/locks"))
+    host_name = str(backup.get("host_name") or socket.gethostname() or "host")
+    lock_paths = [lock_dir / f"backup-{_slug(host_name, 'host')}.lock"]
+    cluster_enabled = bool(cluster_backup.get("enabled", False))
+    cluster_name = str(
+        cluster.get("name")
+        or cluster.get("id")
+        or backup.get("instance_name")
+        or backup.get("host_name")
+        or host_name
+    )
+    if cluster_enabled:
+        cluster_slug = _slug(cluster_name, "cluster")
+        lock_paths.extend(
+            lock_dir / f"backup-cluster-{cluster_slug}-{name}.lock"
+            for name in ("local-full", "local-incremental", "files", "offsite")
+        )
+    active_paths = [str(path) for path in lock_paths if _lock_is_active(path)]
+    active_processes: list[int] = []
+    if cluster_enabled and Path("/proc").is_dir():
+        mount_base = Path(str(backup.get("mount_base_dir") or "/opt/mcd/var/backup/mounts"))
+        marker = f"{mount_base / _slug(host_name, 'host')}/backup/{cluster_name.strip('/') or 'cluster'}/daily/.incomplete-"
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                cmdline = (entry / "cmdline").read_bytes().replace(b"\x00", b" ").decode("utf-8", "replace")
+            except OSError:
+                continue
+            if marker in cmdline:
+                active_processes.append(int(entry.name))
+    if active_paths or active_processes:
+        raise BridgeError("MCD update deferred: backup lock or offsite process is active")
+    return {
+        "enabled": bool(backup.get("enabled", False)),
+        "cluster_enabled": cluster_enabled,
+        "active": False,
+        "probed_locks": [str(path) for path in lock_paths],
+    }
 
 
 _PROFILE_AUTHORITY_SCHEMA = "mcd-profile-authority-probe-v1"
@@ -624,6 +715,61 @@ def _capture_profile_authority(install_dir: Path, config: Path) -> dict[str, Any
     }
 
 
+def _migrate_runtime_config_includes(config: Path, install_dir: Path, runtime_dir: Path) -> dict[str, Any]:
+    """Rewrite only exact managed default includes from src to runtime."""
+    text = config.read_text(encoding="utf-8")
+    try:
+        root = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise BridgeError(f"cannot migrate runtime includes in invalid TOML: {config}: {exc}") from exc
+    include = root.get("include") if isinstance(root, dict) else None
+    files = include.get("files", []) if isinstance(include, dict) else []
+    if not isinstance(files, list):
+        raise BridgeError(f"include.files must be an array before runtime activation: {config}")
+    forbidden_root = (install_dir / "src" / "etc").resolve()
+    runtime_root = (runtime_dir / "etc").resolve()
+    allowed = {"mcd-agent.system.example.toml", "mcd-agent.operator.example.toml"}
+    replacements: list[dict[str, str]] = []
+    updated = text
+    for raw in files:
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        declared = Path(raw)
+        resolved = declared.resolve() if declared.is_absolute() else (config.parent / declared).resolve()
+        if resolved.parent != forbidden_root or resolved.name not in allowed:
+            continue
+        successor = runtime_root / resolved.name
+        if not successor.is_file() or successor.is_symlink():
+            raise BridgeError(f"verified runtime default include is missing: {successor}")
+        replacement = str(successor) if declared.is_absolute() else os.path.relpath(successor, config.parent)
+        old_double = json.dumps(raw)
+        old_single = "'" + raw.replace("'", "\\'") + "'"
+        if old_double in updated:
+            updated = updated.replace(old_double, json.dumps(replacement), 1)
+        elif old_single in updated:
+            updated = updated.replace(old_single, "'" + replacement.replace("'", "\\'") + "'", 1)
+        else:
+            raise BridgeError(f"cannot rewrite exact managed runtime include: {raw}")
+        replacements.append({"from": raw, "to": replacement})
+    if updated != text:
+        mode = config.stat().st_mode & 0o777
+        temporary = config.with_name(f".{config.name}.runtime-includes-{os.getpid()}.tmp")
+        temporary.write_text(updated, encoding="utf-8")
+        os.chmod(temporary, mode)
+        os.replace(temporary, config)
+        try:
+            _profile_config_files(config)
+        except Exception:
+            rollback = config.with_name(f".{config.name}.runtime-includes-rollback-{os.getpid()}.tmp")
+            rollback.write_text(text, encoding="utf-8")
+            os.chmod(rollback, mode)
+            os.replace(rollback, config)
+            raise
+    else:
+        _profile_config_files(config)
+    return {"changed": updated != text, "replacements": replacements}
+
+
 def _pause_path(install_dir: Path) -> Path:
     return install_dir / "var" / "scheduler.pause"
 
@@ -761,14 +907,9 @@ def _write_receipt(install_dir: Path, payload: dict[str, Any]) -> Path:
     return path
 
 
-def _active_source_layout(install_dir: Path) -> tuple[Path, Path, Path]:
-    """Select the active source/runtime layout without inventing a fallback."""
-    legacy_dir = install_dir / "src"
-    runtime_dir = install_dir / "runtime"
-    if runtime_dir.exists() and legacy_dir.exists():
-        raise BridgeError("parallel legacy src requires audited retirement before runtime activation")
-    active_dir = runtime_dir if runtime_dir.is_dir() else legacy_dir
-    return active_dir, legacy_dir, runtime_dir
+def _runtime_layout(install_dir: Path) -> tuple[Path, Path]:
+    """Return the sole runtime artifact path and forbidden cleanup target."""
+    return install_dir / "runtime", install_dir / "src"
 
 
 def _successful_replay(
@@ -800,10 +941,12 @@ def _successful_replay(
     if not target or (expected_target and target != expected_target):
         return None
     try:
-        active_dir, _legacy_dir, _runtime_dir = _active_source_layout(install_dir)
-    except BridgeError:
+        runtime_dir, forbidden_dir = _runtime_layout(install_dir)
+    except (OSError, ValueError):
         return None
-    source_manifest = active_dir / MANIFEST_NAME
+    if forbidden_dir.exists() or forbidden_dir.is_symlink():
+        return None
+    source_manifest = runtime_dir / MANIFEST_NAME
     if not source_manifest.is_file():
         return None
     try:
@@ -823,6 +966,39 @@ def _successful_replay(
     return replay
 
 
+def _installed_distribution_version(install_dir: Path) -> str:
+    """Read one valid installed dist-info record without importing code."""
+    site_dir = _site_dir(_venv_python(install_dir))
+    versions: set[str] = set()
+    for metadata in sorted(site_dir.glob("mcd_agent-*.dist-info/METADATA")):
+        try:
+            fields = {}
+            for line in metadata.read_text(encoding="utf-8").splitlines():
+                if ":" in line:
+                    key, value = line.split(":", 1)
+                    fields.setdefault(key.strip().lower(), value.strip())
+        except OSError:
+            continue
+        name = re.sub(r"[-_.]+", "-", fields.get("name", "")).lower()
+        version = fields.get("version", "").strip()
+        if name == "mcd-agent" and version:
+            versions.add(version)
+    if len(versions) != 1:
+        raise BridgeError(f"installed MCD distribution identity is ambiguous: {sorted(versions)}")
+    return versions.pop()
+
+
+def _remove_forbidden_production_tree(path: Path) -> bool:
+    """Remove only the exact forbidden production path after verified activation."""
+    if not path.exists() and not path.is_symlink():
+        return False
+    if path.is_symlink() or not path.is_dir():
+        path.unlink(missing_ok=True)
+    else:
+        shutil.rmtree(path)
+    return True
+
+
 def bridge(args: argparse.Namespace) -> dict[str, Any]:
     install_dir = Path(args.install_dir).resolve()
     archive = Path(args.archive).resolve()
@@ -831,37 +1007,21 @@ def bridge(args: argparse.Namespace) -> dict[str, Any]:
     if not archive.is_file():
         raise BridgeError(f"runtime archive not found: {archive}")
     actual_archive_sha = _sha256(archive)
-    if args.expected_archive_sha256:
-        if actual_archive_sha.lower() != args.expected_archive_sha256.lower():
-            raise BridgeError(
-                f"runtime archive SHA mismatch expected={args.expected_archive_sha256} actual={actual_archive_sha}"
-            )
+    if args.expected_archive_sha256 and actual_archive_sha.lower() != args.expected_archive_sha256.lower():
+        raise BridgeError(
+            f"runtime archive SHA mismatch expected={args.expected_archive_sha256} actual={actual_archive_sha}"
+        )
     replay = _successful_replay(install_dir, actual_archive_sha, str(args.expected_target or "").strip())
     if replay is not None:
         return replay
-    src_dir, legacy_dir, runtime_dir = _active_source_layout(install_dir)
-    original_dir = src_dir
-    if not src_dir.is_dir():
-        raise BridgeError(f"legacy source directory not found: {src_dir}")
-    if not (src_dir / "mcd_agent" / "__init__.py").is_file():
-        raise BridgeError(f"legacy MCD source package not found: {src_dir}")
-    old_source_version = ""
-    try:
-        old_text = (src_dir / "mcd_agent" / "__init__.py").read_text(encoding="utf-8")
-        match = re.search(r"__version__\s*=\s*['\"]([^'\"]+)", old_text)
-        old_source_version = match.group(1) if match else ""
-    except OSError:
-        pass
 
+    runtime_dir, forbidden_dir = _runtime_layout(install_dir)
+    old_runtime_version = _installed_distribution_version(install_dir)
     profile_authority = _capture_profile_authority(install_dir, config)
-
     updates_dir = install_dir / "var" / "updates"
     updates_dir.mkdir(parents=True, exist_ok=True)
-    runtime_layout = original_dir == runtime_dir
-    stage_name = "runtime.next" if runtime_layout else "src.next"
-    rollback_name = "runtime.prev" if runtime_layout else "src.prev"
-    stage = updates_dir / f"{stage_name}-bridge-{os.getpid()}-{time.time_ns()}"
-    old_src = updates_dir / f"{rollback_name}-bridge-{int(time.time())}"
+    stage = updates_dir / f"runtime.next-bridge-{os.getpid()}-{time.time_ns()}"
+    old_runtime = updates_dir / f"runtime.prev-bridge-{int(time.time())}-{time.time_ns()}"
     state_path = install_dir / "var" / STATE_NAME
     before_state = _state_read(state_path)
     before_state_bytes = state_path.read_bytes() if state_path.is_file() else None
@@ -869,11 +1029,11 @@ def bridge(args: argparse.Namespace) -> dict[str, Any]:
     before_scheduler = _scheduler_status(install_dir, config)
     systemd_path: Path | None = None
     previous_dropin: bytes | None = None
-    switched = False
-    old_source_moved = False
-    manifest: dict[str, Any] = {}
-    target = ""
-    legacy_runtime_snapshot: Path | None = None
+    config_before_migration: bytes | None = None
+    config_migration: dict[str, Any] = {"changed": False, "replacements": []}
+    runtime_switched = False
+    previous_runtime_moved = False
+    package_snapshot: Path | None = None
 
     with _exclusive_lock(install_dir / "var" / "mcd-self-update.lock"):
         if not args.sandbox:
@@ -888,36 +1048,44 @@ def bridge(args: argparse.Namespace) -> dict[str, Any]:
                 raise BridgeError(
                     f"runtime manifest SHA mismatch expected={args.expected_manifest_sha256} actual={actual_manifest_sha}"
                 )
-        if _version_key(target) <= _version_key(old_source_version) and (src_dir / MANIFEST_NAME).is_file():
-            raise BridgeError(f"runtime bridge target is not newer than active source: {old_source_version} -> {target}")
+        cleanup_only_reconcile = (
+            _version_key(target) == _version_key(old_runtime_version)
+            and (forbidden_dir.exists() or forbidden_dir.is_symlink())
+        )
+        if _version_key(target) < _version_key(old_runtime_version) or (
+            _version_key(target) == _version_key(old_runtime_version) and not cleanup_only_reconcile
+        ):
+            raise BridgeError(
+                f"runtime target must be newer than installed package: {old_runtime_version} -> {target}"
+            )
 
         with _scheduler_barrier(install_dir) as barrier_created:
             try:
-                # Install and import the successor before moving the active
-                # source directory.  The legacy daemon remains runnable until
-                # every package/staging check succeeds.
-                legacy_runtime_snapshot = _snapshot_legacy_runtime_package(install_dir)
+                package_snapshot = _snapshot_installed_runtime_package(install_dir)
                 package_result = _install_runtime(install_dir, stage, manifest)
 
-                if old_src.exists():
-                    raise BridgeError(f"rollback source path already exists: {old_src}")
-                os.replace(src_dir, old_src)
-                old_source_moved = True
-                destination_dir = runtime_dir if runtime_layout else legacy_dir
-                os.replace(stage, destination_dir)
-                src_dir = destination_dir
-                switched = True
+                if old_runtime.exists():
+                    raise BridgeError(f"rollback runtime path already exists: {old_runtime}")
+                if runtime_dir.exists() or runtime_dir.is_symlink():
+                    os.replace(runtime_dir, old_runtime)
+                    previous_runtime_moved = True
+                os.replace(stage, runtime_dir)
+                runtime_switched = True
+
+                config_before_migration = config.read_bytes()
+                config_migration = _migrate_runtime_config_includes(config, install_dir, runtime_dir)
 
                 if not args.no_systemd:
-                    systemd_path, previous_dropin = _write_systemd_dropin(systemd_dir, args.service_name, install_dir)
-                if not args.no_systemd:
+                    systemd_path, previous_dropin = _write_systemd_dropin(
+                        systemd_dir, args.service_name, install_dir
+                    )
                     _systemd_reload(args.systemctl)
 
                 state = dict(before_state)
                 state.update(
                     {
                         "last_status": "success",
-                        "last_result": f"runtime bootstrap updated to {target}",
+                        "last_result": f"runtime package activated at {target}",
                         "last_target": target,
                         "last_attempt_ts": int(time.time()),
                         "last_session_id": "runtime-bootstrap",
@@ -927,36 +1095,37 @@ def bridge(args: argparse.Namespace) -> dict[str, Any]:
 
                 service_result: dict[str, Any] = {"skipped": True}
                 if not args.no_systemd:
-                    service_result = _restart_and_health(args.systemctl, args.service_name, args.health_timeout_sec)
-
-                post_scheduler = _scheduler_status(install_dir, config)
+                    service_result = _restart_and_health(
+                        args.systemctl, args.service_name, args.health_timeout_sec
+                    )
                 post_import = _install_runtime_probe(install_dir, target)
+                post_scheduler = _scheduler_status(install_dir, config)
+                forbidden_removed = _remove_forbidden_production_tree(forbidden_dir)
+
                 receipt = {
                     "schema": RECEIPT_SCHEMA,
                     "status": "success",
-                    "bridge": (
-                        "runtime-to-runtime"
-                        if runtime_layout
-                        else "legacy-source-to-runtime-only"
-                    ),
+                    "bridge": "runtime-only-activation",
                     "target": target,
                     "archive": str(archive),
-                    "archive_sha256": _sha256(archive),
-                    "manifest_sha256": _sha256(src_dir / MANIFEST_NAME),
+                    "archive_sha256": actual_archive_sha,
+                    "manifest_sha256": _sha256(runtime_dir / MANIFEST_NAME),
                     "before": {
-                        "source_version": old_source_version,
-                        "source_path": str(old_src),
+                        "installed_version": old_runtime_version,
+                        "runtime_path": str(old_runtime) if previous_runtime_moved else "",
                         "state_sha256": before_state_sha,
                         "scheduler": before_scheduler,
                         "profile_authority": profile_authority,
                     },
                     "after": {
-                        "source_version": target,
-                        "source_path": str(src_dir),
+                        "installed_version": target,
+                        "runtime_path": str(runtime_dir),
                         "installed": package_result,
                         "import_probe": post_import,
                         "scheduler": post_scheduler,
                         "state_sha256": _sha256(state_path) if state_path.is_file() else "",
+                        "forbidden_production_tree_removed": forbidden_removed,
+                        "config_include_migration": config_migration,
                     },
                     "service": {
                         "systemd": not bool(args.no_systemd),
@@ -966,31 +1135,33 @@ def bridge(args: argparse.Namespace) -> dict[str, Any]:
                         "health": service_result,
                     },
                     "scheduler_barrier_created": bool(barrier_created),
-                    "rollback_source_retained": True,
+                    "rollback_runtime_retained": bool(previous_runtime_moved),
                     "checked_at": datetime.now(timezone.utc).isoformat(),
                 }
                 receipt_path = _write_receipt(install_dir, receipt)
                 receipt["receipt"] = str(receipt_path)
                 _write_receipt(install_dir, receipt)
+                if old_runtime.exists():
+                    shutil.rmtree(old_runtime, ignore_errors=True)
                 return receipt
             except Exception:
-                # Do not leave the service pointing at a half-installed source.
-                if switched or old_source_moved:
-                    if src_dir.exists():
-                        shutil.rmtree(src_dir)
-                    os.replace(old_src, src_dir)
+                if runtime_switched and runtime_dir.exists():
+                    shutil.rmtree(runtime_dir)
+                if previous_runtime_moved and old_runtime.exists():
+                    os.replace(old_runtime, runtime_dir)
                 if systemd_path is not None:
                     _restore_dropin(systemd_path, previous_dropin)
                     if not args.no_systemd:
                         _systemd_reload(args.systemctl)
-                if legacy_runtime_snapshot is not None:
+                if package_snapshot is not None:
                     try:
-                        _restore_legacy_runtime_package(install_dir, legacy_runtime_snapshot)
+                        _restore_installed_runtime_package(install_dir, package_snapshot)
                     except Exception:
-                        # Preserve the original error. The source rollback is
-                        # still recorded by the caller's traceback/error path;
-                        # the managed venv snapshot is best-effort cleanup.
                         pass
+                if config_before_migration is not None and bool(config_migration.get("changed")):
+                    temporary = config.with_name(f".{config.name}.rollback-{os.getpid()}.tmp")
+                    temporary.write_bytes(config_before_migration)
+                    os.replace(temporary, config)
                 if before_state_bytes is None:
                     state_path.unlink(missing_ok=True)
                 else:
@@ -1001,8 +1172,8 @@ def bridge(args: argparse.Namespace) -> dict[str, Any]:
             finally:
                 if stage.exists():
                     shutil.rmtree(stage, ignore_errors=True)
-                if legacy_runtime_snapshot is not None and legacy_runtime_snapshot.exists():
-                    shutil.rmtree(legacy_runtime_snapshot, ignore_errors=True)
+                if package_snapshot is not None and package_snapshot.exists():
+                    shutil.rmtree(package_snapshot, ignore_errors=True)
 
 
 def _install_runtime_probe(install_dir: Path, target: str) -> dict[str, str]:

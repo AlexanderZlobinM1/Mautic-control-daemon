@@ -262,12 +262,12 @@ SQL segment auto-promotion:
 ## Split Config
 Recommended layout:
 - entrypoint: `/opt/mcd/etc/mcd.toml` (small, package-safe)
-- package defaults: `/opt/mcd/src/etc/mcd-agent.system.example.toml`
-- package defaults: `/opt/mcd/src/etc/mcd-agent.operator.example.toml`
+- package defaults: `/opt/mcd/runtime/etc/mcd-agent.system.example.toml`
+- package defaults: `/opt/mcd/runtime/etc/mcd-agent.operator.example.toml`
 - host overrides: `/opt/mcd/etc/mcd.local.toml`
 
 Entrypoint file uses:
-- `[include].files = ["/opt/mcd/src/etc/mcd-agent.system.example.toml", "/opt/mcd/src/etc/mcd-agent.operator.example.toml", "/opt/mcd/etc/mcd.local.toml"]`
+- `[include].files = ["/opt/mcd/runtime/etc/mcd-agent.system.example.toml", "/opt/mcd/runtime/etc/mcd-agent.operator.example.toml", "/opt/mcd/etc/mcd.local.toml"]`
 
 Merge and precedence:
 1. include files are merged in listed order
@@ -276,7 +276,7 @@ Merge and precedence:
 4. manually set `[runtime]` values override profile baseline
 
 Why this layout:
-- package update can safely replace `/opt/mcd/src` defaults;
+- package update atomically replaces verified `/opt/mcd/runtime` defaults;
 - host custom behavior stays in `/opt/mcd/etc/mcd.local.toml` and is not overwritten by code update.
 
 ## Commands

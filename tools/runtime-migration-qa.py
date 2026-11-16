@@ -90,12 +90,12 @@ def main() -> int:
 
         archive = root / f"runtime-{target_version}.tar.gz"
         _build(source, archive, source_commit)
-        current_src = install / "src"
-        _extract(archive, current_src)
+        current_runtime = install / "runtime"
+        _extract(archive, current_runtime)
         cfg = _cfg(root)
-        self_update._install_requirements_for_staged_source(install, current_src)
-        self_update._pre_switch_smoke_check(install, current_src)
-        self_update._install_agent_package_for_source(install, current_src)
+        self_update._install_requirements_for_staged_source(install, current_runtime)
+        self_update._pre_switch_smoke_check(install, current_runtime)
+        self_update._install_agent_package_for_source(install, current_runtime)
 
         queue_state = {
             "segment_cycle:/var/www/qa": {
@@ -197,7 +197,9 @@ def main() -> int:
         if rollback_ok or "qa injected runtime install failure" not in rollback_message:
             raise RuntimeError(f"rollback proof did not fail-and-restore: {rollback_message}")
         rollback_receipt = json.loads((install / "var" / "runtime-package-receipt.json").read_text())
-        if rollback_receipt["package_version"] != target_version or not (install / "src" / "mcd-runtime-manifest.json").is_file():
+        if rollback_receipt["package_version"] != target_version or not (
+            install / "runtime" / "mcd-runtime-manifest.json"
+        ).is_file():
             raise RuntimeError("rollback did not restore the previous runtime payload")
 
         reopened = TaskStore(cfg.state_db_path, cfg)

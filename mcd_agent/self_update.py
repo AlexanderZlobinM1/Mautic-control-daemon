@@ -14,6 +14,7 @@ import sys
 import tarfile
 import tempfile
 import time
+import tomllib
 from datetime import datetime, timezone
 from typing import Any
 from urllib import request
@@ -487,12 +488,11 @@ def _write_runtime_package_receipt(
 
 
 def _isolated_venv_env() -> dict[str, str]:
-    """Run venv probes without source-tree path injection from the daemon."""
+    """Run venv probes without path injection from an invalid legacy service."""
     env = os.environ.copy()
-    # The daemon may itself be running from /opt/mcd/src or may have been
-    # started with PYTHONPATH pointing there.  Child venv probes must resolve
-    # mcd_agent from site-packages, otherwise a valid package install is
-    # falsely reported as an installed-package path mismatch.
+    # Child venv probes must resolve mcd_agent from site-packages.  Clearing
+    # inherited path injection also lets a package update repair a host whose
+    # old unit or wrapper still points at the forbidden legacy tree.
     env.pop("PYTHONPATH", None)
     env.pop("PYTHONHOME", None)
     return env
@@ -721,6 +721,60 @@ def _install_agent_package_for_source(install_dir: Path, source_dir: Path) -> No
     _install_agent_package_from_runtime_wheel(install_dir, source_dir, runtime_wheel)
 
 
+def _migrate_forbidden_runtime_includes(
+    config_path: str,
+    install_dir: Path,
+    runtime_dir: Path,
+) -> dict[str, Any]:
+    """Rewrite only exact managed default includes from src to runtime."""
+    if not str(config_path or "").strip():
+        return {"changed": False, "replacements": []}
+    path = Path(config_path)
+    if not path.is_file():
+        return {"changed": False, "replacements": []}
+    text = path.read_text(encoding="utf-8")
+    try:
+        root = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise RuntimeError(f"cannot migrate runtime includes in invalid TOML: {path}: {exc}") from exc
+    include = root.get("include") if isinstance(root, dict) else None
+    files = include.get("files", []) if isinstance(include, dict) else []
+    if not isinstance(files, list):
+        raise RuntimeError(f"include.files must be an array before runtime activation: {path}")
+    forbidden_root = (install_dir / "src" / "etc").resolve()
+    runtime_root = (runtime_dir / "etc").resolve()
+    allowed = {"mcd-agent.system.example.toml", "mcd-agent.operator.example.toml"}
+    replacements: list[dict[str, str]] = []
+    updated = text
+    for raw in files:
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        declared = Path(raw)
+        resolved = declared.resolve() if declared.is_absolute() else (path.parent / declared).resolve()
+        if resolved.parent != forbidden_root or resolved.name not in allowed:
+            continue
+        successor = runtime_root / resolved.name
+        if not successor.is_file() or successor.is_symlink():
+            raise RuntimeError(f"verified runtime default include is missing: {successor}")
+        replacement = str(successor) if declared.is_absolute() else os.path.relpath(successor, path.parent)
+        old_double = json.dumps(raw)
+        old_single = "'" + raw.replace("'", "\\'") + "'"
+        if old_double in updated:
+            updated = updated.replace(old_double, json.dumps(replacement), 1)
+        elif old_single in updated:
+            updated = updated.replace(old_single, "'" + replacement.replace("'", "\\'") + "'", 1)
+        else:
+            raise RuntimeError(f"cannot rewrite exact managed runtime include: {raw}")
+        replacements.append({"from": raw, "to": replacement})
+    if updated != text:
+        mode = path.stat().st_mode & 0o777
+        temporary = path.with_name(f".{path.name}.runtime-includes-{os.getpid()}.tmp")
+        temporary.write_text(updated, encoding="utf-8")
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    return {"changed": updated != text, "replacements": replacements}
+
+
 def _ensure_venv_pip(venv_python: Path) -> None:
     env = _isolated_venv_env()
     probe = subprocess.run(
@@ -818,8 +872,8 @@ if not hasattr(backup, "backup_lock_active"):
     if smoke_proc.returncode != 0:
         detail = (smoke_proc.stderr or smoke_proc.stdout or "import smoke failed").strip()
         raise RuntimeError(f"pre-switch smoke failed (import): {detail}")
-    # compileall/import smoke are validation-only.  Do not leave generated
-    # bytecode in the runtime staging tree that will become /opt/mcd/src.
+    # compileall/import smoke are validation-only. Do not leave generated
+    # bytecode in the verified runtime artifact cache.
     for cache_dir in sorted(staged_src_dir.rglob("__pycache__"), reverse=True):
         if cache_dir.is_dir():
             shutil.rmtree(cache_dir, ignore_errors=True)
@@ -1656,34 +1710,6 @@ def apply_update(cfg: AgentConfig, plan: dict[str, Any]) -> tuple[bool, str]:
         _release_update_lock(lock_f)
 
 
-def _verified_legacy_runtime_cache(install_dir: Path, expected_version: str) -> Path | None:
-    """Recognize only the detached cache recorded by the previous updater."""
-    legacy = install_dir / "src"
-    if not legacy.exists() and not legacy.is_symlink():
-        return None
-    if legacy.is_symlink() or not legacy.is_dir() or any(p.is_symlink() for p in legacy.rglob("*")):
-        raise RuntimeError("legacy runtime cache contains unowned links; preserved")
-    manifest = _runtime_manifest(legacy)
-    if manifest is None:
-        raise RuntimeError("unverified legacy source directory is preserved; runtime cache receipt required")
-    receipt_path = install_dir / "var" / "runtime-package-receipt.json"
-    try:
-        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise RuntimeError("legacy runtime cache ownership receipt is missing or invalid") from exc
-    wheel = legacy / str(manifest["wheel"])
-    if not isinstance(receipt, dict) or not (
-        receipt.get("schema") == "mcd-runtime-package-receipt-v1"
-        and receipt.get("runtime_only") is True
-        and receipt.get("package_version") == expected_version == manifest["version"]
-        and receipt.get("source_tree") == str(legacy)
-        and receipt.get("wheel_sha256") == _sha256_file(wheel)
-        and receipt.get("manifest_sha256") == _sha256_file(legacy / _RUNTIME_MANIFEST_NAME)
-    ):
-        raise RuntimeError("legacy runtime cache ownership receipt mismatch; directory preserved")
-    return legacy
-
-
 def _apply_update_locked(cfg: AgentConfig, plan: dict[str, Any], lock_f) -> tuple[bool, str]:
     status = str(plan.get("status", "")).strip().lower()
     if status == "update_available":
@@ -1774,10 +1800,9 @@ def _apply_update_locked(cfg: AgentConfig, plan: dict[str, Any], lock_f) -> tupl
 
     old_src_dir: Path | None = None
     swapped = False
-    legacy_cache: Path | None = None
-    retired_legacy: Path | None = None
+    forbidden_legacy = install_dir / "src"
+    retired_forbidden: Path | None = None
     try:
-        legacy_cache = _verified_legacy_runtime_cache(install_dir, current_installed)
         archive_path = _ensure_update_archive(cfg, plan)
 
         if src_dir.exists():
@@ -1800,13 +1825,14 @@ def _apply_update_locked(cfg: AgentConfig, plan: dict[str, Any], lock_f) -> tupl
         _install_agent_package_for_source(install_dir, src_dir)
         restore_profile_authority(profile_authority)
         _ensure_mcd_service_kill_mode()
-        # The successor package and its import path are verified above. Keep
-        # the complete former owned cache as a rollback artifact, never import
-        # from it and never delete an unverified/foreign source directory.
-        if legacy_cache is not None:
-            retired_legacy = updates_dir / f"runtime.legacy-prev-{now_s}-{time.time_ns()}"
-            os.replace(legacy_cache, retired_legacy)
-
+        _migrate_forbidden_runtime_includes(
+            str(getattr(cfg, "config_file_path", "") or ""),
+            install_dir,
+            src_dir,
+        )
+        if forbidden_legacy.exists() or forbidden_legacy.is_symlink():
+            retired_forbidden = updates_dir / f"forbidden-src.retired-{now_s}-{time.time_ns()}"
+            os.replace(forbidden_legacy, retired_forbidden)
         release_session(
             cfg,
             session_id,
@@ -1826,7 +1852,7 @@ def _apply_update_locked(cfg: AgentConfig, plan: dict[str, Any], lock_f) -> tupl
         _clear_active_campaign_process_state(state)
         if _cluster_update_enabled(cfg):
             local_host = _cluster_local_host_name(cfg)
-            state["last_cluster_update_result"] = f"update applied -> {target}; source switched, service restart scheduled"
+            state["last_cluster_update_result"] = f"update applied -> {target}; runtime package activated, service restart scheduled"
             try:
                 _cluster_update_finalize_download(
                     cfg,
@@ -1854,34 +1880,42 @@ def _apply_update_locked(cfg: AgentConfig, plan: dict[str, Any], lock_f) -> tupl
                 state["last_cleanup_status"] = f"failed:{ce}"
         _write_state(cfg, state)
         try:
-            if legacy_cache is None and old_src_dir is not None and old_src_dir.exists():
+            if old_src_dir is not None and old_src_dir.exists():
                 shutil.rmtree(old_src_dir)
         except Exception:
             pass
         _restart_service_async()
-        return True, f"update applied -> {target}; source switched, service restart scheduled"
+        # No failing activation step remains. The forbidden production tree
+        # has already left its production path atomically; final cleanup is
+        # best-effort and never turns a committed update into a rollback.
+        if retired_forbidden is not None and (retired_forbidden.exists() or retired_forbidden.is_symlink()):
+            try:
+                if retired_forbidden.is_symlink() or not retired_forbidden.is_dir():
+                    retired_forbidden.unlink(missing_ok=True)
+                else:
+                    shutil.rmtree(retired_forbidden)
+            except OSError as cleanup_exc:
+                logging.warning("forbidden production tree cleanup deferred: %s", cleanup_exc)
+        return True, f"update applied -> {target}; runtime package activated, service restart scheduled"
     except Exception as e:
         msg = str(e)
-        # Best-effort rollback from pre-update source copy.
+        # Best-effort rollback from the previous verified runtime artifact.
         rollback_errors: list[str] = []
         try:
-            if retired_legacy is not None and retired_legacy.exists() and legacy_cache is not None:
-                os.replace(retired_legacy, legacy_cache)
+            if retired_forbidden is not None and (retired_forbidden.exists() or retired_forbidden.is_symlink()):
+                if forbidden_legacy.exists() or forbidden_legacy.is_symlink():
+                    raise RuntimeError("cannot restore forbidden production tree: destination exists")
+                os.replace(retired_forbidden, forbidden_legacy)
             if swapped and old_src_dir is not None and old_src_dir.exists():
                 if src_dir.exists():
                     shutil.rmtree(src_dir)
                 os.replace(old_src_dir, src_dir)
-            elif swapped and legacy_cache is not None and legacy_cache.exists():
-                if src_dir.exists():
-                    shutil.rmtree(src_dir)
             elif backup_path.exists():
                 if src_dir.exists():
                     shutil.rmtree(src_dir)
                 with tarfile.open(backup_path, "r:gz") as tf:
                     tf.extractall(install_dir)
-            if legacy_cache is not None and legacy_cache.exists():
-                _install_agent_package_for_source(install_dir, legacy_cache)
-            elif src_dir.exists():
+            if src_dir.exists():
                 _install_agent_package_for_source(install_dir, src_dir)
             restore_profile_authority(profile_authority)
         except Exception as rollback_exc:
@@ -2178,7 +2212,9 @@ def update_status(cfg: AgentConfig) -> dict[str, Any]:
     ):
         cluster_result = str(out.get("last_cluster_update_result") or "")
         if cluster_result.startswith("cluster update: waiting"):
-            out["last_cluster_update_result"] = f"update applied -> {current}; source switched, service restart scheduled"
+            out["last_cluster_update_result"] = (
+                f"update applied -> {current}; runtime package activated, service restart scheduled"
+            )
     out.setdefault("policy", _update_policy(cfg))
     out.setdefault("auto_update_enabled", bool(cfg.mcd_auto_update_enabled))
     return out
