@@ -1,3 +1,8 @@
+## 1.6.96 - 2026-11-17
+
+- Add the terminal machine-readable plugin operation contract and keep plugin
+  registration restore collation-neutral.
+
 ## 1.6.95 - 2026-11-16
 
 - Apply newer MCC winners field by field during the independent runtime control
