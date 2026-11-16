@@ -1,5 +1,12 @@
 # Segment scheduler liveness test algorithm
 
+Empty-contact cleanup gate: either existing task fence held shared prevents
+SQL deletion; exclusive cleanup prevents new shared admission on both fences.
+Failure releases all acquired fences; a second instance remains independent.
+A contact read followed by FK membership insertion remains valid while cleanup
+is deferred. SQLite unit proof is not a live MySQL/Mautic acceptance receipt.
+Evidence: tests/test_empty_leads_cleanup_fence.py.
+
 Install-type gate: ZIP/source with composer.json, composer.lock, config/local.php,
 bin/console and docroot/public stays zip and uses update-package then finish.
 Explicit recommended-project remains composer; competing project owners return

@@ -1,5 +1,8 @@
 ## 1.7.0 — Unreleased architecture candidate
 
+- Exclude empty-contact cleanup from concurrent supervised instance work
+  using the existing segment/import and campaign task fences.
+
 - Classify ZIP/source installations independently of incidental Composer files
   or directory layout; require explicit Composer project ownership or descriptor.
 
