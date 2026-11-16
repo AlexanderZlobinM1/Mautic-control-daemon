@@ -144,7 +144,7 @@ error. The external result retains add-before-remove, allowlist unban, rollback,
 status and cleanup semantics, while daemon poll is clamped to 30..3600 seconds
 with a 300-second default.
 
-### Plugin filesystem boundary (MCC v1.0.2 pending authoritative proof)
+### Plugin filesystem boundary (MCC component v1.0.2)
 
 MCD сохраняет retrieval/cache/integrity выбранного package, manifest retrieval и
 inventory comparison, canonical UID и bundle/install-bundle resolution, Mautic
@@ -162,15 +162,25 @@ MCC-owned recipe through the existing generic external operation seam:
 | read-only filesystem observation | `plugin_filesystem_status` | `managed_root`, `plugins_root`, `bundle`, `state_filename` |
 
 The binding is selected by the exact cached MCC artifact and executed with framed
-`capture_result=true`, synchronous supervision and `offline_only=true`. MCD does
-not silently fall back after a configured binding returns a terminal error. Until
-MCC v1.0.2 has an immutable artifact plus authoritative bound apply/noop/status/
-cleanup/cache-reset/rollback proof, the concrete implementation remains as a
-temporary compatibility path only when the corresponding binding is absent; no
-cutover is declared by this document. The external recipe must reject traversal,
-absolute paths and archive links, constrain `plugins_root`, restore the previous
-bundle on partial failure, recreate cache directories with the declared mode and
-owner semantics, and preserve unrelated sentinel paths.
+`capture_result=true`, synchronous supervision and `offline_only=true`. Before a
+plugin transaction starts, MCD requires the complete five-operation filesystem
+closure. A missing binding, malformed result or terminal external failure stops
+the operation; there is no local filesystem fallback. The external recipe rejects
+traversal, absolute paths and archive links, constrains `plugins_root`, restores
+the previous bundle on partial failure, recreates cache directories with the
+declared mode and owner semantics, and preserves unrelated paths.
+
+The immutable component v1.0.2 was accepted with the same ProductTour 1.1 package
+on clean Composer and ZIP layouts for Mautic 5, 6 and 7. The proof covers initial
+installation, exact Mautic inventory confirmation, repeatable terminal receipts,
+removal and installation after removal. Mautic 7 dependency preparation uses the
+separate immutable host closure v1.0.4: it prepares a writable Composer runtime
+and, for ZIP layouts, the declared package prerequisite before MCD changes the
+plugin tree. MCD still owns Composer dependency selection and every Mautic
+`bin/console` command. Stable MCD 1.6 keeps its legacy boundary and consumes the
+same host preparation as an explicit prerequisite; no OS path is hardcoded back
+into the stable agent. The machine evidence is recorded in
+`docs/qa/mcd-plugin-standalone-sandbox-acceptance-20261117.json`.
 
 The nested public status result is exactly `mcd-plugin-filesystem-status-v1`.
 The framed `mcd_resolved_plugin_filesystem` input additionally requires

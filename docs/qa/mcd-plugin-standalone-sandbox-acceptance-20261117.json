@@ -1,0 +1,185 @@
+{
+  "schema": "mcd-plugin-standalone-sandbox-acceptance-v1",
+  "recorded_at": "2026-11-17T00:30:58+01:00",
+  "scope": {
+    "plugin_uid": "producttourbundle:5-6-7",
+    "bundle": "ProductTourBundle",
+    "version": "1.1",
+    "purpose": "Standalone MCD installation, native Mautic registration and exact inventory confirmation on clean sandboxes",
+    "mcc_registration_required": false,
+    "business_logic_tested": false
+  },
+  "published_inputs": {
+    "custom_manifest": {
+      "url": "https://servercontrol.sales-snap.com/mauticctl/custom/manifest.json",
+      "revision": 7,
+      "sha256": "c7edf57ef6341c39a59ce18c19351c3cf3ea4cf0cdd99b57c9c2b0e06b8a30fa"
+    },
+    "plugin_filesystem_component": {
+      "version": "1.0.2",
+      "url": "https://servercontrol.sales-snap.com/mauticctl/custom/bundles/plugin-filesystem-component-1.0.2-d598551c8817cbc8.tar.gz",
+      "sha256": "d598551c8817cbc8c5c66db02d97f7be538c1be18a7b9987e88efcd43dece303",
+      "bindings": [
+        "plugin_filesystem_status",
+        "plugin_filesystem_apply",
+        "plugin_filesystem_cleanup",
+        "plugin_alias_cleanup",
+        "plugin_cache_reset"
+      ]
+    },
+    "upgrade_os_component": {
+      "version": "1.0.4",
+      "source_revision": "fb98bd11c69171f934fea3fe6f3b146ffaf48d5d",
+      "url": "https://servercontrol.sales-snap.com/mauticctl/custom/bundles/upgrade-os-external-v1.0.4-a224b0ed3842a1aa.tar.gz",
+      "sha256": "a224b0ed3842a1aaa2becda33781000dce47ef6b14278c604e41af25fe55a1ed",
+      "profile_url": "https://servercontrol.sales-snap.com/mauticctl/custom/profiles/upgrade-os-operator-profile-7c93f0f3fa2497ef2bab01b133e1d575630b4aea9398a57332bdad4bd392ae31.json",
+      "profile_sha256": "7c93f0f3fa2497ef2bab01b133e1d575630b4aea9398a57332bdad4bd392ae31",
+      "bindings": [
+        "apt:apt_apply",
+        "composer:composer_host_prepare"
+      ]
+    },
+    "producttour_archives": {
+      "mautic5_sha256": "4ffa40923ffebe5f3047be0e98f882aa7e0e75ec4f16a4a570ed6bd471df32ea",
+      "mautic6_sha256": "54044fc360610e9a9b99ca565eb3988b96c92dc6ee31b51ace9415e7edf28827",
+      "mautic7_sha256": "7e3a3a0f370e85fb64682cbd065cb751a4e4bf2d67564058cb359cfec20d9ca4"
+    }
+  },
+  "mcd_1_7_clean_results": [
+    {
+      "mautic_version": "5.2.12",
+      "layout": "composer",
+      "operation_id": "sb17-5212c-producttour-component102-001",
+      "receipt_sha256": "b9f15c9ecf0189be1f6de7b2a5853efa4451cdf319b1ea476ba4aad88623269d",
+      "terminal_status": "success"
+    },
+    {
+      "mautic_version": "5.2.12",
+      "layout": "zip",
+      "operation_id": "sb17-5212z-producttour-component102-001",
+      "receipt_sha256": "a2b26b9a7795bc6cf5e6ad8e026a38d0ff802aea89930fa50139db72ce122808",
+      "terminal_status": "success"
+    },
+    {
+      "mautic_version": "6.0.10",
+      "layout": "composer",
+      "operation_id": "sb17-6010c-producttour-component102-001",
+      "receipt_sha256": "27c04204ca06279dc9df63e63fb113dc9e0d3bfed72a7e599d99a685bba638d0",
+      "terminal_status": "success"
+    },
+    {
+      "mautic_version": "6.0.9",
+      "layout": "zip",
+      "operation_id": "sb17-609z-producttour-component102-001",
+      "receipt_sha256": "677fdd8d1aa291ad348fcb34032b8df71d0ebd03a87f2cef9ca6315fbeb7198a",
+      "terminal_status": "success"
+    },
+    {
+      "mautic_version": "7.1.3",
+      "layout": "composer",
+      "operation_id": "sb17-713c-r7-clean-producttour-001",
+      "receipt_sha256": "2f35d9704e0a7c499ad0d0ef87d4afb07c8d7bac7b8a5b51c4583512c7dc9d3a",
+      "terminal_status": "success"
+    },
+    {
+      "mautic_version": "7.1.3",
+      "layout": "zip",
+      "operation_id": "sb17-713z-r7-clean-producttour-001",
+      "receipt_sha256": "a21bf2091c2d54110f17fc2c433c6e599c0b1ff75a7170ed16f3d96b19b8cf58",
+      "terminal_status": "success"
+    },
+    {
+      "mautic_version": "7.2.2",
+      "layout": "composer",
+      "operation_id": "sb17-722c-producttour-component102-001",
+      "receipt_sha256": "d7952eb038dd0b4a22e90366897259ee86a15d6fd14ec1c469054a36d62827e5",
+      "terminal_status": "success"
+    }
+  ],
+  "mcd_1_7_lifecycle_results": {
+    "mautic_6_0_10_remove": {
+      "operation_id": "sb17-6010c-producttour-remove-component102-001",
+      "receipt_sha256": "73f041c383adb5575e6696c9d768dafedf11d9e15d9886d4f542cf48c5636fb3"
+    },
+    "mautic_6_0_10_reinstall": {
+      "operation_id": "sb17-6010c-producttour-reinstall-component102-001",
+      "receipt_sha256": "4063bde16c8c65f7a49b99f880219ec59d0ccaee087c78fd2c6e9c25aa87db68"
+    },
+    "mautic_7_2_2_remove": {
+      "operation_id": "sb17-722c-producttour-remove-component102-001",
+      "receipt_sha256": "5721c04565b869a4365a2792f8f3556673e7142d8384e1f1dccb804f2736ec80"
+    },
+    "mautic_7_2_2_reinstall": {
+      "operation_id": "sb17-722c-producttour-reinstall-component102-001",
+      "receipt_sha256": "6ff005825def90bc56dbceb1f8b36a43641e6a62ccaa836774e93023661e480f"
+    }
+  },
+  "mcd_1_6_paired_clean_results": [
+    {
+      "mautic_version": "6.0.10",
+      "layout": "composer",
+      "operation_id": "sb16-6010c-paired-clean-producttour-001",
+      "receipt_sha256": "30e298dc12a1d0c5e9db27f69162f106739af1948e8de3861c3e5d3921182dc1",
+      "terminal_status": "success"
+    },
+    {
+      "mautic_version": "6.0.9",
+      "layout": "zip",
+      "operation_id": "sb16-609z-paired-clean-producttour-001",
+      "receipt_sha256": "a93145b4cd5fc0e4173f82495a30dd02a15c117fec3ae0caa63df9518c719766",
+      "terminal_status": "success"
+    },
+    {
+      "mautic_version": "7.1.3",
+      "layout": "composer",
+      "host_preparation_operation_id": "sb16-713c-paired-clean-producttour-002-hostprep",
+      "host_preparation_frame_sha256": "a9297c1a1cd20750b0782b17c56cb135822aa020c7181e847c0e5a2e09bf24d0",
+      "operation_id": "sb16-713c-paired-clean-producttour-002",
+      "receipt_sha256": "e354eac7cac019c496b52bea582d21d9828eeb52cc88963ad1ca6db2b648c143",
+      "terminal_status": "success"
+    },
+    {
+      "mautic_version": "7.1.3",
+      "layout": "zip",
+      "host_preparation_operation_id": "sb16-713z-paired-clean-producttour-002-hostprep",
+      "host_preparation_frame_sha256": "39eef9821cdcaab1f0b3eb50d12e21dd072976a1a78a76cb30698ad9560c180b",
+      "operation_id": "sb16-713z-paired-clean-producttour-002",
+      "receipt_sha256": "24c46cc637ac2e3c6261e22e7f838eb7eaa913551ab3c4e059d51de27bba6033",
+      "terminal_status": "success"
+    }
+  ],
+  "unit_regression": {
+    "mcd_1_7": "121 passed",
+    "mcd_1_6": "61 passed, 2 subtests passed",
+    "mcd_1_7_full_suite": "2507 passed, 57 skipped, 4 pre-existing baseline failures",
+    "mcd_1_6_full_suite": "2131 passed, 57 skipped, 4 pre-existing baseline failures"
+  },
+  "negative_evidence": [
+    {
+      "issue": "plugin filesystem component rejected its own complete MCD state",
+      "resolved_by": "immutable plugin-filesystem component 1.0.2"
+    },
+    {
+      "issue": "Mautic 7 Composer runtime cache was not writable",
+      "resolved_by": "immutable upgrade-os component 1.0.4"
+    },
+    {
+      "issue": "Mautic 7 ZIP selected task lacked apt_apply",
+      "resolved_by": "production manifest revision 7"
+    },
+    {
+      "issue": "sandbox web containers lacked outbound DNS/HTTPS",
+      "resolved_by": "Mautic Operations runner front-network attachment; tainted leases were discarded"
+    }
+  ],
+  "remaining_owner_gate": {
+    "owner": "plugin and MCC publication owner",
+    "catalog_uid_projections": 33,
+    "matching_public_projections": 10,
+    "drifting_public_projections": 23,
+    "missing_uid_projections": 0,
+    "accepted_exception": "ProductTour 1.1",
+    "rule": "No other plugin is marked accepted until its source compatibility metadata, public manifest row and published archive identity are reconciled."
+  },
+  "result": "producttour_passed_all_selected_clean_major_and_layout_cells; remaining_plugin_catalog_blocked_by_owner_metadata_drift"
+}
