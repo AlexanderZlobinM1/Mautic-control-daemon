@@ -1,5 +1,41 @@
 # MCD Technical Debt
 
+## MCD-TD-004
+
+- Status: open; explicitly deferred, do not change the current repository now
+- Title: Require authenticated access to plugin manifests and package archives
+- Owner scope: MCC/plugin repository ingress and MCD download compatibility; repository rollout remains MCC/Operations-owned
+- Source task: `01a07d46-213b-7e62-b910-08c7a9dacde1`
+- Last updated: 2026-11-16
+
+The current plugin repository allows anonymous reads of both catalog manifests
+and package bytes. Anonymous requests to the Mautic 4–7 manifest paths returned
+HTTP 200. A range GET without an Authorization header for the Mautic 7
+`AdvancedFiltersBundle.tar.gz` package returned HTTP 206 and the gzip magic
+bytes `1f8b`. MCD already supplies its MCC Bearer token when configured, but the
+repository does not currently require it for these resources.
+
+This is a future security correction, not authorization to change the live
+repository, manifests, package URLs or MCD downloader now. Existing plugin
+installation and recovery paths must remain available until the coordinated
+cutover is implemented and accepted.
+
+Acceptance for the later coordinated change:
+
+- Anonymous GET, HEAD and Range requests for every plugin manifest and package
+  archive return 401/403 without exposing catalog or artifact bytes.
+- A registered MCD using the existing Bearer-authenticated request path can list
+  the catalog and install/update a pinned plugin through the ordinary workflow.
+- Authentication remains valid through the existing DNS fallback path while
+  preserving the original HTTPS hostname, Host header and certificate checks.
+- Tokens never enter package URLs, manifests, logs, receipts or cache filenames;
+  invalid, missing and expired credentials fail closed with typed evidence.
+- Direct, scheduled and cluster plugin operations retain filesystem apply,
+  native Mautic reload, cache reset, inventory confirmation and retry semantics.
+- Repository access-control deployment has staged rollback, test-channel proof,
+  package Range/download checks and fleet acceptance before anonymous access is
+  disabled in production.
+
 ## MCD-TD-002
 
 - Status: open
