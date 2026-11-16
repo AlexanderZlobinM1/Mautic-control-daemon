@@ -2295,15 +2295,19 @@ def _queue_local_runtime_delta(
             _clear_local_runtime_push_pending(store)
             pending = None
         return pending
+    if pending is not None and pending["current"] == current:
+        # Retrying delivery is not a new operator edit. Preserve its original
+        # field timestamps so an older pending value cannot defeat a newer
+        # MCC edit merely because another scheduler poll occurred.
+        return pending
     if not allow_unproven and pending is None and not _has_authoritative_local_runtime_edit(
         metadata, baseline, current
     ):
         return None
-    metadata = _record_local_runtime_changes(metadata, baseline, current)
+    event_previous = pending["current"] if pending is not None else baseline
+    metadata = _record_local_runtime_changes(metadata, event_previous, current)
     store.put_runtime_sync(_LOCAL_RUNTIME_METADATA_KEY, metadata)
     previous = pending["previous"] if pending is not None else deepcopy(baseline)
-    if pending is not None and pending["current"] == current:
-        return pending
     next_pending = {"previous": previous, "current": current}
     store.put_runtime_sync(_LOCAL_RUNTIME_PUSH_PENDING_KEY, next_pending)
     return next_pending

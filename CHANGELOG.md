@@ -1,3 +1,9 @@
+## 1.6.91 - 2026-11-16
+
+- Preserve original field event timestamps while retrying an unchanged local
+  runtime delta. A subsequent local edit timestamps only its newly changed
+  fields, so stale pending values cannot become newer merely through delivery.
+
 ## 1.6.90 - 2026-11-16
 
 - Resume rate-limited observation of queued runtime intents using the original
