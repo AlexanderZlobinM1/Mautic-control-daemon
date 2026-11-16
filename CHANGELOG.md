@@ -1,5 +1,8 @@
 ## 1.7.0 — Unreleased architecture candidate
 
+- Preserve pending field event timestamps across delivery retries and restart;
+  timestamp only actual new local edits.
+
 - Observe durable queued runtime intents after restart and consume their
   terminal status instead of freezing synchronization on queued/idempotent.
 
