@@ -1,7 +1,9 @@
 import pytest
+from types import SimpleNamespace
 
 pytestmark = pytest.mark.usefixtures("installed_workload_data")
 
+from mcd_agent import daemon
 from mcd_agent.config import (
     apply_runtime_overrides, load_config, upsert_section_values,
     runtime_overrides_from_config_file, upsert_runtime_values,
@@ -35,14 +37,89 @@ def test_new_null_required_setting_is_rejected_before_apply_or_persistence(tmp_p
     root.write_text('[profile]\nname="custom"\n')
     cfg = load_config(str(root), allow_recover_from_mcc=False)
     before = root.read_bytes()
+    merged, applied, unsupported, blocked = apply_runtime_overrides(cfg, {key: value})
+    assert merged == cfg
+    assert applied == []
+    assert unsupported == []
+    assert blocked == [key]
     for write in (
-        lambda: apply_runtime_overrides(cfg, {key: value}),
         lambda: upsert_runtime_values(str(root), {key: value}),
         lambda: upsert_section_values(str(root), 'runtime', {key: value}),
     ):
         with pytest.raises(ValueError, match=key):
             write()
         assert root.read_bytes() == before
+
+
+def test_invalid_remote_fields_do_not_block_valid_remote_fields(tmp_path):
+    root = tmp_path / 'mcd.toml'
+    root.write_text('[profile]\nname="custom"\n')
+    cfg = load_config(str(root), allow_recover_from_mcc=False)
+    merged, applied, unsupported, blocked = apply_runtime_overrides(
+        cfg,
+        {
+            'import_stall_timeout_sec': '',
+            'segment_lazy_update_enabled': '',
+            'monitored_email_parser_instance_settings': '',
+            'campaign_super_priority': [78, 82],
+            'segment_super_priority': [93, 94],
+        },
+    )
+    assert merged.campaign_super_priority == [78, 82]
+    assert merged.segment_super_priority == [93, 94]
+    assert applied == ['campaign_super_priority', 'segment_super_priority']
+    assert unsupported == []
+    assert blocked == [
+        'import_stall_timeout_sec',
+        'monitored_email_parser_instance_settings',
+        'segment_lazy_update_enabled',
+    ]
+
+
+def test_resolved_persistence_skips_invalid_fields_and_materializes_valid_settings(tmp_path):
+    root = tmp_path / 'mcd.toml'
+    root.write_text('[profile]\nname="custom"\n[runtime]\nimport_stall_timeout_sec=""\n'
+                    'campaign_super_priority=[82]\nsegment_super_priority=[93,94]\n')
+    cfg = load_config(str(root), allow_recover_from_mcc=False)
+    daemon._persist_resolved_runtime_to_config(
+        SimpleNamespace(config_file_path=str(root), profile_name='custom'),
+        {'campaign_super_priority': [82]},
+        {
+            'import_stall_timeout_sec': '',
+            'segment_lazy_update_enabled': '',
+            'monitored_email_parser_instance_settings': '',
+            'campaign_super_priority': [78, 82],
+            'segment_super_priority': [93, 94],
+        },
+        {},
+        full_snapshot=True,
+    )
+    restored = load_config(str(root), allow_recover_from_mcc=False)
+    assert restored.campaign_super_priority == [78, 82]
+    assert restored.segment_super_priority == [93, 94]
+    assert restored.import_stall_timeout_sec == 1800
+
+
+def test_update_recovery_drops_invalid_fields_but_restores_valid_settings(tmp_path):
+    root = tmp_path / 'mcd.toml'
+    root.write_text('[profile]\nname="custom"\n[runtime]\ncampaign_super_priority=[82]\n')
+    cfg = load_config(str(root), allow_recover_from_mcc=False)
+    recovered = daemon._persist_recovered_runtime_values(
+        cfg,
+        {'campaign_super_priority': [82]},
+        {
+            'import_stall_timeout_sec': '',
+            'campaign_super_priority': [78, 82],
+            'segment_super_priority': [93, 94],
+        },
+    )
+    assert recovered == {
+        'campaign_super_priority': [78, 82],
+        'segment_super_priority': [93, 94],
+    }
+    restored = load_config(str(root), allow_recover_from_mcc=False)
+    assert restored.campaign_super_priority == [78, 82]
+    assert restored.segment_super_priority == [93, 94]
 
 
 def test_real_zero_false_empty_containers_and_optional_null_survive_restart(tmp_path):

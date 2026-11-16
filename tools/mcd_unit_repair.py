@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Repair an existing MCD systemd unit without touching Mautic data.
 
-This is the supported first-aid operation for the 1.6.40 ``/opt/mcd/src``
-regression.  It only installs a managed systemd drop-in, reloads systemd and
+This is the supported first-aid operation for an invalid production runtime
+layout. It only installs a managed systemd drop-in, reloads systemd and
 restarts MCD.  The installed venv, config, state database and queues remain
 the source of truth; a source checkout is never created or used.
 """

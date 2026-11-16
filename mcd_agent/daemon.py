@@ -22,7 +22,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 from mcd_agent import __version__
@@ -35,6 +35,7 @@ except Exception:  # pragma: no cover - non-POSIX development environments
 from mcd_agent.config import (
     AgentConfig,
     DEFAULT_PAGE_HITS_ORPHAN_CLEANUP_GRACE_MIN,
+    _invalid_required_runtime_values,
     check_profile_drift_with_mcc,
     load_config,
     persist_profile_authority,
@@ -2099,6 +2100,18 @@ def _persist_resolved_runtime_to_config(
         for key in stable_keys
         if key in resolved and previous.get(key) != resolved.get(key)
     }
+    invalid_updates = _invalid_required_runtime_values(updates)
+    if invalid_updates:
+        logging.warning(
+            "runtime-overrides rejected invalid fields while preserving valid updates: keys=%s",
+            ",".join(invalid_updates),
+        )
+        invalid_set = set(invalid_updates)
+        updates = {
+            key: value
+            for key, value in updates.items()
+            if key not in invalid_set
+        }
     # A cleared optional data reference must suppress the package's initial
     # intake on restart. The empty local marker projects to absence on the
     # existing runtime wire; it does not create a new setting clock/event.
@@ -2374,6 +2387,19 @@ def _persist_recovered_runtime_values(
         for key, value in recovered_runtime.items()
         if current_runtime.get(key) != value
     }
+    invalid_updates = _invalid_required_runtime_values(updates)
+    if invalid_updates:
+        logging.warning(
+            "runtime-overrides recovery rejected invalid fields while preserving valid updates: keys=%s",
+            ",".join(invalid_updates),
+        )
+        invalid_set = set(invalid_updates)
+        updates = {key: value for key, value in updates.items() if key not in invalid_set}
+        recovered_runtime = {
+            key: value
+            for key, value in recovered_runtime.items()
+            if key not in invalid_set
+        }
     if not updates:
         return dict(recovered_runtime)
     try:
@@ -15482,6 +15508,38 @@ def _external_segment_process_liveness_signal(pid: int) -> dict[str, object]:
     return signal
 
 
+def _segment_runtime_lock_evidence(root: str, entity_ids: Sequence[int]) -> dict[str, object]:
+    """Read exact Mautic segment lock ownership without removing lock files."""
+    run_dir = Path(root) / "var" / "cache" / "run"
+    if not run_dir.exists():
+        return {"lock_probe_ok": True, "lock_active": False, "lock_paths": ()}
+    if not run_dir.is_dir():
+        return {"lock_probe_ok": False, "lock_active": True, "lock_paths": ()}
+    paths: list[str] = []
+    active = False
+    try:
+        for entity_id in sorted({int(value) for value in entity_ids if int(value) > 0}):
+            for path in sorted(run_dir.glob(f"sf.mautic-segments-update{entity_id}.*.lock")):
+                if path.is_symlink() or not path.is_file():
+                    active = True
+                    paths.append(str(path))
+                    continue
+                paths.append(str(path))
+                try:
+                    raw = path.read_text(encoding="utf-8", errors="ignore").strip()
+                except OSError:
+                    active = True
+                    continue
+                if not raw.isdigit():
+                    active = True
+                    continue
+                if _is_pid_alive(int(raw)):
+                    active = True
+    except OSError:
+        return {"lock_probe_ok": False, "lock_active": True, "lock_paths": tuple(paths)}
+    return {"lock_probe_ok": True, "lock_active": active, "lock_paths": tuple(paths)}
+
+
 def _import_path_liveness_signal(root: str, command_str: str) -> dict[str, object]:
     """Read upload/log file counters without treating MCD markers as progress."""
 
@@ -16994,6 +17052,10 @@ def _monitor_running(
         else:
             result = {"active": bool(evidence)}
 
+        if bool(result.get("confirmed_clear")):
+            result["active"] = False
+            return result
+
         # Marker-only state is a bounded restart bridge, never a heartbeat.
         independent = any(
             bool(result.get(key))
@@ -17826,6 +17888,8 @@ def _reconcile_running_state(
             except Exception:
                 evidence = {}
         if isinstance(evidence, Mapping):
+            if bool(evidence.get("confirmed_clear")):
+                return False
             if any(
                 bool(evidence.get(key))
                 for key in ("active", "process", "db", "db_process", "runtime_confirmed", "completed")
@@ -18363,6 +18427,7 @@ def run_loop(
         db_active = False
         db_query_progress: list[str] = []
         db_completed = False
+        db_probe_ok = False
         if db_cfg is not None:
             try:
                 for row in MauticDB(db_cfg).fetch_processlist(limit=200):
@@ -18375,8 +18440,10 @@ def run_loop(
                     if any(re.search(rf"(?<!\d){int(chain_id)}(?!\d)", info) for chain_id in chain_ids):
                         db_active = True
                         db_query_progress.append(info[:500])
+                db_probe_ok = True
             except Exception:
                 db_active = False
+                db_probe_ok = False
             try:
                 rows = MauticDB(db_cfg).fetch_segment_definitions(chain_ids)
                 for row in rows:
@@ -18390,11 +18457,21 @@ def run_loop(
         evidence: dict[str, object] = {
             "db": db_active,
             "db_active": db_active,
+            "db_probe_ok": db_probe_ok,
             "completed": db_completed,
         }
         if db_query_progress:
             evidence["db_query_progress"] = tuple(sorted(db_query_progress))
         evidence.update(_external_segment_process_liveness_signal(task.pid))
+        evidence.update(_segment_runtime_lock_evidence(task.root, chain_ids))
+        evidence["confirmed_clear"] = bool(
+            not evidence.get("pid_alive")
+            and not evidence.get("process_group_alive")
+            and evidence.get("db_probe_ok")
+            and not evidence.get("db_active")
+            and evidence.get("lock_probe_ok")
+            and not evidence.get("lock_active")
+        )
         return evidence
 
     def _import_liveness_probe(task: RunningTask) -> Mapping[str, object]:

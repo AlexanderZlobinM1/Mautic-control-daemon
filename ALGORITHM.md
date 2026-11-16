@@ -430,6 +430,8 @@ MCC. После MCD update этот режим включается всегда
 из остальных файлов и продолжает штатное восстановление из MCC. Само повреждение
 не отправляется в MCC как операторская правка. Явные `0`, `false`, пустые списки
 и карты, а также очистка действительно необязательных полей сохраняют свой смысл.
+Ошибочное поле отклоняется отдельно: оно не отменяет применение и сохранение
+остальных корректных настроек из того же snapshot.
 
 Если локальный config-файл изменился во время remote poll/apply, MCD сначала
 сохраняет пару `previous/current` в durable `local_runtime_push_pending`, а
@@ -1404,7 +1406,7 @@ cycle без ручного `segments:update`, profile/capacity/data changes. Ad
 | persisted cycle, never-built admission и atomic claim | `mcd_agent/segment_admission.py`, `daemon.py` | `tests/test_segment_admission.py` |
 | host/instance slots и rotation | `mcd_agent/daemon.py` | `tests/test_campaign_ring_dispatch.py` |
 | external Mautic logical-task dedupe by root/type/entity and regular-slot reservation | `mcd_agent/daemon.py:list_external_runtime_task_summaries`, `_effective_segment_priority_slot_limit`, ordinary segment dispatch | `tests/test_external_task_admission.py`, `tests/test_segment_liveness.py` |
-| adopted external segment PID/process-group progress watchdog with stale re-admission | `mcd_agent/daemon.py:_external_segment_process_liveness_signal`, `_external_segment_watchdog_keepalive` | `tests/test_external_task_admission.py` |
+| adopted segment PID/process-group progress watchdog and fast missing-owner reconciliation only after PID/PGID absent, DB probe clear and exact Mautic segment lock free | `mcd_agent/daemon.py:_external_segment_process_liveness_signal`, `_segment_runtime_lock_evidence`, `_external_segment_watchdog_keepalive` | `tests/test_external_task_admission.py`, `tests/test_segment_liveness.py` |
 | normal hard caps, manual per-instance N+1 и dedicated super budget не смешиваются | `mcd_agent/daemon.py:_scheduler_host_slots_available`, `_scheduler_instance_slots_available`, `_submit_if_slot_uncoordinated` | `tests/test_campaign_ring_dispatch.py` hard-cap/3+ root rows; `tests/test_segment_admission.py` cap-4 и `11+3→14→...→10→11` receipts |
 | важный root с заполненной capacity не ставит global remaining barrier | `mcd_agent/daemon.py:_scheduler_segment_entity_allowed`, `_scheduler_important_root_dispatchable` | `test_remaining_root_uses_free_host_slot_when_important_root_is_instance_full` |
 | root-local continuous monitor/refill, live durable occupancy, eligibility-aware terminal hand-off/rotation and shared claim lifecycle | `mcd_agent/daemon.py:_iter_instances_with_root_dispatch_gate`, `_SchedulerRuntimeRegistry`, `_scheduler_store_running_rows`, `_scheduler_live_task_capacity_keys`, `_scheduler_notify_refill_priority`, `_ordinary_persisted_refill_worker` (`_refill_priority_root_ready`) | `tests/test_segment_liveness.py`; `tests/test_dispatcher_production_sandbox.py` full `run_loop` paths with unavailable static graph, dead TaskStore rows and terminal-root hand-off |
@@ -3634,6 +3636,18 @@ package identity и совпадает с `mcd_agent.__version__`; mismatch бл
 plugin reload до мутаций и не исправляется редактированием клиентского хоста.
 Check-only `exact_count` evidence связывает group, path, needle, expected и
 actual count до принятия fixed-результата.
+
+## MCD 1.8 distribution contract
+
+MCD 1.8 production distribution uses the native APT repository published at
+`repo.sales-snap.com`. APT owns package retrieval, signature verification,
+installation and package-version transitions; MCD runtime state and host
+configuration remain outside package-owned mutable paths. Future supported
+distributions use their native repository/package format from the same
+`repo.sales-snap.com` host. This is one distribution authority with
+distro-specific repository adapters, not parallel update engines. Until 1.8
+is implemented and accepted, this is a future contract and does not change the
+current verified runtime-package release path.
 
 ## Mautic release version evidence
 
