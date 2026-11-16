@@ -79,6 +79,6 @@ def restore(db: Any, bundles: set[str], *, allow_schema_creation: bool = True) -
                 return 0
             cur.execute(f"""UPDATE `{integrations}` i
                 JOIN `{journal}` j ON j.integration_id=i.id
-                JOIN `{plugins}` p ON p.bundle=j.bundle
+                JOIN `{plugins}` p ON BINARY p.bundle=BINARY j.bundle
                 SET i.plugin_id=p.id WHERE i.plugin_id IS NULL AND p.bundle IN ({marks})""", sorted(bundles))
             return int(cur.rowcount)

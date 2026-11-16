@@ -56,6 +56,7 @@ def test_reinstall_restores_only_orphan_registration_references():
     plugin_registration.restore(db, {'DemoBundle'})
     query, names = cur.execute.call_args.args
     assert 'SET i.plugin_id=p.id WHERE i.plugin_id IS NULL' in query
+    assert 'ON BINARY p.bundle=BINARY j.bundle' in query
     assert names == ['DemoBundle']
     assert 'api_keys' not in query
 
