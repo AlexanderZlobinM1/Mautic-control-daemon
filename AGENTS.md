@@ -70,3 +70,10 @@ Use venv site-packages for imports/CLI and verified /opt/mcd/runtime artifact ca
 never prefer or recreate /opt/mcd/src for version/import/update logic. Legacy
 migration validates all consumers and successor runtime before retiring the old
 tree. Preserve working tasks, config and original baseline evidence.
+
+Every fix follows the mandatory Definition of Done in
+docs/mcd-publication-workflow.md: original-scenario regression, canonical merge
+and remote readback, immutable publication, authorized standard rollout, health
+and acceptance evidence. A branch-only or live-only patch is not complete.
+Keep pending gates explicit; do not manufacture success through manual state
+or configuration changes. Preserve the 1.7 publication prohibition above.
