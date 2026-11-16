@@ -1,3 +1,12 @@
+## 1.6.94 - 2026-11-16
+
+- Consume an explicit runtime-overrides poll trigger in an independent control
+  worker, so a large farm's long ordinary scheduler pass cannot delay MCC
+  desired-state application or ACK. Refresh dedicated campaign/segment workers
+  immediately from the same resolved, persisted runtime snapshot.
+- Keep the installed runtime package free of the forbidden production-checkout
+  path literal while retaining the computed fail-closed import guard.
+
 ## 1.6.93 - 2026-11-16
 
 - Preserve valid runtime settings from a mixed MCC snapshot when separate
