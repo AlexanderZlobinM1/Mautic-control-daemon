@@ -12,6 +12,7 @@ STATUS_SCHEMA = "mcd-plugin-job-status-result-v1"
 CANCEL_SCHEMA = "mcd-plugin-job-cancel-result-v1"
 RECORD_SCHEMA = "mcd-plugin-job-record-v1"
 RUNTIME_PREFIX = "plugin_apply_job:"
+CAPABILITY = "mcd-plugin-job-v1"
 
 _UID_RE = re.compile(r"^[a-z0-9][a-z0-9_.:-]{2,127}$")
 _INSTANCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
@@ -20,6 +21,18 @@ _OPERATION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 
 class PluginJobError(ValueError):
     pass
+
+
+def capability() -> dict[str, Any]:
+    return {
+        "schema": "mcd-plugin-capabilities-v1",
+        "version": "1.0",
+        "features": [
+            CAPABILITY,
+            "mcd-plugin-auto-update-policy-v1",
+            "mcd-plugin-catalog-digest-v1",
+        ],
+    }
 
 
 def canonical_request(
