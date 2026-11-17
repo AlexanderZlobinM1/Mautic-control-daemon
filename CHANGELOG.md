@@ -1,3 +1,12 @@
+## 1.6.106 - 2026-11-18
+
+- Keep explicit durable plugin operations dispatchable on `passive` hosts while
+  scheduled segment, campaign and import work remains disabled.
+- Resolve generic plugin successors against factual installed/registered bundle
+  inventory, including predecessors no longer present in the current catalog,
+  before removal and installation; preserve plugin-owned settings and emit the
+  existing terminal receipt on removal failure.
+
 ## 1.6.105 - 2026-11-17
 
 - Reject plugin package projections whose declared Mautic minor compatibility

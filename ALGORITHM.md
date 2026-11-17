@@ -119,6 +119,21 @@ root-only, docroot-only и symlink layouts сохраняют fail-closed semant
 и наружу больше не передаётся; qualified UID другого хоста отклоняется fail-closed.
 Patch context, migration selectors и state sync используют одну и ту же проверку.
 
+Plugin replacement is resolved from the selected package's valid `replaces`
+bundle list and the factual plugin inventory on the target instance. A
+predecessor does not need to remain in the MCC catalog, and its installed
+version is not compared for replacement admission. When a listed predecessor
+is present, MCD first uses the ordinary remove contract (registration rows are
+journaled while plugin-owned settings remain intact), then materializes the
+successor. A failed predecessor removal stops the transaction before successor
+installation and produces one terminal failure receipt. An absent predecessor
+causes no filesystem removal; unrelated inventory entries are never touched.
+
+The `passive` profile disables scheduled segment, campaign and import dispatch;
+it does not reject an explicit durable `plugins_apply` request. Such a request
+continues through the same local FIFO, supervisor, replacement transaction and
+terminal receipt path.
+
 Для внешнего запуска установки существует один машинный путь MCD. Вызывающая
 система передаёт только bare `instance_uid`, стабильный логический `plugin_uid`,
 при необходимости конкретный `package_uid`, действие и свой `operation_id`.

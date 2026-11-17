@@ -18805,21 +18805,40 @@ def _dispatch_manual_requests_for_root(
     pending = store.pending_manual_requests(root, limit=64)
     if not pending:
         return
-    if (str(getattr(config, "profile_name", "") or "").strip().lower() == "passive"):
+    passive_profile = str(getattr(config, "profile_name", "") or "").strip().lower() == "passive"
+    if passive_profile:
+        # Passive disables scheduler-owned Mautic work, not explicit plugin
+        # management. Plugin jobs are already durable, explicitly requested
+        # operations and must reach the normal supervisor/terminal-receipt
+        # path. Reject only the scheduler/manual task families that passive
+        # owns, while preserving unrelated plugin requests in FIFO order.
         rejected = 0
+        dispatchable: list[dict[str, object]] = []
         for row in pending:
+            task_type = str(row.get("task_type") or "").strip().lower()
+            if task_type == "plugins_apply":
+                dispatchable.append(row)
+                continue
             try:
                 req_id = int(row["id"])
             except (KeyError, TypeError, ValueError):
                 continue
             store.finish_manual_request(req_id, "skipped", "passive_profile_user_dispatch_disabled")
             rejected += 1
+        pending = dispatchable
+        if not pending:
+            if rejected:
+                logging.warning(
+                    "[%s] passive profile rejected manual user-task dispatch requests=%s; plugin management remains enabled",
+                    root,
+                    rejected,
+                )
+            return
         logging.warning(
-            "[%s] passive profile rejected manual user-task dispatch requests=%s; cron remains external",
+            "[%s] passive profile rejected manual user-task dispatch requests=%s; dispatching explicit plugin jobs",
             root,
             rejected,
         )
-        return
     manual_segment_snapshot: Mapping[object, object] | None = None
     manual_segment_parents: dict[int, set[int]] = {}
     if db is not None:
