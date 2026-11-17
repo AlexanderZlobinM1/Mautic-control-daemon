@@ -36,6 +36,7 @@ from mcd_agent.executor import build_mautic_exec_args, execute_mautic_command_te
 from mcd_agent.host_identity import resolve_agent_identity
 from mcd_agent.install_type import is_complete_plugin_bundle, plugin_dir_candidates
 from mcd_agent.instance_uid import canonical_instance_uid, instance_uid_matches
+from mcd_agent.mautic_version_cache import read_mautic_version_evidence_read_only
 from mcd_agent.plugin_interactions import selection_conflicts_for_rules
 from mcd_agent.plugin_update_policy import read_policy as read_plugin_auto_update_policy
 from mcd_agent.runtime_overrides import fetch_runtime_overrides
@@ -1145,6 +1146,55 @@ def _ensure_plugin_reload_runtime_packages(config: AgentConfig, install) -> bool
     )
 
 
+def _manifest_mautic_constraints(item: dict[str, Any]) -> tuple[str, list[str]]:
+    for field in ("mautic_versions", "mautic_majors", "mautic_major"):
+        if field not in item or item.get(field) is None:
+            continue
+        raw = item.get(field)
+        values = raw if isinstance(raw, (list, tuple, set)) else [raw]
+        normalized = [str(value or "").strip().lower().removeprefix("v") for value in values]
+        return field, [value for value in normalized if value]
+    return "", []
+
+
+def _plugin_mautic_compatibility(
+    item: dict[str, Any],
+    *,
+    mautic_major: int,
+    exact_version: str | None,
+) -> tuple[bool, str]:
+    field, constraints = _manifest_mautic_constraints(item)
+    if not constraints:
+        return True, "unconstrained"
+
+    parsed: list[tuple[int, ...]] = []
+    for value in constraints:
+        if not re.fullmatch(r"\d+(?:\.\d+){0,2}", value):
+            return False, f"invalid {field} constraint: {value}"
+        parsed.append(tuple(int(part) for part in value.split(".")))
+
+    if field in {"mautic_majors", "mautic_major"}:
+        allowed_majors = {parts[0] for parts in parsed}
+        compatible = int(mautic_major) in allowed_majors
+        return compatible, (
+            f"Mautic major {mautic_major} allowed"
+            if compatible
+            else f"Mautic major {mautic_major} not in {sorted(allowed_majors)}"
+        )
+
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", str(exact_version or ""))
+    if match is None:
+        return False, "exact Mautic version unavailable for mautic_versions admission"
+    actual = tuple(int(value) for value in match.groups())
+    compatible = any(actual[: len(parts)] == parts for parts in parsed)
+    allowed = ",".join(constraints)
+    return compatible, (
+        f"Mautic {actual[0]}.{actual[1]}.{actual[2]} allowed by {allowed}"
+        if compatible
+        else f"Mautic {actual[0]}.{actual[1]}.{actual[2]} not allowed by {allowed}"
+    )
+
+
 def _build_plugin_rows(
     *,
     config: AgentConfig,
@@ -1167,6 +1217,12 @@ def _build_plugin_rows(
     manifest_sha256 = hashlib.sha256(
         json.dumps(manifest, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+    version_evidence = read_mautic_version_evidence_read_only(install_root)
+    exact_mautic_version = (
+        str(version_evidence.get("version") or "").strip() or None
+        if version_evidence.get("source") == "static_metadata"
+        else None
+    )
 
     plugins = manifest.get("plugins", [])
     if not isinstance(plugins, list) or not plugins:
@@ -1229,6 +1285,11 @@ def _build_plugin_rows(
             continue
 
         install_bundle = _install_bundle_for_manifest_bundle(bundle, item)
+        mautic_compatible, mautic_compatibility_reason = _plugin_mautic_compatibility(
+            item,
+            mautic_major=int(major),
+            exact_version=exact_mautic_version,
+        )
         status, reason, installed_version = _plugin_status(
             plugins_dir,
             item,
@@ -1256,7 +1317,10 @@ def _build_plugin_rows(
                 "server_version": str(item.get("version", "")).strip() or "-",
                 "package": str(item.get("package", "")).strip(),
                 "item": item,
-                "selectable": True,
+                "selectable": mautic_compatible,
+                "mautic_compatible": mautic_compatible,
+                "mautic_compatibility_reason": mautic_compatibility_reason,
+                "mautic_version": exact_mautic_version or f"{major}.x",
                 "exclusive_with": exclusive_with,
                 "catalog_sha256": manifest_sha256,
             }
@@ -2097,6 +2161,7 @@ def _apply_plugin_file_changes_impl(
     run_post_steps: bool,
     operation_id: str,
 ) -> bool:
+    _validate_selected_mautic_compatibility(selected, action=action)
     plugins_dir = _resolve_plugins_dir(install_root, create=False)
     changed = False
     if action in {"remove", "purge"} and install.db:
@@ -2854,6 +2919,7 @@ def _run_cluster_plugin_operation(
     rows_by_bundle: dict[str, dict[str, Any]],
     operation_id: str | None = None,
 ) -> int:
+    _validate_selected_mautic_compatibility(selected, action=action)
     if not mysql_state_enabled(config):
         raise RuntimeError("cluster plugin operation requires mysql_hybrid state backend")
     reference_host = _cluster_plugin_reference_host(config)
@@ -3149,6 +3215,7 @@ def _select_plugin_rows_by_identity(
     *,
     plugin_uids: list[str] | None,
     package_uids: list[str] | None,
+    action: str = "install",
 ) -> list[dict[str, Any]]:
     requested_plugins = {
         _normalize_plugin_uid(str(value or ""))
@@ -3163,7 +3230,11 @@ def _select_plugin_rows_by_identity(
     requested_plugins = {value for value in requested_plugins if _valid_plugin_uid(value)}
     requested_packages = {value for value in requested_packages if _valid_plugin_uid(value)}
 
-    selectable = [row for row in rows if bool(row.get("selectable", False))]
+    removal = action in {"remove", "purge"}
+    selectable = [
+        row for row in rows
+        if bool(row.get("selectable", False)) or (removal and isinstance(row.get("item"), dict))
+    ]
     if requested_packages:
         selected: list[dict[str, Any]] = []
         for package_uid in sorted(requested_packages):
@@ -3172,6 +3243,12 @@ def _select_plugin_rows_by_identity(
                 if str(row.get("package_uid", "") or "").strip() == package_uid
             ]
             if not matches:
+                if any(
+                    str(row.get("package_uid", "") or "").strip() == package_uid
+                    and row.get("mautic_compatible") is False
+                    for row in rows
+                ):
+                    raise RuntimeError("plugin_package_incompatible_with_mautic_version")
                 raise RuntimeError(
                     f"package uid(s) not found in manifest for this instance: {package_uid}"
                 )
@@ -3219,6 +3296,12 @@ def _select_plugin_rows_by_identity(
             if str(row.get("plugin_uid", "") or "").strip() == plugin_uid
         ]
         if not matches:
+            if any(
+                str(row.get("plugin_uid", "") or "").strip() == plugin_uid
+                and row.get("mautic_compatible") is False
+                for row in rows
+            ):
+                raise RuntimeError("plugin_package_incompatible_with_mautic_version")
             raise RuntimeError(f"plugin uid(s) not found in manifest for this instance: {plugin_uid}")
         if len(matches) > 1:
             projections = sorted(str(row.get("package_uid", "") or "").strip() for row in matches)
@@ -3228,6 +3311,17 @@ def _select_plugin_rows_by_identity(
             )
         selected.extend(matches)
     return selected
+
+
+def _validate_selected_mautic_compatibility(
+    selected: list[dict[str, Any]],
+    *,
+    action: str,
+) -> None:
+    if action in {"remove", "purge"}:
+        return
+    if any(row.get("mautic_compatible") is False for row in selected):
+        raise RuntimeError("plugin_package_incompatible_with_mautic_version")
 
 
 def run_plugins_interactive(
@@ -3331,7 +3425,7 @@ def run_plugins_interactive(
         print("Bundle                      Server       Package")
         print("--------------------------  -----------  ------------------------------")
         for row in rows:
-            if row["item"] is None:
+            if row["item"] is None or not bool(row.get("selectable", False)):
                 continue
             print(f"{str(row['bundle']):<26}  {str(row['server_version']):<11}  {str(row['package'])}")
         return 0
@@ -3374,6 +3468,9 @@ def run_plugins_interactive(
                     "installed_version": str(row.get("installed_version", "")).strip(),
                     "server_version": str(row.get("server_version", "")).strip(),
                     "selectable": bool(row.get("selectable", False)),
+                    "mautic_compatible": bool(row.get("mautic_compatible", False)),
+                    "mautic_compatibility_reason": str(row.get("mautic_compatibility_reason", "")).strip(),
+                    "mautic_version": str(row.get("mautic_version", "")).strip(),
                     "exclusive_with": list(row.get("exclusive_with", []) or []),
                 }
             )
@@ -3448,6 +3545,7 @@ def run_plugins_interactive(
                 rows,
                 plugin_uids=plugin_uids,
                 package_uids=package_uids,
+                action=chosen_action,
             )
             if not selected:
                 print("No valid plugin or package uid values, try again")
@@ -3459,11 +3557,21 @@ def run_plugins_interactive(
                 continue
             selected = [
                 row for row in rows
-                if bool(row.get("selectable", False)) and str(row.get("bundle", "")).strip() in requested
+                if (
+                    bool(row.get("selectable", False))
+                    or (chosen_action in {"remove", "purge"} and isinstance(row.get("item"), dict))
+                )
+                and str(row.get("bundle", "")).strip() in requested
             ]
             found = {str(row.get("bundle", "")).strip() for row in selected}
             missing = sorted(requested - found)
             if missing:
+                if any(
+                    str(row.get("bundle", "")).strip() in missing
+                    and row.get("mautic_compatible") is False
+                    for row in rows
+                ):
+                    raise RuntimeError("plugin_package_incompatible_with_mautic_version")
                 raise RuntimeError(f"plugin bundle(s) not found in manifest for this instance: {', '.join(missing)}")
         else:
             indexes = _parse_selection(selection_in, max(idx_map.keys()) if idx_map else 0)
@@ -3474,6 +3582,8 @@ def run_plugins_interactive(
         if not selected:
             print("Selected indexes are not actionable, try again")
             continue
+
+        _validate_selected_mautic_compatibility(selected, action=chosen_action)
 
         if chosen_action == "auto":
             selected, policy_skipped = _filter_auto_update_policy(config, install, selected)

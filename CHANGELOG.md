@@ -1,3 +1,13 @@
+## 1.6.105 - 2026-11-17
+
+- Reject plugin package projections whose declared Mautic minor compatibility
+  does not match authoritative static release metadata; cached or missing
+  minor evidence fails closed for installation while removal remains allowed.
+- Add a durable, idempotent host APT upgrade queue with enqueue/status/cancel
+  receipts, restart-safe process adoption and terminal result publication in
+  the regular MCC state heartbeat. Long APT work is not killed or retried by
+  the generic scheduler.
+
 ## 1.6.104 - 2026-11-17
 
 - Make native MCD uninstall fail closed: restore only current MCD-managed cron
