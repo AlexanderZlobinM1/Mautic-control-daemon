@@ -1,3 +1,13 @@
+## 1.6.102 - 2026-11-17
+
+- Resolve required pre-plugin-reload Mautic patch plans from the immutable
+  public plugin catalog when MCC management is not configured, persist local
+  evidence before optional management delivery, and keep repeated runs at a
+  no-write fixed point.
+- Require every public owner patch record to declare an unambiguous Mautic
+  version range; reject unknown, malformed or overlapping applicability before
+  any source mutation.
+
 ## 1.6.101 - 2026-11-17
 
 - Report plugin auto-update policy changes as observed runtime state so MCC's

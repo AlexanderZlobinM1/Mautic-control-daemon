@@ -70,14 +70,6 @@ _PLUGIN_APPLY_RESULT_SCHEMA = "mcd-plugin-apply-result-v1"
 _PLUGIN_OPERATION_RESULT_SCHEMA = "mcd-plugin-operation-result-v2"
 _PLUGIN_OPERATION_RESULT_PREFIX = "MCD_PLUGIN_OPERATION_RESULT="
 _PLUGIN_OPERATION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
-_PLUGIN_FILESYSTEM_REQUIRED_OPERATIONS = (
-    "plugin_filesystem_status",
-    "plugin_filesystem_apply",
-    "plugin_filesystem_cleanup",
-    "plugin_alias_cleanup",
-    "plugin_cache_reset",
-)
-_PLUGIN_FILESYSTEM_STATUS_SCHEMA = "mcd-plugin-filesystem-status-v1"
 _GALERA_DANGEROUS_SQL_RE = re.compile(
     r"^\s*(ALTER|CREATE|DROP|RENAME|TRUNCATE|OPTIMIZE|ANALYZE|CHECK|REPAIR|LOCK|UNLOCK)\b",
     re.IGNORECASE,

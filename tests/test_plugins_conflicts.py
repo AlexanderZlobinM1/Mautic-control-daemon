@@ -561,7 +561,7 @@ class PluginConflictPathTests(unittest.TestCase):
             cfg,
             install,
             phase="before_plugin_reload",
-            trigger="plugin_reload_failure",
+            trigger="daemon_reconcile",
         )
         run_template.assert_not_called()
 
