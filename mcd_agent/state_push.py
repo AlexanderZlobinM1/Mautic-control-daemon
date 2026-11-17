@@ -56,6 +56,8 @@ from mcd_agent.plugin_inventory import (
 )
 from mcd_agent.plugin_jobs import capability as plugin_job_capability
 from mcd_agent.plugin_jobs import recent_statuses as recent_plugin_job_statuses
+from mcd_agent.apt_jobs import capability as apt_job_capability
+from mcd_agent.apt_jobs import recent_statuses as recent_apt_job_statuses
 from mcd_agent.runtime_matrix import build_runtime_profile
 from mcd_agent.inventory import InstanceInventory, MauticInstall, ensure_seeded
 from mcd_agent.instance_uid import canonical_instance_uid
@@ -2634,6 +2636,11 @@ class MCCStatePusher:
 
         payload: dict[str, Any] = {
             "schema": "mcd-state-v1",
+            "apt_capabilities": apt_job_capability(),
+            "apt_jobs": recent_apt_job_statuses(
+                self.runtime_store,
+                mcc_enabled=bool(getattr(self.cfg, "mcc_url", None)),
+            ),
             "plugin_capabilities": plugin_job_capability(),
             "plugin_jobs": recent_plugin_job_statuses(
                 self.runtime_store,

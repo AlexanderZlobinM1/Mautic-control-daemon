@@ -194,6 +194,23 @@ from mcd_agent.plugin_jobs import (
     status_result as plugin_job_status_result,
     with_receipt as plugin_job_with_receipt,
 )
+from mcd_agent.apt_jobs import (
+    CANCEL_SCHEMA as APT_JOB_CANCEL_SCHEMA,
+    ENQUEUE_SCHEMA as APT_JOB_ENQUEUE_SCHEMA,
+    RECORD_SCHEMA as APT_JOB_RECORD_SCHEMA,
+    STATUS_SCHEMA as APT_JOB_STATUS_SCHEMA,
+    TERMINAL_PREFIX as APT_TERMINAL_PREFIX,
+    AptJobError,
+    canonical_request as canonical_apt_job_request,
+    host_task_root as apt_job_host_task_root,
+    output_paths as apt_job_output_paths,
+    request_sha256 as apt_job_request_sha256,
+    runtime_key as apt_job_runtime_key,
+    status_result as apt_job_status_result,
+    terminal_result as apt_terminal_result,
+    validate_operation_id as validate_apt_operation_id,
+    with_receipt as apt_job_with_receipt,
+)
 from mcd_agent.runtime_overrides import (
     apply_remote_overrides,
     fetch_runtime_overrides,
@@ -985,6 +1002,128 @@ def _plugin_job_cli(cfg, args) -> int:
         })
         print(json.dumps(payload, ensure_ascii=True, sort_keys=True))
         return 1
+
+
+def _apt_job_cli(cfg, args) -> int:
+    command = str(args.apt_job_cmd or "").strip().lower()
+    operation_id = str(args.operation_id or "").strip()
+    store = TaskStore(cfg.state_db_path, cfg)
+    try:
+        key = apt_job_runtime_key(operation_id)
+        if command == "enqueue":
+            request = canonical_apt_job_request(operation_id=operation_id)
+            digest = apt_job_request_sha256(request)
+            existing = store.get_runtime_sync(key)
+            if isinstance(existing, dict) and existing:
+                if existing.get("request_sha256") != digest:
+                    raise AptJobError("apt_operation_id_conflict")
+                request_id = int(existing.get("request_id") or 0)
+                status = store.get_manual_request_status(request_id) or "unknown"
+                payload = apt_job_with_receipt({
+                    "schema": APT_JOB_ENQUEUE_SCHEMA,
+                    "status": "accepted",
+                    "idempotent_replay": True,
+                    "operation_id": operation_id,
+                    "job_id": operation_id,
+                    "request_id": request_id,
+                    "job_status": status,
+                    "request_sha256": digest,
+                })
+                print(json.dumps(payload, ensure_ascii=True, sort_keys=True))
+                return 0
+
+            executable = shutil.which("mcd-cli") or "mcd-cli"
+            command_tokens = [
+                executable,
+                "apt-upgrade",
+                "--config",
+                str(cfg.config_file_path),
+                "--yes",
+                "--machine-result",
+                "--operation-id",
+                operation_id,
+            ]
+            timeout_sec = max(6 * 60 * 60, int(getattr(cfg, "command_timeout_sec", 0) or 0))
+            root = apt_job_host_task_root(cfg.state_db_path)
+            request_id = store.enqueue_manual_request(
+                root=root,
+                task_type="apt_upgrade",
+                entity_id=None,
+                command_str=_MANUAL_CMD_SEP.join(command_tokens),
+                timeout_sec=timeout_sec,
+            )
+            stdout_path, stderr_path = apt_job_output_paths(cfg.state_db_path, operation_id)
+            store.put_runtime_sync(key, {
+                "schema": APT_JOB_RECORD_SCHEMA,
+                "operation_id": operation_id,
+                "request_id": request_id,
+                "request_sha256": digest,
+                "request": request,
+                "root": root,
+                "stdout_path": stdout_path,
+                "stderr_path": stderr_path,
+                "created_at": time.time(),
+            })
+            payload = apt_job_with_receipt({
+                "schema": APT_JOB_ENQUEUE_SCHEMA,
+                "status": "accepted",
+                "idempotent_replay": False,
+                "operation_id": operation_id,
+                "job_id": operation_id,
+                "request_id": request_id,
+                "job_status": "pending",
+                "request_sha256": digest,
+            })
+            print(json.dumps(payload, ensure_ascii=True, sort_keys=True))
+            return 0
+
+        record = store.get_runtime_sync(key)
+        if not isinstance(record, dict) or record.get("schema") != APT_JOB_RECORD_SCHEMA:
+            raise AptJobError("apt_job_not_found")
+        request_id = int(record.get("request_id") or 0)
+        request_status = str(store.get_manual_request_status(request_id) or "unknown").strip().lower()
+        if command == "cancel":
+            cancelled = store.cancel_manual_request(request_id, note="operator_cancelled")
+            current = str(store.get_manual_request_status(request_id) or request_status).strip().lower()
+            already_cancelled = current == "cancelled" and not cancelled
+            payload = apt_job_with_receipt({
+                "schema": APT_JOB_CANCEL_SCHEMA,
+                "status": "cancelled" if cancelled or already_cancelled else "not_cancelled",
+                "operation_id": operation_id,
+                "job_id": operation_id,
+                "request_id": request_id,
+                "job_status": current,
+                "idempotent_replay": already_cancelled,
+                "reason": "" if cancelled or already_cancelled else "job_is_not_pending",
+            })
+            print(json.dumps(payload, ensure_ascii=True, sort_keys=True))
+            return 0 if cancelled or current == "cancelled" else 1
+        if command != "status":
+            raise AptJobError("apt_job_command_invalid")
+        payload = apt_job_status_result(
+            store,
+            record,
+            mcc_enabled=bool(getattr(cfg, "mcc_url", None)),
+        )
+        print(json.dumps(payload, ensure_ascii=True, sort_keys=True))
+        return 0
+    except Exception as exc:
+        schema = {
+            "enqueue": APT_JOB_ENQUEUE_SCHEMA,
+            "status": APT_JOB_STATUS_SCHEMA,
+            "cancel": APT_JOB_CANCEL_SCHEMA,
+        }.get(command, APT_JOB_STATUS_SCHEMA)
+        payload = apt_job_with_receipt({
+            "schema": schema,
+            "status": "error",
+            "operation_id": operation_id,
+            "job_id": operation_id,
+            "reason": str(exc),
+        })
+        print(json.dumps(payload, ensure_ascii=True, sort_keys=True))
+        return 1
+    finally:
+        store.close()
 
 
 def _run_manual_command_with_scheduler(
@@ -2524,6 +2663,21 @@ def _build_parser() -> argparse.ArgumentParser:
     apt_upg.add_argument("--config", default=default_cfg)
     apt_upg.add_argument("--yes", action="store_true", help="Do not ask confirmation")
     apt_upg.add_argument("--json", action="store_true")
+    apt_upg.add_argument("--machine-result", action="store_true")
+    apt_upg.add_argument("--operation-id", default="")
+
+    apt_job = sub.add_parser(
+        "apt-job",
+        help="Enqueue and inspect a durable host APT upgrade",
+    )
+    apt_job_sub = apt_job.add_subparsers(dest="apt_job_cmd", required=True)
+    apt_job_enqueue = apt_job_sub.add_parser("enqueue")
+    apt_job_enqueue.add_argument("--config", default=default_cfg)
+    apt_job_enqueue.add_argument("--operation-id", required=True)
+    for name in ("status", "cancel"):
+        job_parser = apt_job_sub.add_parser(name)
+        job_parser.add_argument("--config", default=default_cfg)
+        job_parser.add_argument("--operation-id", required=True)
 
     sdb = sub.add_parser("state-db", help="State DB status/bootstrap for legacy->mysql_hybrid migration")
     sdb.add_argument("--config", default=default_cfg)
@@ -3599,6 +3753,10 @@ def main() -> int:
         cfg = load_config(args.config)
         return _plugin_job_cli(cfg, args)
 
+    if args.cmd == "apt-job":
+        cfg = load_config(args.config)
+        return _apt_job_cli(cfg, args)
+
     if args.cmd in {"plugins", "plugin"}:
         cfg = load_config(args.config)
         if bool(args.machine_result):
@@ -4435,6 +4593,20 @@ def main() -> int:
         note = maybe_notify_update(cfg)
         if note:
             print(f"NOTICE: {note}")
+        operation_id = str(args.operation_id or "").strip()
+        if bool(args.machine_result):
+            try:
+                operation_id = validate_apt_operation_id(operation_id)
+            except AptJobError as exc:
+                print(json.dumps({
+                    "schema": "mcd-apt-operation-result-v1",
+                    "terminal": True,
+                    "status": "failed",
+                    "operation_id": operation_id,
+                    "job_id": operation_id,
+                    "reason": str(exc),
+                }, ensure_ascii=True, sort_keys=True))
+                return 2
         if not bool(args.yes):
             ans = _ask(
                 "Run the MCC-bound APT upgrade with keep-local-config behavior? [y/N]: "
@@ -4476,8 +4648,30 @@ def main() -> int:
             ok = str(external.get("status") or "").strip().lower() == "ok" and str(payload.get("status") or "").strip().lower() == "ok"
             if ok:
                 _push_state_after_change(cfg, "apt-upgrade")
+            if bool(args.machine_result):
+                print(
+                    APT_TERMINAL_PREFIX
+                    + json.dumps(
+                        apt_terminal_result(operation_id, payload),
+                        ensure_ascii=True,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                )
             return 0 if ok else 1
-        print(json.dumps({"status": "error", "reason": "apt_upgrade_binding_not_configured"}, ensure_ascii=True))
+        payload = {"status": "error", "reason": "apt_upgrade_binding_not_configured"}
+        if bool(args.machine_result):
+            print(
+                APT_TERMINAL_PREFIX
+                + json.dumps(
+                    apt_terminal_result(operation_id, payload),
+                    ensure_ascii=True,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+        else:
+            print(json.dumps(payload, ensure_ascii=True))
         return 1
 
     if args.cmd == "tasks-lifecycle":

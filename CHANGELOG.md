@@ -1,5 +1,13 @@
 ## 1.7.0 — Unreleased architecture candidate
 
+- Reject plugin package projections whose declared Mautic minor compatibility
+  does not match authoritative static release metadata; cached or missing
+  minor evidence fails closed for installation while removal remains allowed.
+- Add a durable, idempotent host APT upgrade queue with enqueue/status/cancel
+  receipts, restart-safe process adoption and terminal result publication in
+  the regular MCC state heartbeat. Long APT work is not killed or retried by
+  the generic scheduler.
+
 - Forward-port the stable fail-closed native uninstall contract: restore only
   current MCD cron marker pairs, preserve foreign/new cron and recovery state,
   verify service/filesystem transitions, and emit a terminal machine receipt.

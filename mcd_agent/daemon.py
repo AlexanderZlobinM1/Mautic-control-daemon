@@ -17652,7 +17652,7 @@ def _monitor_running(
                 # and races the next FIFO item; the next poll/reconciliation
                 # owns any deliberate retry decision.  Explicit retry calls
                 # still pass through _respawn_task's per-instance singleton.
-                if rc != 0 and not lock_busy and task.task_type != "import":
+                if rc != 0 and not lock_busy and task.task_type not in {"import", "apt_upgrade"}:
                     logging.warning("[%s] %s entity=%s failed rc=%s", task.root, task.task_type, task.entity_id, rc)
                     retry_max = _effective_task_retry_max(config, task)
                     retry_enabled = (retry_max <= 0) or (retry_max > 1)
@@ -17786,6 +17786,12 @@ def _monitor_running(
         if _plugin_operation_runtime_digest_from_task(task):
             timeout_threshold = None
 
+        # APT owns its own package-manager locks and may legitimately run for
+        # hours.  It is never killed or implicitly retried by the generic
+        # scheduler; its terminal receipt or explicit operator retry owns the
+        # outcome.
+        if task.task_type == "apt_upgrade":
+            timeout_threshold = None
         if alive and (timeout_threshold is None or elapsed <= timeout_threshold):
             _segment_runtime_marker_write(store, task, status="running", now_ts=now)
             continue
@@ -18247,6 +18253,67 @@ def _load_orphans_from_store(store: TaskStore) -> dict[str, RunningTask]:
         t = _running_task_from_row(row)
         out[t.task_key] = t
     return out
+
+
+def _dispatch_host_manual_requests(
+    *,
+    config: AgentConfig,
+    store: TaskStore,
+    running: dict[str, RunningTask],
+    popens: dict[str, subprocess.Popen[bytes]],
+) -> None:
+    """Dispatch explicit host operations without requiring a Mautic instance.
+
+    The queue is durable and FIFO.  Only the narrow APT job contract is
+    accepted here; arbitrary commands stored in TaskStore are rejected before
+    process creation.
+    """
+
+    from mcd_agent.apt_jobs import (
+        host_task_root as apt_job_host_task_root,
+        output_paths as apt_job_output_paths,
+        validate_operation_id as validate_apt_operation_id,
+    )
+
+    root = apt_job_host_task_root(config.state_db_path)
+    pending = store.pending_manual_requests(root, limit=32)
+    for row in pending:
+        req_id = int(row["id"])
+        task_type = str(row["task_type"] or "").strip().lower()
+        args = [value for value in str(row["command_str"] or "").split(_CMD_SEP) if value]
+        if task_type != "apt_upgrade" or "apt-upgrade" not in args:
+            store.finish_manual_request(req_id, "failed", "invalid_host_request_payload")
+            continue
+        try:
+            operation_index = args.index("--operation-id")
+            operation_id = validate_apt_operation_id(args[operation_index + 1])
+        except (ValueError, IndexError):
+            store.finish_manual_request(req_id, "failed", "apt_operation_id_missing")
+            continue
+        stdout_path, stderr_path = apt_job_output_paths(config.state_db_path, operation_id)
+        Path(stdout_path).parent.mkdir(parents=True, exist_ok=True)
+        launched = _submit_if_slot(
+            config=config,
+            store=store,
+            running=running,
+            root=root,
+            task_type="apt_upgrade",
+            entity_id=None,
+            args=args,
+            timeout_sec=int(row["timeout_sec"] or max(6 * 60 * 60, config.command_timeout_sec)),
+            max_parallel_for_type=1,
+            popens=popens,
+            ignore_limit=True,
+            manual_request_id=req_id,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+        )
+        if not launched:
+            # Busy/update-fenced work remains queued; it is never converted to
+            # a false failure merely because the slot is unavailable now.
+            return
+        store.mark_manual_request_launched(req_id, _task_key(root, "apt_upgrade", None))
+        return
 
 
 def _dispatch_manual_requests_for_root(
@@ -21449,6 +21516,22 @@ def run_loop(
             else:
                 time.sleep(1.0)
 
+    def _host_manual_job_worker() -> None:
+        while _test_stop_event is None or not _test_stop_event.is_set():
+            try:
+                _dispatch_host_manual_requests(
+                    config=config,
+                    store=store,
+                    running=running,
+                    popens=popens,
+                )
+            except Exception as exc:
+                logging.warning("host manual job dispatch failed: %s", exc)
+            if _test_stop_event is not None:
+                _test_stop_event.wait(1.0)
+            else:
+                time.sleep(1.0)
+
     if not single_cycle:
         threading.Thread(
             target=_active_cycle_observation_worker,
@@ -21476,6 +21559,18 @@ def run_loop(
             name="mcd-runtime-poll-control",
             daemon=True,
         ).start()
+        threading.Thread(
+            target=_host_manual_job_worker,
+            name="mcd-host-manual-jobs",
+            daemon=True,
+        ).start()
+    else:
+        _dispatch_host_manual_requests(
+            config=config,
+            store=store,
+            running=running,
+            popens=popens,
+        )
 
     while _test_stop_event is None or not _test_stop_event.is_set():
         # Only refresh the snapshot here.  Each configured instance owns an

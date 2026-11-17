@@ -30,6 +30,23 @@ must pass its separate check. Source metadata drift before mutation must
 fail even when the target reader still returns its original lock value.
 Evidence: test_source_identity_is_independent_of_composer_target_identity.
 
+Plugin minor admission regression: exact static Mautic release metadata admits
+only matching package projections. A cache fallback or missing exact release
+fails closed for `mautic_versions`, while a major-only declaration remains
+usable. Explicit incompatible install/update is rejected before filesystem or
+Mautic mutation; remove/purge remains available. Standalone and registered
+catalogs must produce the same decision. Evidence:
+`tests/test_plugin_mautic_compatibility.py`.
+
+Durable APT job regression: enqueue persists the canonical operation before
+returning acceptance; replay with the same operation ID is idempotent. Busy or
+update-fenced host dispatch remains pending. No Mautic instance is required.
+A terminal receipt remains authoritative even if the scheduler observed the
+adopted PID disappear after restart, and recent heartbeat status exposes the
+same receipt without local paths. The generic timeout/retry path must not kill
+or duplicate an APT upgrade. Evidence: `tests/test_apt_jobs.py`,
+`tests/test_task_lifecycle.py`, `tests/test_self_update_version_reporting.py`.
+
 Этот документ описывает исполняемую матрицу M6/M7 для ordinary segment
 cycles. Локальная unit-матрица не использует production host, не запускает
 реальный Mautic и не меняет profile/config/data; её зелёный результат не
