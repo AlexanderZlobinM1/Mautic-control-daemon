@@ -1,0 +1,83 @@
+{
+  "schema": "mcd-m4-public-patch-run-transcript-v1",
+  "candidate_commit": "a34f3fe56d1e081eb619dc5aa9f9e4b5de310eed",
+  "candidate_wheel_sha256": "e68b9c4021415362a7b226eb2bd5aadc0fc530783c2a42722293a48945acdf75",
+  "sandbox": {
+    "mautic_version": "4.4.13",
+    "php_version": "8.0.30",
+    "instance_uid": "www-1d94d5bb",
+    "management_delivery": "not_configured",
+    "standalone_config_sha256": "8594b0a2e038f866abbc975a27c62a8a891f70aa533167c6c7d47882d7e9d33e"
+  },
+  "operations": [
+    {
+      "operation_id": "m4-public-patch-clean-001",
+      "argv": [
+        "/opt/mcd/acceptance/mcd170-voucher-44/venv/bin/mcd-cli",
+        "plugins",
+        "--config",
+        "/opt/mcd/acceptance/mcd170-voucher-44/etc-mcd.toml",
+        "--machine-result",
+        "--instance-uid",
+        "www-1d94d5bb",
+        "--plugin-uid",
+        "voucherbundle:4",
+        "--action",
+        "install",
+        "--operation-id",
+        "m4-public-patch-clean-001",
+        "--yes",
+        "--no-color"
+      ],
+      "terminal_result": {"action":"install","automatic_replay_allowed":false,"cache_inventory_confirmed":true,"catalog_sha256":"9f1c74e5e8e649affb22ef22d797be9944f39729e3df1a2b2a2947dc0d70b1d9","error":"","error_code":"","execution_state":"confirmed_success","files_applied":true,"filesystem_changed":true,"instance_uid":"www-1d94d5bb","inventory":[{"bundle":"VoucherBundle","confirmed":true,"expected_version":"1.10.4","install_bundle":"VoucherBundle","installed_version":"1.10.4","reason":"version match","status":"OK"}],"manual_recovery_required":false,"mcd_version":"1.7.0.dev0","operation":"plugin_apply","operation_id":"m4-public-patch-clean-001","package_uids":[],"partial_state":false,"plugin_uids":["voucherbundle:4"],"post_step_status":"success","rc":0,"receipt_sha256":"670eb9234772e77de334c3fa314e72aabeb1734a93217d8bd62a3f42aea3ffad","rollback_status":"not_required","schema":"mcd-plugin-operation-result-v2","selected":[{"bundle":"VoucherBundle","expected_version":"1.10.4","install_bundle":"VoucherBundle","package_uid":"legacy.voucherbundle","plugin_uid":"voucherbundle:4"}],"state_confirmation_required":false,"status":"success","terminal":true},
+      "patch_receipt_path": "first-patch-local-receipt.json",
+      "patch_receipt_sha256": "8dcf9a2ca9fee38f9380773b1964e1fa122d175625f7dfa3c03ec751f830c5eb"
+    },
+    {
+      "operation_id": "m4-public-patch-clean-002",
+      "argv": [
+        "/opt/mcd/acceptance/mcd170-voucher-44/venv/bin/mcd-cli",
+        "plugins",
+        "--config",
+        "/opt/mcd/acceptance/mcd170-voucher-44/etc-mcd.toml",
+        "--machine-result",
+        "--instance-uid",
+        "www-1d94d5bb",
+        "--plugin-uid",
+        "voucherbundle:4",
+        "--action",
+        "install",
+        "--operation-id",
+        "m4-public-patch-clean-002",
+        "--yes",
+        "--no-color"
+      ],
+      "terminal_result": {"action":"install","automatic_replay_allowed":false,"cache_inventory_confirmed":true,"catalog_sha256":"9f1c74e5e8e649affb22ef22d797be9944f39729e3df1a2b2a2947dc0d70b1d9","error":"","error_code":"","execution_state":"confirmed_success","files_applied":true,"filesystem_changed":true,"instance_uid":"www-1d94d5bb","inventory":[{"bundle":"VoucherBundle","confirmed":true,"expected_version":"1.10.4","install_bundle":"VoucherBundle","installed_version":"1.10.4","reason":"version match","status":"OK"}],"manual_recovery_required":false,"mcd_version":"1.7.0.dev0","operation":"plugin_apply","operation_id":"m4-public-patch-clean-002","package_uids":[],"partial_state":false,"plugin_uids":["voucherbundle:4"],"post_step_status":"success","rc":0,"receipt_sha256":"afa79e90014f83f6fc024e0ae7b567bdfa9bfc228e0c643ee8898a6e9c26bc5e","rollback_status":"not_required","schema":"mcd-plugin-operation-result-v2","selected":[{"bundle":"VoucherBundle","expected_version":"1.10.4","install_bundle":"VoucherBundle","package_uid":"legacy.voucherbundle","plugin_uid":"voucherbundle:4"}],"state_confirmation_required":false,"status":"success","terminal":true},
+      "patch_receipt_path": "fixed-point-patch-local-receipt.json",
+      "patch_receipt_sha256": "fac452cca8adc43494e26e1ad34ab4a4ff7edba97105b3dd16f2c921e50455de"
+    }
+  ],
+  "core_file_observations": {
+    "before_first_operation": {
+      "app/bundles/PluginBundle/Bundle/PluginBundleBase.php": {"sha256":"90bb4a242094840487e1b24e418ad787336659e2f10627951ab51b38ac4e4a17"},
+      "app/bundles/IntegrationsBundle/Migration/Engine.php": {"sha256":"094d55b3f73458eacb9e3a2fe6e2ca53cf5588529a598d131d4b082a8e62cc3b"}
+    },
+    "after_first_operation": {
+      "app/bundles/PluginBundle/Bundle/PluginBundleBase.php": {"sha256":"6263548a6827d90111e34c7b3830ca73ff003db321c7c8a37f7e36aacfc6a08e"},
+      "app/bundles/IntegrationsBundle/Migration/Engine.php": {"sha256":"526c32693b2232f5a98d287d7ac8f1c0fd471112aa0aac274eb91d912fcb4547"}
+    },
+    "before_fixed_point_operation": {
+      "app/bundles/PluginBundle/Bundle/PluginBundleBase.php": {"sha256":"6263548a6827d90111e34c7b3830ca73ff003db321c7c8a37f7e36aacfc6a08e","mtime_epoch":1794915370},
+      "app/bundles/IntegrationsBundle/Migration/Engine.php": {"sha256":"526c32693b2232f5a98d287d7ac8f1c0fd471112aa0aac274eb91d912fcb4547","mtime_epoch":1794915370}
+    },
+    "after_fixed_point_operation": {
+      "app/bundles/PluginBundle/Bundle/PluginBundleBase.php": {"sha256":"6263548a6827d90111e34c7b3830ca73ff003db321c7c8a37f7e36aacfc6a08e","mtime_epoch":1794915370},
+      "app/bundles/IntegrationsBundle/Migration/Engine.php": {"sha256":"526c32693b2232f5a98d287d7ac8f1c0fd471112aa0aac274eb91d912fcb4547","mtime_epoch":1794915370}
+    }
+  },
+  "preserved_source_artifacts": {
+    "plugin_marker_sha256": "e27865c09148f4070069cf27f8dc50b55dcecefb7ef0be9804b9480da69cddaa",
+    "first_execution_ledger_sha256": "399c5b2f5b01cb4d277def7722ecb8cd06ff8124ab6cbbc4c57437638bc1e7ac",
+    "fixed_point_execution_ledger_sha256": "8d7a6d87ecd7f1432f73b86910216203f711f0ed260608f09daa68da2ef9a041"
+  }
+}
