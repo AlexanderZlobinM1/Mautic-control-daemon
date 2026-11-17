@@ -23,6 +23,7 @@ from mcd_agent.plugins import (
     _cluster_plugin_row_signature,
     _cluster_plugin_wait_file_sync,
     _canonical_plugin_uid,
+    _canonical_package_uid,
     _assert_plugin_bundles_registered,
     _ensure_plugin_reload_runtime_packages,
     _registration_aware_status,
@@ -1282,6 +1283,17 @@ class PluginConflictPathTests(unittest.TestCase):
         self.assertEqual(
             _canonical_plugin_uid({"plugin_uid": "Vendor.Custom:6"}, "IgnoredBundle"),
             "vendor.custom:6",
+        )
+        self.assertEqual(
+            _canonical_package_uid(
+                {"package_uid": "Hostnet.Auth.Managed:6-7"},
+                "HostnetAuthManagedBundle",
+            ),
+            "hostnet.auth.managed:6-7",
+        )
+        self.assertEqual(
+            _canonical_package_uid({}, "HostnetAuthBundle"),
+            "legacy.hostnetauthbundle",
         )
 
     def test_existing_state_connection_does_not_ensure_schema(self) -> None:

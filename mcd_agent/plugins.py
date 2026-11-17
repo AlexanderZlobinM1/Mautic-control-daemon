@@ -132,6 +132,22 @@ def _canonical_plugin_uid(item: dict[str, Any], bundle: str) -> str:
     return _normalize_plugin_uid(f"{bundle}:{'-'.join(str(value) for value in majors)}")
 
 
+def _canonical_package_uid(item: dict[str, Any], bundle: str) -> str:
+    """Return the stable identity of one package projection.
+
+    ``plugin_uid`` identifies the logical plugin and may therefore be shared by
+    mutually exclusive package variants. ``package_uid`` identifies one such
+    variant and must stay stable when its version or archive changes. The
+    namespaced fallback keeps legacy manifests usable until their owner
+    publishes an explicit projection identity.
+    """
+    explicit = _normalize_plugin_uid(str(item.get("package_uid", "") or ""))
+    if _valid_plugin_uid(explicit):
+        return explicit
+    fallback = _normalize_plugin_uid(f"legacy.{bundle}")
+    return fallback if _valid_plugin_uid(fallback) else ""
+
+
 def _install_bundle_for_manifest_bundle(bundle: str, item: dict[str, Any] | None = None) -> str:
     """
     Resolve filesystem install directory for a manifest bundle key.
@@ -319,13 +335,14 @@ def _cluster_plugin_row_signature(action: str, selected: list[dict[str, Any]], a
                 "bundle": bundle,
                 "install_bundle": str(row.get("install_bundle") or _install_bundle_for_manifest_bundle(bundle, item_dict)).strip(),
                 "plugin_uid": str(row.get("plugin_uid", "") or "").strip(),
+                "package_uid": str(row.get("package_uid", "") or "").strip(),
                 "version": str((item_dict or {}).get("version", "") or row.get("server_version", "") or "").strip(),
                 "sha256": str((item_dict or {}).get("sha256", "") or "").strip(),
             }
         )
     payload = {
         "action": str(action or "").strip(),
-        "rows": sorted(rows, key=lambda x: (x.get("plugin_uid") or "", x.get("bundle") or "")),
+        "rows": sorted(rows, key=lambda x: (x.get("plugin_uid") or "", x.get("package_uid") or "")),
         "auto_remove": sorted(str(x).strip() for x in auto_remove_bundles if str(x).strip()),
     }
     raw = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
@@ -1479,6 +1496,7 @@ def _build_plugin_rows(
                 {
                     "idx": selectable_idx,
                     "plugin_uid": "",
+                    "package_uid": "",
                     "bundle": bundle,
                     "display_name": bundle,
                     "install_bundle": bundle,
@@ -1514,6 +1532,7 @@ def _build_plugin_rows(
             {
                 "idx": selectable_idx,
                 "plugin_uid": _canonical_plugin_uid(item, bundle),
+                "package_uid": _canonical_package_uid(item, bundle),
                 "bundle": bundle,
                 "display_name": str(item.get("display_name", "")).strip() or bundle,
                 "install_bundle": install_bundle,
@@ -1693,6 +1712,7 @@ def _plugin_apply_selection(selected: list[dict[str, Any]]) -> list[dict[str, st
         result.append(
             {
                 "plugin_uid": str(row.get("plugin_uid", "") or "").strip(),
+                "package_uid": str(row.get("package_uid", "") or "").strip(),
                 "bundle": bundle,
                 "install_bundle": str(
                     row.get("install_bundle") or _install_bundle_for_manifest_bundle(bundle, item_dict)
@@ -2523,6 +2543,17 @@ def _cluster_plugin_cli_args(
         if extra_args:
             args.extend(extra_args)
         return args
+    package_uids = [
+        str(row.get("package_uid", "") or "").strip()
+        for row in selected
+        if str(row.get("package_uid", "") or "").strip() and action not in {"remove", "purge"}
+    ]
+    if package_uids and len(package_uids) == len(selected):
+        for package_uid in package_uids:
+            args.extend(["--package-uid", package_uid])
+        if extra_args:
+            args.extend(extra_args)
+        return args
     plugin_uids = [
         str(row.get("plugin_uid", "") or "").strip()
         for row in selected
@@ -3224,6 +3255,92 @@ def _run_cluster_plugin_operation(
         raise
 
 
+def _select_plugin_rows_by_identity(
+    rows: list[dict[str, Any]],
+    *,
+    plugin_uids: list[str] | None,
+    package_uids: list[str] | None,
+) -> list[dict[str, Any]]:
+    requested_plugins = {
+        _normalize_plugin_uid(str(value or ""))
+        for value in (plugin_uids or [])
+        if _normalize_plugin_uid(str(value or ""))
+    }
+    requested_packages = {
+        _normalize_plugin_uid(str(value or ""))
+        for value in (package_uids or [])
+        if _normalize_plugin_uid(str(value or ""))
+    }
+    requested_plugins = {value for value in requested_plugins if _valid_plugin_uid(value)}
+    requested_packages = {value for value in requested_packages if _valid_plugin_uid(value)}
+
+    selectable = [row for row in rows if bool(row.get("selectable", False))]
+    if requested_packages:
+        selected: list[dict[str, Any]] = []
+        for package_uid in sorted(requested_packages):
+            matches = [
+                row for row in selectable
+                if str(row.get("package_uid", "") or "").strip() == package_uid
+            ]
+            if not matches:
+                raise RuntimeError(
+                    f"package uid(s) not found in manifest for this instance: {package_uid}"
+                )
+            if len(matches) > 1:
+                raise RuntimeError(f"package uid is ambiguous for this instance: {package_uid}")
+            selected.extend(matches)
+        if requested_plugins:
+            unrelated = [
+                str(row.get("package_uid", "") or "").strip()
+                for row in selected
+                if str(row.get("plugin_uid", "") or "").strip() not in requested_plugins
+            ]
+            if unrelated:
+                raise RuntimeError(
+                    "package uid(s) do not belong to requested plugin uid(s): "
+                    + ", ".join(sorted(unrelated))
+                )
+            found_plugins = {str(row.get("plugin_uid", "") or "").strip() for row in selected}
+            missing_plugins = sorted(requested_plugins - found_plugins)
+            if missing_plugins:
+                raise RuntimeError(
+                    "plugin uid(s) have no selected package projection: "
+                    + ", ".join(missing_plugins)
+                )
+            duplicate_plugins = sorted(
+                plugin_uid for plugin_uid in requested_plugins
+                if sum(
+                    str(row.get("plugin_uid", "") or "").strip() == plugin_uid
+                    for row in selected
+                ) != 1
+            )
+            if duplicate_plugins:
+                raise RuntimeError(
+                    "plugin uid(s) must select exactly one package projection: "
+                    + ", ".join(duplicate_plugins)
+                )
+        return selected
+
+    if not requested_plugins:
+        return []
+    selected: list[dict[str, Any]] = []
+    for plugin_uid in sorted(requested_plugins):
+        matches = [
+            row for row in selectable
+            if str(row.get("plugin_uid", "") or "").strip() == plugin_uid
+        ]
+        if not matches:
+            raise RuntimeError(f"plugin uid(s) not found in manifest for this instance: {plugin_uid}")
+        if len(matches) > 1:
+            projections = sorted(str(row.get("package_uid", "") or "").strip() for row in matches)
+            raise RuntimeError(
+                f"plugin uid is ambiguous for this instance: {plugin_uid}; "
+                f"select one package_uid: {', '.join(projections)}"
+            )
+        selected.extend(matches)
+    return selected
+
+
 def run_plugins_interactive(
     *,
     config: AgentConfig,
@@ -3231,6 +3348,7 @@ def run_plugins_interactive(
     selection: str | None,
     bundles: list[str] | None = None,
     plugin_uids: list[str] | None = None,
+    package_uids: list[str] | None = None,
     action: str | None,
     no_color: bool,
     yes: bool,
@@ -3261,6 +3379,7 @@ def run_plugins_interactive(
                     selection=selection,
                     bundles=bundles,
                     plugin_uids=plugin_uids,
+                    package_uids=package_uids,
                     action=action,
                     no_color=no_color,
                     yes=yes,
@@ -3364,6 +3483,7 @@ def run_plugins_interactive(
                 {
                     "idx": row.get("idx"),
                     "plugin_uid": str(row.get("plugin_uid", "")).strip(),
+                    "package_uid": str(row.get("package_uid", "")).strip(),
                     "bundle": str(row.get("bundle", "")).strip(),
                     "display_name": str(row.get("display_name", "")).strip(),
                     "install_bundle": str(row.get("install_bundle", "")).strip(),
@@ -3425,39 +3545,30 @@ def run_plugins_interactive(
             return 0
         chosen_action = normalized
 
-        if selection is None and not bundles and not plugin_uids:
+        if selection is None and not bundles and not plugin_uids and not package_uids:
             selection_in = _ask("Select plugins to apply (e.g. 1-3 6 10), empty=back: ").strip()
-        elif bundles or plugin_uids:
+        elif bundles or plugin_uids or package_uids:
             selection_in = ""
         else:
             selection_in = selection.strip()
             selection = None
 
-        if not selection_in and not bundles and not plugin_uids:
+        if not selection_in and not bundles and not plugin_uids and not package_uids:
             if not sys.stdin.isatty():
                 print("No selection provided in non-interactive mode, exit")
                 return 0
             print("Back to action selection")
             continue
 
-        if plugin_uids:
-            requested_uids = {
-                _normalize_plugin_uid(str(x or ""))
-                for x in (plugin_uids or [])
-                if _normalize_plugin_uid(str(x or ""))
-            }
-            requested_uids = {x for x in requested_uids if _valid_plugin_uid(x)}
-            if not requested_uids:
-                print("No valid plugin uid values, try again")
+        if plugin_uids or package_uids:
+            selected = _select_plugin_rows_by_identity(
+                rows,
+                plugin_uids=plugin_uids,
+                package_uids=package_uids,
+            )
+            if not selected:
+                print("No valid plugin or package uid values, try again")
                 continue
-            selected = [
-                row for row in rows
-                if bool(row.get("selectable", False)) and str(row.get("plugin_uid", "")).strip() in requested_uids
-            ]
-            found = {str(row.get("plugin_uid", "")).strip() for row in selected}
-            missing = sorted(requested_uids - found)
-            if missing:
-                raise RuntimeError(f"plugin uid(s) not found in manifest for this instance: {', '.join(missing)}")
         elif bundles:
             requested = {str(x or "").strip() for x in (bundles or []) if str(x or "").strip()}
             if not requested:
@@ -3579,6 +3690,7 @@ def _plugin_operation_terminal_payload(
     operation_id: str,
     instance_uid: str,
     plugin_uids: list[str],
+    package_uids: list[str],
     action: str,
     status: str,
     rc: int,
@@ -3595,6 +3707,7 @@ def _plugin_operation_terminal_payload(
         "operation_id": operation_id,
         "instance_uid": canonical_instance_uid(instance_uid),
         "plugin_uids": list(plugin_uids),
+        "package_uids": list(package_uids),
         "action": action,
         "terminal": True,
         "status": status,
@@ -3614,7 +3727,8 @@ def run_plugins_machine(
     *,
     config: AgentConfig,
     instance_uid: str,
-    plugin_uids: list[str],
+    plugin_uids: list[str] | None,
+    package_uids: list[str] | None = None,
     action: str,
     operation_id: str,
     legacy_root: str | None = None,
@@ -3630,6 +3744,11 @@ def run_plugins_machine(
     normalized_uids = sorted({
         _normalize_plugin_uid(value)
         for value in (plugin_uids or [])
+        if _normalize_plugin_uid(value)
+    })
+    normalized_package_uids = sorted({
+        _normalize_plugin_uid(value)
+        for value in (package_uids or [])
         if _normalize_plugin_uid(value)
     })
     normalized_action = _normalize_action(action)
@@ -3649,8 +3768,12 @@ def run_plugins_machine(
             raise ValueError("plugin_instance_uid_invalid")
         if not _PLUGIN_OPERATION_ID_RE.fullmatch(normalized_operation_id):
             raise ValueError("plugin_operation_id_invalid")
-        if not normalized_uids or any(not _valid_plugin_uid(value) for value in normalized_uids):
+        if not normalized_uids:
             raise ValueError("plugin_uid_invalid")
+        if any(not _valid_plugin_uid(value) for value in normalized_uids):
+            raise ValueError("plugin_uid_invalid")
+        if any(not _valid_plugin_uid(value) for value in normalized_package_uids):
+            raise ValueError("package_uid_invalid")
         if normalized_action not in {"auto", "install", "update", "reinstall", "remove", "purge"}:
             raise ValueError("plugin_action_invalid")
 
@@ -3666,6 +3789,7 @@ def run_plugins_machine(
                 selection=None,
                 bundles=None,
                 plugin_uids=normalized_uids,
+                package_uids=normalized_package_uids,
                 action=normalized_action,
                 no_color=True,
                 yes=True,
@@ -3691,6 +3815,7 @@ def run_plugins_machine(
         operation_id=normalized_operation_id,
         instance_uid=safe_instance_uid,
         plugin_uids=normalized_uids,
+        package_uids=normalized_package_uids,
         action=str(normalized_action or action or ""),
         status="success" if success else "failed",
         rc=0 if success else max(1, int(rc)),
