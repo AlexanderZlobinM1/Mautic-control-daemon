@@ -148,7 +148,8 @@ class TargetStage:
     def verify_original(self, root: str, plan: dict[str, Any], read_version: Callable[[Path], str | None]) -> None:
         self.verify_facts(plan)
         live = _root(root)
-        if canonical_json_sha256(plan) != self.plan_sha256 or self.read_source_version(live) != plan["source_version"]:
+        source_version_reader = getattr(self, "read_source_version", read_version)
+        if canonical_json_sha256(plan) != self.plan_sha256 or source_version_reader(live) != plan["source_version"]:
             raise PatchPlanV3Error("target_stage_source_binding_changed")
         live_application = self.root_binding(live)
         for path, expected in self.original_hashes.items():

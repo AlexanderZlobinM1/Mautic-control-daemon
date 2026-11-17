@@ -1929,6 +1929,11 @@ def _build_parser() -> argparse.ArgumentParser:
         p.add_argument("--select", help="Selection expression, e.g. '1-3 6 10'")
         p.add_argument("--bundle", action="append", help="Select plugin by bundle name (repeatable)")
         p.add_argument("--plugin-uid", action="append", help="Select plugin by stable manifest plugin_uid (repeatable)")
+        p.add_argument(
+            "--package-uid",
+            action="append",
+            help="Select one stable package projection/variant (repeatable)",
+        )
         p.add_argument("--yes", action="store_true", help="Do not ask for confirmation")
         p.add_argument("--no-color", action="store_true")
         p.add_argument("--list-available", action="store_true", help="Show plugins available in server manifest")
@@ -3227,6 +3232,7 @@ def main() -> int:
                 config=cfg,
                 instance_uid=str(args.instance_uid or ""),
                 plugin_uids=list(args.plugin_uid or []),
+                package_uids=list(args.package_uid or []),
                 action=str(args.action or ""),
                 operation_id=str(args.operation_id or ""),
                 legacy_root=args.root,
@@ -3243,6 +3249,7 @@ def main() -> int:
             selection=args.select,
             bundles=list(args.bundle or []),
             plugin_uids=list(args.plugin_uid or []),
+            package_uids=list(args.package_uid or []),
             action=args.action,
             no_color=bool(args.no_color),
             yes=bool(args.yes),

@@ -11,6 +11,7 @@ import signal
 import socket
 import sqlite3
 import subprocess
+import tarfile
 import tempfile
 import time
 from dataclasses import dataclass, replace
@@ -36,6 +37,7 @@ _RETENTION_DIR_RE = re.compile(r"^(?:\d{4}-\d{2}-\d{2}|\d{8}-\d{6})$")
 _PROFILE_ROW_ID = 1
 _MYDUMPER_FLAG_CACHE: dict[tuple[str, str], bool] = {}
 _XTRABACKUP_FLAG_CACHE: dict[tuple[str, str], bool] = {}
+_TAR_IGNORE_FAILED_READ_SUPPORTED: bool | None = None
 
 _CLUSTER_FILE_FORBIDDEN_PREFIXES = (
     "/dev",
@@ -76,11 +78,6 @@ _CLUSTER_FILE_RSYNC_EXCLUDES = (
 )
 
 _BACKUP_TAR_RUNTIME_EXCLUDES = (
-    # File-list entries are collected from live application trees.  A
-    # transient file (for example a rotating *.bak) can disappear between
-    # list creation and tar opening; GNU tar must skip that race rather than
-    # fail an otherwise complete backup.
-    "--ignore-failed-read",
     "--exclude=.mcd",
     "--exclude=.mcd/*",
     "--exclude=./.mcd",
@@ -88,6 +85,37 @@ _BACKUP_TAR_RUNTIME_EXCLUDES = (
     "--exclude=*/.mcd",
     "--exclude=*/.mcd/*",
 )
+
+
+def _tar_supports_ignore_failed_read() -> bool:
+    global _TAR_IGNORE_FAILED_READ_SUPPORTED
+    if _TAR_IGNORE_FAILED_READ_SUPPORTED is None:
+        proc = subprocess.run(["tar", "--help"], capture_output=True, text=True)
+        help_text = f"{proc.stdout or ''}\n{proc.stderr or ''}"
+        _TAR_IGNORE_FAILED_READ_SUPPORTED = "--ignore-failed-read" in help_text
+    return _TAR_IGNORE_FAILED_READ_SUPPORTED
+
+
+def _portable_tar_missing_file_result(proc: subprocess.CompletedProcess[str], target: Path) -> bool:
+    """Accept only BSD tar's known missing-file race with a readable archive."""
+    if proc.returncode != 1 or not target.is_file():
+        return False
+    lines = [line.strip() for line in str(proc.stderr or "").splitlines() if line.strip()]
+    if not lines or not any("Cannot stat: No such file or directory" in line for line in lines):
+        return False
+    allowed = (
+        "Cannot stat: No such file or directory",
+        "Error exit delayed from previous errors.",
+        "Removing leading '/' from member names",
+    )
+    if any(not any(marker in line for marker in allowed) for line in lines):
+        return False
+    try:
+        with tarfile.open(target, "r:gz") as archive:
+            archive.getmembers()
+    except (OSError, tarfile.TarError):
+        return False
+    return True
 
 _BACKUP_RUNTIME_CONTENT_EXCLUDES = tuple(
     f"--exclude=*/{runtime_path}/*"
@@ -613,8 +641,10 @@ def _archive_path_list(
                     for name in files:
                         archive_file = archive_current / name
                         stream.write(os.fsencode(archive_file) + b"\0")
+        supports_missing_file_race = _tar_supports_ignore_failed_read()
         cmd = [
             "tar",
+            *(["--ignore-failed-read"] if supports_missing_file_race else []),
             *_BACKUP_TAR_RUNTIME_EXCLUDES,
             "--no-recursion",
             "--null",
@@ -624,7 +654,15 @@ def _archive_path_list(
             "-czf",
             str(target),
         ]
-        _run(cmd, timeout_sec=cfg.backup_dump_timeout_sec, check=True)
+        proc = _run(
+            cmd,
+            timeout_sec=cfg.backup_dump_timeout_sec,
+            check=supports_missing_file_race,
+        )
+        if not supports_missing_file_race and proc.returncode != 0:
+            if not _portable_tar_missing_file_result(proc, target):
+                details = (proc.stderr or proc.stdout or f"exit={proc.returncode}").strip()
+                raise RuntimeError(f"command failed: {' '.join(cmd)} :: {details}")
     finally:
         if list_path is not None:
             list_path.unlink(missing_ok=True)

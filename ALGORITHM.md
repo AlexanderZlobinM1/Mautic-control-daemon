@@ -87,8 +87,9 @@ root-only, docroot-only и symlink layouts сохраняют fail-closed semant
 Patch context, migration selectors и state sync используют одну и ту же проверку.
 
 Для внешнего запуска установки существует один машинный путь MCD. Вызывающая
-система передаёт только bare `instance_uid`, стабильный `plugin_uid`, действие и
-свой `operation_id`. MCD на выбранном хосте сам разрешает UID в локальный root,
+система передаёт только bare `instance_uid`, стабильный логический `plugin_uid`,
+при необходимости конкретный `package_uid`, действие и свой `operation_id`.
+MCD на выбранном хосте сам разрешает UID в локальный root,
 получает и проверяет manifest/package, выполняет файловую транзакцию через
 внешний handler, запускает native Mautic registration/reload, очищает и
 прогревает cache, проверяет точную версию в inventory и при ошибке выполняет
@@ -101,6 +102,7 @@ Patch context, migration selectors и state sync используют одну �
 mcd-cli plugins --machine-result \
   --instance-uid <bare-instance-uid> \
   --plugin-uid <plugin-uid> \
+  --package-uid <package-uid> \
   --action <auto|install|update|reinstall|remove|purge> \
   --operation-id <caller-operation-id>
 ```
@@ -108,11 +110,18 @@ mcd-cli plugins --machine-result \
 В этом пути `--root` и `instance_uid@host` запрещены. Квалифицированная форма
 может сохраняться только как вход старого совместимого transport-пути и никогда
 не попадает в новый request/result, интерфейс или identity операции. После
+фильтрации по major-версии Mautic один `plugin_uid` может иметь несколько
+взаимоисключающих проекций с разными версиями пакета. Это нормальное состояние,
+а не конфликт. `package_uid` стабильно обозначает одну проекцию и не меняется
+вместе с version/archive; при неоднозначности он обязателен. MCD проверяет его
+принадлежность логическому плагину и выбирает ровно один пакет. Нулевая, чужая
+или неоднозначная проекция останавливает операцию до файловых изменений.
+После
 окончания MCD выдаёт ровно один `mcd-plugin-operation-result-v2`: terminal
 success только после native registration, cache warmup и точного inventory;
 terminal failure — после завершения локального error/rollback пути. Receipt не
-содержит host или root, включает bare UID, plugin UID, caller operation ID,
-package/inventory evidence и SHA-256 канонического результата. Старые
+содержит host или root, включает bare UID, plugin UID, package UID, caller
+operation ID, package/inventory evidence и SHA-256 канонического результата. Старые
 `mcd-plugin-apply-result-v1` progress-записи остаются compatibility-механикой
 внутри обычного CLI и не являются MCC workflow.
 
