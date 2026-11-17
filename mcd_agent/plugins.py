@@ -1918,7 +1918,7 @@ def _run_plugin_cache_warmup(config: AgentConfig, install) -> None:
 def _run_plugin_install_reload(config: AgentConfig, install, expected_bundles: set[str] | None = None) -> None:
     from mcd_agent.mautic_patch_runtime import run as run_catalog
     if getattr(config, "mcc_url", ""):
-        preflight = run_catalog(config, install, phase="before_plugin_reload", trigger="plugin_reload_failure")
+        preflight = run_catalog(config, install, phase="before_plugin_reload", trigger="daemon_reconcile")
         if preflight.get("status") == "error":
             reason = str(preflight.get("reason") or "catalog_preflight_failed")
             if reason in _CATALOG_COMPATIBILITY_BLOCK_REASONS:

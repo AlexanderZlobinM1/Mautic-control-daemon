@@ -324,6 +324,17 @@ truthful cron/pause cleanup. Patch evidence is not emitted when the guard
 fails before the source/package stage, and no patch rollback is attempted.
 
 Каталоговая преднастройка перед native plugin reload остаётся fail-closed:
+до запуска `mautic:plugin:install` MCD запрашивает обычный Assets-план фазы
+`before_plugin_reload`. Если опубликованный record применим, его проверенные
+изменения выполняются до нативной мутации; уже исправленная сигнатура даёт
+безопасный skip, а неизвестная или непроверяемая сигнатура останавливает
+операцию без записи. Первый упавший native reload не используется как способ
+обнаружить обязательную профилактику. Тот же pre-reload caller универсален для
+версий и типов установки: ID патча, версии Mautic и пути приходят только из
+подписанного Assets-плана. Профилактический вызов использует обычный lifecycle
+`daemon_reconcile`; существующие реактивные records после точной ошибки reload
+сохраняют `plugin_reload_failure` и не заменяются отдельным runner.
+
 MCD не применяет план при `agent_patch_contract_mismatch`,
 `agent_patch_contract_fields_mismatch` или `agent_version_below_minimum` и не
 подменяет строгую проверку MCC. Такой отказ совместимости не отменяет уже

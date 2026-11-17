@@ -559,9 +559,99 @@ class PluginConflictPathTests(unittest.TestCase):
             cfg,
             install,
             phase="before_plugin_reload",
-            trigger="plugin_reload_failure",
+            trigger="daemon_reconcile",
         )
         run_template.assert_called_once_with(cfg, install, "mautic:plugin:install")
+
+    def test_plugin_reload_applies_catalog_preflight_before_native_mutation(self) -> None:
+        cfg = SimpleNamespace(mcc_url="https://mcc.example")
+        install = SimpleNamespace(root="/var/www/ss/public_html", db=None, mautic_major=4)
+        events: list[str] = []
+
+        def catalog_preflight(*_args, **_kwargs):
+            events.append("catalog-preflight")
+            return {
+                "status": "success",
+                "selected": ["FIXTURE-PRE-RELOAD-GUARD"],
+            }
+
+        def native_reload(*_args, **_kwargs):
+            events.append("native-reload")
+            return 0, "plugins reloaded"
+
+        with patch(
+            "mcd_agent.mautic_patch_runtime.run",
+            side_effect=catalog_preflight,
+        ) as run_catalog, patch(
+            "mcd_agent.plugins._run_plugin_template",
+            side_effect=native_reload,
+        ) as run_template:
+            _run_plugin_install_reload(cfg, install, expected_bundles={"ExampleBundle"})
+
+        self.assertEqual(events, ["catalog-preflight", "native-reload"])
+        run_catalog.assert_called_once_with(
+            cfg,
+            install,
+            phase="before_plugin_reload",
+            trigger="daemon_reconcile",
+        )
+        run_template.assert_called_once_with(cfg, install, "mautic:plugin:install")
+
+    def test_plugin_reload_unknown_catalog_precondition_fails_before_native_mutation(self) -> None:
+        cfg = SimpleNamespace(mcc_url="https://mcc.example")
+        install = SimpleNamespace(root="/var/www/ss/public_html", db=None, mautic_major=4)
+
+        with patch(
+            "mcd_agent.mautic_patch_runtime.run",
+            return_value={"status": "error", "reason": "required_predicate_missing"},
+        ) as run_catalog, patch(
+            "mcd_agent.plugins._run_plugin_template",
+        ) as run_template:
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "Catalog plugin reload preflight failed: required_predicate_missing",
+            ):
+                _run_plugin_install_reload(cfg, install, expected_bundles={"ExampleBundle"})
+
+        run_catalog.assert_called_once_with(
+            cfg,
+            install,
+            phase="before_plugin_reload",
+            trigger="daemon_reconcile",
+        )
+        run_template.assert_not_called()
+
+    def test_plugin_reload_keeps_exact_failure_repair_on_failure_trigger(self) -> None:
+        cfg = SimpleNamespace(
+            mcc_url="https://mcc.example",
+            mautic6_core_patch_policy="required",
+        )
+        install = SimpleNamespace(root="/var/www/ss/public_html", db=None, mautic_major=6)
+
+        with patch(
+            "mcd_agent.mautic_patch_runtime.run",
+            side_effect=[
+                {"status": "success", "selected": []},
+                {"status": "success", "selected": ["M6-PLUGIN-METADATA-REPAIR"]},
+            ],
+        ) as run_catalog, patch(
+            "mcd_agent.plugins._run_plugin_template",
+            side_effect=[
+                (1, "PluginUpdateEvent metadata must be of type array, null given"),
+                (0, "plugins reloaded"),
+            ],
+        ) as run_template:
+            _run_plugin_install_reload(cfg, install, expected_bundles={"ExampleBundle"})
+
+        self.assertEqual(
+            [call.kwargs["trigger"] for call in run_catalog.call_args_list],
+            ["daemon_reconcile", "plugin_reload_failure"],
+        )
+        self.assertEqual(
+            [call.kwargs["phase"] for call in run_catalog.call_args_list],
+            ["before_plugin_reload", "legacy_runtime_plugin_repair"],
+        )
+        self.assertEqual(run_template.call_count, 2)
 
     def test_mautic6_plugin_reload_retries_inactive_transaction_once(self) -> None:
         cfg = SimpleNamespace()
