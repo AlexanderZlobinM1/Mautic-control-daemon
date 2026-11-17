@@ -301,3 +301,66 @@ def test_cli_reports_preserved_local_state_when_mcc_push_raises(tmp_path, monkey
     assert retried["auto_update_disabled"] is True
     assert retried["changed"] is False
     assert retried["local_state_confirmed"] is True
+
+
+def test_cli_policy_sync_notifies_observed_state_without_desired_mutation(tmp_path, monkeypatch, capsys) -> None:
+    config_path = tmp_path / "mcd.toml"
+    config_path.write_text(
+        '[profile]\nname = "custom"\n\n[runtime]\n'
+        'plugin_auto_update_instance_settings = { "other-instance" = { "other.package:6-7" = '
+        '{ plugin_uid = "other.plugin:6-7", auto_update_disabled = false } } }\n\n'
+        '[mcc]\nurl = "https://mcc.example"\n',
+        encoding="utf-8",
+    )
+    cfg = load_config(str(config_path), allow_recover_from_mcc=False)
+    monkeypatch.setattr(
+        cli,
+        "_select_instance_for_ops",
+        lambda _cfg, selector: SimpleNamespace(instance_uid=selector),
+    )
+    monkeypatch.setattr(cli, "touch_poll_trigger", lambda _cfg: "trigger")
+    pushes: list[dict[str, object]] = []
+
+    def push(_cfg, runtime, **kwargs):
+        pushes.append({"runtime": runtime, **kwargs})
+        if kwargs.get("target") == "desired":
+            return {"status": "conflict", "reason": "stale_desired_revision"}
+        return {"status": "ok"}
+
+    monkeypatch.setattr(cli, "push_runtime_overrides", push)
+    args = SimpleNamespace(
+        plugin_auto_update_policy_cmd="set",
+        instance_uid=INSTANCE_UID,
+        plugin_uid=PLUGIN_UID,
+        package_uid=STANDARD_PACKAGE_UID,
+        operation_id="policy-observed-1",
+    )
+
+    assert cli._plugin_auto_update_policy_cli(cfg, args) == 0
+    result = json.loads(capsys.readouterr().out)
+
+    assert result["status"] == "ok"
+    assert result["local_state_confirmed"] is True
+    assert result["auto_update_disabled"] is True
+    assert pushes == [{
+        "runtime": {
+            "plugin_auto_update_instance_settings": {
+                "other-instance": {
+                    "other.package:6-7": {
+                        "plugin_uid": "other.plugin:6-7",
+                        "auto_update_disabled": False,
+                    }
+                },
+                INSTANCE_UID: {
+                    STANDARD_PACKAGE_UID: {
+                        "plugin_uid": PLUGIN_UID,
+                        "auto_update_disabled": True,
+                    }
+                }
+            }
+        },
+        "merge": True,
+        "target": "observed",
+    }]
+    assert "desired_state_revision" not in pushes[0]
+    assert "instance_desired_states" not in pushes[0]
