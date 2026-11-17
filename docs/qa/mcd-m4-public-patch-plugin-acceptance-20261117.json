@@ -2,6 +2,15 @@
   "schema": "mcd-m4-public-patch-plugin-acceptance-v1",
   "recorded_at": "2026-11-17T11:38:51Z",
   "result": "pass",
+  "raw_evidence": {
+    "directory": "docs/qa/evidence/m4-public-patch-20261117",
+    "run_transcript": "run-transcript.json",
+    "run_transcript_sha256": "a89cdaa8a2fdb861c23b63b951a8f133441e8e79d29d11b5feba5a1e14efdd9b",
+    "first_patch_local_receipt": "first-patch-local-receipt.json",
+    "first_patch_local_receipt_sha256": "8dcf9a2ca9fee38f9380773b1964e1fa122d175625f7dfa3c03ec751f830c5eb",
+    "fixed_point_patch_local_receipt": "fixed-point-patch-local-receipt.json",
+    "fixed_point_patch_local_receipt_sha256": "fac452cca8adc43494e26e1ad34ab4a4ff7edba97105b3dd16f2c921e50455de"
+  },
   "scope": {
     "candidate_commit": "a34f3fe56d1e081eb619dc5aa9f9e4b5de310eed",
     "candidate_version": "1.7.0.dev0",
