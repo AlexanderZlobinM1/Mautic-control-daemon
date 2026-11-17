@@ -77,6 +77,12 @@ def test_machine_contract_emits_one_terminal_host_independent_result(monkeypatch
     assert result["plugin_uids"] == ["vendor.demo:7"]
     assert result["package_uids"] == []
     assert result["status"] == "success"
+    assert result["files_applied"] is True
+    assert result["post_step_status"] == "success"
+    assert result["partial_state"] is False
+    assert result["rollback_status"] == "not_required"
+    assert result["manual_recovery_required"] is False
+    assert result["automatic_replay_allowed"] is False
     assert result["catalog_sha256"] == "c" * 64
     assert result["terminal"] is True
     assert "/srv/tenant-one" not in output
@@ -445,3 +451,10 @@ def test_machine_contract_preserves_terminal_failure_evidence(monkeypatch, capsy
     assert result["error"] == "native_plugin_registration_failed"
     assert result["selected"][0]["plugin_uid"] == "vendor.demo:7"
     assert result["inventory"] == []
+    assert result["files_applied"] is True
+    assert result["post_step_status"] == "failed"
+    assert result["cache_inventory_confirmed"] is False
+    assert result["partial_state"] is True
+    assert result["rollback_status"] == "not_attempted"
+    assert result["manual_recovery_required"] is True
+    assert result["automatic_replay_allowed"] is False

@@ -3770,6 +3770,9 @@ def _plugin_operation_terminal_payload(
     terminal_payload = terminal if isinstance(terminal, dict) else {}
     selected = terminal_payload.get("selected")
     inventory = terminal_payload.get("inventory")
+    files_applied = bool(terminal_payload.get("files_applied", False))
+    post_step_status = str(terminal_payload.get("post_step_status") or "unknown")
+    partial_state = status != "success" and files_applied and post_step_status != "success"
     payload: dict[str, Any] = {
         "schema": _PLUGIN_OPERATION_RESULT_SCHEMA,
         "operation": "plugin_apply",
@@ -3783,6 +3786,13 @@ def _plugin_operation_terminal_payload(
         "rc": int(rc),
         "selected": list(selected) if isinstance(selected, list) else [],
         "inventory": list(inventory) if isinstance(inventory, list) else [],
+        "files_applied": files_applied,
+        "post_step_status": post_step_status,
+        "cache_inventory_confirmed": bool(terminal_payload.get("cache_inventory_confirmed", False)),
+        "partial_state": partial_state,
+        "rollback_status": "not_attempted" if partial_state else "not_required",
+        "manual_recovery_required": partial_state,
+        "automatic_replay_allowed": False,
         "error_code": str(error_code or ""),
         "error": str(error or terminal_payload.get("error") or ""),
         "mcd_version": __version__,

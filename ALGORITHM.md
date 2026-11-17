@@ -237,7 +237,8 @@ mcd-cli plugins --machine-result \
 После
 окончания MCD выдаёт ровно один `mcd-plugin-operation-result-v2`: terminal
 success только после native registration, cache warmup и точного inventory;
-terminal failure — после завершения локального error/rollback пути. Receipt не
+terminal failure — после завершения локального error path с явным статусом
+частичного состояния и rollback. Receipt не
 содержит host или root, включает bare UID, plugin UID, package UID, caller
 operation ID, package/inventory evidence и SHA-256 канонического результата. Старые
 `mcd-plugin-apply-result-v1` progress-записи остаются compatibility-механикой
@@ -259,6 +260,14 @@ path самостоятельно. Регистрация в MCC для чтен
 результат. Локальный execution result и доставка уведомления/инвентаря в MCC —
 разные состояния: недоступный management transport не отменяет успешно
 завершённую установку и не запускает её повторно.
+
+Если файлы плагина уже применены, но нативная регистрация, очистка кеша или
+другой завершающий шаг Mautic завершился ошибкой, операция остаётся неуспешной и
+явно сообщает о частичном состоянии. MCD не объявляет такой результат успешным,
+не повторяет операцию автоматически и не изображает выполненный rollback:
+receipt указывает, что rollback не выполнялся и требуется ручное восстановление.
+Это важно, потому что после ошибки Mautic база и файловая система уже могут быть
+изменены несимметрично; слепой откат или повтор способен увеличить повреждение.
 
 Для зарегистрированного агента последние bounded status receipts входят в
 обычный host state snapshot. Это только наблюдение той же локальной durable

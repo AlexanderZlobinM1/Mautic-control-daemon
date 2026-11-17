@@ -45,6 +45,9 @@ MCD_PLUGIN_OPERATION_RESULT=<JSON>
 - `terminal=true`, `status` и `rc`;
 - `selected` с ожидаемыми package versions;
 - подтверждённый Mautic `inventory`;
+- `files_applied`, `post_step_status` и `cache_inventory_confirmed`;
+- `partial_state`, `rollback_status`, `manual_recovery_required` и
+  `automatic_replay_allowed`;
 - `error_code` и `error` при отказе;
 - `mcd_version` и `receipt_sha256`.
 
@@ -57,6 +60,13 @@ digest terminal receipt. Версия пакета остаётся отдель
 что MCD закончил файловую транзакцию, native plugin registration/reload, cache
 reset/warmup и точную inventory-проверку. Наличие файлов без terminal success не
 является успешной установкой.
+
+Если файлы уже применены, а native registration/reload или cache-шаг упал,
+terminal result остаётся `failed` и содержит `partial_state=true`. MCD не
+выполняет слепой rollback после потенциальной частичной DB-мутации и сообщает
+`rollback_status=not_attempted`, `manual_recovery_required=true`. Любой terminal
+result содержит `automatic_replay_allowed=false`: удалённый оркестратор не
+должен повторять файловую операцию из-за ошибки callback или post-step.
 
 Обычный интерактивный CLI сохраняет старый `mcd-plugin-apply-result-v1` для
 обратной совместимости. Новый MCC-путь не читает его progress-записи и не
