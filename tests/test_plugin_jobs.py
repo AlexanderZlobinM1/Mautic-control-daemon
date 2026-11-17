@@ -12,6 +12,7 @@ from mcd_agent.plugin_jobs import (
     PluginJobError,
     capability,
     canonical_request,
+    recent_statuses,
     terminal_from_output,
 )
 
@@ -76,6 +77,13 @@ class MemoryStore:
 
     def put_runtime_sync(self, key: str, value: dict[str, object]) -> None:
         self.runtime[key] = dict(value)
+
+    def list_runtime_sync(self, prefix: str = ""):
+        return sorted(
+            (key, dict(value))
+            for key, value in self.runtime.items()
+            if key.startswith(prefix)
+        )
 
     def enqueue_manual_request(self, **kwargs) -> int:
         self.next_id += 1
@@ -178,6 +186,45 @@ def test_operation_id_conflict_and_pending_cancel_are_typed(tmp_path, monkeypatc
     assert cli._plugin_job_cli(cfg, _job_args("cancel")) == 0
     cancelled = json.loads(capsys.readouterr().out)
     assert cancelled["status"] == "cancelled"
+    assert cancelled["idempotent_replay"] is False
+    assert cli._plugin_job_cli(cfg, _job_args("cancel")) == 0
+    replay = json.loads(capsys.readouterr().out)
+    assert replay["status"] == "cancelled"
+    assert replay["idempotent_replay"] is True
+
+
+def test_recent_statuses_exposes_bounded_terminal_receipts_without_local_paths(tmp_path) -> None:
+    store = MemoryStore()
+    stdout = tmp_path / "job.stdout"
+    terminal = {
+        "schema": "mcd-plugin-operation-result-v2",
+        "terminal": True,
+        "status": "success",
+        "receipt_sha256": "c" * 64,
+        "inventory_sync_status": "pending",
+    }
+    stdout.write_text("MCD_PLUGIN_OPERATION_RESULT=" + json.dumps(terminal) + "\n", encoding="utf-8")
+    store.runtime["plugin_apply_job:a"] = {
+        "schema": "mcd-plugin-job-record-v1",
+        "operation_id": "plugin-job-1",
+        "request_id": 41,
+        "request_sha256": "d" * 64,
+        "stdout_path": str(stdout),
+        "stderr_path": str(tmp_path / "job.stderr"),
+        "created_at": 20.0,
+    }
+    store.statuses[41] = "done"
+
+    rows = recent_statuses(store, mcc_enabled=True, limit=1)
+
+    assert len(rows) == 1
+    assert rows[0]["schema"] == "mcd-plugin-job-status-result-v1"
+    assert rows[0]["status"] == "succeeded"
+    assert rows[0]["terminal_result"] == terminal
+    assert rows[0]["notification_delivery_status"] == "pending"
+    encoded = json.dumps(rows[0], sort_keys=True)
+    assert "stdout_path" not in encoded
+    assert "stderr_path" not in encoded
 
 
 def test_busy_manual_worker_leaves_later_plugin_job_queued(monkeypatch, tmp_path) -> None:

@@ -89,10 +89,18 @@ projections, текущую Mautic-совместимость и каталог 
 и не меняет локальный execution success. На standalone-хосте оно равно
 `disabled`.
 
+Зарегистрированный агент включает последние bounded status receipts в обычный
+`mcd-state-v1.plugin_jobs`. Это канал наблюдения, а не вторая очередь: MCC не
+запускает работу повторно и не реконструирует terminal result. Локальный
+`plugin-job status` читает тот же durable record и остаётся доступен независимо
+от доставки state snapshot.
+
 `mcd-cli plugin-job cancel --operation-id ID` отменяет только ещё не запущенную
 работу. Запущенная транзакция остаётся под supervisor MCD и не убивается
 удалённым timeout. Очередь и output receipt сохраняются локально; перезапуск
 клиента MCC или потеря SSH-сессии не влияет на выполнение.
+Повтор отмены уже отменённого задания идемпотентно возвращает `cancelled`;
+running и terminal задания отменой не изменяются.
 
 Manifest читается MCD из `plugins.repo_base_url` и
 `plugins.manifest_path_template`. Для этого не нужны MCC management token,
