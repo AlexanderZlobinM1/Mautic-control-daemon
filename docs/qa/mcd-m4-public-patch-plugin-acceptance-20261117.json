@@ -1,0 +1,119 @@
+{
+  "schema": "mcd-m4-public-patch-plugin-acceptance-v1",
+  "recorded_at": "2026-11-17T11:38:51Z",
+  "result": "pass",
+  "raw_evidence": {
+    "directory": "docs/qa/evidence/m4-public-patch-20261117",
+    "run_transcript": "run-transcript.json",
+    "run_transcript_sha256": "a89cdaa8a2fdb861c23b63b951a8f133441e8e79d29d11b5feba5a1e14efdd9b",
+    "first_patch_local_receipt": "first-patch-local-receipt.json",
+    "first_patch_local_receipt_sha256": "8dcf9a2ca9fee38f9380773b1964e1fa122d175625f7dfa3c03ec751f830c5eb",
+    "fixed_point_patch_local_receipt": "fixed-point-patch-local-receipt.json",
+    "fixed_point_patch_local_receipt_sha256": "fac452cca8adc43494e26e1ad34ab4a4ff7edba97105b3dd16f2c921e50455de"
+  },
+  "scope": {
+    "candidate_commit": "a34f3fe56d1e081eb619dc5aa9f9e4b5de310eed",
+    "candidate_version": "1.7.0.dev0",
+    "candidate_wheel": "mcd_agent-1.7.0.dev0-py3-none-any.whl",
+    "candidate_wheel_sha256": "e68b9c4021415362a7b226eb2bd5aadc0fc530783c2a42722293a48945acdf75",
+    "purpose": "Prove a normal standalone MCD plugin installation on clean Mautic 4.4.13 resolves and applies the public owner patch catalog without MCC management delivery, then reaches a fixed point without rewriting patched core files."
+  },
+  "sandbox": {
+    "owner": "Mautic-Operations",
+    "baseline": "4.4-composer",
+    "worker": "mcd170-voucher-44",
+    "mautic_version": "4.4.13",
+    "php_version": "8.0.30",
+    "instance_uid": "www-1d94d5bb",
+    "webroot": "/var/www/html",
+    "layout_root": "/var/www/html/docroot",
+    "standalone_config_sha256": "8594b0a2e038f866abbc975a27c62a8a891f70aa533167c6c7d47882d7e9d33e",
+    "management_delivery": "not_configured",
+    "mcc_url_configured": false,
+    "mcc_token_configured": false,
+    "mcc_push_enabled": false,
+    "mcc_profile_guard_enabled": false,
+    "runtime_overrides_poll_enabled": false
+  },
+  "external_component": {
+    "key": "plugin-filesystem-component-1.0.2",
+    "version": "1.0.2",
+    "source_revision": "f2e65edc427508d7c4fbb94b9f84a45ace5a2448",
+    "artifact_sha256": "d598551c8817cbc8c5c66db02d97f7be538c1be18a7b9987e88efcd43dece303",
+    "custom_manifest_sha256": "c7edf57ef6341c39a59ce18c19351c3cf3ea4cf0cdd99b57c9c2b0e06b8a30fa",
+    "prefetch_status": "cached",
+    "bindings": [
+      "plugin_filesystem_status",
+      "plugin_filesystem_apply",
+      "plugin_filesystem_cleanup",
+      "plugin_alias_cleanup",
+      "plugin_cache_reset"
+    ]
+  },
+  "public_catalog": {
+    "manifest_url": "https://servercontrol.sales-snap.com/mauticctl/packages/mautic4/manifest.json",
+    "public_manifest_raw_sha256": "4754187e6b5ad19f46c3ac30506db40e872469b118528cefd2e40221607aac97",
+    "projection_sha256": "0991992e9a3c9953f87e1d03fa1709fbbf7e6922b6df1747a8bc93b3df06dac6",
+    "registry_commit": "9d4fdcf00e2996ae8582e01f2eeaabd2bceaab42",
+    "registry_sha256": "1b5ee65612e524a158d28d909c3f817032646cab8396334ef88f507528853832",
+    "selected_patch_id": "M4-PLUGIN-DDL-TRANSACTION-GUARD",
+    "version_range": ">=4.4.0 <=4.4.13",
+    "install_types": [
+      "composer",
+      "zip"
+    ]
+  },
+  "clean_precondition": {
+    "plugin_absent": true,
+    "patch_receipt_directory_absent": true,
+    "core_files": {
+      "app/bundles/PluginBundle/Bundle/PluginBundleBase.php": "90bb4a242094840487e1b24e418ad787336659e2f10627951ab51b38ac4e4a17",
+      "app/bundles/IntegrationsBundle/Migration/Engine.php": "094d55b3f73458eacb9e3a2fe6e2ca53cf5588529a598d131d4b082a8e62cc3b"
+    }
+  },
+  "first_install": {
+    "operation_id": "m4-public-patch-clean-001",
+    "plugin_uid": "voucherbundle:4",
+    "bundle": "VoucherBundle",
+    "version": "1.10.4",
+    "terminal_status": "success",
+    "execution_state": "confirmed_success",
+    "inventory_confirmed": true,
+    "operation_receipt_sha256": "670eb9234772e77de334c3fa314e72aabeb1734a93217d8bd62a3f42aea3ffad",
+    "patch_plan_sha256": "59ee57d99eb6c5ebb893262aeae497aa0eaa646e01f511416e484b7d4e0ad5e2",
+    "patch_receipt_sha256": "8dcf9a2ca9fee38f9380773b1964e1fa122d175625f7dfa3c03ec751f830c5eb",
+    "patch_decision": "applied",
+    "patched_core_files": {
+      "app/bundles/PluginBundle/Bundle/PluginBundleBase.php": "6263548a6827d90111e34c7b3830ca73ff003db321c7c8a37f7e36aacfc6a08e",
+      "app/bundles/IntegrationsBundle/Migration/Engine.php": "526c32693b2232f5a98d287d7ac8f1c0fd471112aa0aac274eb91d912fcb4547"
+    }
+  },
+  "fixed_point_install": {
+    "operation_id": "m4-public-patch-clean-002",
+    "terminal_status": "success",
+    "execution_state": "confirmed_success",
+    "inventory_confirmed": true,
+    "operation_receipt_sha256": "afa79e90014f83f6fc024e0ae7b567bdfa9bfc228e0c643ee8898a6e9c26bc5e",
+    "patch_plan_sha256": "d35c6d4f0f39e1e8a35a2a00e58f3539f727467e6087854c0937a26a927727de",
+    "patch_receipt_sha256": "fac452cca8adc43494e26e1ad34ab4a4ff7edba97105b3dd16f2c921e50455de",
+    "patch_decision": "already",
+    "patch_before_sha256": {},
+    "patch_after_sha256": {},
+    "core_file_hashes_unchanged": true,
+    "core_file_mtimes_unchanged": true,
+    "core_file_mtime_epoch": 1794915370
+  },
+  "discarded_attempt": {
+    "accepted_as_clean_evidence": false,
+    "reason": "The initial disposable lease used an incorrect sandbox php_bin=/usr/bin/php and reached partial_failure after filesystem materialization. Recovery succeeded after correcting only the sandbox descriptor, but the lease was reset before authoritative acceptance.",
+    "recovery_operation_receipt_sha256": "93d7ef365ef10a165e75750c94749d3ab2af9faba47d36323ec422830e16a585"
+  },
+  "cleanup": {
+    "status": "pass",
+    "active_lease_removed": true,
+    "matching_containers_remaining": 0,
+    "matching_networks_remaining": 0,
+    "recoverable_retired_path": "/Users/azlobin/.cache/mautic-sandboxes/retired/4.4-composer--mcd170-voucher-44-20261117T113000Z",
+    "other_leases_touched": false
+  }
+}
