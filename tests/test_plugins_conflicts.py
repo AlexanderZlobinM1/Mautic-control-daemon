@@ -541,7 +541,7 @@ class PluginConflictPathTests(unittest.TestCase):
         db.execute_sql_template.assert_not_called()
         run_template.assert_called_once()
 
-    def test_plugin_reload_ack_completes_after_catalog_contract_block(self) -> None:
+    def test_plugin_reload_catalog_contract_block_stops_before_native_mutation(self) -> None:
         cfg = SimpleNamespace(mcc_url="https://mcc.example")
         install = SimpleNamespace(root="/var/www/ss/public_html", db=None, mautic_major=7)
 
@@ -551,7 +551,11 @@ class PluginConflictPathTests(unittest.TestCase):
         ) as run_catalog, patch(
             "mcd_agent.plugins._run_plugin_template", return_value=(0, "plugins reloaded")
         ) as run_template:
-            _run_plugin_install_reload(cfg, install, expected_bundles={"SalesSnapEcommerceBundle"})
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "Catalog plugin reload preflight failed: agent_patch_contract_mismatch",
+            ):
+                _run_plugin_install_reload(cfg, install, expected_bundles={"SalesSnapEcommerceBundle"})
 
         run_catalog.assert_called_once_with(
             cfg,
@@ -559,7 +563,7 @@ class PluginConflictPathTests(unittest.TestCase):
             phase="before_plugin_reload",
             trigger="plugin_reload_failure",
         )
-        run_template.assert_called_once_with(cfg, install, "mautic:plugin:install")
+        run_template.assert_not_called()
 
     def test_mautic6_plugin_reload_retries_inactive_transaction_once(self) -> None:
         cfg = SimpleNamespace()

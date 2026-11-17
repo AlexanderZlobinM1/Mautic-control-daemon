@@ -228,6 +228,28 @@ class MauticPatchResolutionTransportTests(unittest.TestCase):
         self.assertEqual(request.full_url, "https://mcc.example/api/v1/agent/mautic-patches/evidence")
         self.assertEqual(json.loads(request.data)["host_id"], "550e8400-e29b-41d4-a716-446655440000")
 
+    def test_reports_public_catalog_evidence_without_inventing_host_id(self):
+        response = {"schema": "mcc-mautic-patch-evidence-accepted-v1", "evidence_id": "evidence-2", "status": "accepted"}
+        with patch.object(resolution.urllib.request, "urlopen", return_value=_Response(response)) as urlopen:
+            result = resolution.report_evidence(
+                self.config,
+                instance_uid="fixture-instance-001",
+                mcc_host_name="fixture-mcc-host",
+                hostname="fixture.example",
+                host_id="",
+                catalog_revision="a" * 40,
+                catalog_sha256="c" * 64,
+                plan_sha256="d" * 64,
+                trigger="daemon_reconcile",
+                phase="before_plugin_reload",
+                run_id="fixture-public-runtime-001",
+                evidence={"schema": "mcd-mautic-patch-evidence-v1", "status": "success"},
+            )
+        self.assertEqual(result["evidence_id"], "evidence-2")
+        payload = json.loads(urlopen.call_args.args[0].data)
+        self.assertNotIn("host_id", payload)
+        self.assertEqual(payload["instance_uid"], "fixture-instance-001")
+
 
 if __name__ == "__main__":
     unittest.main()

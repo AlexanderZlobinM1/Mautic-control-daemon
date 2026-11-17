@@ -70,11 +70,14 @@ _PLUGIN_APPLY_RESULT_SCHEMA = "mcd-plugin-apply-result-v1"
 _PLUGIN_OPERATION_RESULT_SCHEMA = "mcd-plugin-operation-result-v2"
 _PLUGIN_OPERATION_RESULT_PREFIX = "MCD_PLUGIN_OPERATION_RESULT="
 _PLUGIN_OPERATION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
-_CATALOG_COMPATIBILITY_BLOCK_REASONS = frozenset({
-    "agent_patch_contract_mismatch",
-    "agent_patch_contract_fields_mismatch",
-    "agent_version_below_minimum",
-})
+_PLUGIN_FILESYSTEM_REQUIRED_OPERATIONS = (
+    "plugin_filesystem_status",
+    "plugin_filesystem_apply",
+    "plugin_filesystem_cleanup",
+    "plugin_alias_cleanup",
+    "plugin_cache_reset",
+)
+_PLUGIN_FILESYSTEM_STATUS_SCHEMA = "mcd-plugin-filesystem-status-v1"
 _GALERA_DANGEROUS_SQL_RE = re.compile(
     r"^\s*(ALTER|CREATE|DROP|RENAME|TRUNCATE|OPTIMIZE|ANALYZE|CHECK|REPAIR|LOCK|UNLOCK)\b",
     re.IGNORECASE,
@@ -1793,24 +1796,10 @@ def _run_plugin_cache_warmup(config: AgentConfig, install) -> None:
 
 def _run_plugin_install_reload(config: AgentConfig, install, expected_bundles: set[str] | None = None) -> None:
     from mcd_agent.mautic_patch_runtime import run as run_catalog
-    if getattr(config, "mcc_url", ""):
-        preflight = run_catalog(config, install, phase="before_plugin_reload", trigger="plugin_reload_failure")
-        if preflight.get("status") == "error":
-            reason = str(preflight.get("reason") or "catalog_preflight_failed")
-            if reason in _CATALOG_COMPATIBILITY_BLOCK_REASONS:
-                # The catalog admission remains strict and no unvalidated patch
-                # is applied.  A stale MCC/agent contract must not turn a
-                # completed plugin file/cache operation into a failed native
-                # plugin reload; the next catalog reconciliation can retry the
-                # optional remediation once compatibility is restored.
-                logging.warning(
-                    "[%s] catalog plugin reload preflight blocked by compatibility (%s); "
-                    "continuing native plugin reload",
-                    install.root,
-                    reason,
-                )
-            else:
-                raise RuntimeError("Catalog plugin reload preflight failed: " + reason)
+    preflight = run_catalog(config, install, phase="before_plugin_reload", trigger="daemon_reconcile")
+    if preflight.get("status") == "error":
+        reason = str(preflight.get("reason") or "catalog_preflight_failed")
+        raise RuntimeError("Catalog plugin reload preflight failed: " + reason)
     rc, out = _run_plugin_template(config, install, "mautic:plugin:install")
     if rc == 0:
         return
