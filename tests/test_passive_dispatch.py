@@ -27,6 +27,33 @@ class _Store:
         self.finished.append((req_id, status, message))
 
 
+class _PassivePluginStore(_Store):
+    def __init__(self) -> None:
+        super().__init__()
+        self.launched: list[tuple[int, str]] = []
+
+    def pending_manual_requests(self, root: str, limit: int = 32):
+        return [
+            {
+                "id": 18,
+                "task_type": "plugins_apply",
+                "entity_id": None,
+                "command_str": "mcd-cli\x1fplugins\x1f--machine-result\x1f--operation-id\x1fpassive-plugin-18",
+                "timeout_sec": 21600,
+            },
+            {
+                "id": 19,
+                "task_type": "segment",
+                "entity_id": 2071,
+                "command_str": "php|bin/console|mautic:segments:update",
+                "timeout_sec": 1800,
+            },
+        ]
+
+    def mark_manual_request_launched(self, req_id: int, task_key: str) -> None:
+        self.launched.append((req_id, task_key))
+
+
 def _rings() -> dict[str, deque[int]]:
     return {name: deque() for name in (
         "seg_sql_ring",
@@ -82,3 +109,30 @@ def test_passive_cli_rejects_every_user_task_command() -> None:
 
         assert rc == 2, command
         assert "passive profile rejects MCD user-task execution" in output
+
+
+def test_passive_dispatch_runs_durable_plugin_jobs_but_rejects_scheduler_tasks(tmp_path) -> None:
+    store = _PassivePluginStore()
+    rings = _rings()
+    config = SimpleNamespace(
+        profile_name="passive",
+        command_timeout_sec=1800,
+        state_db_path=str(tmp_path / "mcd-state.db"),
+    )
+
+    with patch.object(daemon, "_submit_if_slot", return_value=True) as submit:
+        daemon._dispatch_manual_requests_for_root(
+            config=config,
+            store=store,
+            running={},
+            popens={},
+            root="/var/www/mautic",
+            monitor_cycle_done=None,
+            **rings,
+        )
+
+    assert store.finished == [(19, "skipped", "passive_profile_user_dispatch_disabled")]
+    assert store.launched == [(18, "/var/www/mautic|plugins_apply|-")]
+    submit.assert_called_once()
+    assert submit.call_args.kwargs["task_type"] == "plugins_apply"
+    assert submit.call_args.kwargs["manual_request_id"] == 18

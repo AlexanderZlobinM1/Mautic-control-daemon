@@ -224,6 +224,28 @@ class PluginConflictPathTests(unittest.TestCase):
         )
         self.assertEqual(_protected_plugin_path_names(selected), {"AmazonSesBundle"})
 
+    def test_catalog_absent_predecessor_is_resolved_from_stable_local_inventory(self) -> None:
+        selected = [{
+            "bundle": "AuthGuardBundle",
+            "install_bundle": "AuthGuardBundle",
+            "item": {
+                "replaces": ["HostnetAuthBundle", "HostnetAuthManagedBundle"],
+            },
+        }]
+
+        with TemporaryDirectory() as tmp:
+            plugins_dir = Path(tmp)
+            for bundle in ("HostnetAuthBundle", "HostnetAuthManagedBundle"):
+                (plugins_dir / bundle).mkdir()
+
+            replaced = _auto_remove_conflicting_installed_bundles(
+                selected,
+                plugins_dir,
+                context={"installed_plugins": {bundle: "any" for bundle in ("HostnetAuthBundle", "HostnetAuthManagedBundle")}},
+            )
+
+        self.assertEqual(replaced, ["HostnetAuthBundle", "HostnetAuthManagedBundle"])
+
     def test_conflict_cleanup_does_not_delete_selected_runtime_path(self) -> None:
         selected = [
             {
