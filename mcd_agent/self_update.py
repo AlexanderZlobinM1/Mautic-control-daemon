@@ -14,7 +14,10 @@ import sys
 import tarfile
 import tempfile
 import time
-import tomllib
+try:
+    import tomllib  # type: ignore[attr-defined]
+except ModuleNotFoundError:  # pragma: no cover - exercised by Python 3.10
+    import tomli as tomllib  # type: ignore[no-redef]
 from datetime import datetime, timezone
 from typing import Any
 from urllib import request

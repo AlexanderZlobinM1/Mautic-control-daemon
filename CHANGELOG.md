@@ -1,3 +1,13 @@
+## 1.6.101 - 2026-11-17
+
+- Report plugin auto-update policy changes as observed runtime state so MCC's
+  mirror converges without mutating the server desired state or its revision.
+
+## 1.6.100 - 2026-11-17
+
+- Support self-update import and read-only admission checks on Python 3.10 by
+  using the `tomli` fallback declared for Python versions below 3.11.
+
 ## 1.6.99 - 2026-11-17
 
 - Expose durable plugin-job status and recent terminal receipts in the state

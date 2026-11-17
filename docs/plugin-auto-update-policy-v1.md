@@ -45,6 +45,13 @@ readback and MCC synchronization result. If local persistence succeeds but the
 MCC synchronization attempt fails, the result remains an error while reporting
 the confirmed local value; a retry is safe.
 
+For a registered agent, a locally executed policy change is reported to MCC as
+observed runtime state. This updates MCC's mirror without mutating the server's
+desired state or its revision. If delivery is not confirmed, the receipt keeps
+the truthful locally observed value and reports synchronization failure; MCD
+does not replay the local mutation automatically. Standalone operation treats
+explicitly disabled MCC transport as a successful local-only outcome.
+
 MCC UI and MCC CLI must normalize through the same MCC operation/service and
 invoke this one MCD contract. They must not implement separate selection,
 validation, storage, or plugin-mutation paths.

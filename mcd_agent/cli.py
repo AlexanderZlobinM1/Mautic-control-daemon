@@ -813,7 +813,7 @@ def _plugin_auto_update_policy_cli(cfg, args) -> int:
                 cfg,
                 {PLUGIN_AUTO_UPDATE_RUNTIME_KEY: settings},
                 merge=True,
-                target="desired",
+                target="observed",
             )
             touch_poll_trigger(cfg)
         else:
