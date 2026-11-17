@@ -96,6 +96,16 @@ When the version is unknown, local opt-in, independently confirmed major,
 explicit catalog permission and source gates are all required. Local version
 window settings no longer supply catalog applicability decisions.
 
+Preventive `before_plugin_reload` plans are also consumable without agent
+registration. The configured public plugin manifest may bind one same-origin,
+digest-verified Assets projection. MCD binds the immutable v3 plan template to
+the observed major/install type and local execution context, then uses the same
+plan validators, exact source gates and executor as a registered agent. A
+required projection that is unavailable, invalid, missing or ambiguous blocks
+before native reload. Local execution evidence is durable before optional MCC
+notification; notification failure is never an execution rollback or replay
+signal.
+
 Nonempty `git_patch_v1.parameters` is rejected until a typed capability exists.
 Role row count, configured-prefix migration-pending/namespace facts, dependency
 package predicates, method-scoped predicates and migration/DDL rollback barriers

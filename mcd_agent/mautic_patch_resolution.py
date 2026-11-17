@@ -579,7 +579,6 @@ def report_evidence(
         "schema": EVIDENCE_SCHEMA,
         "mcc_host_name": mcc_host_name,
         "hostname": hostname,
-        "host_id": _resolved_host_id(host_id),
         "instance_uid": instance_uid,
         "catalog_revision": catalog_revision,
         "catalog_sha256": catalog_sha256,
@@ -589,6 +588,8 @@ def report_evidence(
         "run_id": run_id,
         "evidence": evidence,
     }
+    if str(host_id or "").strip():
+        payload["host_id"] = _resolved_host_id(host_id)
     result = _post_json(config, "/agent/mautic-patches/evidence", payload)
     if result.get("schema") != EVIDENCE_ACCEPTED_SCHEMA or result.get("status") != "accepted":
         raise MauticPatchResolutionError("mcc_patch_evidence_not_accepted")

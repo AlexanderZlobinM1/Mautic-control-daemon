@@ -335,6 +335,17 @@ fails before the source/package stage, and no patch rollback is attempted.
 `daemon_reconcile`; существующие реактивные records после точной ошибки reload
 сохраняют `plugin_reload_failure` и не заменяются отдельным runner.
 
+Этот pre-reload путь не зависит от регистрации агента в MCC. Manifest
+настроенного plugin repository может содержать один digest-bound reference на
+готовую публичную проекцию того же Assets registry. MCD выбирает подходящую
+проекцию по major, install type, trigger и phase, привязывает локальный UID/root
+и запускает существующие v3 validators, source gates и executor. Отсутствующий
+необязательный source означает обычный no-op; недоступный или неоднозначный
+обязательный source блокирует native reload. Выполнение сначала сохраняет
+локальный receipt. Если management-канал настроен, evidence отправляется затем
+как отдельное уведомление; его недоступность не отменяет уже выполненный patch,
+не превращает успешную установку в ошибку и не вызывает повторную мутацию.
+
 MCD не применяет план при `agent_patch_contract_mismatch`,
 `agent_patch_contract_fields_mismatch` или `agent_version_below_minimum` и не
 подменяет строгую проверку MCC. Такой отказ совместимости не отменяет уже
