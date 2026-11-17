@@ -1,0 +1,127 @@
+{
+  "schema": "mcd-plugin-public-catalog-lifecycle-acceptance-v1",
+  "recorded_at": "2026-11-17T14:18:30Z",
+  "scope": {
+    "plugin_uid": "authguardbundle:7",
+    "package_uid": "authguardbundle-m7",
+    "bundle": "AuthGuardBundle",
+    "version": "7.0",
+    "business_logic_tested": false,
+    "management_delivery": "not_configured",
+    "daemon_started": false
+  },
+  "source": {
+    "remote": "ssh://git@git.sales-snap.com:9797/zlobin/AuthGuardBundle.git",
+    "tag": "v7.0",
+    "tag_object": "e37e7b70d3d1c2dd8c62689954df12395776c8d6",
+    "commit": "be6421c279195e5a28176fc4d2840250554b9b02",
+    "content_tree_sha256": "8030269a7df2caa37c32833895f3718ed09d43820031d5655ca83a319ffa7a75"
+  },
+  "published_catalog": {
+    "manifest_url": "https://servercontrol.sales-snap.com/mauticctl/packages/mautic7/manifest.json",
+    "raw_http_sha256": "e9dedd4db9e207f321736328ecd880333ee37db47270913c8055f6b3645a4b45",
+    "canonical_json_sha256": "da8c30b8abc1c7f1b6cf9e312c5432c5df53ec213cd39b1cd458f38ce7e95d6c",
+    "archive_url": "https://servercontrol.sales-snap.com/mauticctl/packages/mautic7/authguardbundle-m7.tar.gz",
+    "archive_sha256": "30a57b284e1f81893aba2e8b44fe4cbe7fc913b14cea5c9e910db25072a65c74",
+    "archive_size_bytes": 52462,
+    "mautic_versions": ["7.2"],
+    "php_constraint": ">=8.1",
+    "replaces": ["HostnetAuthBundle", "HostnetAuthManagedBundle"],
+    "mcc_fetch_revision": 32,
+    "mcc_build_revision": 33,
+    "mcc_publish_revision": 12,
+    "host_apply": false,
+    "jobs_started": false
+  },
+  "sandbox": {
+    "lease": "ops-authguard-catalog-20261117-a1",
+    "mautic_version": "7.2.2",
+    "php_version": "8.4.26",
+    "database": "MySQL 8.4",
+    "instance_uid": "127.0.0.1",
+    "root": "/var/www/html",
+    "plugins_root": "/var/www/html/docroot/plugins",
+    "mcd_version": "1.6.103",
+    "mcd_runtime_sha256": "4d6ac54989dc54a96d376d912e79f8cfc7e12034f3060d07bfceb38ce2177b28",
+    "profile": "passive",
+    "php_bin": "/usr/local/bin/php",
+    "composer_home": "/var/www/.composer"
+  },
+  "negative_receipts": [
+    {
+      "operation_id": "ops-authguard-catalog-20261117-a1-install",
+      "receipt_sha256": "bb4f7d923bc6695ea8f94c06a48b36c4986f723090cb6f944c2788d271daffc5",
+      "status": "failed",
+      "error_code": "plugin_operation_failed",
+      "error": "Mautic console is not healthy before composer package preflight: /var/www/html",
+      "disposition": "sandbox php_bin corrected from absent /usr/bin/php to actual /usr/local/bin/php; no MCD code change"
+    },
+    {
+      "operation_id": "ops-authguard-catalog-20261117-a1-install-r2",
+      "receipt_sha256": "11dac47a0b567cbdf8ca7d903c550b89dcd5d91d5e1f96bb7ac7945b01a2aaaa",
+      "status": "failed",
+      "error_code": "plugin_operation_failed",
+      "error": "/var/www/.composer/cache/vcs did not exist and could not be created",
+      "disposition": "sandbox Composer home/cache provisioned for www-data; no manual composer update and no MCD code change"
+    }
+  ],
+  "terminal_receipts": [
+    {
+      "action": "install",
+      "operation_id": "mcd-authguard-103-install-003",
+      "receipt_sha256": "913a0b04c948970bca2798ac477a54d937c3f06ef29d73c06b9048ae47058410",
+      "status": "success",
+      "installed_version": "7.0",
+      "reason": "version+sha match"
+    },
+    {
+      "action": "install",
+      "operation_id": "mcd-authguard-103-repeat-004",
+      "receipt_sha256": "91a345a9af44296241ef0413b8c147e133237757f22a4f64addd4efb2a463f11",
+      "status": "success",
+      "installed_version": "7.0",
+      "reason": "version+sha match"
+    },
+    {
+      "action": "update",
+      "operation_id": "mcd-authguard-103-update-005",
+      "receipt_sha256": "c45cf5f00eeee85d2476875694114969baed2abaa0af394374fc1cd0a15924cf",
+      "status": "success",
+      "installed_version": "7.0",
+      "reason": "version+sha match"
+    },
+    {
+      "action": "remove",
+      "operation_id": "mcd-authguard-103-remove-006",
+      "receipt_sha256": "73bc7d20fe76c5f9140513cf21d3114fa488a71e1f9db6a47295922fff71f987",
+      "status": "success",
+      "installed_version": "-",
+      "reason": "removed"
+    },
+    {
+      "action": "reinstall",
+      "operation_id": "mcd-authguard-103-reinstall-007",
+      "receipt_sha256": "5bbd4d1b66023a122d8c5bfcf10e4716f67d6d4605906e5eca271af91cab12b8",
+      "status": "success",
+      "installed_version": "7.0",
+      "reason": "version+sha match"
+    }
+  ],
+  "remove_readback": {
+    "bundle_path_absent": true,
+    "database_registration_absent": true,
+    "catalog_status": "MISSING",
+    "installed_version": "-"
+  },
+  "final_readback": {
+    "AuthGuardBundle_present": true,
+    "HostnetAuthBundle_present": false,
+    "HostnetAuthManagedBundle_present": false,
+    "database_bundle": "AuthGuardBundle",
+    "database_is_missing": 0,
+    "catalog_status": "OK",
+    "installed_version": "7.0",
+    "state_archive_sha256": "30a57b284e1f81893aba2e8b44fe4cbe7fc913b14cea5c9e910db25072a65c74"
+  },
+  "result": "passed_public_catalog_install_repeat_update_remove_reinstall"
+}
