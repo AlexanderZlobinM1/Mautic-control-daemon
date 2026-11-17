@@ -1,3 +1,8 @@
+## 1.6.100 - 2026-11-17
+
+- Support self-update import and read-only admission checks on Python 3.10 by
+  using the `tomli` fallback declared for Python versions below 3.11.
+
 ## 1.6.99 - 2026-11-17
 
 - Expose durable plugin-job status and recent terminal receipts in the state
