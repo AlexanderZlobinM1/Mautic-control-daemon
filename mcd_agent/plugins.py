@@ -805,6 +805,7 @@ def _plugin_interaction_context(
     *,
     config: AgentConfig | None = None,
     bundle_names: list[str] | None = None,
+    registered_plugins: set[str] | None = None,
 ) -> dict[str, Any]:
     installed_plugins = _installed_plugins_from_dir(
         plugins_dir,
@@ -826,6 +827,11 @@ def _plugin_interaction_context(
     return {
         "sender_type": sender_type,
         "installed_plugins": installed_plugins,
+        "registered_plugins": {
+            str(bundle).strip()
+            for bundle in (registered_plugins or set())
+            if str(bundle).strip()
+        },
     }
 
 
@@ -855,12 +861,18 @@ def _exclusive_counterparts(
             out.update(group)
 
     if isinstance(item, dict):
-        repl = item.get("replaces")
-        if isinstance(repl, list):
-            for x in repl:
-                name = str(x or "").strip()
-                if name and _is_valid_bundle_name(name):
-                    out.add(name)
+        if "replaces" in item:
+            repl = item.get("replaces")
+            if not isinstance(repl, list) or any(
+                not isinstance(value, str)
+                or not _is_valid_bundle_name(value.strip())
+                for value in repl
+            ):
+                raise RuntimeError("plugin_replaces_contract_invalid")
+            normalized_replaces = [value.strip() for value in repl]
+            if len(set(normalized_replaces)) != len(normalized_replaces):
+                raise RuntimeError("plugin_replaces_contract_duplicate")
+            out.update(normalized_replaces)
         rules = item.get("dependency_matrix")
         if rules:
             ctx = context or {}
@@ -897,10 +909,16 @@ def _auto_remove_conflicting_installed_bundles(
 ) -> list[str]:
     """
     Return conflicting bundle keys that must be removed before applying `selected`.
-    Manifest `replaces` aliases are removed unconditionally because they often
-    exist only as stale DB rows. Broader exclusive counterparts are removed only
-    when their plugin path exists, avoiding unrelated path churn for competitors
-    that were never installed on this instance.
+    The selected package's `replaces` list is matched against the factual local
+    plugin inventory, not against the current catalog. This is what allows a
+    successor to remove an orphaned bundle whose catalog entry was retired,
+    while avoiding cleanup calls for a competitor that is not installed.
+
+    The standard MCD remove path is the migration contract: registration rows
+    are journaled with settings retained, then the managed bundle is removed.
+    A failed cleanup aborts the transaction before the successor download or
+    install is attempted and the outer machine contract emits the terminal
+    failure receipt.
     """
     selected_set = {str(row.get("bundle", "")).strip() for row in selected if str(row.get("bundle", "")).strip()}
     remove: set[str] = set()
@@ -908,18 +926,15 @@ def _auto_remove_conflicting_installed_bundles(
         bundle = str(row.get("bundle", "")).strip()
         item = row.get("item")
         item_dict = item if isinstance(item, dict) else None
-        explicit_replaces: set[str] = set()
-        repl = item_dict.get("replaces") if isinstance(item_dict, dict) else None
-        if isinstance(repl, list):
-            for token in repl:
-                name = str(token or "").strip()
-                if name and _is_valid_bundle_name(name):
-                    explicit_replaces.add(name)
+        installed = set((context or {}).get("installed_plugins", {}) or {})
+        registered = set((context or {}).get("registered_plugins", {}) or {})
         for conflict in _exclusive_counterparts(bundle, item_dict, context=context):
             if conflict in selected_set:
                 continue
-            installed = set((context or {}).get("installed_plugins", {}) or {})
-            if conflict not in explicit_replaces and conflict not in installed:
+            # In the extracted 1.7 path the external inventory is the only
+            # authoritative filesystem observation. Do not reconstruct it from
+            # local paths, which would bypass the managed-root boundary.
+            if conflict not in installed and conflict not in registered:
                 continue
             remove.add(conflict)
     return sorted(remove, key=lambda x: x.lower())
@@ -1528,13 +1543,14 @@ def _build_plugin_rows(
         else set()
     )
     all_bundles = sorted(set(local_bundles) | set(manifest_by_bundle.keys()), key=lambda x: x.lower())
+    registered_bundles = _registered_plugin_bundles(install)
     interaction_context = _plugin_interaction_context(
         install_root,
         plugins_dir,
         config=config,
         bundle_names=all_bundles,
+        registered_plugins=registered_bundles,
     )
-    registered_bundles = _registered_plugin_bundles(install)
 
     rows: list[dict[str, Any]] = []
     selectable_idx = 1
@@ -2266,6 +2282,7 @@ def _apply_plugin_file_changes_impl(
                     auto_remove_bundles=auto_remove_bundles,
                     rows_by_bundle=rows_by_bundle,
                 ),
+                registered_plugins=_registered_plugin_bundles(install),
             ),
             extra_conflicts=auto_remove_bundles,
             allow_schema_creation=not bool(getattr(config, "cluster_id", None)),
@@ -3541,6 +3558,7 @@ def run_plugins_interactive(
         plugins_dir,
         config=config,
         bundle_names=[str(row.get("bundle") or "").strip() for row in rows if str(row.get("bundle") or "").strip()],
+        registered_plugins=_registered_plugin_bundles(install),
     )
 
     idx_map: dict[int, dict[str, Any]] = {}

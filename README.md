@@ -469,7 +469,9 @@ Same operations via wrapper (`mcd-cli`):
 ## Profile Model
 - State is profile-based (`[profile].name`).
 - `profile=passive`:
-  - MCD runs in planning/statistics mode only (no Mautic task dispatch),
+  - MCD runs in planning/statistics mode for scheduled Mautic work (no
+    segment/campaign/import dispatch), while explicit durable plugin-management
+    jobs still run through the normal MCD supervisor and terminal receipt path,
   - cron is expected to remain active.
 - Non-passive profiles (`tiny|mini|midi|maxi|hiload|ultra|farm-tiny|farm-mini|farm-midi|farm-maxi|farm-hiload|farm-ultra|custom`) dispatch Mautic tasks.
 - Automatic selection is persisted separately in

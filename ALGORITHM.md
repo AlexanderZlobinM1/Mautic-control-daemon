@@ -237,6 +237,25 @@ empty digest/top fields, and no local row synthesis. Malformed, invalid-name or
 duplicate rows are terminal validation errors. The outer executable result must
 remain the existing `mcd-self-hosted-executable-output-v1` runner frame.
 
+Plugin replacement is resolved from two facts on the target instance: the
+selected package's valid `replaces` bundle list and the current factual plugin
+inventory. A predecessor does not need to remain in the MCC catalog, and its
+installed version is not compared for replacement admission. When a listed
+predecessor is present, MCD first uses the ordinary remove contract (registration
+references are journaled while plugin-owned settings remain intact), then
+materializes the successor. A missing or malformed successor `replaces`
+declaration, failed predecessor removal, or failed replacement binding stops the
+transaction before successor installation and produces one terminal failure
+receipt. An absent predecessor causes no cleanup call. The selected successor
+runtime path is protected when catalog projections share an install bundle, and
+unrelated inventory entries are never removed.
+
+The `passive` profile disables scheduled segment, campaign and import dispatch;
+it does not reject an explicit durable `plugins_apply` request. Such a request
+continues through the same local FIFO, supervisor, replacement transaction and
+terminal receipt path. This separation keeps cron-owned scheduled work passive
+without making plugin management silently disappear.
+
 Для внешнего запуска установки существует один машинный путь MCD. Вызывающая
 система передаёт только bare `instance_uid`, стабильный логический `plugin_uid`,
 при необходимости конкретный `package_uid`, действие и свой `operation_id`.

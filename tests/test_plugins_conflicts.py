@@ -230,10 +230,141 @@ class PluginConflictPathTests(unittest.TestCase):
         ]
 
         self.assertEqual(
-            _auto_remove_conflicting_installed_bundles(selected, Path("/tmp/plugins")),
+            _auto_remove_conflicting_installed_bundles(
+                selected,
+                Path("/tmp/plugins"),
+                context={
+                    "installed_plugins": {
+                        "AmazonSesBundleDev": "1.0.0",
+                        "AmazonSesOriginalBundle": "1.0.0",
+                    },
+                },
+            ),
             ["AmazonSesBundleDev", "AmazonSesOriginalBundle"],
         )
         self.assertEqual(_protected_plugin_path_names(selected), {"AmazonSesBundle"})
+
+    def test_replaces_uses_factual_inventory_for_orphaned_competitor(self) -> None:
+        selected = [{
+            "bundle": "AuthGuardBundle",
+            "install_bundle": "AuthGuardBundle",
+            "item": {
+                "replaces": ["HostnetAuthBundle", "HostnetAuthManagedBundle"],
+            },
+        }]
+
+        with TemporaryDirectory() as tmp:
+            plugins_dir = Path(tmp)
+            for inventory in (
+                {"HostnetAuthBundle": "6.1.1.1"},
+                {"HostnetAuthManagedBundle": "5.4.0"},
+                {
+                    "HostnetAuthBundle": "6.0.0",
+                    "HostnetAuthManagedBundle": "6.1.1.1",
+                },
+            ):
+                replaced = _auto_remove_conflicting_installed_bundles(
+                    selected,
+                    plugins_dir,
+                    context={"installed_plugins": inventory},
+                )
+                assert replaced == sorted(inventory)
+
+            db_only = _auto_remove_conflicting_installed_bundles(
+                selected,
+                plugins_dir,
+                context={
+                    "installed_plugins": {},
+                    "registered_plugins": {"HostnetAuthManagedBundle"},
+                },
+            )
+
+            absent = _auto_remove_conflicting_installed_bundles(
+                selected,
+                plugins_dir,
+                context={"installed_plugins": {}},
+            )
+
+        assert db_only == ["HostnetAuthManagedBundle"]
+        assert absent == []
+
+    def test_replaces_rejects_invalid_successor_contract(self) -> None:
+        selected = [{
+            "bundle": "AuthGuardBundle",
+            "install_bundle": "AuthGuardBundle",
+            "item": {"replaces": "HostnetAuthBundle"},
+        }]
+
+        with self.assertRaisesRegex(RuntimeError, "plugin_replaces_contract_invalid"):
+            _auto_remove_conflicting_installed_bundles(
+                selected,
+                Path("/tmp/plugins"),
+                context={"installed_plugins": {"HostnetAuthBundle": "6.1.1.1"}},
+            )
+
+    def test_failed_predecessor_removal_stops_successor_install_with_terminal_failure(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "plugins").mkdir()
+            cfg = SimpleNamespace(
+                plugins_state_filename=".mcd-plugin.json",
+                mcc_token="",
+                cluster_id="",
+            )
+            install = SimpleNamespace(
+                root=str(root),
+                db=None,
+                mautic_major=7,
+                console_path=str(root / "bin" / "console"),
+            )
+            selected = [{
+                "bundle": "AuthGuardBundle",
+                "install_bundle": "AuthGuardBundle",
+                "item": {
+                    "bundle": "AuthGuardBundle",
+                    "version": "7.2.1",
+                    "url": "https://mcc.example/authguardbundle-m7.tar.gz",
+                    "replaces": ["HostnetAuthBundle"],
+                },
+                "package": "authguardbundle-m7.tar.gz",
+                "status": "MISSING",
+            }]
+            output = io.StringIO()
+
+            with redirect_stdout(output), patch(
+                "mcd_agent.plugins._plugin_interaction_context",
+                return_value={"installed_plugins": {"HostnetAuthBundle": "6.1.1.1"}},
+            ), patch(
+                "mcd_agent.plugins._configured_plugin_filesystem_operation",
+                return_value={"status": "error", "reason": "competitor_remove_denied"},
+            ), patch("mcd_agent.plugins._install_or_replace_plugin") as install_plugin, patch(
+                "mcd_agent.plugins._plugin_files_applied_observed", return_value=False
+            ):
+                with self.assertRaisesRegex(RuntimeError, "competitor_remove_denied"):
+                    _apply_plugin_file_changes(
+                        config=cfg,
+                        install=install,
+                        install_root=str(root),
+                        manifest_dir="https://mcc.example/",
+                        fallback_ip=None,
+                        action="install",
+                        selected=selected,
+                        auto_remove_bundles=["HostnetAuthBundle"],
+                        rows_by_bundle={},
+                        run_post_steps=True,
+                        operation_id="authguard-replacement-failed-1",
+                    )
+
+            install_plugin.assert_not_called()
+            results = [
+                json.loads(line.split("=", 1)[1])
+                for line in output.getvalue().splitlines()
+                if line.startswith("MCD_PLUGIN_APPLY_RESULT=")
+            ]
+            self.assertEqual(len(results), 1)
+            self.assertTrue(results[0]["terminal"])
+            self.assertEqual(results[0]["overall_status"], "failed")
+            self.assertEqual(results[0]["rc"], 1)
 
     def test_conflict_cleanup_does_not_delete_selected_runtime_path(self) -> None:
         selected = [
