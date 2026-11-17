@@ -46,7 +46,8 @@ MCD_PLUGIN_OPERATION_RESULT=<JSON>
 - `selected` с ожидаемыми package versions;
 - подтверждённый Mautic `inventory`;
 - `files_applied`, `post_step_status` и `cache_inventory_confirmed`;
-- `partial_state`, `rollback_status`, `manual_recovery_required` и
+- `execution_state`, `partial_state`, `rollback_status`,
+  `manual_recovery_required`, `state_confirmation_required` и
   `automatic_replay_allowed`;
 - `error_code` и `error` при отказе;
 - `mcd_version` и `receipt_sha256`.
@@ -67,6 +68,13 @@ terminal result остаётся `failed` и содержит `partial_state=tru
 `rollback_status=not_attempted`, `manual_recovery_required=true`. Любой terminal
 result содержит `automatic_replay_allowed=false`: удалённый оркестратор не
 должен повторять файловую операцию из-за ошибки callback или post-step.
+Если MCD не получил usable внутренний terminal result либо внутренний success
+противоречит внешнему rc, состояние не подменяется значением `false`:
+`files_applied=null`, `partial_state=null`, `rollback_status=unknown` и требуется
+отдельный readback. Для validation failure до запуска executor состояние явно
+`preflight_no_write`. `filesystem_changed` дублирует смысл `files_applied` для
+операций удаления: `true` означает также подтверждённое удаление файлов, а не
+только их копирование.
 
 Обычный интерактивный CLI сохраняет старый `mcd-plugin-apply-result-v1` для
 обратной совместимости. Новый MCC-путь не читает его progress-записи и не

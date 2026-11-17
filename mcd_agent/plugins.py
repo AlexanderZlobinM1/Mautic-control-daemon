@@ -3770,9 +3770,67 @@ def _plugin_operation_terminal_payload(
     terminal_payload = terminal if isinstance(terminal, dict) else {}
     selected = terminal_payload.get("selected")
     inventory = terminal_payload.get("inventory")
-    files_applied = bool(terminal_payload.get("files_applied", False))
-    post_step_status = str(terminal_payload.get("post_step_status") or "unknown")
-    partial_state = status != "success" and files_applied and post_step_status != "success"
+    preflight_no_write = not terminal_payload and error_code in {
+        "plugin_machine_root_forbidden",
+        "plugin_instance_uid_must_be_bare",
+        "plugin_instance_uid_invalid",
+        "plugin_operation_id_invalid",
+        "plugin_uid_invalid",
+        "package_uid_invalid",
+        "plugin_action_invalid",
+        "plugin_instance_uid_not_found",
+    }
+    files_applied: bool | None
+    if "files_applied" in terminal_payload:
+        files_applied = bool(terminal_payload.get("files_applied"))
+    elif preflight_no_write:
+        files_applied = False
+    else:
+        files_applied = None
+    post_step_status = str(
+        terminal_payload.get("post_step_status")
+        or ("not_started" if preflight_no_write else "unknown")
+    )
+    cache_inventory_confirmed = (
+        bool(terminal_payload.get("cache_inventory_confirmed"))
+        if "cache_inventory_confirmed" in terminal_payload
+        else (False if preflight_no_write else None)
+    )
+    terminal_claims_success = (
+        str(terminal_payload.get("overall_status") or "") == "success"
+        and int(terminal_payload.get("rc") or 0) == 0
+    )
+    contradictory_failure = status != "success" and terminal_claims_success
+    if status == "success":
+        execution_state = "confirmed_success"
+        partial_state: bool | None = False
+        rollback_status = "not_required"
+        manual_recovery_required = False
+        state_confirmation_required = False
+    elif preflight_no_write:
+        execution_state = "preflight_no_write"
+        partial_state = False
+        rollback_status = "not_required"
+        manual_recovery_required = False
+        state_confirmation_required = False
+    elif contradictory_failure or files_applied is None:
+        execution_state = "failure_state_unknown"
+        partial_state = None
+        rollback_status = "unknown"
+        manual_recovery_required = True
+        state_confirmation_required = True
+    elif files_applied and post_step_status != "success":
+        execution_state = "partial_failure"
+        partial_state = True
+        rollback_status = "not_attempted"
+        manual_recovery_required = True
+        state_confirmation_required = True
+    else:
+        execution_state = "post_step_failure_without_filesystem_change"
+        partial_state = False
+        rollback_status = "not_required"
+        manual_recovery_required = True
+        state_confirmation_required = True
     payload: dict[str, Any] = {
         "schema": _PLUGIN_OPERATION_RESULT_SCHEMA,
         "operation": "plugin_apply",
@@ -3787,11 +3845,14 @@ def _plugin_operation_terminal_payload(
         "selected": list(selected) if isinstance(selected, list) else [],
         "inventory": list(inventory) if isinstance(inventory, list) else [],
         "files_applied": files_applied,
+        "filesystem_changed": files_applied,
         "post_step_status": post_step_status,
-        "cache_inventory_confirmed": bool(terminal_payload.get("cache_inventory_confirmed", False)),
+        "cache_inventory_confirmed": cache_inventory_confirmed,
+        "execution_state": execution_state,
         "partial_state": partial_state,
-        "rollback_status": "not_attempted" if partial_state else "not_required",
-        "manual_recovery_required": partial_state,
+        "rollback_status": rollback_status,
+        "manual_recovery_required": manual_recovery_required,
+        "state_confirmation_required": state_confirmation_required,
         "automatic_replay_allowed": False,
         "error_code": str(error_code or ""),
         "error": str(error or terminal_payload.get("error") or ""),

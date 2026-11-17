@@ -78,10 +78,13 @@ def test_machine_contract_emits_one_terminal_host_independent_result(monkeypatch
     assert result["package_uids"] == []
     assert result["status"] == "success"
     assert result["files_applied"] is True
+    assert result["filesystem_changed"] is True
     assert result["post_step_status"] == "success"
+    assert result["execution_state"] == "confirmed_success"
     assert result["partial_state"] is False
     assert result["rollback_status"] == "not_required"
     assert result["manual_recovery_required"] is False
+    assert result["state_confirmation_required"] is False
     assert result["automatic_replay_allowed"] is False
     assert result["catalog_sha256"] == "c" * 64
     assert result["terminal"] is True
@@ -454,7 +457,126 @@ def test_machine_contract_preserves_terminal_failure_evidence(monkeypatch, capsy
     assert result["files_applied"] is True
     assert result["post_step_status"] == "failed"
     assert result["cache_inventory_confirmed"] is False
+    assert result["execution_state"] == "partial_failure"
     assert result["partial_state"] is True
     assert result["rollback_status"] == "not_attempted"
     assert result["manual_recovery_required"] is True
+    assert result["state_confirmation_required"] is True
     assert result["automatic_replay_allowed"] is False
+
+
+def test_machine_contract_marks_validation_failure_as_preflight_no_write(monkeypatch, capsys):
+    monkeypatch.setattr(
+        plugins,
+        "run_plugins_interactive",
+        lambda **_kwargs: pytest.fail("preflight rejection must not start plugin transaction"),
+    )
+
+    rc = plugins.run_plugins_machine(
+        config=SimpleNamespace(),
+        instance_uid="tenant-one@host-a",
+        plugin_uids=["vendor.demo:7"],
+        action="auto",
+        operation_id="mcc-op-preflight",
+    )
+
+    _, result = _read_machine_result(capsys)
+    assert rc == 1
+    assert result["execution_state"] == "preflight_no_write"
+    assert result["files_applied"] is False
+    assert result["filesystem_changed"] is False
+    assert result["post_step_status"] == "not_started"
+    assert result["partial_state"] is False
+    assert result["rollback_status"] == "not_required"
+    assert result["manual_recovery_required"] is False
+    assert result["state_confirmation_required"] is False
+
+
+def test_machine_contract_marks_missing_terminal_failure_state_unknown(monkeypatch, capsys):
+    monkeypatch.setattr(
+        plugins,
+        "_select_install_with_db",
+        lambda _config, selector: SimpleNamespace(instance_uid=selector, root="/srv/tenant-one"),
+    )
+    monkeypatch.setattr(
+        plugins,
+        "run_plugins_interactive",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("engine_failed_without_terminal")),
+    )
+
+    rc = plugins.run_plugins_machine(
+        config=SimpleNamespace(),
+        instance_uid="tenant-one",
+        plugin_uids=["vendor.demo:7"],
+        action="auto",
+        operation_id="mcc-op-unknown",
+    )
+
+    _, result = _read_machine_result(capsys)
+    assert rc == 1
+    assert result["execution_state"] == "failure_state_unknown"
+    assert result["files_applied"] is None
+    assert result["filesystem_changed"] is None
+    assert result["partial_state"] is None
+    assert result["rollback_status"] == "unknown"
+    assert result["manual_recovery_required"] is True
+    assert result["state_confirmation_required"] is True
+
+
+def test_machine_contract_marks_contradictory_success_terminal_unknown(monkeypatch, capsys):
+    monkeypatch.setattr(
+        plugins,
+        "_select_install_with_db",
+        lambda _config, selector: SimpleNamespace(instance_uid=selector, root="/srv/tenant-one"),
+    )
+
+    def run(**kwargs):
+        print("MCD_PLUGIN_APPLY_RESULT=" + json.dumps(_terminal_v1(kwargs["operation_id"])))
+        return 9
+
+    monkeypatch.setattr(plugins, "run_plugins_interactive", run)
+    rc = plugins.run_plugins_machine(
+        config=SimpleNamespace(),
+        instance_uid="tenant-one",
+        plugin_uids=["vendor.demo:7"],
+        action="auto",
+        operation_id="mcc-op-contradictory",
+    )
+
+    _, result = _read_machine_result(capsys)
+    assert rc == 1
+    assert result["execution_state"] == "failure_state_unknown"
+    assert result["files_applied"] is True
+    assert result["partial_state"] is None
+    assert result["rollback_status"] == "unknown"
+    assert result["manual_recovery_required"] is True
+
+
+def test_machine_contract_remove_reports_filesystem_change(monkeypatch, capsys):
+    monkeypatch.setattr(
+        plugins,
+        "_select_install_with_db",
+        lambda _config, selector: SimpleNamespace(instance_uid=selector, root="/srv/tenant-one"),
+    )
+
+    def run(**kwargs):
+        terminal = _terminal_v1(kwargs["operation_id"])
+        terminal["action"] = "remove"
+        print("MCD_PLUGIN_APPLY_RESULT=" + json.dumps(terminal))
+        return 0
+
+    monkeypatch.setattr(plugins, "run_plugins_interactive", run)
+    rc = plugins.run_plugins_machine(
+        config=SimpleNamespace(),
+        instance_uid="tenant-one",
+        plugin_uids=["vendor.demo:7"],
+        action="remove",
+        operation_id="mcc-op-remove",
+    )
+
+    _, result = _read_machine_result(capsys)
+    assert rc == 0
+    assert result["action"] == "remove"
+    assert result["files_applied"] is True
+    assert result["filesystem_changed"] is True
+    assert result["execution_state"] == "confirmed_success"
