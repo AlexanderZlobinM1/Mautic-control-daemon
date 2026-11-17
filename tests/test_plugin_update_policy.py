@@ -194,10 +194,30 @@ def test_auto_action_skips_only_exact_disabled_projection() -> None:
     assert skipped == [rows[0]]
 
 
+def test_policy_skipped_terminal_keeps_catalog_digest(capsys) -> None:
+    plugins._emit_plugin_apply_result(
+        operation_id="policy-skip-1",
+        install_root="/srv/instance-a",
+        action="auto",
+        selected=[],
+        event="completed",
+        files_applied=False,
+        post_step_status="skipped_by_policy",
+        cache_inventory_confirmed=True,
+        overall_status="success",
+        rc=0,
+        inventory=[],
+        catalog_sha256="d" * 64,
+    )
+    line = capsys.readouterr().out.strip()
+    payload = json.loads(line.split("=", 1)[1])
+    assert payload["catalog_sha256"] == "d" * 64
+
+
 def test_cli_set_get_unset_persists_without_plugin_mutation(tmp_path, monkeypatch, capsys) -> None:
     config_path = tmp_path / "mcd.toml"
     config_path.write_text(
-        '[profile]\nname = "custom"\n\n[runtime]\nplugin_auto_update_instance_settings = {}\n',
+        '[profile]\nname = "custom"\n\n[runtime]\nplugin_auto_update_instance_settings = {}\n\n[mcc]\nurl = ""\n',
         encoding="utf-8",
     )
     cfg = load_config(str(config_path), allow_recover_from_mcc=False)
@@ -246,7 +266,7 @@ def test_cli_set_get_unset_persists_without_plugin_mutation(tmp_path, monkeypatc
 def test_cli_reports_preserved_local_state_when_mcc_push_raises(tmp_path, monkeypatch, capsys) -> None:
     config_path = tmp_path / "mcd.toml"
     config_path.write_text(
-        '[profile]\nname = "custom"\n\n[runtime]\nplugin_auto_update_instance_settings = {}\n',
+        '[profile]\nname = "custom"\n\n[runtime]\nplugin_auto_update_instance_settings = {}\n\n[mcc]\nurl = ""\n',
         encoding="utf-8",
     )
     monkeypatch.setattr(

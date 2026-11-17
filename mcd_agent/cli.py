@@ -480,7 +480,10 @@ def _upsert_section_values(config_path: str, section_name: str, updates: dict[st
         merged.append("")
         merged.extend(out_lines)
     new_body = "\n".join(merged).rstrip("\n")
-    text2 = text[: m.start(2)] + new_body + text[m.end(2) :]
+    tail = text[m.end(2) :]
+    if tail and not tail.startswith("\n") and not new_body.endswith("\n"):
+        new_body += "\n"
+    text2 = text[: m.start(2)] + new_body + tail
     p.write_text(text2, encoding="utf-8")
     return str(p)
 
