@@ -1,0 +1,67 @@
+{
+  "schema": "mcd-m4-public-patch-stable-acceptance-v1",
+  "recorded_at": "2026-11-17T12:05:00Z",
+  "result": "pass",
+  "release": {
+    "version": "1.6.102",
+    "canonical_main_commit": "88e50fe20705c995bf08ce04a6f3b01f6c9e0e1e",
+    "canonical_merge_pr": 111,
+    "candidate_receipt_sha256": "3815dffda6000d474416bcdcd78c536337d7cb9e8a63541b0f7e3581171b0853",
+    "runtime_archive_sha256": "c05dec9aa950e354054fc12ccc0f882d8ef344c42f2f23b2c4c5473cfc0a7137",
+    "runtime_manifest_sha256": "4446167ef31d126f977a378d3085f79a74952345992f52351ab637e7c9d89f26",
+    "wheel_url": "https://servercontrol.sales-snap.com/mauticctl/mcd/mcd_agent-1.6.102-py3-none-any.whl",
+    "wheel_sha256": "32235c96658a61dbd2ba5f0ac70a22e22d050de46a116af5e83f3f01717ff519",
+    "installed_version": "1.6.102"
+  },
+  "sandbox": {
+    "owner": "Mautic-Operations",
+    "worker": "mcd162-voucher-final-44",
+    "container": "mops-sb-4-4-composer--mcd162-voucher-final-44-web",
+    "mautic_version": "4.4.13",
+    "php_version": "8.0.30",
+    "instance_uid": "www-1d94d5bb",
+    "application_root": "/var/www/html",
+    "public_root": "/var/www/html/docroot",
+    "standalone_config_sha256": "8ffff2d842732cb30ae11f82f5c13b4a74d2fd06c5e3df640994f3abfffe5be1",
+    "management_delivery": "not_configured",
+    "post_acceptance_login_http_status": 200
+  },
+  "precondition": {
+    "voucher_bundle_absent": true,
+    "patch_plan_directory_absent": true,
+    "core_files": {
+      "app/bundles/PluginBundle/Bundle/PluginBundleBase.php": {"sha256":"90bb4a242094840487e1b24e418ad787336659e2f10627951ab51b38ac4e4a17","mtime_epoch":1726668065,"size":4309},
+      "app/bundles/IntegrationsBundle/Migration/Engine.php": {"sha256":"094d55b3f73458eacb9e3a2fe6e2ca53cf5588529a598d131d4b082a8e62cc3b","mtime_epoch":1726668065,"size":2730}
+    }
+  },
+  "operations": [
+    {
+      "operation_id": "m4-public-patch-stable-162-clean-001",
+      "argv": ["/opt/mcd/acceptance/mcd162-voucher-final-44/venv/bin/mcd-cli","plugins","--config","/opt/mcd/acceptance/mcd162-voucher-final-44/etc-mcd.toml","--machine-result","--instance-uid","www-1d94d5bb","--plugin-uid","voucherbundle:4","--action","install","--operation-id","m4-public-patch-stable-162-clean-001","--yes","--no-color"],
+      "exit_code": 0,
+      "stderr_log": ["2026-11-17 12:01:31,367 INFO plugins manifest: https://servercontrol.sales-snap.com/mauticctl/packages/mautic4/manifest.json","2026-11-17 12:01:32,543 INFO [/var/www/html] plugin VoucherBundle applied action=install path=VoucherBundle","2026-11-17 12:02:40,381 WARNING MCC immediate push (plugins-machine) skipped/failed: push disabled"],
+      "terminal_result": {"action":"install","catalog_sha256":"9f1c74e5e8e649affb22ef22d797be9944f39729e3df1a2b2a2947dc0d70b1d9","error":"","error_code":"","instance_uid":"www-1d94d5bb","inventory":[{"bundle":"VoucherBundle","confirmed":true,"expected_version":"1.10.4","install_bundle":"VoucherBundle","installed_version":"1.10.4","reason":"version+sha match","status":"OK"}],"mcd_version":"1.6.102","operation":"plugin_apply","operation_id":"m4-public-patch-stable-162-clean-001","package_uids":[],"plugin_uids":["voucherbundle:4"],"rc":0,"receipt_sha256":"0cda39c91219d7aa7b67c54c8295a000cdc1691d291329f07a5ffad7b9863163","schema":"mcd-plugin-operation-result-v2","selected":[{"bundle":"VoucherBundle","expected_version":"1.10.4","install_bundle":"VoucherBundle","package_uid":"legacy.voucherbundle","plugin_uid":"voucherbundle:4"}],"status":"success","terminal":true},
+      "patch_receipt": "evidence/m4-public-patch-stable-1.6.102-20261117/first-patch-local-receipt.json",
+      "patch_receipt_sha256": "24b9999a44586e85af691d989afa354edbde5cff83f36895ee4ff8d152c69691",
+      "patch_decision": "applied"
+    },
+    {
+      "operation_id": "m4-public-patch-stable-162-clean-002",
+      "argv": ["/opt/mcd/acceptance/mcd162-voucher-final-44/venv/bin/mcd-cli","plugins","--config","/opt/mcd/acceptance/mcd162-voucher-final-44/etc-mcd.toml","--machine-result","--instance-uid","www-1d94d5bb","--plugin-uid","voucherbundle:4","--action","install","--operation-id","m4-public-patch-stable-162-clean-002","--yes","--no-color"],
+      "exit_code": 0,
+      "stderr_log": ["2026-11-17 12:03:01,285 INFO plugins manifest: https://servercontrol.sales-snap.com/mauticctl/packages/mautic4/manifest.json","2026-11-17 12:03:02,407 INFO [/var/www/html] plugin VoucherBundle applied action=install path=VoucherBundle","2026-11-17 12:04:11,129 WARNING MCC immediate push (plugins-machine) skipped/failed: push disabled"],
+      "terminal_result": {"action":"install","catalog_sha256":"9f1c74e5e8e649affb22ef22d797be9944f39729e3df1a2b2a2947dc0d70b1d9","error":"","error_code":"","instance_uid":"www-1d94d5bb","inventory":[{"bundle":"VoucherBundle","confirmed":true,"expected_version":"1.10.4","install_bundle":"VoucherBundle","installed_version":"1.10.4","reason":"version+sha match","status":"OK"}],"mcd_version":"1.6.102","operation":"plugin_apply","operation_id":"m4-public-patch-stable-162-clean-002","package_uids":[],"plugin_uids":["voucherbundle:4"],"rc":0,"receipt_sha256":"1219fae168061f2d752ad3fb2cd822212fd064a3d2d09bb4f7dace5470c128cb","schema":"mcd-plugin-operation-result-v2","selected":[{"bundle":"VoucherBundle","expected_version":"1.10.4","install_bundle":"VoucherBundle","package_uid":"legacy.voucherbundle","plugin_uid":"voucherbundle:4"}],"status":"success","terminal":true},
+      "patch_receipt": "evidence/m4-public-patch-stable-1.6.102-20261117/fixed-point-patch-local-receipt.json",
+      "patch_receipt_sha256": "e68a230345615bbe9f02de63034314e268e617dadb8972110febeb6e27175230",
+      "patch_decision": "already"
+    }
+  ],
+  "fixed_point": {
+    "core_files": {
+      "app/bundles/PluginBundle/Bundle/PluginBundleBase.php": {"sha256":"6263548a6827d90111e34c7b3830ca73ff003db321c7c8a37f7e36aacfc6a08e","mtime_epoch":1794916956,"size":4779},
+      "app/bundles/IntegrationsBundle/Migration/Engine.php": {"sha256":"526c32693b2232f5a98d287d7ac8f1c0fd471112aa0aac274eb91d912fcb4547","mtime_epoch":1794916956,"size":3813}
+    },
+    "hashes_unchanged_by_repeat": true,
+    "mtimes_unchanged_by_repeat": true
+  }
+}
