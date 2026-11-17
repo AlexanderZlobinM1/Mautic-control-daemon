@@ -1,0 +1,21 @@
+{
+  "schema": "mcd-native-uninstall-evidence-index-v1",
+  "recorded_at": "2026-11-17T16:50:00+01:00",
+  "files": [
+    {
+      "path": "docs/qa/mcd-native-uninstall-1.6.104-20261117-failure.txt",
+      "sha256": "f42d9d14e1782c9b3ae739f5e0b02890b2af97d4c52cbe66450696b60ba0bb0d",
+      "kind": "raw_command_stdout_readback"
+    },
+    {
+      "path": "docs/qa/mcd-native-uninstall-1.6.104-20261117-success.txt",
+      "sha256": "99b7e33b0aa9c4be27654bf7e46978121d72641f7576a58f1b37a9d17d3fb2f4",
+      "kind": "raw_command_stdout_readback"
+    },
+    {
+      "path": "docs/qa/mcd-native-uninstall-1.6.104-20261117.json",
+      "sha256": "b8bf9ddba219424a161ce066cd6f3429a9409dce8cade9a35c631d3a8d31db28",
+      "kind": "structured_acceptance_summary"
+    }
+  ]
+}

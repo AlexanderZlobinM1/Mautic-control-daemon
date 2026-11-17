@@ -1,0 +1,21 @@
+MCD native uninstall 1.6.104 — mixed cron failure
+Recorded: 2026-11-17 Europe/Belgrade
+Environment: disposable Debian 12, systemd 252, Python 3.11.2
+
+COMMAND
+docker exec mcd-uninstall-native-104 env PATH=/tmp/failbin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin /usr/local/bin/mcd-cli uninstall --yes --machine-result --operation-id native-mixed-failure-final --service-name mcd-native
+
+STDOUT
+MCD_UNINSTALL_RESULT={"cron":{"root":{"managed_pairs":1,"status":"rolled_back","written":false},"www-data":{"managed_pairs":1,"status":"rolled_back","written":false}},"error":"cannot restore www-data crontab: rc=73 injected www-data crontab write failure","error_code":"cron_write_failed","etc_dir":"/etc/mcd","install_dir":"/opt/mcd","mcd_version":"1.6.104","ok":false,"operation_id":"native-mixed-failure-final","outcome":"failed","preserved_paths":["/opt/mcd","/etc/mcd"],"purge_requested":true,"receipt_sha256":"33b4dd4da27055f78c966dc5ae0ac22e0c16e034e618bab8c53efe99bcb404a7","removed_paths":[],"schema":"mcd-uninstall-result-v1","service_name":"mcd-native","status":"failed","steps":[{"active":true,"enabled":true,"name":"service_preflight","present":true,"status":"ok"},{"detail":"","name":"service_stop","rc":0,"status":"ok"},{"active":false,"name":"service_stop_readback","status":"ok"},{"cron_restored":true,"detail":"","name":"cron_failure_recovery","service_restored":true,"status":"ok"}],"terminal":true}
+NATIVE_FAILURE_RC=1
+
+READBACK
+SERVICE=active/enabled
+a918c84f34af39e4e6bc1c556b27d882c3f52ad6141caf8ef13be6a62146f7f5  /opt/mcd/var/backup/root.pre-active.crontab
+cb3bd896f607cca83fe246907be543745b3fea67429f2dacbb91b6a6ba43de7e  /opt/mcd/var/backup/www-data.pre-active.crontab
+ROOT_SHA=49efd8db0ab3a330eec9f9af711cdd82e08a4e334bb30a1e33b2154fc7dee3e4
+WWW_SHA=aa27df9e6f4b843c325e93748404484539ae765ab644b0c3f107a8118058c4bf
+install=present
+etc=present
+wrapper=present
+foreign=present

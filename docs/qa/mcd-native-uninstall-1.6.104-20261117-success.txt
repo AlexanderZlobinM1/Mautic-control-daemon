@@ -1,0 +1,27 @@
+MCD native uninstall 1.6.104 — successful removal
+Recorded: 2026-11-17 Europe/Belgrade
+Environment: disposable Debian 12, systemd 252, Python 3.11.2
+
+COMMAND
+docker exec mcd-uninstall-native-104 /usr/local/bin/mcd-cli uninstall --yes --machine-result --operation-id native-success-final --service-name mcd-native
+
+STDOUT
+MCD_UNINSTALL_RESULT={"cron":{"root":{"managed_pairs":1,"status":"restored","written":true},"www-data":{"managed_pairs":1,"status":"restored","written":true}},"error":"","error_code":"","etc_dir":"/etc/mcd","install_dir":"/opt/mcd","mcd_version":"1.6.104","ok":true,"operation_id":"native-success-final","outcome":"removed","preserved_paths":[],"purge_requested":true,"receipt_sha256":"1807f527d772b06d22854d06f0bef0bad12f728da5432b2f6f1b7169ea26980f","removed_paths":["/etc/systemd/system/mcd-native.service","/usr/local/bin/mcd-cli","/opt/mcd","/etc/mcd"],"schema":"mcd-uninstall-result-v1","service_name":"mcd-native","status":"success","steps":[{"active":true,"enabled":true,"name":"service_preflight","present":true,"status":"ok"},{"detail":"","name":"service_stop","rc":0,"status":"ok"},{"active":false,"name":"service_stop_readback","status":"ok"},{"detail":"Removed \"/etc/systemd/system/multi-user.target.wants/mcd-native.service\".","name":"service_disable","rc":0,"status":"ok"},{"detail":"","name":"daemon_reload","rc":0,"status":"ok"}],"terminal":true}
+NATIVE_SUCCESS_RC=0
+
+READBACK
+ROOT
+*/5 * * * * /usr/bin/true # mcd-owned-root
+17 4 * * * /usr/bin/true # foreign-root-sentinel
+WWW
+29 4 * * * /usr/bin/true # foreign-www-sentinel
+*/7 * * * * /usr/bin/true # mcd-owned-www
+install=absent
+etc=absent
+wrapper=absent
+unit=absent
+alias=absent
+foreign=present
+SERVICE=inactive/not-found
+ROOT_FINAL=ed4903068b55da0534737452fd775a511c585da17941e016c00f7dada54cd629
+WWW_FINAL=6b81fa6c2398322ecb75d1a297139562570bbc9bdf8a8dcc22848ea3787ab65c
