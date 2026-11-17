@@ -176,6 +176,7 @@ def test_apt_upgrade_machine_result_is_terminal(tmp_path, monkeypatch, capsys) -
                 "duration_sec": 17,
             },
         },
+        raising=False,
     )
     monkeypatch.setattr(
         cli.subprocess,
