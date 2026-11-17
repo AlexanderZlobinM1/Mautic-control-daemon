@@ -164,6 +164,21 @@ def test_apt_upgrade_machine_result_is_terminal(tmp_path, monkeypatch, capsys) -
     monkeypatch.setattr(cli, "_apt_service_postcheck", lambda: (True, ["services: ok"]))
     monkeypatch.setattr(cli, "_push_state_after_change", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
+        cli,
+        "_configured_external_operation",
+        lambda *_args, **_kwargs: {
+            "status": "ok",
+            "output_events": [],
+            "payload": {
+                "status": "ok",
+                "update_rc": 0,
+                "upgrade_rc": 0,
+                "duration_sec": 17,
+            },
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(
         cli.subprocess,
         "run",
         lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""),
