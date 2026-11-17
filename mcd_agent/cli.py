@@ -186,10 +186,9 @@ from mcd_agent.plugin_jobs import (
     PluginJobError,
     canonical_request as canonical_plugin_job_request,
     output_paths as plugin_job_output_paths,
-    read_tail as read_plugin_job_tail,
     request_sha256 as plugin_job_request_sha256,
     runtime_key as plugin_job_runtime_key,
-    terminal_from_output as plugin_job_terminal_from_output,
+    status_result as plugin_job_status_result,
     with_receipt as plugin_job_with_receipt,
 )
 from mcd_agent.runtime_overrides import (
@@ -962,51 +961,27 @@ def _plugin_job_cli(cfg, args) -> int:
         if command == "cancel":
             cancelled = store.cancel_manual_request(request_id, note="operator_cancelled")
             current = str(store.get_manual_request_status(request_id) or request_status).strip().lower()
+            already_cancelled = current == "cancelled" and not cancelled
             payload = plugin_job_with_receipt({
                 "schema": PLUGIN_JOB_CANCEL_SCHEMA,
-                "status": "cancelled" if cancelled else "not_cancelled",
+                "status": "cancelled" if cancelled or already_cancelled else "not_cancelled",
                 "operation_id": operation_id,
                 "job_id": operation_id,
                 "request_id": request_id,
                 "job_status": current,
-                "reason": "" if cancelled else "job_is_not_pending",
+                "idempotent_replay": already_cancelled,
+                "reason": "" if cancelled or already_cancelled else "job_is_not_pending",
             })
             print(json.dumps(payload, ensure_ascii=True, sort_keys=True))
             return 0 if cancelled or current == "cancelled" else 1
         if command != "status":
             raise PluginJobError("plugin_job_command_invalid")
 
-        stdout = read_plugin_job_tail(str(record.get("stdout_path") or ""), limit=256 * 1024)
-        terminal = plugin_job_terminal_from_output(stdout)
-        public_status = {
-            "pending": "queued",
-            "launched": "running",
-            "done": "succeeded",
-            "failed": "failed",
-            "timeout": "failed",
-            "lost": "failed",
-            "skipped": "failed",
-            "cancelled": "cancelled",
-        }.get(request_status, request_status or "unknown")
-        if isinstance(terminal, dict):
-            public_status = "succeeded" if terminal.get("status") == "success" else "failed"
-        notification = "disabled" if not getattr(cfg, "mcc_url", None) else "pending"
-        if isinstance(terminal, dict) and terminal.get("inventory_sync_status"):
-            notification = str(terminal.get("inventory_sync_status"))
-        payload_data: dict[str, object] = {
-            "schema": PLUGIN_JOB_STATUS_SCHEMA,
-            "status": public_status,
-            "operation_id": operation_id,
-            "job_id": operation_id,
-            "request_id": request_id,
-            "request_sha256": str(record.get("request_sha256") or ""),
-            "notification_delivery_status": notification,
-        }
-        if isinstance(terminal, dict):
-            payload_data["terminal_result"] = terminal
-        elif public_status == "failed":
-            payload_data["error_tail"] = read_plugin_job_tail(str(record.get("stderr_path") or ""))
-        payload = plugin_job_with_receipt(payload_data)
+        payload = plugin_job_status_result(
+            store,
+            record,
+            mcc_enabled=bool(getattr(cfg, "mcc_url", None)),
+        )
         print(json.dumps(payload, ensure_ascii=True, sort_keys=True))
         return 0
     except Exception as exc:
