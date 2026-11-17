@@ -45,6 +45,14 @@ readback and MCC synchronization result. If local persistence succeeds but the
 MCC synchronization attempt fails, the result remains an error while reporting
 the confirmed local value; a retry is safe.
 
+For a registered agent, synchronization first reads the current MCC host and
+instance revisions. MCD merges only the selected package projection into the
+current bare-UID instance row and submits that row with both revisions. A
+revision conflict triggers one bounded refetch, rebase, and retry. Other package
+projections in the current MCC row are preserved. MCD reports success only when
+that revisioned synchronization succeeds (or when MCC transport is explicitly
+disabled for standalone operation).
+
 MCC UI and MCC CLI must normalize through the same MCC operation/service and
 invoke this one MCD contract. They must not implement separate selection,
 validation, storage, or plugin-mutation paths.

@@ -275,7 +275,11 @@ def test_cli_reports_preserved_local_state_when_mcc_push_raises(tmp_path, monkey
         lambda _cfg, selector: SimpleNamespace(instance_uid=selector),
     )
     monkeypatch.setattr(cli, "touch_poll_trigger", lambda _cfg: "trigger")
-    monkeypatch.setattr(cli, "push_runtime_overrides", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("offline")))
+    monkeypatch.setattr(
+        cli,
+        "_sync_plugin_auto_update_policy",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("offline")),
+    )
     args = SimpleNamespace(
         plugin_auto_update_policy_cmd="set",
         instance_uid=INSTANCE_UID,
@@ -293,7 +297,11 @@ def test_cli_reports_preserved_local_state_when_mcc_push_raises(tmp_path, monkey
     assert failed["changed"] is True
     assert failed["local_state_confirmed"] is True
 
-    monkeypatch.setattr(cli, "push_runtime_overrides", lambda *_args, **_kwargs: {"status": "disabled"})
+    monkeypatch.setattr(
+        cli,
+        "_sync_plugin_auto_update_policy",
+        lambda *_args, **_kwargs: {"status": "disabled"},
+    )
     args.operation_id = "policy-partial-2"
     reloaded = load_config(str(config_path), allow_recover_from_mcc=False)
     assert cli._plugin_auto_update_policy_cli(reloaded, args) == 0
@@ -301,3 +309,81 @@ def test_cli_reports_preserved_local_state_when_mcc_push_raises(tmp_path, monkey
     assert retried["auto_update_disabled"] is True
     assert retried["changed"] is False
     assert retried["local_state_confirmed"] is True
+
+
+def test_policy_sync_uses_current_instance_revision_and_retries_one_conflict(monkeypatch) -> None:
+    cfg = SimpleNamespace(mcc_url="https://mcc.example", mcc_token="token")
+    settings = {
+        INSTANCE_UID: {
+            STANDARD_PACKAGE_UID: {
+                "plugin_uid": PLUGIN_UID,
+                "auto_update_disabled": True,
+            }
+        }
+    }
+    fetches = [
+        {
+            "status": "ok",
+            "desired_state": {"revision": 11},
+            "instance_desired_states": {
+                INSTANCE_UID: {
+                    "revision": 4,
+                    "runtime_overrides": {
+                        "plugin_auto_update_instance_settings": {
+                            "other.package:6-7": {
+                                "plugin_uid": "other.plugin:6-7",
+                                "auto_update_disabled": False,
+                            }
+                        }
+                    },
+                }
+            },
+        },
+        {
+            "status": "ok",
+            "desired_state": {"revision": 12},
+            "instance_desired_states": {
+                INSTANCE_UID: {
+                    "revision": 5,
+                    "runtime_overrides": {
+                        "plugin_auto_update_instance_settings": {
+                            "other.package:6-7": {
+                                "plugin_uid": "other.plugin:6-7",
+                                "auto_update_disabled": True,
+                            }
+                        }
+                    },
+                }
+            },
+        },
+    ]
+    monkeypatch.setattr(cli, "fetch_runtime_overrides", lambda *_args, **_kwargs: fetches.pop(0))
+    pushes: list[dict[str, object]] = []
+
+    def push(_cfg, runtime, **kwargs):
+        pushes.append({"runtime": runtime, **kwargs})
+        if len(pushes) == 1:
+            return {"status": "conflict", "reason": "stale_desired_revision"}
+        return {"status": "ok"}
+
+    monkeypatch.setattr(cli, "push_runtime_overrides", push)
+
+    result = cli._sync_plugin_auto_update_policy(
+        cfg,
+        instance_uid=INSTANCE_UID,
+        package_uid=STANDARD_PACKAGE_UID,
+        settings=settings,
+    )
+
+    assert result == {"status": "ok"}
+    assert len(pushes) == 2
+    assert pushes[0]["runtime"] == {}
+    assert pushes[0]["merge"] is True
+    assert pushes[0]["target"] == "desired"
+    assert pushes[0]["desired_state_revision"] == 11
+    assert pushes[0]["instance_desired_state_revisions"] == {INSTANCE_UID: 4}
+    assert pushes[1]["desired_state_revision"] == 12
+    assert pushes[1]["instance_desired_state_revisions"] == {INSTANCE_UID: 5}
+    second_row = pushes[1]["instance_desired_states"][INSTANCE_UID]["plugin_auto_update_instance_settings"]
+    assert second_row["other.package:6-7"]["auto_update_disabled"] is True
+    assert second_row[STANDARD_PACKAGE_UID] == settings[INSTANCE_UID][STANDARD_PACKAGE_UID]
