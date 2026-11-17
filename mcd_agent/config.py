@@ -616,6 +616,7 @@ class AgentConfig:
     cache_warm_quiet_window_min: int
     plugin_operations: dict[str, Any]
     plugin_operation_instance_settings: dict[str, Any]
+    plugin_auto_update_instance_settings: dict[str, Any]
     plugin_operation_legacy_runtime: dict[str, Any]
     message_queue_enabled: bool
     message_queue_interval_sec: int
@@ -2471,6 +2472,7 @@ _RUNTIME_TO_ATTR: dict[str, str] = {
     "cache_warm_quiet_window_min": "cache_warm_quiet_window_min",
     "plugin_operations": "plugin_operations",
     "plugin_operation_instance_settings": "plugin_operation_instance_settings",
+    "plugin_auto_update_instance_settings": "plugin_auto_update_instance_settings",
     "message_queue_enabled": "message_queue_enabled",
     "message_queue_interval_sec": "message_queue_interval_sec",
     "message_queue_instance_settings": "message_queue_instance_settings",
@@ -3411,6 +3413,11 @@ def _load_config_inner(path: str) -> AgentConfig:
         plugin_operation_instance_settings=(
             dict(runtime.get("plugin_operation_instance_settings", {}))
             if isinstance(runtime.get("plugin_operation_instance_settings", {}), dict)
+            else {}
+        ),
+        plugin_auto_update_instance_settings=(
+            dict(runtime.get("plugin_auto_update_instance_settings", {}))
+            if isinstance(runtime.get("plugin_auto_update_instance_settings", {}), dict)
             else {}
         ),
         # Internal migration input: catalog legacy_runtime mappings decide

@@ -3604,6 +3604,7 @@ _BACKUP_STABLE_RUNTIME_KEYS = {
 _PLUGIN_OPERATION_STABLE_RUNTIME_KEYS = {
     "plugin_operations",
     "plugin_operation_instance_settings",
+    "plugin_auto_update_instance_settings",
 }
 _MESSAGE_QUEUE_STABLE_RUNTIME_KEYS = {
     "message_queue_enabled",

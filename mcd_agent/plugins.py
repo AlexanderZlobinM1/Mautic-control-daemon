@@ -37,6 +37,7 @@ from mcd_agent.host_identity import resolve_agent_identity
 from mcd_agent.install_type import is_complete_plugin_bundle, plugin_dir_candidates
 from mcd_agent.instance_uid import canonical_instance_uid, instance_uid_matches
 from mcd_agent.plugin_interactions import selection_conflicts_for_rules
+from mcd_agent.plugin_update_policy import read_policy as read_plugin_auto_update_policy
 from mcd_agent.runtime_overrides import fetch_runtime_overrides
 from mcd_agent.runtime_descriptor import descriptor_for_root
 from mcd_agent.state_backend import mysql_state_enabled, mysql_state_existing_connection, mysql_state_table_names
@@ -1314,28 +1315,6 @@ def _plugin_status(
         except Exception:
             return "BROKEN", "invalid state metadata", installed_version
 
-    # Canonical-path dev/stable aliases share one install directory.
-    # Respect the last installed bundle from state file so UI/CLI won't
-    # show both variants as simultaneously installed.
-    if state is not None:
-        recorded_bundle = str(state.get("bundle", "")).strip()
-        if recorded_bundle and recorded_bundle != bundle:
-            if recorded_bundle in _exclusive_counterparts(bundle, plugin):
-                return "MISSING", f"counterpart installed={recorded_bundle}", "-"
-
-    if installed_version == expected_version:
-        if state is None:
-            return "OK", "version match", installed_version
-        installed_sha = str(state.get("sha256", "")).strip()
-        if expected_sha and installed_sha == expected_sha:
-            return "OK", "version+sha match", installed_version
-        return "OK", "version match", installed_version
-
-    cmp_val = _version_cmp(installed_version, expected_version)
-    if cmp_val is not None and cmp_val > 0:
-        return "OK", f"installed newer than server={expected_version}", installed_version
-
-    return "UPDATE", f"installed={installed_version}", installed_version
 
 
 def _extract_package(archive_path: Path, staging: Path) -> None:
@@ -1940,6 +1919,30 @@ def _selected_install_bundles(selected: list[dict[str, Any]]) -> list[str]:
         if bundle and bundle != install_bundle:
             out.append(bundle)
     return _dedupe_text(out)
+
+
+def _filter_auto_update_policy(
+    config: AgentConfig,
+    install,
+    selected: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    settings = getattr(config, "plugin_auto_update_instance_settings", {})
+    instance_uid = canonical_instance_uid(str(getattr(install, "instance_uid", "") or ""))
+    allowed: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for row in selected:
+        plugin_uid = str(row.get("plugin_uid") or "").strip().lower()
+        package_uid = str(row.get("package_uid") or "").strip().lower()
+        if plugin_uid and package_uid and read_plugin_auto_update_policy(
+            settings,
+            instance_uid=instance_uid,
+            plugin_uid=plugin_uid,
+            package_uid=package_uid,
+        ):
+            skipped.append(row)
+        else:
+            allowed.append(row)
+    return allowed, skipped
 
 
 def _cluster_sync_bundle_names(
@@ -3350,6 +3353,30 @@ def run_plugins_interactive(
             print("Selected indexes are not actionable, try again")
             continue
 
+        if chosen_action == "auto":
+            selected, policy_skipped = _filter_auto_update_policy(config, install, selected)
+            for row in policy_skipped:
+                print(
+                    "Automatic update skipped by policy: "
+                    f"{row.get('plugin_uid')} package={row.get('package_uid')}"
+                )
+            if not selected:
+                resolved_operation_id = str(operation_id or "").strip() or uuid.uuid4().hex
+                _emit_plugin_apply_result(
+                    operation_id=resolved_operation_id,
+                    install_root=install_root,
+                    action=chosen_action,
+                    selected=[],
+                    event="completed",
+                    files_applied=False,
+                    post_step_status="skipped_by_policy",
+                    cache_inventory_confirmed=True,
+                    overall_status="success",
+                    rc=0,
+                    inventory=[],
+                )
+                return 0
+
         try:
             _validate_selected_exclusive_conflicts(selected, context=interaction_context)
         except RuntimeError as e:
@@ -3476,6 +3503,17 @@ def _plugin_operation_terminal_payload(
         "error": str(error or terminal_payload.get("error") or ""),
         "mcd_version": __version__,
     }
+    if action == "auto" and package_uids:
+        selected_package_uids = {
+            str(row.get("package_uid") or "").strip().lower()
+            for row in payload["selected"]
+            if isinstance(row, dict) and str(row.get("package_uid") or "").strip()
+        }
+        payload["policy_skipped_package_uids"] = sorted(
+            package_uid
+            for package_uid in package_uids
+            if package_uid not in selected_package_uids
+        )
     canonical = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
     payload["receipt_sha256"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     return payload

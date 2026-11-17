@@ -89,6 +89,39 @@ def test_machine_contract_emits_one_terminal_host_independent_result(monkeypatch
     assert receipt_sha == hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def test_machine_auto_result_reports_exact_package_skipped_by_policy(monkeypatch, capsys):
+    monkeypatch.setattr(
+        plugins,
+        "_select_install_with_db",
+        lambda _config, selector: SimpleNamespace(instance_uid=selector, root="/srv/tenant-one"),
+    )
+
+    def run(**kwargs):
+        terminal = _terminal_v1(kwargs["operation_id"])
+        terminal["selected"] = []
+        terminal["inventory"] = []
+        terminal["files_applied"] = False
+        terminal["post_step_status"] = "skipped_by_policy"
+        print("MCD_PLUGIN_APPLY_RESULT=" + json.dumps(terminal))
+        return 0
+
+    monkeypatch.setattr(plugins, "run_plugins_interactive", run)
+    rc = plugins.run_plugins_machine(
+        config=SimpleNamespace(),
+        instance_uid="tenant-one",
+        plugin_uids=["vendor.demo:7"],
+        package_uids=["vendor.demo.standard:7"],
+        action="auto",
+        operation_id="mcc-op-policy-123",
+    )
+
+    _output, result = _read_machine_result(capsys)
+    assert rc == 0
+    assert result["status"] == "success"
+    assert result["policy_skipped_package_uids"] == ["vendor.demo.standard:7"]
+    assert result["selected"] == []
+
+
 @pytest.mark.parametrize(
     ("instance_uid", "legacy_root", "error_code"),
     [
@@ -232,6 +265,72 @@ def test_one_logical_plugin_cannot_select_two_package_variants():
             plugin_uids=["hostnet.auth:6-7"],
             package_uids=["hostnet.auth.standard:6-7", "hostnet.auth.managed:6-7"],
         )
+
+
+def test_multiple_logical_plugins_select_every_exact_projection():
+    rows = [
+        {
+            "selectable": True,
+            "plugin_uid": "vendor.runtime:7",
+            "package_uid": "vendor.runtime.managed:7",
+            "bundle": "VendorRuntimeManagedBundle",
+        },
+        {
+            "selectable": True,
+            "plugin_uid": "vendor.dependency-one:7",
+            "package_uid": "vendor.dependency-one.standard:7",
+            "bundle": "VendorDependencyOneBundle",
+        },
+        {
+            "selectable": True,
+            "plugin_uid": "vendor.dependency-two:7",
+            "package_uid": "vendor.dependency-two.standard:7",
+            "bundle": "VendorDependencyTwoBundle",
+        },
+    ]
+
+    selected = plugins._select_plugin_rows_by_identity(
+        rows,
+        plugin_uids=[
+            "vendor.runtime:7",
+            "vendor.dependency-one:7",
+            "vendor.dependency-two:7",
+        ],
+        package_uids=[
+            "vendor.runtime.managed:7",
+            "vendor.dependency-one.standard:7",
+            "vendor.dependency-two.standard:7",
+        ],
+    )
+
+    assert {row["bundle"] for row in selected} == {
+        "VendorRuntimeManagedBundle",
+        "VendorDependencyOneBundle",
+        "VendorDependencyTwoBundle",
+    }
+
+
+def test_companion_projection_is_not_treated_as_runtime_competitor():
+    selected = [
+        {
+            "bundle": "AmazonSesUpstreamBundle",
+            "install_bundle": "AmazonSesBundle",
+            "item": {
+                "bundle": "AmazonSesUpstreamBundle",
+                "replaces": ["AmazonSesManagedBundle"],
+            },
+        },
+        {
+            "bundle": "AmazonSnsCallbackBundle",
+            "install_bundle": "AmazonSnsCallbackBundle",
+            "item": {
+                "bundle": "AmazonSnsCallbackBundle",
+                "replaces": ["MauticAmazonSesBundle"],
+            },
+        },
+    ]
+
+    plugins._validate_selected_exclusive_conflicts(selected, context={"installed_plugins": {}})
 
 
 def test_machine_contract_passes_package_projection_and_binds_it_to_receipt(monkeypatch, capsys):
