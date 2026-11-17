@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import base64
-from copy import deepcopy
 import contextlib
 from datetime import datetime, timedelta, timezone
 import getpass
@@ -739,70 +738,6 @@ def _plugin_operation_cli(cfg, args) -> int:
     return int(result.returncode)
 
 
-def _sync_plugin_auto_update_policy(
-    cfg,
-    *,
-    instance_uid: str,
-    package_uid: str,
-    settings: dict[str, object],
-) -> dict[str, object]:
-    """Publish one exact package policy on the current MCC revisions.
-
-    The desired-state endpoint is revisioned. A blind host-level merge can
-    commit locally and then fail with ``stale_desired_revision``. Read the
-    canonical instance row first, merge only the selected package projection,
-    and retry one conflict against a fresh snapshot.
-    """
-    local_packages = settings.get(instance_uid)
-    if not isinstance(local_packages, dict):
-        return {"status": "error", "reason": "local_policy_instance_row_missing"}
-    local_package = local_packages.get(package_uid)
-    if not isinstance(local_package, dict):
-        return {"status": "error", "reason": "local_policy_package_row_missing"}
-
-    last: dict[str, object] = {"status": "error", "reason": "mcc_sync_not_attempted"}
-    for _attempt in range(2):
-        fetched = fetch_runtime_overrides(cfg, instance_uids=[instance_uid])
-        fetch_status = str(fetched.get("status", "")).strip().lower()
-        if fetch_status != "ok":
-            return dict(fetched)
-
-        desired_state = fetched.get("desired_state")
-        desired_revision = desired_state.get("revision") if isinstance(desired_state, dict) else None
-        if not isinstance(desired_revision, int) or isinstance(desired_revision, bool):
-            desired_revision = None
-
-        states = fetched.get("instance_desired_states")
-        states = states if isinstance(states, dict) else {}
-        state = states.get(instance_uid)
-        state = state if isinstance(state, dict) else {}
-        state_revision = state.get("revision")
-        if not isinstance(state_revision, int) or isinstance(state_revision, bool):
-            state_revision = None
-        remote_row = state.get("runtime_overrides", state)
-        remote_row = deepcopy(remote_row) if isinstance(remote_row, dict) else {}
-        remote_row.pop("revision", None)
-
-        remote_packages = remote_row.get(PLUGIN_AUTO_UPDATE_RUNTIME_KEY)
-        remote_packages = deepcopy(remote_packages) if isinstance(remote_packages, dict) else {}
-        remote_packages[package_uid] = deepcopy(local_package)
-        remote_row[PLUGIN_AUTO_UPDATE_RUNTIME_KEY] = remote_packages
-
-        revisions = {instance_uid: state_revision} if state_revision is not None else None
-        last = push_runtime_overrides(
-            cfg,
-            {},
-            merge=True,
-            target="desired",
-            desired_state_revision=desired_revision,
-            instance_desired_states={instance_uid: remote_row},
-            instance_desired_state_revisions=revisions,
-        )
-        if str(last.get("status", "")).strip().lower() != "conflict":
-            return dict(last)
-    return dict(last)
-
-
 def _plugin_auto_update_policy_cli(cfg, args) -> int:
     action = str(args.plugin_auto_update_policy_cmd or "").strip().lower()
     raw_instance = str(args.instance_uid or "").strip()
@@ -860,11 +795,11 @@ def _plugin_auto_update_policy_cli(cfg, args) -> int:
                 package_uid=package_uid,
             )
             local_state_confirmed = True
-            mcc_sync = _sync_plugin_auto_update_policy(
+            mcc_sync = push_runtime_overrides(
                 cfg,
-                instance_uid=instance_uid,
-                package_uid=package_uid,
-                settings=settings,
+                {PLUGIN_AUTO_UPDATE_RUNTIME_KEY: settings},
+                merge=True,
+                target="observed",
             )
             touch_poll_trigger(cfg)
         else:
