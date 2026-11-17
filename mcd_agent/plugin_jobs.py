@@ -125,3 +125,54 @@ def with_receipt(payload: dict[str, Any]) -> dict[str, Any]:
     canonical = json.dumps(result, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
     result["receipt_sha256"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     return result
+
+
+def status_result(store: object, record: dict[str, Any], *, mcc_enabled: bool) -> dict[str, Any]:
+    operation_id = str(record.get("operation_id") or "")
+    request_id = int(record.get("request_id") or 0)
+    request_status = str(getattr(store, "get_manual_request_status")(request_id) or "unknown").strip().lower()
+    stdout = read_tail(str(record.get("stdout_path") or ""), limit=256 * 1024)
+    terminal = terminal_from_output(stdout)
+    public_status = {
+        "pending": "queued",
+        "launched": "running",
+        "done": "succeeded",
+        "failed": "failed",
+        "timeout": "failed",
+        "lost": "failed",
+        "skipped": "failed",
+        "cancelled": "cancelled",
+    }.get(request_status, request_status or "unknown")
+    if isinstance(terminal, dict):
+        public_status = "succeeded" if terminal.get("status") == "success" else "failed"
+    notification = "pending" if mcc_enabled else "disabled"
+    if isinstance(terminal, dict) and terminal.get("inventory_sync_status"):
+        notification = str(terminal.get("inventory_sync_status"))
+    payload: dict[str, Any] = {
+        "schema": STATUS_SCHEMA,
+        "status": public_status,
+        "operation_id": operation_id,
+        "job_id": operation_id,
+        "request_id": request_id,
+        "request_sha256": str(record.get("request_sha256") or ""),
+        "notification_delivery_status": notification,
+    }
+    if isinstance(terminal, dict):
+        payload["terminal_result"] = terminal
+    elif public_status == "failed":
+        payload["error_tail"] = read_tail(str(record.get("stderr_path") or ""))
+    return with_receipt(payload)
+
+
+def recent_statuses(store: object, *, mcc_enabled: bool, limit: int = 50) -> list[dict[str, Any]]:
+    rows = getattr(store, "list_runtime_sync")(RUNTIME_PREFIX)
+    records = [
+        dict(payload)
+        for _key, payload in rows
+        if isinstance(payload, dict) and payload.get("schema") == RECORD_SCHEMA
+    ]
+    records.sort(key=lambda item: float(item.get("created_at") or 0.0), reverse=True)
+    return [
+        status_result(store, record, mcc_enabled=mcc_enabled)
+        for record in records[: max(1, int(limit))]
+    ]

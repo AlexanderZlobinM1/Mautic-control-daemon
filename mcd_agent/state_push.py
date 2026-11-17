@@ -55,6 +55,7 @@ from mcd_agent.plugin_inventory import (
     utc_now,
 )
 from mcd_agent.plugin_jobs import capability as plugin_job_capability
+from mcd_agent.plugin_jobs import recent_statuses as recent_plugin_job_statuses
 from mcd_agent.runtime_matrix import build_runtime_profile
 from mcd_agent.inventory import InstanceInventory, MauticInstall, ensure_seeded
 from mcd_agent.logical_issues import read_logical_issues_snapshot
@@ -2624,6 +2625,10 @@ class MCCStatePusher:
         payload: dict[str, Any] = {
             "schema": "mcd-state-v1",
             "plugin_capabilities": plugin_job_capability(),
+            "plugin_jobs": recent_plugin_job_statuses(
+                self.runtime_store,
+                mcc_enabled=bool(getattr(self.cfg, "mcc_url", None)),
+            ),
             "control_receipts": control_store.receipts(),
             "control_capabilities": {"schema": "mcd-control-capabilities-v1", "version": "1.0", "commands": ["docker_runtime_preflight_v1"]},
             "inventory_sync_status": _plugin_inventory_sync_payload(self.runtime_store).get("status", "ok"),

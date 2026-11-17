@@ -1,3 +1,8 @@
+## 1.6.99 - 2026-11-17
+
+- Expose durable plugin-job status and recent terminal receipts in the state
+  snapshot, including idempotent cancellation replay and notification status.
+
 ## 1.6.98 - 2026-11-17
 
 - Enforce per-instance plugin auto-update policy while keeping manual actions
