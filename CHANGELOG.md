@@ -1,3 +1,12 @@
+## 1.6.104 - 2026-11-17
+
+- Make native MCD uninstall fail closed: restore only current MCD-managed cron
+  marker pairs for root and www-data, preserve unrelated/new cron entries and
+  retained recovery state, and never report success after service, cron,
+  readback, daemon-reload or filesystem failures.
+- Add a stable terminal `mcd-uninstall-result-v1` machine receipt for MCC and
+  reject broad, symlinked or unverified purge targets before the first mutation.
+
 ## 1.6.103 - 2026-11-17
 
 - Publish legacy message-queue and plugin-operation setting migrations against
