@@ -1733,6 +1733,7 @@ def _emit_plugin_apply_result(
     inventory: list[dict[str, Any]] | None = None,
     inventory_sync: dict[str, Any] | None = None,
     error: str = "",
+    catalog_sha256: str = "",
 ) -> dict[str, Any]:
     payload = {
         "schema": _PLUGIN_APPLY_RESULT_SCHEMA,
@@ -1756,7 +1757,10 @@ def _emit_plugin_apply_result(
         for row in selected
         if str(row.get("catalog_sha256") or "").strip()
     }
-    if len(catalog_digests) == 1:
+    explicit_catalog_sha256 = str(catalog_sha256 or "").strip().lower()
+    if explicit_catalog_sha256:
+        payload["catalog_sha256"] = explicit_catalog_sha256
+    elif len(catalog_digests) == 1:
         payload["catalog_sha256"] = next(iter(catalog_digests))
     if isinstance(inventory_sync, dict):
         payload["inventory_sync_status"] = str(inventory_sync.get("inventory_sync_status") or inventory_sync.get("status") or "error")
@@ -3632,6 +3636,11 @@ def run_plugins_interactive(
                 )
             if not selected:
                 resolved_operation_id = str(operation_id or "").strip() or uuid.uuid4().hex
+                skipped_catalog_digests = {
+                    str(row.get("catalog_sha256") or "").strip().lower()
+                    for row in policy_skipped
+                    if str(row.get("catalog_sha256") or "").strip()
+                }
                 _emit_plugin_apply_result(
                     operation_id=resolved_operation_id,
                     install_root=install_root,
@@ -3644,6 +3653,11 @@ def run_plugins_interactive(
                     overall_status="success",
                     rc=0,
                     inventory=[],
+                    catalog_sha256=(
+                        next(iter(skipped_catalog_digests))
+                        if len(skipped_catalog_digests) == 1
+                        else ""
+                    ),
                 )
                 return 0
 
