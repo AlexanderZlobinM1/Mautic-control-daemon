@@ -7783,6 +7783,51 @@ def _with_message_queue_instance_settings(
     return replace(config, message_queue_instance_settings=settings)
 
 
+def _push_runtime_migration_overrides(
+    config: AgentConfig,
+    installs: list[object],
+    runtime_overrides: dict[str, object],
+) -> dict[str, object]:
+    """Publish a legacy migration against MCC's current desired revision.
+
+    Migration callers run independently from the ordinary runtime poll. They
+    must fetch the current desired-state revision immediately before their
+    merge instead of repeatedly submitting an unversioned write. One conflict
+    is retried from a fresh snapshot; older MCC responses without a revision
+    retain the historical unversioned merge behavior.
+    """
+    instance_uids = sorted(
+        {
+            str(getattr(inst, "instance_uid", "") or "").strip()
+            for inst in installs
+            if str(getattr(inst, "instance_uid", "") or "").strip()
+        }
+    )
+    result: dict[str, object] = {"status": "error", "reason": "migration_push_not_attempted"}
+    for attempt in range(2):
+        fresh = fetch_runtime_overrides(config, instance_uids=instance_uids)
+        if str(fresh.get("status", "")).strip().lower() != "ok":
+            return dict(fresh)
+        desired_state = fresh.get("desired_state")
+        desired_revision = (
+            desired_state.get("revision")
+            if isinstance(desired_state, dict)
+            else None
+        )
+        if not isinstance(desired_revision, int) or isinstance(desired_revision, bool):
+            desired_revision = None
+        result = push_runtime_overrides(
+            config,
+            runtime_overrides,
+            merge=True,
+            target="desired",
+            desired_state_revision=desired_revision,
+        )
+        if str(result.get("status", "")).strip().lower() != "conflict" or attempt:
+            return dict(result)
+    return dict(result)
+
+
 def _monitored_email_fetch_replaces_mautic(config: AgentConfig, inst: object) -> bool:
     setting = _monitored_email_parser_effective_setting(config, inst)
     return bool(setting.enabled and setting.disable_mautic_fetch)
@@ -24722,11 +24767,10 @@ def run_loop(
                         next_settings[instance_key] = block
                         changed_settings = True
                 if changed_settings:
-                    pushed = push_runtime_overrides(
+                    pushed = _push_runtime_migration_overrides(
                         config,
+                        installs,
                         {"plugin_operation_instance_settings": next_settings},
-                        merge=True,
-                        target="desired",
                     )
                     if str(pushed.get("status", "")).lower() == "ok":
                         config.plugin_operation_instance_settings = next_settings
@@ -24784,11 +24828,10 @@ def run_loop(
                     config = _with_message_queue_instance_settings(config, next_settings)
                     settings_to_push = next_settings
                 if settings_to_push is not None:
-                    pushed = push_runtime_overrides(
+                    pushed = _push_runtime_migration_overrides(
                         config,
+                        supported_installs,
                         {"message_queue_instance_settings": settings_to_push},
-                        merge=True,
-                        target="desired",
                     )
                     if str(pushed.get("status", "")).lower() == "ok":
                         config = _with_message_queue_instance_settings(config, settings_to_push)
