@@ -1169,6 +1169,9 @@ def _build_plugin_rows(
         timeout_sec=12,
         fallback_ip=fallback_ip,
     )
+    manifest_sha256 = hashlib.sha256(
+        json.dumps(manifest, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
     plugins = manifest.get("plugins", [])
     if not isinstance(plugins, list) or not plugins:
@@ -1224,6 +1227,7 @@ def _build_plugin_rows(
                     "item": None,
                     "selectable": False,
                     "exclusive_with": [],
+                    "catalog_sha256": manifest_sha256,
                 }
             )
             selectable_idx += 1
@@ -1259,6 +1263,7 @@ def _build_plugin_rows(
                 "item": item,
                 "selectable": True,
                 "exclusive_with": exclusive_with,
+                "catalog_sha256": manifest_sha256,
             }
         )
         selectable_idx += 1
@@ -1525,6 +1530,13 @@ def _emit_plugin_apply_result(
         "inventory": list(inventory or []),
         "error": error,
     }
+    catalog_digests = {
+        str(row.get("catalog_sha256") or "").strip().lower()
+        for row in selected
+        if str(row.get("catalog_sha256") or "").strip()
+    }
+    if len(catalog_digests) == 1:
+        payload["catalog_sha256"] = next(iter(catalog_digests))
     if isinstance(inventory_sync, dict):
         payload["inventory_sync_status"] = str(inventory_sync.get("inventory_sync_status") or inventory_sync.get("status") or "error")
         payload["inventory_sync"] = dict(inventory_sync)
@@ -3238,6 +3250,10 @@ def run_plugins_interactive(
         return 0
 
     if catalog_json:
+        catalog_sha256 = next(
+            (str(row.get("catalog_sha256") or "") for row in rows if row.get("catalog_sha256")),
+            "",
+        )
         payload_rows: list[dict[str, Any]] = []
         for row in rows:
             payload_rows.append(
@@ -3264,6 +3280,7 @@ def run_plugins_interactive(
                     "mautic_major": major,
                     "manifest_url": manifest_url,
                     "fallback_ip": fallback_ip or "",
+                    "catalog_sha256": catalog_sha256,
                     "items": payload_rows,
                 },
                 ensure_ascii=True,
@@ -3503,6 +3520,8 @@ def _plugin_operation_terminal_payload(
         "error": str(error or terminal_payload.get("error") or ""),
         "mcd_version": __version__,
     }
+    if terminal_payload.get("catalog_sha256"):
+        payload["catalog_sha256"] = str(terminal_payload.get("catalog_sha256"))
     if action == "auto" and package_uids:
         selected_package_uids = {
             str(row.get("package_uid") or "").strip().lower()
