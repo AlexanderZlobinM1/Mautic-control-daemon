@@ -1,3 +1,12 @@
+## 1.6.98 - 2026-11-17
+
+- Enforce per-instance plugin auto-update policy while keeping manual actions
+  allowed, and report exact shared InstallBundle variant status.
+- Queue plugin operations durably through the local TaskStore so busy slots do
+  not drop requested work; expose enqueue/status/cancel machine operations.
+- Preserve plugin policy configuration and catalog receipt bindings, including
+  catalog digests and separate notification delivery status.
+
 ## 1.6.97 - 2026-11-17
 
 - Distinguish a logical plugin from its concrete package projection, require an

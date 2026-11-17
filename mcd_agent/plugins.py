@@ -37,6 +37,7 @@ from mcd_agent.host_identity import resolve_agent_identity
 from mcd_agent.install_type import is_complete_plugin_bundle, plugin_dir_candidates
 from mcd_agent.instance_uid import canonical_instance_uid, instance_uid_matches
 from mcd_agent.plugin_interactions import selection_conflicts_for_rules
+from mcd_agent.plugin_update_policy import read_policy as read_plugin_auto_update_policy
 from mcd_agent.runtime_overrides import fetch_runtime_overrides
 from mcd_agent.runtime_descriptor import descriptor_for_root
 from mcd_agent.state_backend import mysql_state_enabled, mysql_state_existing_connection, mysql_state_table_names
@@ -1168,6 +1169,9 @@ def _build_plugin_rows(
         timeout_sec=12,
         fallback_ip=fallback_ip,
     )
+    manifest_sha256 = hashlib.sha256(
+        json.dumps(manifest, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
     plugins = manifest.get("plugins", [])
     if not isinstance(plugins, list) or not plugins:
@@ -1223,6 +1227,7 @@ def _build_plugin_rows(
                     "item": None,
                     "selectable": False,
                     "exclusive_with": [],
+                    "catalog_sha256": manifest_sha256,
                 }
             )
             selectable_idx += 1
@@ -1258,6 +1263,7 @@ def _build_plugin_rows(
                 "item": item,
                 "selectable": True,
                 "exclusive_with": exclusive_with,
+                "catalog_sha256": manifest_sha256,
             }
         )
         selectable_idx += 1
@@ -1279,15 +1285,112 @@ def _has_php_file_fast(root: Path, limit_files: int = 50000) -> bool:
     return False
 
 
+def _plugin_status_version(result: dict[str, Any] | None) -> str:
+    if not isinstance(result, dict):
+        return "-"
+    return str(result.get("installed_version") or "-").strip() or "-"
+
+
+def _plugin_filesystem_status_external(
+    config: AgentConfig,
+    *,
+    plugins_dir: Path,
+    bundle: str,
+    state_filename: str,
+) -> dict[str, Any]:
+    """Return the typed filesystem observation used by the shared status path.
+
+    Stable 1.6 keeps the filesystem observer local; the operation binding is
+    supplied by the later host integration.  Keeping this typed seam here lets
+    the policy/variant contract consume the same shape and lets that binding be
+    adopted without changing status semantics.
+    """
+    del config
+    pdir = plugins_dir / bundle
+    if not pdir.exists():
+        return {
+            "schema": "mcd-plugin-filesystem-status-v1",
+            "status": "ok",
+            "plugin_status": "missing",
+            "reason": "not installed",
+            "installed_version": "-",
+            "state": None,
+        }
+    installed_version = _read_installed_version(pdir)
+    state: dict[str, Any] | None = None
+    state_path = pdir / state_filename
+    if state_path.exists():
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {
+                "schema": "mcd-plugin-filesystem-status-v1",
+                "status": "ok",
+                "plugin_status": "broken",
+                "reason": "invalid state metadata",
+                "installed_version": installed_version,
+                "state": None,
+            }
+    if not _has_php_file_fast(pdir):
+        return {
+            "schema": "mcd-plugin-filesystem-status-v1",
+            "status": "ok",
+            "plugin_status": "broken",
+            "reason": "no php files",
+            "installed_version": installed_version,
+            "state": state,
+        }
+    return {
+        "schema": "mcd-plugin-filesystem-status-v1",
+        "status": "ok",
+        "plugin_status": "ok",
+        "reason": "version match",
+        "installed_version": installed_version,
+        "state": state,
+    }
+
+
 def _plugin_status(
     plugins_dir: Path,
     plugin: dict[str, Any],
     state_filename: str,
     *,
     install_bundle: str | None = None,
+    config: AgentConfig | None = None,
 ) -> tuple[str, str, str]:
     bundle = str(plugin.get("bundle", "")).strip()
     install_name = str(install_bundle or "").strip() or bundle
+    if config is not None:
+        external = _plugin_filesystem_status_external(
+            config,
+            plugins_dir=plugins_dir,
+            bundle=install_name,
+            state_filename=state_filename,
+        )
+        installed_version = _plugin_status_version(external)
+        external_status = str(external.get("plugin_status") or "").strip().lower()
+        if external_status == "missing":
+            return "MISSING", str(external.get("reason") or "not installed"), installed_version
+        if external_status == "broken":
+            return "BROKEN", str(external.get("reason") or "filesystem status is broken"), installed_version
+        if external_status not in {"ok", "noop", "observed", "success"}:
+            raise RuntimeError("plugin_filesystem_status_result_invalid")
+        expected_version = str(plugin.get("version", "")).strip() or "-"
+        expected_sha = str(plugin.get("sha256", "")).strip()
+        state = external.get("state")
+        if isinstance(state, dict):
+            recorded_bundle = str(state.get("bundle", "") or "").strip()
+            if recorded_bundle and recorded_bundle != bundle:
+                if recorded_bundle in _exclusive_counterparts(bundle, plugin):
+                    return "MISSING", f"counterpart installed={recorded_bundle}", "-"
+        if installed_version == expected_version:
+            if state is None or not expected_sha or str(state.get("sha256", "")).strip() == expected_sha:
+                return "OK", str(external.get("reason") or "version match"), installed_version
+            return "OK", "version match", installed_version
+        cmp_val = _version_cmp(installed_version, expected_version)
+        if cmp_val is not None and cmp_val > 0:
+            return "OK", f"installed newer than server={expected_version}", installed_version
+        return "UPDATE", f"installed={installed_version}", installed_version
     pdir = plugins_dir / install_name
     if not pdir.exists():
         return "MISSING", "not installed", "-"
@@ -1314,9 +1417,9 @@ def _plugin_status(
         except Exception:
             return "BROKEN", "invalid state metadata", installed_version
 
-    # Canonical-path dev/stable aliases share one install directory.
-    # Respect the last installed bundle from state file so UI/CLI won't
-    # show both variants as simultaneously installed.
+    # Canonical-path dev/stable aliases share one install directory. Respect
+    # the last installed bundle so competing projections are not both shown as
+    # installed.
     if state is not None:
         recorded_bundle = str(state.get("bundle", "")).strip()
         if recorded_bundle and recorded_bundle != bundle:
@@ -1336,6 +1439,7 @@ def _plugin_status(
         return "OK", f"installed newer than server={expected_version}", installed_version
 
     return "UPDATE", f"installed={installed_version}", installed_version
+
 
 
 def _extract_package(archive_path: Path, staging: Path) -> None:
@@ -1528,6 +1632,7 @@ def _emit_plugin_apply_result(
     inventory: list[dict[str, Any]] | None = None,
     inventory_sync: dict[str, Any] | None = None,
     error: str = "",
+    catalog_sha256: str = "",
 ) -> dict[str, Any]:
     payload = {
         "schema": _PLUGIN_APPLY_RESULT_SCHEMA,
@@ -1546,6 +1651,16 @@ def _emit_plugin_apply_result(
         "inventory": list(inventory or []),
         "error": error,
     }
+    catalog_digests = {
+        str(row.get("catalog_sha256") or "").strip().lower()
+        for row in selected
+        if str(row.get("catalog_sha256") or "").strip()
+    }
+    explicit_catalog_sha256 = str(catalog_sha256 or "").strip().lower()
+    if explicit_catalog_sha256:
+        payload["catalog_sha256"] = explicit_catalog_sha256
+    elif len(catalog_digests) == 1:
+        payload["catalog_sha256"] = next(iter(catalog_digests))
     if isinstance(inventory_sync, dict):
         payload["inventory_sync_status"] = str(inventory_sync.get("inventory_sync_status") or inventory_sync.get("status") or "error")
         payload["inventory_sync"] = dict(inventory_sync)
@@ -1940,6 +2055,30 @@ def _selected_install_bundles(selected: list[dict[str, Any]]) -> list[str]:
         if bundle and bundle != install_bundle:
             out.append(bundle)
     return _dedupe_text(out)
+
+
+def _filter_auto_update_policy(
+    config: AgentConfig,
+    install,
+    selected: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    settings = getattr(config, "plugin_auto_update_instance_settings", {})
+    instance_uid = canonical_instance_uid(str(getattr(install, "instance_uid", "") or ""))
+    allowed: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for row in selected:
+        plugin_uid = str(row.get("plugin_uid") or "").strip().lower()
+        package_uid = str(row.get("package_uid") or "").strip().lower()
+        if plugin_uid and package_uid and read_plugin_auto_update_policy(
+            settings,
+            instance_uid=instance_uid,
+            plugin_uid=plugin_uid,
+            package_uid=package_uid,
+        ):
+            skipped.append(row)
+        else:
+            allowed.append(row)
+    return allowed, skipped
 
 
 def _cluster_sync_bundle_names(
@@ -3235,6 +3374,10 @@ def run_plugins_interactive(
         return 0
 
     if catalog_json:
+        catalog_sha256 = next(
+            (str(row.get("catalog_sha256") or "") for row in rows if row.get("catalog_sha256")),
+            "",
+        )
         payload_rows: list[dict[str, Any]] = []
         for row in rows:
             payload_rows.append(
@@ -3261,6 +3404,7 @@ def run_plugins_interactive(
                     "mautic_major": major,
                     "manifest_url": manifest_url,
                     "fallback_ip": fallback_ip or "",
+                    "catalog_sha256": catalog_sha256,
                     "items": payload_rows,
                 },
                 ensure_ascii=True,
@@ -3349,6 +3493,40 @@ def run_plugins_interactive(
         if not selected:
             print("Selected indexes are not actionable, try again")
             continue
+
+        if chosen_action == "auto":
+            selected, policy_skipped = _filter_auto_update_policy(config, install, selected)
+            for row in policy_skipped:
+                print(
+                    "Automatic update skipped by policy: "
+                    f"{row.get('plugin_uid')} package={row.get('package_uid')}"
+                )
+            if not selected:
+                resolved_operation_id = str(operation_id or "").strip() or uuid.uuid4().hex
+                skipped_catalog_digests = {
+                    str(row.get("catalog_sha256") or "").strip().lower()
+                    for row in policy_skipped
+                    if str(row.get("catalog_sha256") or "").strip()
+                }
+                _emit_plugin_apply_result(
+                    operation_id=resolved_operation_id,
+                    install_root=install_root,
+                    action=chosen_action,
+                    selected=[],
+                    event="completed",
+                    files_applied=False,
+                    post_step_status="skipped_by_policy",
+                    cache_inventory_confirmed=True,
+                    overall_status="success",
+                    rc=0,
+                    inventory=[],
+                    catalog_sha256=(
+                        next(iter(skipped_catalog_digests))
+                        if len(skipped_catalog_digests) == 1
+                        else ""
+                    ),
+                )
+                return 0
 
         try:
             _validate_selected_exclusive_conflicts(selected, context=interaction_context)
@@ -3476,6 +3654,19 @@ def _plugin_operation_terminal_payload(
         "error": str(error or terminal_payload.get("error") or ""),
         "mcd_version": __version__,
     }
+    if terminal_payload.get("catalog_sha256"):
+        payload["catalog_sha256"] = str(terminal_payload.get("catalog_sha256"))
+    if action == "auto" and package_uids:
+        selected_package_uids = {
+            str(row.get("package_uid") or "").strip().lower()
+            for row in payload["selected"]
+            if isinstance(row, dict) and str(row.get("package_uid") or "").strip()
+        }
+        payload["policy_skipped_package_uids"] = sorted(
+            package_uid
+            for package_uid in package_uids
+            if package_uid not in selected_package_uids
+        )
     canonical = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
     payload["receipt_sha256"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     return payload

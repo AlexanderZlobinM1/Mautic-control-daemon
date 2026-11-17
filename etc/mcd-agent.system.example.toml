@@ -344,6 +344,8 @@ cache_warm_quiet_window_min = 60
 # cron match rules to this host-level template.
 plugin_operations = {}
 plugin_operation_instance_settings = {}
+# Exact bare instance UID -> package UID -> plugin UID and auto-update policy.
+plugin_auto_update_instance_settings = {}
 
 # Mautic 5/6/7 database message queue consumer. Disabled by default so a new
 # agent cannot unexpectedly drain an accumulated queue. MCC writes the
