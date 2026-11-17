@@ -18309,6 +18309,19 @@ def _dispatch_manual_requests_for_root(
                 store.finish_manual_request(req_id, "skipped", prepare_reason)
                 continue
 
+        stdout_path = ""
+        stderr_path = ""
+        if task_type == "plugins_apply":
+            try:
+                from mcd_agent.plugin_jobs import output_paths as plugin_job_output_paths
+
+                operation_index = args.index("--operation-id")
+                operation_id = str(args[operation_index + 1]).strip()
+                stdout_path, stderr_path = plugin_job_output_paths(config.state_db_path, operation_id)
+                Path(stdout_path).parent.mkdir(parents=True, exist_ok=True)
+            except (ValueError, IndexError):
+                store.finish_manual_request(req_id, "failed", "plugin_operation_id_missing")
+                continue
         try:
             launched = _submit_if_slot(
                 config=config,
@@ -18323,6 +18336,8 @@ def _dispatch_manual_requests_for_root(
                 popens=popens,
                 ignore_limit=True,
                 manual_request_id=req_id,
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
             )
         except Exception:
             if task_type == "segment" and entity_id is not None:
@@ -18341,7 +18356,15 @@ def _dispatch_manual_requests_for_root(
                     request_id=req_id,
                     now_ts=time.time(),
                 )
-            store.finish_manual_request(req_id, "skipped", "already_running")
+            if any(
+                task.root == root and task.manual_request_id is not None
+                for task in running.values()
+            ):
+                # Durable manual requests are a local FIFO. A long operation
+                # keeps later work pending; it must never make the daemon drop
+                # queued plugin installs merely because their slot is busy.
+                break
+            store.finish_manual_request(req_id, "skipped", "admission_rejected")
             continue
 
         task_key = _task_key(root, task_type, entity_id)

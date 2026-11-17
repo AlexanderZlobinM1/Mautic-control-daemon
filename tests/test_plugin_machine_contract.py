@@ -32,6 +32,7 @@ def _terminal_v1(operation_id: str) -> dict[str, object]:
         "rc": 0,
         "inventory": [{"bundle": "VendorDemoBundle", "installed_version": "1.2.3"}],
         "error": "",
+        "catalog_sha256": "c" * 64,
     }
 
 
@@ -76,6 +77,7 @@ def test_machine_contract_emits_one_terminal_host_independent_result(monkeypatch
     assert result["plugin_uids"] == ["vendor.demo:7"]
     assert result["package_uids"] == []
     assert result["status"] == "success"
+    assert result["catalog_sha256"] == "c" * 64
     assert result["terminal"] is True
     assert "/srv/tenant-one" not in output
     assert "host-a" not in output

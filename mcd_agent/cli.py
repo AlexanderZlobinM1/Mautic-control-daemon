@@ -181,6 +181,20 @@ from mcd_agent.plugin_update_policy import (
     validate_identity as validate_plugin_auto_update_identity,
     write_policy as write_plugin_auto_update_policy,
 )
+from mcd_agent.plugin_jobs import (
+    CANCEL_SCHEMA as PLUGIN_JOB_CANCEL_SCHEMA,
+    ENQUEUE_SCHEMA as PLUGIN_JOB_ENQUEUE_SCHEMA,
+    RECORD_SCHEMA as PLUGIN_JOB_RECORD_SCHEMA,
+    STATUS_SCHEMA as PLUGIN_JOB_STATUS_SCHEMA,
+    PluginJobError,
+    canonical_request as canonical_plugin_job_request,
+    output_paths as plugin_job_output_paths,
+    read_tail as read_plugin_job_tail,
+    request_sha256 as plugin_job_request_sha256,
+    runtime_key as plugin_job_runtime_key,
+    terminal_from_output as plugin_job_terminal_from_output,
+    with_receipt as plugin_job_with_receipt,
+)
 from mcd_agent.runtime_overrides import (
     apply_remote_overrides,
     fetch_runtime_overrides,
@@ -831,6 +845,166 @@ def _plugin_auto_update_policy_cli(cfg, args) -> int:
             local_state_confirmed=local_state_confirmed,
             reason=str(exc),
         )
+        print(json.dumps(payload, ensure_ascii=True, sort_keys=True))
+        return 1
+
+
+def _plugin_job_cli(cfg, args) -> int:
+    command = str(args.plugin_job_cmd or "").strip().lower()
+    operation_id = str(args.operation_id or "").strip()
+    store = TaskStore(cfg.state_db_path, cfg)
+    key = plugin_job_runtime_key(operation_id)
+    try:
+        if command == "enqueue":
+            request = canonical_plugin_job_request(
+                instance_uid=str(args.instance_uid or ""),
+                plugin_uids=list(args.plugin_uid or []),
+                package_uids=list(args.package_uid or []),
+                action=str(args.action or ""),
+                operation_id=operation_id,
+            )
+            inst = _select_instance_for_ops(cfg, request["instance_uid"])
+            if str(inst.instance_uid or "").strip() != request["instance_uid"]:
+                raise PluginJobError("plugin_instance_uid_not_found")
+            digest = plugin_job_request_sha256(request)
+            existing = store.get_runtime_sync(key)
+            if isinstance(existing, dict) and existing:
+                if existing.get("request_sha256") != digest:
+                    raise PluginJobError("plugin_operation_id_conflict")
+                request_id = int(existing.get("request_id") or 0)
+                status = store.get_manual_request_status(request_id) or "unknown"
+                payload = plugin_job_with_receipt({
+                    "schema": PLUGIN_JOB_ENQUEUE_SCHEMA,
+                    "status": "accepted",
+                    "idempotent_replay": True,
+                    "operation_id": operation_id,
+                    "job_id": operation_id,
+                    "request_id": request_id,
+                    "job_status": status,
+                    "request_sha256": digest,
+                })
+                print(json.dumps(payload, ensure_ascii=True, sort_keys=True))
+                return 0
+
+            executable = shutil.which("mcd-cli") or "mcd-cli"
+            command_tokens = [
+                executable,
+                "plugins",
+                "--config",
+                str(cfg.config_file_path),
+                "--machine-result",
+                "--instance-uid",
+                request["instance_uid"],
+                "--action",
+                request["action"],
+                "--operation-id",
+                operation_id,
+            ]
+            for selection in request["selections"]:
+                command_tokens.extend(["--plugin-uid", str(selection["plugin_uid"])])
+                if selection.get("package_uid"):
+                    command_tokens.extend(["--package-uid", str(selection["package_uid"])])
+            timeout_sec = max(6 * 60 * 60, int(getattr(cfg, "command_timeout_sec", 0) or 0))
+            request_id = store.enqueue_manual_request(
+                root=str(inst.root),
+                task_type="plugins_apply",
+                entity_id=None,
+                command_str=_MANUAL_CMD_SEP.join(command_tokens),
+                timeout_sec=timeout_sec,
+            )
+            stdout_path, stderr_path = plugin_job_output_paths(cfg.state_db_path, operation_id)
+            record = {
+                "schema": PLUGIN_JOB_RECORD_SCHEMA,
+                "operation_id": operation_id,
+                "request_id": request_id,
+                "request_sha256": digest,
+                "request": request,
+                "stdout_path": stdout_path,
+                "stderr_path": stderr_path,
+                "created_at": time.time(),
+            }
+            store.put_runtime_sync(key, record)
+            payload = plugin_job_with_receipt({
+                "schema": PLUGIN_JOB_ENQUEUE_SCHEMA,
+                "status": "accepted",
+                "idempotent_replay": False,
+                "operation_id": operation_id,
+                "job_id": operation_id,
+                "request_id": request_id,
+                "job_status": "pending",
+                "request_sha256": digest,
+            })
+            print(json.dumps(payload, ensure_ascii=True, sort_keys=True))
+            return 0
+
+        record = store.get_runtime_sync(key)
+        if not isinstance(record, dict) or record.get("schema") != PLUGIN_JOB_RECORD_SCHEMA:
+            raise PluginJobError("plugin_job_not_found")
+        request_id = int(record.get("request_id") or 0)
+        request_status = str(store.get_manual_request_status(request_id) or "unknown").strip().lower()
+        if command == "cancel":
+            cancelled = store.cancel_manual_request(request_id, note="operator_cancelled")
+            current = str(store.get_manual_request_status(request_id) or request_status).strip().lower()
+            payload = plugin_job_with_receipt({
+                "schema": PLUGIN_JOB_CANCEL_SCHEMA,
+                "status": "cancelled" if cancelled else "not_cancelled",
+                "operation_id": operation_id,
+                "job_id": operation_id,
+                "request_id": request_id,
+                "job_status": current,
+                "reason": "" if cancelled else "job_is_not_pending",
+            })
+            print(json.dumps(payload, ensure_ascii=True, sort_keys=True))
+            return 0 if cancelled or current == "cancelled" else 1
+        if command != "status":
+            raise PluginJobError("plugin_job_command_invalid")
+
+        stdout = read_plugin_job_tail(str(record.get("stdout_path") or ""), limit=256 * 1024)
+        terminal = plugin_job_terminal_from_output(stdout)
+        public_status = {
+            "pending": "queued",
+            "launched": "running",
+            "done": "succeeded",
+            "failed": "failed",
+            "timeout": "failed",
+            "lost": "failed",
+            "skipped": "failed",
+            "cancelled": "cancelled",
+        }.get(request_status, request_status or "unknown")
+        if isinstance(terminal, dict):
+            public_status = "succeeded" if terminal.get("status") == "success" else "failed"
+        notification = "disabled" if not getattr(cfg, "mcc_url", None) else "pending"
+        if isinstance(terminal, dict) and terminal.get("inventory_sync_status"):
+            notification = str(terminal.get("inventory_sync_status"))
+        payload_data: dict[str, object] = {
+            "schema": PLUGIN_JOB_STATUS_SCHEMA,
+            "status": public_status,
+            "operation_id": operation_id,
+            "job_id": operation_id,
+            "request_id": request_id,
+            "request_sha256": str(record.get("request_sha256") or ""),
+            "notification_delivery_status": notification,
+        }
+        if isinstance(terminal, dict):
+            payload_data["terminal_result"] = terminal
+        elif public_status == "failed":
+            payload_data["error_tail"] = read_plugin_job_tail(str(record.get("stderr_path") or ""))
+        payload = plugin_job_with_receipt(payload_data)
+        print(json.dumps(payload, ensure_ascii=True, sort_keys=True))
+        return 0
+    except Exception as exc:
+        schema = {
+            "enqueue": PLUGIN_JOB_ENQUEUE_SCHEMA,
+            "status": PLUGIN_JOB_STATUS_SCHEMA,
+            "cancel": PLUGIN_JOB_CANCEL_SCHEMA,
+        }.get(command, PLUGIN_JOB_STATUS_SCHEMA)
+        payload = plugin_job_with_receipt({
+            "schema": schema,
+            "status": "error",
+            "operation_id": operation_id,
+            "job_id": operation_id,
+            "reason": str(exc),
+        })
         print(json.dumps(payload, ensure_ascii=True, sort_keys=True))
         return 1
 
@@ -2096,6 +2270,27 @@ def _build_parser() -> argparse.ArgumentParser:
         policy_parser.add_argument("--plugin-uid", required=True)
         policy_parser.add_argument("--package-uid", required=True)
         policy_parser.add_argument("--operation-id", required=True)
+
+    plugin_job = sub.add_parser(
+        "plugin-job",
+        help="Enqueue and inspect durable local plugin operations",
+    )
+    plugin_job_sub = plugin_job.add_subparsers(dest="plugin_job_cmd", required=True)
+    plugin_job_enqueue = plugin_job_sub.add_parser("enqueue")
+    plugin_job_enqueue.add_argument("--config", default=default_cfg)
+    plugin_job_enqueue.add_argument("--instance-uid", required=True)
+    plugin_job_enqueue.add_argument("--plugin-uid", action="append", required=True)
+    plugin_job_enqueue.add_argument("--package-uid", action="append", default=[])
+    plugin_job_enqueue.add_argument(
+        "--action",
+        required=True,
+        choices=["auto", "install", "update", "reinstall", "remove", "purge"],
+    )
+    plugin_job_enqueue.add_argument("--operation-id", required=True)
+    for name in ("status", "cancel"):
+        job_parser = plugin_job_sub.add_parser(name)
+        job_parser.add_argument("--config", default=default_cfg)
+        job_parser.add_argument("--operation-id", required=True)
 
     plugin_ops = sub.add_parser("plugin-operations", aliases=["plugin-operation"], help="Use declared plugin operations")
     plugin_ops_sub = plugin_ops.add_subparsers(dest="plugin_ops_cmd", required=True)
@@ -3419,6 +3614,10 @@ def main() -> int:
     if args.cmd == "plugin-auto-update-policy":
         cfg = load_config(args.config)
         return _plugin_auto_update_policy_cli(cfg, args)
+
+    if args.cmd == "plugin-job":
+        cfg = load_config(args.config)
+        return _plugin_job_cli(cfg, args)
 
     if args.cmd in {"plugins", "plugin"}:
         cfg = load_config(args.config)

@@ -1,8 +1,8 @@
 # MCD plugin operation result v2
 
-`mcd-plugin-operation-result-v2` — единственный машинный контракт установки
-плагина между внешним оркестратором и MCD. Оркестратор выбирает текущий хост,
-но передаёт MCD только стабильную сущность инстанса и желаемую операцию:
+`mcd-plugin-operation-result-v2` — единственный terminal execution result
+установки плагина в MCD. Локальный executor принимает стабильную сущность
+инстанса и желаемую операцию:
 
 ```bash
 mcd-cli plugins --machine-result \
@@ -61,3 +61,41 @@ reset/warmup и точную inventory-проверку. Наличие файл
 Обычный интерактивный CLI сохраняет старый `mcd-plugin-apply-result-v1` для
 обратной совместимости. Новый MCC-путь не читает его progress-записи и не
 строит собственную копию MCD state machine.
+
+## Durable host queue
+
+Удалённый оркестратор не держит SSH-процесс до конца установки. Он коротким
+вызовом передаёт intent в локальную durable-очередь MCD:
+
+```bash
+mcd-cli plugin-job enqueue \
+  --instance-uid INSTANCE_UID \
+  --plugin-uid PLUGIN_UID \
+  --package-uid PACKAGE_UID \
+  --action auto \
+  --operation-id OPERATION_ID
+```
+
+Для нескольких выбранных плагинов пары `--plugin-uid`/`--package-uid`
+повторяются в одинаковом порядке. MCD валидирует bare UID, выбранные package
+projections, текущую Mautic-совместимость и каталог уже на конечном хосте.
+`operation_id` является idempotency key: повтор идентичного enqueue возвращает
+существующий local job, а тот же ID с другим intent завершается конфликтом.
+
+`mcd-cli plugin-job status --operation-id ID` — короткий readback. Он возвращает
+`queued`, `running`, `succeeded`, `failed` или `cancelled`; terminal status
+содержит исходный `mcd-plugin-operation-result-v2`. Отдельное поле
+`notification_delivery_status` показывает доставку inventory/результата в MCC
+и не меняет локальный execution success. На standalone-хосте оно равно
+`disabled`.
+
+`mcd-cli plugin-job cancel --operation-id ID` отменяет только ещё не запущенную
+работу. Запущенная транзакция остаётся под supervisor MCD и не убивается
+удалённым timeout. Очередь и output receipt сохраняются локально; перезапуск
+клиента MCC или потеря SSH-сессии не влияет на выполнение.
+
+Manifest читается MCD из `plugins.repo_base_url` и
+`plugins.manifest_path_template`. Для этого не нужны MCC management token,
+регистрация агента или UI-сессия. Terminal result включает digest фактически
+прочитанного каталога. Регистрация добавляет только доставку observed inventory
+и настроек; её отсутствие не превращает успешную локальную установку в ошибку.

@@ -305,6 +305,9 @@ Production CLI (recommended):
 - `mcd-cli import`
 - `mcd-cli plugins`
 - `mcd-cli plugins --machine-result --instance-uid <bare-uid> --plugin-uid <plugin-uid> --action auto --operation-id <id>` (one terminal result without root/host identity)
+- `mcd-cli plugin-job enqueue --instance-uid <bare-uid> --plugin-uid <plugin-uid> --package-uid <package-uid> --action auto --operation-id <id>` (durable local queue)
+- `mcd-cli plugin-job status --operation-id <id>`
+- `mcd-cli plugin-job cancel --operation-id <id>` (pending jobs only)
 - `mcd-cli mautic-upgrade` (interactive)
 - `mcd-cli mautic-upgrade check`
 - `mcd-cli mautic-upgrade apply --mode zip --backup --yes`
