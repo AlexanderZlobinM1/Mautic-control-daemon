@@ -115,6 +115,65 @@ def test_startup_adoption_replaces_frozen_runtime_config() -> None:
     assert updated.message_queue_instance_settings == settings
 
 
+def test_migration_push_uses_fresh_desired_revision() -> None:
+    config = _config()
+    inst = _instance(uid="demo.sales-snap.com")
+    accepted = {"status": "ok", "desired_state": {"revision": 4}}
+
+    with patch.object(
+        daemon,
+        "fetch_runtime_overrides",
+        return_value={"status": "ok", "desired_state": {"revision": 3}},
+    ) as fetch, patch.object(
+        daemon,
+        "push_runtime_overrides",
+        return_value=accepted,
+    ) as push:
+        result = daemon._push_runtime_migration_overrides(
+            config,
+            [inst],
+            {"message_queue_instance_settings": {inst.instance_uid: {"enabled": True}}},
+        )
+
+    assert result == accepted
+    fetch.assert_called_once_with(config, instance_uids=[inst.instance_uid])
+    assert push.call_args.kwargs == {
+        "merge": True,
+        "target": "desired",
+        "desired_state_revision": 3,
+    }
+
+
+def test_migration_push_refetches_once_after_revision_conflict() -> None:
+    config = _config()
+    inst = _instance(uid="demo.sales-snap.com")
+
+    with patch.object(
+        daemon,
+        "fetch_runtime_overrides",
+        side_effect=[
+            {"status": "ok", "desired_state": {"revision": 3}},
+            {"status": "ok", "desired_state": {"revision": 4}},
+        ],
+    ) as fetch, patch.object(
+        daemon,
+        "push_runtime_overrides",
+        side_effect=[
+            {"status": "conflict", "reason": "stale_desired_revision"},
+            {"status": "ok", "desired_state": {"revision": 5}},
+        ],
+    ) as push:
+        result = daemon._push_runtime_migration_overrides(
+            config,
+            [inst],
+            {"message_queue_instance_settings": {inst.instance_uid: {"enabled": True}}},
+        )
+
+    assert result["status"] == "ok"
+    assert fetch.call_count == 2
+    assert [call.kwargs["desired_state_revision"] for call in push.call_args_list] == [3, 4]
+
+
 def test_existing_instance_setting_is_never_overwritten_by_cron_adoption() -> None:
     inst = _instance()
     existing = {inst.root: {"enabled": False, "interval_sec": 7200}}
