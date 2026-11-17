@@ -1,3 +1,9 @@
+## 1.6.97 - 2026-11-17
+
+- Distinguish a logical plugin from its concrete package projection, require an
+  exact `package_uid` when multiple variants apply, and bind the selected
+  projection into the terminal installation receipt.
+
 ## 1.6.96 - 2026-11-17
 
 - Add the terminal machine-readable plugin operation contract and keep plugin
