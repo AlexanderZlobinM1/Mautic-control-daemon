@@ -59,6 +59,7 @@ _INSTANCE_RUNTIME_KEYS = {
     "campaign_super_priority_instance_settings",
     "page_hits_orphan_cleanup_instance_settings",
     "plugin_operation_instance_settings",
+    "plugin_auto_update_instance_settings",
     "message_queue_instance_settings",
     "monitored_email_parser_instance_settings",
     "form_embed_instance_settings",

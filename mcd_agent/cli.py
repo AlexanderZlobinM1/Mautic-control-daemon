@@ -173,6 +173,14 @@ from mcd_agent.plugin_operations import (
     operations_for_instance,
     validate_operation_values,
 )
+from mcd_agent.plugin_update_policy import (
+    RUNTIME_KEY as PLUGIN_AUTO_UPDATE_RUNTIME_KEY,
+    PluginAutoUpdatePolicyError,
+    read_policy as read_plugin_auto_update_policy,
+    terminal_result as plugin_auto_update_terminal_result,
+    validate_identity as validate_plugin_auto_update_identity,
+    write_policy as write_plugin_auto_update_policy,
+)
 from mcd_agent.runtime_overrides import (
     apply_remote_overrides,
     fetch_runtime_overrides,
@@ -412,6 +420,11 @@ def _toml_literal(value: object) -> str:
         return str(value)
     if isinstance(value, list):
         return "[" + ", ".join(_toml_literal(v) for v in value) + "]"
+    if isinstance(value, dict):
+        parts = []
+        for key, item in sorted(value.items(), key=lambda pair: str(pair[0])):
+            parts.append(f"{json.dumps(str(key), ensure_ascii=True)} = {_toml_literal(item)}")
+        return "{ " + ", ".join(parts) + " }"
     return json.dumps("" if value is None else str(value), ensure_ascii=True)
 
 
@@ -707,6 +720,119 @@ def _plugin_operation_cli(cfg, args) -> int:
     payload = {"status": "ok" if result.returncode == 0 else "error", "operation_key": key, "argv": argv, "output": output}
     print(json.dumps(payload, ensure_ascii=True, indent=2) if args.json else output)
     return int(result.returncode)
+
+
+def _plugin_auto_update_policy_cli(cfg, args) -> int:
+    action = str(args.plugin_auto_update_policy_cmd or "").strip().lower()
+    raw_instance = str(args.instance_uid or "").strip()
+    raw_plugin = str(args.plugin_uid or "").strip().lower()
+    raw_package = str(args.package_uid or "").strip().lower()
+    raw_operation = str(args.operation_id or "").strip()
+    disabled = False
+    changed = False
+    local_state_confirmed = False
+    validated = False
+    instance_uid = raw_instance
+    plugin_uid = raw_plugin
+    package_uid = raw_package
+    operation_id = raw_operation
+    try:
+        instance_uid, plugin_uid, package_uid, operation_id = validate_plugin_auto_update_identity(
+            instance_uid=raw_instance,
+            plugin_uid=raw_plugin,
+            package_uid=raw_package,
+            operation_id=raw_operation,
+        )
+        validated = True
+        inst = _select_instance_for_ops(cfg, instance_uid)
+        if str(inst.instance_uid or "").strip() != instance_uid:
+            raise PluginAutoUpdatePolicyError("instance_uid_must_match_registered_bare_uid")
+        current = getattr(cfg, PLUGIN_AUTO_UPDATE_RUNTIME_KEY, {})
+        mcc_sync: dict[str, object] | None = None
+        if action == "get":
+            disabled = read_plugin_auto_update_policy(
+                current,
+                instance_uid=instance_uid,
+                plugin_uid=plugin_uid,
+                package_uid=package_uid,
+            )
+            local_state_confirmed = True
+        elif action in {"set", "unset"}:
+            disabled = action == "set"
+            settings, changed = write_plugin_auto_update_policy(
+                current,
+                instance_uid=instance_uid,
+                plugin_uid=plugin_uid,
+                package_uid=package_uid,
+                disabled=disabled,
+            )
+            if changed:
+                _upsert_runtime_values(
+                    cfg.config_file_path,
+                    {PLUGIN_AUTO_UPDATE_RUNTIME_KEY: settings},
+                )
+                cfg = load_config(cfg.config_file_path)
+            disabled = read_plugin_auto_update_policy(
+                getattr(cfg, PLUGIN_AUTO_UPDATE_RUNTIME_KEY, {}),
+                instance_uid=instance_uid,
+                plugin_uid=plugin_uid,
+                package_uid=package_uid,
+            )
+            local_state_confirmed = True
+            mcc_sync = push_runtime_overrides(
+                cfg,
+                {PLUGIN_AUTO_UPDATE_RUNTIME_KEY: settings},
+                merge=True,
+                target="desired",
+            )
+            touch_poll_trigger(cfg)
+        else:
+            raise PluginAutoUpdatePolicyError("unsupported_action")
+
+        sync_status = str((mcc_sync or {}).get("status", "ok")).strip().lower()
+        ok = sync_status in {"ok", "disabled"}
+        payload = plugin_auto_update_terminal_result(
+            status="ok" if ok else "error",
+            action=action,
+            operation_id=operation_id,
+            instance_uid=instance_uid,
+            plugin_uid=plugin_uid,
+            package_uid=package_uid,
+            auto_update_disabled=disabled,
+            changed=changed,
+            local_state_confirmed=local_state_confirmed,
+            mcc_sync=mcc_sync,
+            reason="" if ok else "mcc_sync_failed",
+        )
+        print(json.dumps(payload, ensure_ascii=True, sort_keys=True))
+        return 0 if ok else 1
+    except Exception as exc:
+        if validated and not local_state_confirmed:
+            try:
+                observed_cfg = load_config(cfg.config_file_path)
+                disabled = read_plugin_auto_update_policy(
+                    getattr(observed_cfg, PLUGIN_AUTO_UPDATE_RUNTIME_KEY, {}),
+                    instance_uid=instance_uid,
+                    plugin_uid=plugin_uid,
+                    package_uid=package_uid,
+                )
+                local_state_confirmed = True
+            except Exception:
+                changed = False
+        payload = plugin_auto_update_terminal_result(
+            status="error",
+            action=action,
+            operation_id=raw_operation,
+            instance_uid=raw_instance,
+            plugin_uid=raw_plugin,
+            package_uid=raw_package,
+            auto_update_disabled=disabled,
+            changed=changed if local_state_confirmed else False,
+            local_state_confirmed=local_state_confirmed,
+            reason=str(exc),
+        )
+        print(json.dumps(payload, ensure_ascii=True, sort_keys=True))
+        return 1
 
 
 def _run_manual_command_with_scheduler(
@@ -1954,6 +2080,22 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_plugins_args(plugins)
     plugin_alias = sub.add_parser("plugin", help=argparse.SUPPRESS)
     _add_plugins_args(plugin_alias)
+
+    plugin_auto_update_policy = sub.add_parser(
+        "plugin-auto-update-policy",
+        help="Read or change the exact per-package automatic update policy",
+    )
+    plugin_auto_update_policy_sub = plugin_auto_update_policy.add_subparsers(
+        dest="plugin_auto_update_policy_cmd",
+        required=True,
+    )
+    for name in ("get", "set", "unset"):
+        policy_parser = plugin_auto_update_policy_sub.add_parser(name)
+        policy_parser.add_argument("--config", default=default_cfg)
+        policy_parser.add_argument("--instance-uid", required=True)
+        policy_parser.add_argument("--plugin-uid", required=True)
+        policy_parser.add_argument("--package-uid", required=True)
+        policy_parser.add_argument("--operation-id", required=True)
 
     plugin_ops = sub.add_parser("plugin-operations", aliases=["plugin-operation"], help="Use declared plugin operations")
     plugin_ops_sub = plugin_ops.add_subparsers(dest="plugin_ops_cmd", required=True)
@@ -3273,6 +3415,10 @@ def main() -> int:
             else:
                 print(f"plugin operation error: {exc}", file=sys.stderr)
             return 1
+
+    if args.cmd == "plugin-auto-update-policy":
+        cfg = load_config(args.config)
+        return _plugin_auto_update_policy_cli(cfg, args)
 
     if args.cmd in {"plugins", "plugin"}:
         cfg = load_config(args.config)

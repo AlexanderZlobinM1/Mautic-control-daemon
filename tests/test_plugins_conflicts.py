@@ -164,6 +164,60 @@ class PluginConflictPathTests(unittest.TestCase):
             self.assertEqual(installed, "1.0.36.1")
             self.assertIn("installed newer", reason)
 
+    def test_shared_install_bundle_reports_only_recorded_runtime_variant_installed(self) -> None:
+        with TemporaryDirectory() as tmp:
+            plugins_dir = Path(tmp)
+            observed = {
+                "schema": "mcd-plugin-filesystem-status-v1",
+                "status": "ok",
+                "plugin_status": "ok",
+                "installed_version": "6.1.1.1",
+                "digest": "a" * 64,
+                "state": {
+                    "bundle": "HostnetAuthManagedBundle",
+                    "version": "6.1.1.1",
+                    "sha256": "b" * 64,
+                },
+                "has_doctrine_entity_metadata": False,
+                "has_native_migrations": False,
+            }
+            cfg = SimpleNamespace(plugins_state_filename=".mcd-plugin.json")
+            unmanaged = {
+                "bundle": "HostnetAuthBundle",
+                "version": "6.1.1",
+                "sha256": "c" * 64,
+                "replaces": ["HostnetAuthManagedBundle"],
+            }
+            managed = {
+                "bundle": "HostnetAuthManagedBundle",
+                "install_bundle": "HostnetAuthBundle",
+                "version": "6.1.1.1",
+                "sha256": "b" * 64,
+                "replaces": ["HostnetAuthBundle"],
+            }
+
+            with patch("mcd_agent.plugins._plugin_filesystem_status_external", return_value=observed):
+                unmanaged_status = _plugin_status(
+                    plugins_dir,
+                    unmanaged,
+                    cfg.plugins_state_filename,
+                    install_bundle="HostnetAuthBundle",
+                    config=cfg,
+                )
+                managed_status = _plugin_status(
+                    plugins_dir,
+                    managed,
+                    cfg.plugins_state_filename,
+                    install_bundle="HostnetAuthBundle",
+                    config=cfg,
+                )
+
+            self.assertEqual(
+                unmanaged_status,
+                ("MISSING", "counterpart installed=HostnetAuthManagedBundle", "-"),
+            )
+            self.assertEqual(managed_status, ("OK", "version match", "6.1.1.1"))
+
     def test_selected_install_bundle_is_protected_from_conflict_aliases(self) -> None:
         selected = [
             {
