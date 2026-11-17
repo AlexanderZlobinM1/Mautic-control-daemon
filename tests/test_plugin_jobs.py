@@ -8,10 +8,26 @@ import pytest
 
 from mcd_agent import cli, daemon
 from mcd_agent.plugin_jobs import (
+    CAPABILITY,
     PluginJobError,
+    capability,
     canonical_request,
     terminal_from_output,
 )
+
+
+def test_plugin_job_capability_is_stable() -> None:
+    advertised = capability()
+    assert CAPABILITY == "mcd-plugin-job-v1"
+    assert advertised == {
+        "schema": "mcd-plugin-capabilities-v1",
+        "version": "1.0",
+        "features": [
+            "mcd-plugin-job-v1",
+            "mcd-plugin-auto-update-policy-v1",
+            "mcd-plugin-catalog-digest-v1",
+        ],
+    }
 
 
 def test_canonical_request_preserves_ordered_exact_pairs() -> None:
