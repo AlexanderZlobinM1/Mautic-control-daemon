@@ -8,6 +8,7 @@
 mcd-cli plugins --machine-result \
   --instance-uid INSTANCE_UID \
   --plugin-uid PLUGIN_UID \
+  --package-uid PACKAGE_UID \
   --action auto \
   --operation-id OPERATION_ID
 ```
@@ -16,6 +17,16 @@ mcd-cli plugins --machine-result \
 запрещён. MCD разрешает UID в локальный runtime самостоятельно. Допустимые
 действия совпадают с локальным plugin CLI: `auto`, `install`, `update`,
 `reinstall`, `remove`, `purge`.
+
+`plugin_uid` обозначает логический плагин. Один логический плагин может иметь
+несколько взаимоисключающих package-проекций с разными версиями и архивами.
+`package_uid` обозначает одну такую проекцию, остаётся стабильным при обновлении
+версии и не является bundle, путём, URL или именем хоста. Если для текущей
+major-версии Mautic у `plugin_uid` существует несколько проекций,
+`--package-uid` обязателен. MCD проверяет принадлежность проекции плагину и
+выбирает ровно одну строку manifest. Для единственной проекции параметр можно
+не передавать для обратной совместимости. Нулевая, чужая или неоднозначная
+проекция завершает операцию validation error до файловой транзакции.
 
 До окончания операции machine mode не публикует промежуточные filesystem,
 cache или Mautic-фазы. После полного завершения stdout содержит ровно одну
@@ -30,12 +41,17 @@ MCD_PLUGIN_OPERATION_RESULT=<JSON>
 - `schema=mcd-plugin-operation-result-v2`;
 - caller-supplied `operation_id`;
 - bare `instance_uid`;
-- выбранные `plugin_uids` и `action`;
+- выбранные `plugin_uids`, `package_uids` и `action`;
 - `terminal=true`, `status` и `rc`;
 - `selected` с ожидаемыми package versions;
 - подтверждённый Mautic `inventory`;
 - `error_code` и `error` при отказе;
 - `mcd_version` и `receipt_sha256`.
+
+Выбранный `package_uid` возвращается в каждой записи `selected` и входит в
+digest terminal receipt. Версия пакета остаётся отдельным ожидаемым значением:
+разные версии одного логического плагина являются допустимыми данными, а не
+конфликтом идентичности.
 
 `root`, host identity и `instance@host` в receipt отсутствуют. Success означает,
 что MCD закончил файловую транзакцию, native plugin registration/reload, cache

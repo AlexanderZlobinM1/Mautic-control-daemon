@@ -20,6 +20,7 @@ def _terminal_v1(operation_id: str) -> dict[str, object]:
         "terminal": True,
         "selected": [{
             "plugin_uid": "vendor.demo:7",
+            "package_uid": "vendor.demo.standard:7",
             "bundle": "VendorDemoBundle",
             "install_bundle": "VendorDemoBundle",
             "expected_version": "1.2.3",
@@ -73,6 +74,7 @@ def test_machine_contract_emits_one_terminal_host_independent_result(monkeypatch
     assert result["operation_id"] == "mcc-op-123"
     assert result["instance_uid"] == "tenant-one"
     assert result["plugin_uids"] == ["vendor.demo:7"]
+    assert result["package_uids"] == []
     assert result["status"] == "success"
     assert result["terminal"] is True
     assert "/srv/tenant-one" not in output
@@ -149,16 +151,116 @@ def test_bare_uid_selects_local_instance_and_legacy_same_host_remains_read_compa
 def test_plugin_apply_selection_carries_stable_uid():
     selected = [{
         "plugin_uid": "vendor.demo:7",
+        "package_uid": "vendor.demo.standard:7",
         "bundle": "VendorDemoBundle",
         "install_bundle": "VendorDemoBundle",
         "item": {"version": "1.2.3"},
     }]
     assert plugins._plugin_apply_selection(selected) == [{
         "plugin_uid": "vendor.demo:7",
+        "package_uid": "vendor.demo.standard:7",
         "bundle": "VendorDemoBundle",
         "install_bundle": "VendorDemoBundle",
         "expected_version": "1.2.3",
     }]
+
+
+def test_package_uid_selects_exactly_one_variant_and_plugin_uid_alone_is_ambiguous():
+    rows = [
+        {
+            "selectable": True,
+            "plugin_uid": "hostnet.auth:6-7",
+            "package_uid": "hostnet.auth.standard:6-7",
+            "bundle": "HostnetAuthBundle",
+        },
+        {
+            "selectable": True,
+            "plugin_uid": "hostnet.auth:6-7",
+            "package_uid": "hostnet.auth.managed:6-7",
+            "bundle": "HostnetAuthManagedBundle",
+        },
+    ]
+
+    with pytest.raises(RuntimeError, match="plugin uid is ambiguous"):
+        plugins._select_plugin_rows_by_identity(
+            rows,
+            plugin_uids=["hostnet.auth:6-7"],
+            package_uids=[],
+        )
+
+    selected = plugins._select_plugin_rows_by_identity(
+        rows,
+        plugin_uids=["hostnet.auth:6-7"],
+        package_uids=["hostnet.auth.managed:6-7"],
+    )
+    assert [row["bundle"] for row in selected] == ["HostnetAuthManagedBundle"]
+
+
+def test_package_uid_must_belong_to_requested_logical_plugin():
+    rows = [{
+        "selectable": True,
+        "plugin_uid": "vendor.other:7",
+        "package_uid": "vendor.other.standard:7",
+        "bundle": "VendorOtherBundle",
+    }]
+
+    with pytest.raises(RuntimeError, match="do not belong"):
+        plugins._select_plugin_rows_by_identity(
+            rows,
+            plugin_uids=["vendor.demo:7"],
+            package_uids=["vendor.other.standard:7"],
+        )
+
+
+def test_one_logical_plugin_cannot_select_two_package_variants():
+    rows = [
+        {
+            "selectable": True,
+            "plugin_uid": "hostnet.auth:6-7",
+            "package_uid": "hostnet.auth.standard:6-7",
+        },
+        {
+            "selectable": True,
+            "plugin_uid": "hostnet.auth:6-7",
+            "package_uid": "hostnet.auth.managed:6-7",
+        },
+    ]
+
+    with pytest.raises(RuntimeError, match="exactly one package projection"):
+        plugins._select_plugin_rows_by_identity(
+            rows,
+            plugin_uids=["hostnet.auth:6-7"],
+            package_uids=["hostnet.auth.standard:6-7", "hostnet.auth.managed:6-7"],
+        )
+
+
+def test_machine_contract_passes_package_projection_and_binds_it_to_receipt(monkeypatch, capsys):
+    monkeypatch.setattr(
+        plugins,
+        "_select_install_with_db",
+        lambda _config, selector: SimpleNamespace(instance_uid=selector, root="/srv/tenant-one"),
+    )
+    calls = []
+
+    def run(**kwargs):
+        calls.append(kwargs)
+        print("MCD_PLUGIN_APPLY_RESULT=" + json.dumps(_terminal_v1(kwargs["operation_id"])))
+        return 0
+
+    monkeypatch.setattr(plugins, "run_plugins_interactive", run)
+    assert plugins.run_plugins_machine(
+        config=SimpleNamespace(),
+        instance_uid="tenant-one",
+        plugin_uids=["vendor.demo:7"],
+        package_uids=["vendor.demo.standard:7"],
+        action="install",
+        operation_id="mcc-op-package",
+    ) == 0
+
+    _, result = _read_machine_result(capsys)
+    assert calls[0]["plugin_uids"] == ["vendor.demo:7"]
+    assert calls[0]["package_uids"] == ["vendor.demo.standard:7"]
+    assert result["package_uids"] == ["vendor.demo.standard:7"]
 
 
 def test_machine_contract_same_operation_replays_deterministic_terminal_receipt(monkeypatch, capsys):
