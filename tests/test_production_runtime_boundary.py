@@ -1,11 +1,36 @@
 from __future__ import annotations
 
+import builtins
+import importlib
 import os
 from pathlib import Path
+import sys
+from types import ModuleType
 import unittest
 from unittest.mock import patch
 
 from mcd_agent.self_update import assert_production_runtime_origin
+
+
+def test_self_update_imports_tomli_when_python_has_no_tomllib(monkeypatch):
+    real_import = builtins.__import__
+    original_module = sys.modules["mcd_agent.self_update"]
+    fallback = ModuleType("tomli")
+
+    def without_stdlib_tomllib(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "tomllib":
+            raise ModuleNotFoundError("simulated Python 3.10")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", without_stdlib_tomllib)
+    monkeypatch.setitem(sys.modules, "tomli", fallback)
+    monkeypatch.delitem(sys.modules, "mcd_agent.self_update", raising=False)
+    try:
+        module = importlib.import_module("mcd_agent.self_update")
+
+        assert module.tomllib.__name__ == "tomli"
+    finally:
+        sys.modules["mcd_agent.self_update"] = original_module
 
 
 class ProductionRuntimeBoundaryTests(unittest.TestCase):
