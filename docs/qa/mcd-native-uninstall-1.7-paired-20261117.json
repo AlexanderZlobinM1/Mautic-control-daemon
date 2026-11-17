@@ -1,0 +1,28 @@
+{
+  "schema": "mcd-paired-hotfix-evidence-v1",
+  "recorded_at": "2026-11-17T16:58:00+01:00",
+  "line": "1.7.0.dev0",
+  "publication_status": "source-only; 1.7 publication HOLD remains in force",
+  "stable_source": {
+    "commit": "af23d28f43c5e7ef590ad4de395d2e78f12befe1",
+    "branch": "codex/mcd-uninstall-contract-1.6.104",
+    "version": "1.6.104"
+  },
+  "identical_shared_files": {
+    "mcd_agent/uninstall.py": "4c9e5b69ca7c38ef6c8aaeaf56b2963201ac6dada210848eb0d596eefb33b57b",
+    "tests/test_uninstall.py": "4d1ebf6d42d61f68a3e246b1edce99e9bd5681872d8d89960602b485410c195d",
+    "docs/mcd-uninstall-result-v1.md": "9d0cf7a074f0d6a1501d7fe15ac1770feb5cf97e7ac5da024640c106be553e09"
+  },
+  "stable_native_evidence": {
+    "index": "docs/qa/mcd-native-uninstall-1.6.104-20261117-index.json",
+    "failure_raw_sha256": "f42d9d14e1782c9b3ae739f5e0b02890b2af97d4c52cbe66450696b60ba0bb0d",
+    "success_raw_sha256": "99b7e33b0aa9c4be27654bf7e46978121d72641f7576a58f1b37a9d17d3fb2f4",
+    "summary_sha256": "b8bf9ddba219424a161ce066cd6f3429a9409dce8cade9a35c631d3a8d31db28"
+  },
+  "tests": {
+    "targeted": "61 passed, 14 subtests passed",
+    "full": "2590 passed, 57 skipped, 142 subtests passed",
+    "warnings": 1
+  },
+  "decision": "paired shared source and regression accepted; no 1.7 package, channel promotion, or host rollout authorized"
+}

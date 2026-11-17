@@ -489,6 +489,25 @@ Mandatory release regression загружает канонический patch-r
 `mcd_agent.__version__`. Target verification отдельно проверяет полный
 exact-count observation, включая неизменяемый needle.
 
+## Native uninstall
+
+- Root и www-data fixtures содержат MCD marker-пары вместе с cron-строками,
+  добавленными после takeover; восстанавливаются только пары, а sentinels
+  сохраняются байт-в-байт. Backup не используется как полный replacement.
+- Отсутствие marker не вызывает `crontab -`; malformed marker, read/write и
+  readback failures дают typed terminal failure и сохраняют runtime/backup.
+- Инъекции ошибок systemctl, daemon-reload и удаления не могут дать `ok=true`.
+- Broad/symlink/foreign purge targets блокируются до первой мутации; Mautic и
+  foreign process/file sentinels вне MCD ownership остаются нетронутыми.
+- Повторный вызов после успешного удаления возвращает `already_absent`, а
+  machine result содержит один проверяемый receipt с operation ID и SHA-256.
+
+Проверка:
+
+```bash
+python3 -m pytest -q tests/test_uninstall.py
+```
+
 ## Mautic release version evidence
 
 - `release_metadata=6.0.9`, `composer.lock=6.0.0-dev` и такая же same-major

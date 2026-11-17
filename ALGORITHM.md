@@ -3732,6 +3732,31 @@ neighbor vhosts and certificates remain protected. Dev uses the externally
 verified baseline recipe; stable uses its minimal existing leaf generator fix.
 A paired source/test fix does not authorize channel promotion or host rollout.
 
+## Штатное удаление MCD
+
+Удаление выполняет сам установленный MCD. Перед первой мутацией он проверяет
+точные каталоги, wrapper и systemd-артефакты, а также читает crontab root и
+www-data. Опасный широкий путь, symlink-корень, неизвестный файл верхнего уровня
+или повреждённая MCD-marker-пара останавливают операцию без удаления.
+
+Cron не откатывается целиком к старой копии. MCD восстанавливает только строки,
+которые в текущем crontab непосредственно следуют за его собственным marker,
+и оставляет на месте все новые и чужие строки. Если marker отсутствует, crontab
+вообще не переписывается. Backup сохраняется до успешного завершения purge.
+
+После точечной остановки/disable собственного systemd unit удаляются только
+проверенные MCD unit, alias, drop-in, CLI wrapper, runtime и конфигурация.
+Процессы Mautic, приложения, БД и чужие файлы не являются целью удаления.
+Ошибка stop/disable, cron write/readback, daemon-reload или удаления является
+terminal failure; она не превращается в PASS и не запускает последующий purge.
+
+Для MCC команда `mcd-cli uninstall --machine-result --operation-id <id>` выдаёт
+одну terminal-строку `MCD_UNINSTALL_RESULT=<json>` со статусом cron для каждого
+пользователя, выполненными шагами, удалёнными/сохранёнными путями и digest
+receipt. Повторный вызов после полного удаления возвращает `already_absent`.
+Недоступный хост или уже отсутствующий executable определяется MCC до запуска и
+завершается отдельным inventory-only forget без SSH/ACK; это не локальный PASS.
+
 ## Независимый monitored-email parser
 
 Включённый для инстанса IMAP parser является отдельным периодическим сервисом,

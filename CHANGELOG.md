@@ -1,5 +1,9 @@
 ## 1.7.0 — Unreleased architecture candidate
 
+- Forward-port the stable fail-closed native uninstall contract: restore only
+  current MCD cron marker pairs, preserve foreign/new cron and recovery state,
+  verify service/filesystem transitions, and emit a terminal machine receipt.
+
 - Apply newer MCC winners field by field during the independent runtime control
   poll even while unrelated local settings remain queued. Ignore invalid
   required `null` placeholders without blocking valid campaign/segment lanes.

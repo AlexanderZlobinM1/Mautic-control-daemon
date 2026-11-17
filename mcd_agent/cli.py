@@ -2700,6 +2700,8 @@ def _build_parser() -> argparse.ArgumentParser:
     uninst.add_argument("--install-dir", default="/opt/mcd")
     uninst.add_argument("--etc-dir", default="/etc/mcd")
     uninst.add_argument("--no-purge", action="store_true", help="Keep /opt/mcd and /etc/mcd")
+    uninst.add_argument("--machine-result", action="store_true", help="Emit one terminal MCD_UNINSTALL_RESULT JSON line")
+    uninst.add_argument("--operation-id", default="", help="Stable MCC/local operation identifier copied into the receipt")
     uninst.add_argument("--yes", action="store_true", help="Do not ask for confirmation")
 
     bkp = sub.add_parser("backup", help="Backup via SFTP/SSHFS or pre-mounted local storage")
@@ -5331,9 +5333,13 @@ def main() -> int:
             install_dir=args.install_dir,
             etc_dir=args.etc_dir,
             purge=not bool(args.no_purge),
+            operation_id=args.operation_id,
         )
-        for line in res.lines:
-            print(line)
+        if args.machine_result:
+            print(res.machine_line())
+        else:
+            for line in res.lines:
+                print(line)
         return 0 if res.ok else 1
 
     if args.cmd == "backup":

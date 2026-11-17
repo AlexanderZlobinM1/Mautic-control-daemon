@@ -452,6 +452,8 @@ Same operations via wrapper (`mcd-cli`):
 - `mcd-cli profile tiny --yes`
 - `mcd-cli profile passive --yes`
 - `mcd-cli uninstall --yes`
+- `mcd-cli uninstall --machine-result --operation-id <id>` emits one terminal
+  `MCD_UNINSTALL_RESULT=<json>` receipt for a reachable installed agent.
 - `mcd-cli backup run`
 - `mcd-cli backup status --json`
 - `mcd-cli backup history --json`
