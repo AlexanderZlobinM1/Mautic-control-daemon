@@ -1,3 +1,10 @@
+## 1.6.103 - 2026-11-17
+
+- Publish legacy message-queue and plugin-operation setting migrations against
+  MCC's current desired-state revision, with one bounded fresh rebase after a
+  conflict, so a daemon restart cannot produce a permanent
+  `stale_desired_revision` retry loop.
+
 ## 1.6.102 - 2026-11-17
 
 - Resolve required pre-plugin-reload Mautic patch plans from the immutable
