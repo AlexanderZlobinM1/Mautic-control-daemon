@@ -43,6 +43,7 @@ def _projection() -> dict:
                 "trigger": "daemon_reconcile",
                 "phase": "before_plugin_reload",
                 "observed_majors": [4],
+                "version_ranges": [">=4.4.0 <=4.4.13"],
                 "install_types": ["zip"],
                 "plan_template": {
                     "schema": "mcd-mautic-patch-plan-v3",
@@ -172,10 +173,10 @@ def _scenario(tmp_path: Path, base_url: str, *, registered: bool = False):
     return config, install, source
 
 
-def _version_evidence():
+def _version_evidence(version="4.4.13"):
     return patch.multiple(
         "mcd_agent.mautic_patch_runtime",
-        read_mautic_version_evidence_read_only=lambda _root: {"version": "4.4.13"},
+        read_mautic_version_evidence_read_only=lambda _root: {"version": version},
         confirmed_mautic_major=lambda *_args, **_kwargs: 4,
     )
 
@@ -190,7 +191,9 @@ def test_unregistered_plugin_install_applies_real_public_plan_before_native_relo
             events.append("native")
             return 0, "plugins reloaded"
 
-        with _version_evidence(), patch("mcd_agent.plugins._run_plugin_template", side_effect=native):
+        with _version_evidence("4.4.0"), patch(
+            "mcd_agent.plugins._run_plugin_template", side_effect=native
+        ):
             _run_plugin_install_reload(config, install, expected_bundles={"ExampleBundle"})
 
     assert events == ["native"]
@@ -269,6 +272,29 @@ def test_optional_public_catalog_unavailable_is_valid_noop(tmp_path):
     native.assert_called_once()
 
 
+@pytest.mark.parametrize("version", ["4.3.9", "4.4.14"])
+def test_known_version_outside_owner_range_is_safe_noop(tmp_path, version):
+    with _catalog_server() as base_url:
+        config, install, source = _scenario(tmp_path, base_url)
+        with _version_evidence(version), patch(
+            "mcd_agent.plugins._run_plugin_template", return_value=(0, "plugins reloaded")
+        ) as native:
+            _run_plugin_install_reload(config, install, expected_bundles={"ExampleBundle"})
+    assert source.read_text() == "before\n"
+    native.assert_called_once()
+
+
+@pytest.mark.parametrize("version", [None, "4.4"])
+def test_unknown_or_malformed_version_blocks_required_projection_before_native_reload(tmp_path, version):
+    with _catalog_server() as base_url:
+        config, install, source = _scenario(tmp_path, base_url)
+        with _version_evidence(version), patch("mcd_agent.plugins._run_plugin_template") as native:
+            with pytest.raises(RuntimeError, match="required_public_patch_version_unknown"):
+                _run_plugin_install_reload(config, install, expected_bundles={"ExampleBundle"})
+    assert source.read_text() == "before\n"
+    native.assert_not_called()
+
+
 @pytest.mark.parametrize("shape", ["missing", "ambiguous"])
 def test_required_public_projection_missing_or_ambiguous_blocks(tmp_path, shape):
     projection = _projection()
@@ -313,6 +339,18 @@ def test_public_projection_malformed_ref_blocks(tmp_path):
         config, install, source = _scenario(tmp_path, base_url)
         with _version_evidence(), patch("mcd_agent.plugins._run_plugin_template") as native:
             with pytest.raises(RuntimeError, match="public_patch_catalog_ref_fields_invalid"):
+                _run_plugin_install_reload(config, install, expected_bundles={"ExampleBundle"})
+    assert source.read_text() == "before\n"
+    native.assert_not_called()
+
+
+def test_public_projection_malformed_version_range_blocks(tmp_path):
+    projection = _projection()
+    projection["selectors"][0]["version_ranges"] = ["4.4 through 4.5"]
+    with _catalog_server(projection=projection) as base_url:
+        config, install, source = _scenario(tmp_path, base_url)
+        with _version_evidence(), patch("mcd_agent.plugins._run_plugin_template") as native:
+            with pytest.raises(RuntimeError, match="public_patch_catalog_selector_version_ranges_invalid"):
                 _run_plugin_install_reload(config, install, expected_bundles={"ExampleBundle"})
     assert source.read_text() == "before\n"
     native.assert_not_called()

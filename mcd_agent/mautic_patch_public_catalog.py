@@ -8,7 +8,8 @@ import urllib.parse
 import uuid
 
 from mcd_agent.mautic_patch_fact_binding import discover_execution_context, needs_facts
-from mcd_agent.mautic_patch_resolution import canonical_json_sha256
+from mcd_agent.mautic_patch_plan_v2 import _range_matches
+from mcd_agent.mautic_patch_resolution import _version_tuple, canonical_json_sha256
 
 
 REF_SCHEMA = "mcd-mautic-patch-catalog-ref-v1"
@@ -17,8 +18,12 @@ _SHA40_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA64_RE = re.compile(r"^[0-9a-f]{64}$")
 _REF_FIELDS = {"schema", "url", "sha256", "required"}
 _CATALOG_FIELDS = {"schema", "registry_commit", "registry_sha256", "selectors"}
-_SELECTOR_FIELDS = {"trigger", "phase", "observed_majors", "install_types", "plan_template"}
+_SELECTOR_FIELDS = {
+    "trigger", "phase", "observed_majors", "version_ranges", "install_types", "plan_template",
+}
 _TEMPLATE_FIELDS = {"schema", "registry_commit", "registry_sha256", "patches", "payloads"}
+_RANGE_TOKEN_RE = re.compile(r"^(?:>=|<=|>|<|=)?\d+\.\d+\.\d+$")
+_RANGE_WILDCARD_RE = re.compile(r"^\d+\.\d+\.x$")
 
 
 class PublicPatchCatalogError(RuntimeError):
@@ -76,6 +81,17 @@ def _validated_catalog(value: dict[str, Any], *, expected_sha256: str) -> dict[s
         if any(isinstance(item, bool) or not isinstance(item, int) or item not in range(1, 100)
                for item in selector["observed_majors"]):
             raise PublicPatchCatalogError("public_patch_catalog_selector_majors_invalid")
+        ranges = selector.get("version_ranges")
+        if not isinstance(ranges, list) or not ranges or any(
+            not isinstance(item, str)
+            or not item.strip()
+            or not (
+                _RANGE_WILDCARD_RE.fullmatch(item.strip())
+                or all(_RANGE_TOKEN_RE.fullmatch(token) for token in item.strip().split())
+            )
+            for item in ranges
+        ):
+            raise PublicPatchCatalogError("public_patch_catalog_selector_version_ranges_invalid")
         if not isinstance(selector.get("install_types"), list) or not selector["install_types"]:
             raise PublicPatchCatalogError("public_patch_catalog_selector_install_types_invalid")
         template = selector.get("plan_template")
@@ -144,17 +160,31 @@ def resolve_public_pre_reload_plan(
         raise PublicPatchCatalogError("public_patch_catalog_invalid")
     catalog = _validated_catalog(catalog, expected_sha256=str(ref["sha256"]))
 
-    matches = [
+    base_matches = [
         row for row in catalog["selectors"]
         if row.get("trigger") == trigger
         and row.get("phase") == phase
         and observed_major in row.get("observed_majors", [])
         and install_type in row.get("install_types", [])
     ]
-    if len(matches) != 1:
+    if not base_matches:
         if ref["required"]:
-            reason = "required_public_patch_projection_missing" if not matches else "required_public_patch_projection_ambiguous"
-            raise PublicPatchCatalogError(reason)
+            raise PublicPatchCatalogError("required_public_patch_projection_missing")
+        return {"status": "noop", "reason": "no_applicable_public_patch_projection"}
+    observed_tuple = _version_tuple(str(observed_version)) if observed_version is not None else None
+    if observed_tuple is None:
+        if ref["required"]:
+            raise PublicPatchCatalogError("required_public_patch_version_unknown")
+        return {"status": "noop", "reason": "optional_public_patch_version_unknown"}
+    matches = [
+        row for row in base_matches
+        if any(_range_matches(expression, observed_tuple) for expression in row["version_ranges"])
+    ]
+    if len(matches) != 1:
+        if not matches:
+            return {"status": "noop", "reason": "public_patch_version_not_applicable"}
+        if ref["required"]:
+            raise PublicPatchCatalogError("required_public_patch_projection_ambiguous")
         return {"status": "noop", "reason": "no_applicable_public_patch_projection"}
 
     template = deepcopy(matches[0]["plan_template"])

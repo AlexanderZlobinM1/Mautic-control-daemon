@@ -338,8 +338,11 @@ fails before the source/package stage, and no patch rollback is attempted.
 Этот pre-reload путь не зависит от регистрации агента в MCC. Manifest
 настроенного plugin repository может содержать один digest-bound reference на
 готовую публичную проекцию того же Assets registry. MCD выбирает подходящую
-проекцию по major, install type, trigger и phase, привязывает локальный UID/root
-и запускает существующие v3 validators, source gates и executor. Отсутствующий
+проекцию по major, точному owner version range, install type, trigger и phase,
+привязывает локальный UID/root и запускает существующие v3 validators, source
+gates и executor. Неизвестная версия при обязательной проекции блокируется до
+native reload; версия вне опубликованного диапазона даёт безопасный no-op.
+Отсутствующий
 необязательный source означает обычный no-op; недоступный или неоднозначный
 обязательный source блокирует native reload. Выполнение сначала сохраняет
 локальный receipt. Если management-канал настроен, evidence отправляется затем
