@@ -1285,15 +1285,112 @@ def _has_php_file_fast(root: Path, limit_files: int = 50000) -> bool:
     return False
 
 
+def _plugin_status_version(result: dict[str, Any] | None) -> str:
+    if not isinstance(result, dict):
+        return "-"
+    return str(result.get("installed_version") or "-").strip() or "-"
+
+
+def _plugin_filesystem_status_external(
+    config: AgentConfig,
+    *,
+    plugins_dir: Path,
+    bundle: str,
+    state_filename: str,
+) -> dict[str, Any]:
+    """Return the typed filesystem observation used by the shared status path.
+
+    Stable 1.6 keeps the filesystem observer local; the operation binding is
+    supplied by the later host integration.  Keeping this typed seam here lets
+    the policy/variant contract consume the same shape and lets that binding be
+    adopted without changing status semantics.
+    """
+    del config
+    pdir = plugins_dir / bundle
+    if not pdir.exists():
+        return {
+            "schema": "mcd-plugin-filesystem-status-v1",
+            "status": "ok",
+            "plugin_status": "missing",
+            "reason": "not installed",
+            "installed_version": "-",
+            "state": None,
+        }
+    installed_version = _read_installed_version(pdir)
+    state: dict[str, Any] | None = None
+    state_path = pdir / state_filename
+    if state_path.exists():
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {
+                "schema": "mcd-plugin-filesystem-status-v1",
+                "status": "ok",
+                "plugin_status": "broken",
+                "reason": "invalid state metadata",
+                "installed_version": installed_version,
+                "state": None,
+            }
+    if not _has_php_file_fast(pdir):
+        return {
+            "schema": "mcd-plugin-filesystem-status-v1",
+            "status": "ok",
+            "plugin_status": "broken",
+            "reason": "no php files",
+            "installed_version": installed_version,
+            "state": state,
+        }
+    return {
+        "schema": "mcd-plugin-filesystem-status-v1",
+        "status": "ok",
+        "plugin_status": "ok",
+        "reason": "version match",
+        "installed_version": installed_version,
+        "state": state,
+    }
+
+
 def _plugin_status(
     plugins_dir: Path,
     plugin: dict[str, Any],
     state_filename: str,
     *,
     install_bundle: str | None = None,
+    config: AgentConfig | None = None,
 ) -> tuple[str, str, str]:
     bundle = str(plugin.get("bundle", "")).strip()
     install_name = str(install_bundle or "").strip() or bundle
+    if config is not None:
+        external = _plugin_filesystem_status_external(
+            config,
+            plugins_dir=plugins_dir,
+            bundle=install_name,
+            state_filename=state_filename,
+        )
+        installed_version = _plugin_status_version(external)
+        external_status = str(external.get("plugin_status") or "").strip().lower()
+        if external_status == "missing":
+            return "MISSING", str(external.get("reason") or "not installed"), installed_version
+        if external_status == "broken":
+            return "BROKEN", str(external.get("reason") or "filesystem status is broken"), installed_version
+        if external_status not in {"ok", "noop", "observed", "success"}:
+            raise RuntimeError("plugin_filesystem_status_result_invalid")
+        expected_version = str(plugin.get("version", "")).strip() or "-"
+        expected_sha = str(plugin.get("sha256", "")).strip()
+        state = external.get("state")
+        if isinstance(state, dict):
+            recorded_bundle = str(state.get("bundle", "") or "").strip()
+            if recorded_bundle and recorded_bundle != bundle:
+                if recorded_bundle in _exclusive_counterparts(bundle, plugin):
+                    return "MISSING", f"counterpart installed={recorded_bundle}", "-"
+        if installed_version == expected_version:
+            if state is None or not expected_sha or str(state.get("sha256", "")).strip() == expected_sha:
+                return "OK", str(external.get("reason") or "version match"), installed_version
+            return "OK", "version match", installed_version
+        cmp_val = _version_cmp(installed_version, expected_version)
+        if cmp_val is not None and cmp_val > 0:
+            return "OK", f"installed newer than server={expected_version}", installed_version
+        return "UPDATE", f"installed={installed_version}", installed_version
     pdir = plugins_dir / install_name
     if not pdir.exists():
         return "MISSING", "not installed", "-"
@@ -1319,6 +1416,29 @@ def _plugin_status(
             state = json.loads(state_path.read_text(encoding="utf-8"))
         except Exception:
             return "BROKEN", "invalid state metadata", installed_version
+
+    # Canonical-path dev/stable aliases share one install directory. Respect
+    # the last installed bundle so competing projections are not both shown as
+    # installed.
+    if state is not None:
+        recorded_bundle = str(state.get("bundle", "")).strip()
+        if recorded_bundle and recorded_bundle != bundle:
+            if recorded_bundle in _exclusive_counterparts(bundle, plugin):
+                return "MISSING", f"counterpart installed={recorded_bundle}", "-"
+
+    if installed_version == expected_version:
+        if state is None:
+            return "OK", "version match", installed_version
+        installed_sha = str(state.get("sha256", "")).strip()
+        if expected_sha and installed_sha == expected_sha:
+            return "OK", "version+sha match", installed_version
+        return "OK", "version match", installed_version
+
+    cmp_val = _version_cmp(installed_version, expected_version)
+    if cmp_val is not None and cmp_val > 0:
+        return "OK", f"installed newer than server={expected_version}", installed_version
+
+    return "UPDATE", f"installed={installed_version}", installed_version
 
 
 
