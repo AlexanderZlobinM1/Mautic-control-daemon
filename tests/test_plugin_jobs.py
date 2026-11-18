@@ -130,8 +130,11 @@ def test_enqueue_is_durable_and_idempotent_and_status_returns_terminal(tmp_path,
 
     assert cli._plugin_job_cli(cfg, _job_args("enqueue")) == 0
     accepted = json.loads(capsys.readouterr().out)
+    assert accepted["schema"] == "mcd-plugin-job-enqueue-result-v1"
     assert accepted["status"] == "accepted"
     assert accepted["idempotent_replay"] is False
+    assert len(accepted["request_sha256"]) == 64
+    assert len(accepted["receipt_sha256"]) == 64
     assert len(store.enqueued) == 1
     assert store.enqueued[0]["task_type"] == "plugins_apply"
     assert int(store.enqueued[0]["timeout_sec"]) == 21600
@@ -261,3 +264,78 @@ def test_busy_manual_worker_leaves_later_plugin_job_queued(monkeypatch, tmp_path
         reb_reg_ring=daemon.deque(),
     )
     assert store.finished == []
+
+
+def test_plugin_jobs_are_host_fifo_across_instance_roots(monkeypatch, tmp_path) -> None:
+    class QueueStore:
+        def __init__(self) -> None:
+            self.finished: list[tuple[int, str, str]] = []
+            self.launched: list[tuple[int, str]] = []
+
+        def pending_manual_requests(self, _root: str, limit: int = 32):
+            return [{
+                "id": 43,
+                "task_type": "plugins_apply",
+                "entity_id": None,
+                "command_str": "mcd-cli\x1fplugins\x1f--operation-id\x1fplugin-job-next",
+                "timeout_sec": 21600,
+            }]
+
+        def finish_manual_request(self, request_id: int, status: str, note: str = "") -> None:
+            self.finished.append((request_id, status, note))
+
+        def mark_manual_request_launched(self, request_id: int, task_key: str) -> None:
+            self.launched.append((request_id, task_key))
+
+    store = QueueStore()
+    rings = {
+        name: daemon.deque()
+        for name in (
+            "seg_sql_ring",
+            "seg_prio_ring",
+            "seg_reg_ring",
+            "trg_prio_ring",
+            "trg_reg_ring",
+            "reb_prio_ring",
+            "reb_reg_ring",
+        )
+    }
+    config = SimpleNamespace(
+        profile_name="custom",
+        command_timeout_sec=0,
+        state_db_path=str(tmp_path / "mcd-state.db"),
+    )
+    running = {
+        "instance-a-plugin": SimpleNamespace(
+            root="/srv/instance-a",
+            task_type="plugins_apply",
+            manual_request_id=42,
+        )
+    }
+    monkeypatch.setattr(daemon, "_submit_if_slot", lambda **_kwargs: False)
+
+    daemon._dispatch_manual_requests_for_root(
+        config=config,
+        store=store,
+        running=running,
+        popens={},
+        root="/srv/instance-b",
+        **rings,
+    )
+
+    assert store.finished == []
+    assert store.launched == []
+
+    running.clear()
+    monkeypatch.setattr(daemon, "_submit_if_slot", lambda **_kwargs: True)
+    daemon._dispatch_manual_requests_for_root(
+        config=config,
+        store=store,
+        running=running,
+        popens={},
+        root="/srv/instance-b",
+        **rings,
+    )
+
+    assert store.finished == []
+    assert store.launched == [(43, "/srv/instance-b|plugins_apply|-")]

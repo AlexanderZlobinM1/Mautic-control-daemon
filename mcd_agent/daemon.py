@@ -16738,6 +16738,22 @@ def _submit_if_slot(
             _campaign_dispatch_end(root, task_type)
 
 
+def _manual_plugin_queue_busy(running: Mapping[str, RunningTask]) -> bool:
+    """Return whether this MCD host is executing a durable plugin job.
+
+    Durable plugin requests are admitted per instance, but their execution
+    queue is host-local: different instance roots on one host must not mutate
+    plugin files, registration state, or cache concurrently. Separate hosts
+    have independent daemon state and therefore independent queues.
+    """
+
+    return any(
+        str(getattr(task, "task_type", "") or "") == "plugins_apply"
+        and getattr(task, "manual_request_id", None) is not None
+        for task in running.values()
+    )
+
+
 def _wait_for_segment_process_exit(
     proc: subprocess.Popen[bytes],
     wakeup: threading.Event,
@@ -16776,11 +16792,14 @@ def _submit_if_slot_uncoordinated(
         return False
     if store.has_running_task_key(key):
         return False
-    if manual_request_id is not None and any(
-        task.root == root and task.manual_request_id is not None
-        for task in running.values()
-    ):
-        return False
+    if manual_request_id is not None:
+        if task_type == "plugins_apply" and _manual_plugin_queue_busy(running):
+            return False
+        if any(
+            task.root == root and task.manual_request_id is not None
+            for task in running.values()
+        ):
+            return False
     # Imports are singleton per instance/root. Keep this guard at the common
     # submit boundary so manual and future dispatch paths cannot overlap an
     # import on the same instance while other instances use free host slots.
@@ -18487,13 +18506,17 @@ def _dispatch_manual_requests_for_root(
                     request_id=req_id,
                     now_ts=time.time(),
                 )
-            if any(
+            plugin_queue_busy = task_type == "plugins_apply" and _manual_plugin_queue_busy(running)
+            same_root_manual_busy = any(
                 task.root == root and task.manual_request_id is not None
                 for task in running.values()
-            ):
+            )
+            if plugin_queue_busy or same_root_manual_busy:
                 # Durable manual requests are a local FIFO. A long operation
-                # keeps later work pending; it must never make the daemon drop
-                # queued plugin installs merely because their slot is busy.
+                # keeps later work pending; plugin operations extend that FIFO
+                # across instance roots on this host. They must never make the
+                # daemon drop queued plugin installs merely because their slot
+                # is busy.
                 break
             store.finish_manual_request(req_id, "skipped", "admission_rejected")
             continue
