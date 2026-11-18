@@ -166,6 +166,11 @@ maintained 1.7 line before external-provider parity and acceptance evidence.
   - the source tree is used only as bounded staging/rollback material. The
     apply path installs the wheel into the actual venv and verifies that
     systemd/import resolve from venv `site-packages`, not `/opt/mcd/src`.
+  - release acceptance also compares the immutable runtime manifest, installed
+    distribution metadata, `mcd-cli --version`, systemd `ExecStart`, the
+    imported `mcd_agent` path and the SHA-256 of `mcd_agent/daemon.py`.
+    A service that is active and healthy but imports an older package is a
+    typed integrity failure and cannot be promoted.
   - ordinary Mautic/PHP processes do not defer update; only explicit durable
     MCD-owned critical locks do. TaskStore queues, claims, running/follow-up,
     retry and monitor state survive restart and are re-adopted.
