@@ -2482,6 +2482,25 @@ Prepared-target candidate metadata carries that same package version. A
 check-only `exact_count` observation binds group, path, needle, expected count
 and actual count before it can be accepted as fixed evidence.
 
+## Runtime package integrity
+
+MCD does not treat a wrapper version or an active systemd service as proof that
+the published package is running. Before an update is accepted, the selected
+runtime manifest is compared with the installed distribution metadata, the
+`mcd-cli` wrapper, the interpreter named by systemd `ExecStart`, the imported
+`mcd_agent` path and the SHA-256 of the critical daemon module. The managed
+venv and imported module must be the exact candidate; an active, healthy
+service that still imports a previous package is a failed result.
+
+The wheel is first installed into a temporary directory using the exact venv
+interpreter. Its version and critical-module hash are checked, then the
+managed package entries are switched as one transaction. Files absent from the
+previous package's `RECORD` are treated as operator-owned and carried forward;
+only distribution-owned files may be retired. A failed post-switch check
+restores the previous package entries. Runtime/source identity is included in
+MCC update checks and state snapshots so the mismatch cannot be hidden by a
+new wrapper string.
+
 ## Mautic release version evidence
 
 Точная версия Mautic берётся из штатного `release_metadata`. Composer-версия с
