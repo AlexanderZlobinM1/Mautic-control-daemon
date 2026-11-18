@@ -134,6 +134,16 @@ it does not reject an explicit durable `plugins_apply` request. Such a request
 continues through the same local FIFO, supervisor, replacement transaction and
 terminal receipt path.
 
+Durable plugin requests are admitted immediately for every bare instance UID,
+but execution is serialized by the MCD host queue: while one `plugins_apply`
+transaction is running, a request for another instance root on the same host
+remains queued and is never converted to `skipped` merely because the host is
+busy. After the running transaction reaches its terminal receipt, the next
+queued instance is admitted. Each instance keeps its own operation ID, output
+receipt and status record. Different hosts have independent MCD daemons and
+may execute their local plugin queues concurrently. A single request carrying
+several plugin selections still uses the existing ordered MCD transaction.
+
 Для внешнего запуска установки существует один машинный путь MCD. Вызывающая
 система передаёт только bare `instance_uid`, стабильный логический `plugin_uid`,
 при необходимости конкретный `package_uid`, действие и свой `operation_id`.
