@@ -102,6 +102,13 @@ projections, текущую Mautic-совместимость и каталог 
 Повтор отмены уже отменённого задания идемпотентно возвращает `cancelled`;
 running и terminal задания отменой не изменяются.
 
+Очередь `plugins_apply` является host-local: задания для разных instance UID на
+одном хосте принимаются сразу, но выполняются последовательно в одном MCD
+daemon. Пока предыдущая транзакция не закрыта terminal receipt, следующая
+остаётся `queued` и не превращается в `skipped`. На разных хостах очереди
+независимы и могут выполняться параллельно. Каждый instance сохраняет свой
+`operation_id`, durable status и terminal result.
+
 Manifest читается MCD из `plugins.repo_base_url` и
 `plugins.manifest_path_template`. Для этого не нужны MCC management token,
 регистрация агента или UI-сессия. Terminal result включает digest фактически
