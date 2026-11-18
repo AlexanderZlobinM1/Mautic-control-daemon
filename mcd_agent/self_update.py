@@ -3,6 +3,7 @@ from __future__ import annotations
 from mcd_agent.mcc_transport import mcc_request
 
 import hashlib
+import csv
 import json
 import logging
 import os
@@ -117,6 +118,23 @@ def _state_path(cfg: AgentConfig) -> Path:
 
 def _lock_path(cfg: AgentConfig) -> Path:
     return Path(cfg.state_db_path).parent / "mcd-self-update.lock"
+
+
+def _runtime_source_dir(cfg: AgentConfig) -> Path:
+    return Path(str(getattr(cfg, "mcd_install_dir", "/opt/mcd") or "/opt/mcd")) / "runtime"
+
+
+def _version_payload_for_config(cfg: AgentConfig) -> dict[str, Any]:
+    """Include source identity only when the managed runtime source exists.
+
+    Keeping the no-argument call for hosts without a runtime directory also
+    preserves compatibility with older integrations that monkeypatch the
+    legacy callable shape.
+    """
+    runtime_dir = _runtime_source_dir(cfg)
+    if runtime_dir.is_dir():
+        return agent_version_payload(runtime_dir)
+    return agent_version_payload()
 
 
 def _read_state(cfg: AgentConfig) -> dict[str, Any]:
@@ -264,7 +282,7 @@ def check_with_mcc(cfg: AgentConfig, *, auto_update_enabled: bool) -> dict[str, 
         "allow_test_build": bool(cfg.mcd_update_allow_test_build),
         "config_sha256": cfg.config_sha256,
     }
-    payload.update(agent_version_payload())
+    payload.update(_version_payload_for_config(cfg))
     url = base + "/api/v1/agent/update/check"
     try:
         out = _post_json(url, payload, cfg.mcc_token, timeout_sec=12)
@@ -616,6 +634,101 @@ def _install_requirements_for_staged_source(install_dir: Path, staged_src_dir: P
         raise RuntimeError(f"dependency install failed: {detail}")
 
 
+def _runtime_import_probe(venv_python: Path, *, extra_path: Path | None = None) -> dict[str, Any]:
+    code = (
+        "import hashlib, importlib.metadata as m, json, pathlib, sys; "
+        "import mcd_agent, mcd_agent.daemon as d; "
+        "p=pathlib.Path(d.__file__).resolve(); h=hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() else ''; "
+        "print(json.dumps({'package_version':str(m.version('mcd-agent') or ''),"
+        "'imported_version':str(getattr(mcd_agent,'__version__','') or ''),"
+        "'imported_path':str(pathlib.Path(mcd_agent.__file__).resolve()),"
+        "'daemon_sha256':h}, sort_keys=True))"
+    )
+    env = _isolated_venv_env()
+    if extra_path is not None:
+        env["PYTHONPATH"] = str(extra_path)
+    proc = subprocess.run(
+        [str(venv_python), "-c", code],
+        cwd="/",
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "runtime import probe failed").strip()
+        raise RuntimeError(f"runtime import probe failed: {detail}")
+    try:
+        payload = json.loads((proc.stdout or "").strip().splitlines()[-1])
+    except (ValueError, IndexError) as exc:
+        raise RuntimeError("runtime import probe returned invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("runtime import probe returned a non-object")
+    return payload
+
+
+def _remove_path(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink(missing_ok=True)
+    elif path.is_dir():
+        shutil.rmtree(path)
+
+
+def _copy_path(source: Path, destination: Path) -> None:
+    if source.is_symlink():
+        destination.symlink_to(os.readlink(source))
+    elif source.is_dir():
+        shutil.copytree(source, destination, symlinks=True)
+    else:
+        shutil.copy2(source, destination)
+
+
+def _owned_package_paths(site_dir: Path) -> set[str]:
+    """Read package-owned paths from installed MCD RECORD files.
+
+    Files in ``mcd_agent`` that are absent from RECORD are operator-owned and
+    must survive a package replacement.  The package directory itself is
+    swapped transactionally; only these recorded paths are eligible for
+    retirement.
+    """
+    owned: set[str] = set()
+    for metadata in sorted(site_dir.glob("mcd_agent-*.dist-info")):
+        record = metadata / "RECORD"
+        if not record.is_file():
+            continue
+        try:
+            with record.open(newline="", encoding="utf-8") as handle:
+                rows = csv.reader(handle)
+                for row in rows:
+                    if not row:
+                        continue
+                    raw = str(row[0] or "").replace("\\", "/").lstrip("./")
+                    if raw.startswith("mcd_agent/"):
+                        owned.add(raw)
+        except (OSError, csv.Error):
+            continue
+    return owned
+
+
+def _merge_unowned_package_files(old_package: Path, new_package: Path, owned: set[str]) -> None:
+    """Carry forward files not owned by the previous MCD distribution."""
+    if not old_package.is_dir() or not new_package.is_dir():
+        return
+    for candidate in sorted(old_package.rglob("*")):
+        if not candidate.is_file() and not candidate.is_symlink():
+            continue
+        relative = candidate.relative_to(old_package).as_posix()
+        if f"mcd_agent/{relative}" in owned:
+            continue
+        destination = new_package / relative
+        if destination.exists() or destination.is_symlink():
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if candidate.is_symlink():
+            destination.symlink_to(os.readlink(candidate))
+        else:
+            shutil.copy2(candidate, destination)
+
+
 def _install_agent_package_from_runtime_wheel(install_dir: Path, source_dir: Path, wheel_path: Path) -> None:
     """Install the production runtime from the detached wheel payload.
 
@@ -623,7 +736,6 @@ def _install_agent_package_from_runtime_wheel(install_dir: Path, source_dir: Pat
     The supervisor and all post-restart imports resolve from venv site-packages,
     never from a project checkout or from the artifact staging directory.
     """
-    metadata_name = _wheel_distribution_metadata_name(wheel_path)
     venv_python = install_dir / "venv" / "bin" / "python"
     if not venv_python.exists():
         raise RuntimeError(f"venv python not found: {venv_python}")
@@ -644,76 +756,113 @@ def _install_agent_package_from_runtime_wheel(install_dir: Path, source_dir: Pat
     site_dir = Path((site_proc.stdout or "").strip())
     if not site_dir.is_dir():
         raise RuntimeError(f"venv site-packages directory not found: {site_dir}")
-    removed_metadata = _remove_agent_distribution_metadata(site_dir, preserve_records=True)
-    removed_hooks = _remove_agent_editable_artifacts(site_dir, source_dir)
-    if removed_metadata:
-        logging.info("MCD self-update: removed stale package metadata: %s", removed_metadata)
-    if removed_hooks:
-        logging.info("MCD self-update: removed stale editable package hooks: %s", removed_hooks)
-    proc = subprocess.run(
-        [
-            str(venv_python),
-            "-m",
-            "pip",
-            "install",
-            "--disable-pip-version-check",
-            "--no-input",
-            "--no-cache-dir",
-            "--no-deps",
-            "--force-reinstall",
-            str(wheel_path),
-        ],
-        cwd="/",
-        capture_output=True,
-        text=True,
-        env=_isolated_venv_env(),
-    )
-    if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout or "runtime wheel install failed").strip()
-        raise RuntimeError(f"runtime wheel install failed: {detail}")
-
-    removed_metadata.extend(_remove_agent_distribution_metadata(site_dir, keep=metadata_name))
-    verify = subprocess.run(
-        [
-            str(venv_python),
-            "-c",
-            "import importlib.metadata as m, mcd_agent; "
-            "print(m.version('mcd-agent')); print(mcd_agent.__version__); "
-            "print(mcd_agent.__file__)",
-        ],
-        cwd="/",
-        env=_isolated_venv_env(),
-        capture_output=True,
-        text=True,
-    )
-    if verify.returncode != 0:
-        detail = (verify.stderr or verify.stdout or "installed runtime verification failed").strip()
-        raise RuntimeError(f"installed runtime verification failed: {detail}")
-    lines = [line.strip() for line in (verify.stdout or "").splitlines() if line.strip()]
-    if len(lines) < 3:
-        raise RuntimeError("installed runtime verification returned incomplete output")
-    package_ver, imported_ver, imported_path = lines[-3:]
-    expected_path = str((site_dir / "mcd_agent" / "__init__.py").resolve())
     manifest = _runtime_manifest(source_dir) or {}
     expected_ver = str(manifest.get("version") or "").strip()
-    if expected_ver and (package_ver != expected_ver or imported_ver != expected_ver):
-        raise RuntimeError(
-            f"installed runtime version mismatch expected={expected_ver} "
-            f"metadata={package_ver} imported={imported_ver}"
+    payload_hashes = manifest.get("payload_sha256") if isinstance(manifest.get("payload_sha256"), dict) else {}
+    expected_daemon = str(payload_hashes.get("mcd_agent/daemon.py") or "").strip().lower()
+    transaction = Path(tempfile.mkdtemp(prefix=f".mcd-agent-install-{os.getpid()}-", dir=str(site_dir)))
+    stage = transaction / "stage"
+    backup = transaction / "backup"
+    stage.mkdir()
+    backup.mkdir()
+    mutation_started = False
+    try:
+        proc = subprocess.run(
+            [
+                str(venv_python),
+                "-m",
+                "pip",
+                "install",
+                "--disable-pip-version-check",
+                "--no-input",
+                "--no-cache-dir",
+                "--no-deps",
+                "--upgrade",
+                "--target",
+                str(stage),
+                str(wheel_path),
+            ],
+            cwd="/",
+            capture_output=True,
+            text=True,
+            env=_isolated_venv_env(),
         )
-    if Path(imported_path).resolve() != Path(expected_path):
-        raise RuntimeError(
-            f"installed runtime path mismatch expected={expected_path} imported={imported_path}"
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or "runtime wheel staging failed").strip()
+            raise RuntimeError(f"runtime wheel staging failed: {detail}")
+
+        staged_probe = _runtime_import_probe(venv_python, extra_path=stage)
+        if expected_ver and (
+            staged_probe.get("package_version") != expected_ver
+            or staged_probe.get("imported_version") != expected_ver
+        ):
+            raise RuntimeError(
+                f"staged runtime version mismatch expected={expected_ver} "
+                f"metadata={staged_probe.get('package_version')} imported={staged_probe.get('imported_version')}"
+            )
+        if expected_daemon and str(staged_probe.get("daemon_sha256") or "").lower() != expected_daemon:
+            raise RuntimeError(
+                f"staged runtime daemon hash mismatch expected={expected_daemon} "
+                f"actual={staged_probe.get('daemon_sha256')}"
+            )
+
+        staged_entries = [stage / "mcd_agent", *sorted(stage.glob("mcd_agent-*.dist-info"))]
+        if not staged_entries[0].is_dir() or len(staged_entries) < 2:
+            raise RuntimeError("staged runtime wheel has incomplete MCD package payload")
+        old_owned = _owned_package_paths(site_dir)
+        old_entries = [site_dir / "mcd_agent", *sorted(site_dir.glob("mcd_agent-*.dist-info"))]
+        for old in old_entries:
+            if old.exists() or old.is_symlink():
+                _copy_path(old, backup / old.name)
+        mutation_started = True
+        for old in old_entries:
+            _remove_path(old)
+        for new in staged_entries:
+            os.replace(new, site_dir / new.name)
+        _merge_unowned_package_files(backup / "mcd_agent", site_dir / "mcd_agent", old_owned)
+
+        verify = _runtime_import_probe(venv_python)
+        expected_path = str((site_dir / "mcd_agent" / "__init__.py").resolve())
+        if expected_ver and (
+            verify.get("package_version") != expected_ver
+            or verify.get("imported_version") != expected_ver
+        ):
+            raise RuntimeError(
+                f"installed runtime version mismatch expected={expected_ver} "
+                f"metadata={verify.get('package_version')} imported={verify.get('imported_version')}"
+            )
+        if Path(str(verify.get("imported_path") or "")).resolve() != Path(expected_path):
+            raise RuntimeError(
+                f"installed runtime path mismatch expected={expected_path} imported={verify.get('imported_path')}"
+            )
+        if str(source_dir.resolve()) in str(Path(str(verify.get("imported_path") or "")).resolve()):
+            raise RuntimeError(f"installed runtime is shadowed by source tree: {verify.get('imported_path')}")
+        if expected_daemon and str(verify.get("daemon_sha256") or "").lower() != expected_daemon:
+            raise RuntimeError(
+                f"installed runtime daemon hash mismatch expected={expected_daemon} "
+                f"actual={verify.get('daemon_sha256')}"
+            )
+        removed_hooks = _remove_agent_editable_artifacts(site_dir, source_dir)
+        if removed_hooks:
+            logging.info("MCD self-update: removed stale editable package hooks: %s", removed_hooks)
+        _write_runtime_package_receipt(
+            install_dir,
+            source_dir,
+            wheel_path,
+            package_version=str(verify.get("package_version") or ""),
+            imported_path=str(verify.get("imported_path") or ""),
         )
-    if str(source_dir.resolve()) in str(Path(imported_path).resolve()):
-        raise RuntimeError(f"installed runtime is shadowed by source tree: {imported_path}")
-    _write_runtime_package_receipt(
-        install_dir,
-        source_dir,
-        wheel_path,
-        package_version=package_ver,
-        imported_path=imported_path,
-    )
+    except Exception:
+        if mutation_started:
+            _remove_path(site_dir / "mcd_agent")
+            for current in sorted(site_dir.glob("mcd_agent-*.dist-info")):
+                _remove_path(current)
+            for old in sorted(backup.iterdir()):
+                _copy_path(old, site_dir / old.name)
+        raise
+    finally:
+        if transaction.exists():
+            shutil.rmtree(transaction)
 
 
 def _install_agent_package_for_source(install_dir: Path, source_dir: Path) -> None:
@@ -2200,7 +2349,7 @@ def update_status(cfg: AgentConfig) -> dict[str, Any]:
             out["active_campaign_processes"] = active_campaigns[:10]
         else:
             out.pop("active_campaign_processes", None)
-    versions = agent_version_payload()
+    versions = _version_payload_for_config(cfg)
     out["current_version"] = versions.get("agent_version") or __version__
     out["running_version"] = versions.get("agent_running_version") or __version__
     out["installed_version"] = versions.get("agent_installed_version") or ""

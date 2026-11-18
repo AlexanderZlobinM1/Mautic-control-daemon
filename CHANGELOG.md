@@ -1,3 +1,13 @@
+## 1.6.107 - 2026-11-18
+
+- Fail closed when the release wrapper, runtime package metadata, systemd
+  interpreter or imported critical module are not the same immutable candidate.
+- Install the verified wheel transactionally into the exact managed venv used
+  by systemd, preserve unowned operator files, and roll back package entries
+  on verification failure.
+- Publish runtime/source identity in update checks and state snapshots so MCC
+  cannot accept a healthy-looking but stale service package.
+
 ## 1.6.106 - 2026-11-18
 
 - Keep explicit durable plugin operations dispatchable on `passive` hosts while

@@ -224,6 +224,7 @@ from mcd_agent.self_update import apply_update, check_with_mcc, maybe_auto_updat
 from mcd_agent.tuner import format_tune_result, tune_segments
 from mcd_agent.uninstall import run_uninstall
 from mcd_agent.version_identity import agent_version_payload, installed_agent_version
+from mcd_agent.runtime_integrity import check_runtime_integrity
 from mcd_agent.version_check import maybe_notify_update
 from mcd_agent.instance_uid import instance_uid_matches, qualify_instance_uid
 
@@ -2128,6 +2129,16 @@ def _build_parser() -> argparse.ArgumentParser:
 
     health = sub.add_parser("health", help="Print agent health")
     health.add_argument("--json", action="store_true")
+    health.add_argument("--config", default=default_cfg)
+
+    integrity = sub.add_parser("runtime-integrity", help="Verify release/package/service runtime parity")
+    integrity.add_argument("--config", default=default_cfg)
+    integrity.add_argument("--json", action="store_true")
+    integrity.add_argument("--service", default="mcd.service")
+    integrity.add_argument("--expected-version", default="")
+    integrity.add_argument("--expected-source-commit", default="")
+    integrity.add_argument("--expected-daemon-sha256", default="")
+    integrity.add_argument("--expected-archive-sha256", default="")
 
     discover = sub.add_parser("discover", help="Discover local Mautic installs")
     discover.add_argument("--config", default=default_cfg)
@@ -2958,17 +2969,47 @@ def main() -> int:
 
     if args.cmd == "health":
         versions = agent_version_payload()
+        try:
+            cfg = load_config(args.config, allow_recover_from_mcc=False)
+            install_dir = str(getattr(cfg, "mcd_install_dir", "/opt/mcd") or "/opt/mcd")
+        except Exception:
+            install_dir = "/opt/mcd"
+        integrity = check_runtime_integrity(
+            install_dir=install_dir,
+            strict=(Path(install_dir).resolve() / "runtime" / "mcd-runtime-manifest.json").is_file(),
+        )
         payload = {
             "service": "mcd-agent",
             "version": str(versions.get("agent_version") or __version__),
-            "status": "ok",
+            "status": "ok" if integrity.get("status") != "failed" else "error",
+            "runtime_integrity": integrity,
             **versions,
         }
+        if integrity.get("status") == "failed":
+            payload["reason"] = str((integrity.get("errors") or [{}])[0].get("code") or "runtime_integrity_failed")
         if args.json:
             print(json.dumps(payload))
         else:
             print("mcd-agent ok")
-        return 0
+        return 0 if payload["status"] == "ok" else 1
+
+    if args.cmd == "runtime-integrity":
+        try:
+            cfg = load_config(args.config, allow_recover_from_mcc=False)
+            install_dir = str(getattr(cfg, "mcd_install_dir", "/opt/mcd") or "/opt/mcd")
+        except Exception:
+            install_dir = "/opt/mcd"
+        payload = check_runtime_integrity(
+            install_dir=install_dir,
+            service_name=args.service,
+            expected_version=args.expected_version,
+            expected_source_commit=args.expected_source_commit,
+            expected_daemon_sha256=args.expected_daemon_sha256,
+            expected_archive_sha256=args.expected_archive_sha256,
+            strict=True,
+        )
+        print(json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True))
+        return 0 if payload.get("status") == "ok" else 1
 
     if args.cmd == "config-check":
         try:
