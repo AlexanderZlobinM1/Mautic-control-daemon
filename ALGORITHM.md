@@ -2302,6 +2302,32 @@ the existing rollback transaction for this newly created installation. Even
 when certificate issuance is skipped, the HTTPS gate requires valid existing
 TLS; `--no-certbot` does not bypass readiness verification.
 
+For a new MCC image job, MCC supplies the stable bare `instance_uid` and the
+five-character lower-case Crockford `instance_code` before MCD starts creating
+resources. MCD validates and persists that pair; it never generates a second
+identity. The legacy path without the pair remains only for existing standalone
+or historical compatibility flows. A successful receipt includes the same pair
+and the actual root, webroot, database name and database user.
+
+The DNS-01 path has one ordered publication gate: after certbot succeeds, MCD
+reads the issued `fullchain.pem`, verifies that it is current and covers the
+requested FQDN, writes the combined HTTP/HTTPS vhost, runs `nginx -t`, checks
+the reload exit status, and only then starts the local SNI acceptance probe.
+The probe is bounded and retryable so a graceful nginx reload can finish before
+the first connection; every attempt uses `curl --noproxy '*' --resolve
+<domain>:443:127.0.0.1` with normal CA and hostname validation. MCD also reads
+the peer certificate selected by that local SNI and requires its DNS identity
+to match the requested FQDN. Thus a default-server certificate, duplicate
+vhost, stale worker or certificate-readiness race is a failed deployment, not
+a successful HTTP response.
+
+On a failed image deployment, MCD writes a redacted
+`mcd-image-install-failure-evidence-v1` record outside the disposable instance
+root before rollback and updates it after cleanup. It contains the requested
+server name, expected certificate path, curl code/status/stderr classification,
+actual peer certificate identity when available, UID/code and rollback errors;
+it never contains database passwords, MCC tokens or Cloudflare credentials.
+
 The existing source-operation lease prevents concurrent MCD replacement during
 the operation. Inventory rescan is observational; no new discovery or scheduler
 marker layer is introduced. No concurrent cache invalidation was demonstrated

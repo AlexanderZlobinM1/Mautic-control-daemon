@@ -10,10 +10,13 @@ import os
 import re
 import secrets
 import shutil
+import socket
+import ssl
 import subprocess
 import tarfile
 import tempfile
 import time
+from datetime import datetime, timezone
 from typing import Any
 from urllib import request
 from urllib.parse import urlencode
@@ -36,6 +39,8 @@ _LETSENCRYPT_RENEWAL = Path("/etc/letsencrypt/renewal")
 _LETSENCRYPT_MCD = Path("/etc/letsencrypt/mcd")
 _CERTBOT_LOCK_RETRY_SEC = 5
 _CERTBOT_LOCK_MAX_WAIT_SEC = 180
+_IMAGE_HTTPS_ATTEMPTS = 8
+_IMAGE_HTTPS_RETRY_SEC = 1
 
 
 @dataclass
@@ -52,6 +57,14 @@ class ImageInstallPlan:
     instance_code: str | None = None
 
 
+class ImageHTTPSVerificationError(RuntimeError):
+    """A safe, structured failure from the final image HTTPS acceptance gate."""
+
+    def __init__(self, message: str, evidence: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.evidence = evidence
+
+
 def _run(args: list[str], *, timeout_sec: int = 300, input_text: str | None = None) -> tuple[int, str]:
     proc = subprocess.run(
         args,
@@ -62,6 +75,128 @@ def _run(args: list[str], *, timeout_sec: int = 300, input_text: str | None = No
         check=False,
     )
     return int(proc.returncode), ((proc.stdout or "") + (proc.stderr or "")).strip()
+
+
+def _safe_runtime_detail(value: object, *, limit: int = 500) -> str:
+    """Keep command diagnostics useful without allowing credentials into receipts."""
+    text = " ".join(str(value or "").split())
+    text = re.sub(
+        r"(?i)\b(authorization|bearer|token|password|api[_-]?key)\b\s*[:=]\s*[^\s]+",
+        r"\1=<redacted>",
+        text,
+    )
+    return text[:limit]
+
+
+def _utc_iso(value: datetime) -> str:
+    normalized = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    return normalized.astimezone(timezone.utc).isoformat()
+
+
+def _certificate_datetime(cert: Any, *, utc_name: str, legacy_name: str) -> datetime:
+    value = getattr(cert, utc_name, None)
+    if value is None:
+        value = getattr(cert, legacy_name)
+    return value
+
+
+def _certificate_matches_domain(domain: str, names: list[str]) -> bool:
+    wanted = str(domain or "").strip().lower().rstrip(".")
+    for raw in names:
+        name = str(raw or "").strip().lower().rstrip(".")
+        if name == wanted:
+            return True
+        if name.startswith("*.") and wanted.endswith(name[1:]) and wanted.count(".") == name.count("."):
+            return True
+    return False
+
+
+def _certificate_identity_from_object(cert: Any, *, domain: str, source: str, path: str = "") -> dict[str, Any]:
+    from cryptography import x509
+    from cryptography.x509.oid import NameOID
+
+    try:
+        san = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName)
+        dns_names = [str(value) for value in san.value.get_values_for_type(x509.DNSName)]
+    except Exception:
+        dns_names = []
+    common_names = [
+        str(attr.value)
+        for attr in cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+        if str(attr.value).strip()
+    ]
+    names = dns_names or common_names
+    not_before = _certificate_datetime(cert, utc_name="not_valid_before_utc", legacy_name="not_valid_before")
+    not_after = _certificate_datetime(cert, utc_name="not_valid_after_utc", legacy_name="not_valid_after")
+    return {
+        "status": "ok",
+        "source": source,
+        "path": path,
+        "server_name": str(domain),
+        "dns_names": dns_names[:64],
+        "common_names": common_names[:16],
+        "hostname_matches": _certificate_matches_domain(domain, names),
+        "subject": cert.subject.rfc4514_string(),
+        "issuer": cert.issuer.rfc4514_string(),
+        "serial": format(int(cert.serial_number), "x"),
+        "not_before": _utc_iso(not_before),
+        "not_after": _utc_iso(not_after),
+    }
+
+
+def _load_pem_certificate_identity(cert_path: Path, *, domain: str) -> dict[str, Any]:
+    from cryptography import x509
+
+    if not cert_path.is_file():
+        raise RuntimeError(f"issued certificate is missing: {cert_path}")
+    try:
+        cert = x509.load_pem_x509_certificate(cert_path.read_bytes())
+    except Exception as exc:
+        raise RuntimeError(f"issued certificate cannot be parsed: {cert_path}") from exc
+    evidence = _certificate_identity_from_object(cert, domain=domain, source="issued_certificate", path=str(cert_path))
+    now = datetime.now(timezone.utc)
+    not_before = _certificate_datetime(cert, utc_name="not_valid_before_utc", legacy_name="not_valid_before")
+    not_after = _certificate_datetime(cert, utc_name="not_valid_after_utc", legacy_name="not_valid_after")
+    if now < (not_before if not_before.tzinfo else not_before.replace(tzinfo=timezone.utc)):
+        raise RuntimeError(f"issued certificate is not valid yet: {cert_path}")
+    if now >= (not_after if not_after.tzinfo else not_after.replace(tzinfo=timezone.utc)):
+        raise RuntimeError(f"issued certificate is expired: {cert_path}")
+    if not evidence["hostname_matches"]:
+        raise RuntimeError(f"issued certificate does not cover target domain: {domain}")
+    return evidence
+
+
+def _expected_image_certificate(plan: ImageInstallPlan) -> dict[str, Any]:
+    cert_path = _LETSENCRYPT_LIVE / plan.domain / "fullchain.pem"
+    return _load_pem_certificate_identity(cert_path, domain=plan.domain)
+
+
+def _peer_certificate_identity(plan: ImageInstallPlan) -> dict[str, Any]:
+    """Read the certificate actually selected by local SNI, even on a failed CA check."""
+    try:
+        from cryptography import x509
+
+        raw = socket.create_connection(("127.0.0.1", 443), timeout=5)
+        context = ssl._create_unverified_context()
+        with context.wrap_socket(raw, server_hostname=plan.domain) as tls:
+            der = tls.getpeercert(binary_form=True)
+        cert = x509.load_der_x509_certificate(der)
+        return _certificate_identity_from_object(cert, domain=plan.domain, source="local_sni_peer", path="")
+    except Exception as exc:
+        return {
+            "status": "unavailable",
+            "source": "local_sni_peer",
+            "server_name": plan.domain,
+            "connect_address": "127.0.0.1",
+            "reason": type(exc).__name__,
+        }
+
+
+def _reload_nginx() -> dict[str, Any]:
+    rc, out = _run(["systemctl", "reload", "nginx"], timeout_sec=30)
+    if rc != 0:
+        raise RuntimeError(f"nginx reload failed rc={rc}: {_safe_runtime_detail(out)}")
+    return {"status": "ok", "command": "systemctl reload nginx"}
 
 
 def _run_certbot(args: list[str], *, timeout_sec: int) -> tuple[int, str]:
@@ -349,6 +484,50 @@ def _rollback_failed_install(
         except Exception as exc:
             errors.append(f"database user: {exc}")
     return errors
+
+
+def _persist_image_failure_evidence(
+    cfg: AgentConfig,
+    plan: ImageInstallPlan,
+    *,
+    failure: dict[str, Any],
+    rollback_errors: list[str],
+    rollback_started: bool,
+) -> Path | None:
+    """Persist safe acceptance evidence outside the disposable install root."""
+    try:
+        raw_state_path = str(getattr(cfg, "state_db_path", "") or "").strip()
+        if not raw_state_path:
+            return None
+        state_path = Path(raw_state_path).resolve()
+        directory = state_path.parent / "image-install-failures"
+        directory.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        suffix = re.sub(r"[^a-z0-9_.-]+", "_", plan.domain.lower()).strip("._-") or "domain"
+        path = directory / f"{stamp}-{suffix}.json"
+        payload = {
+            "schema": "mcd-image-install-failure-evidence-v1",
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+            "domain": plan.domain,
+            "instance_uid": plan.instance_uid or None,
+            "instance_code": plan.instance_code or None,
+            "root": str(plan.webroot),
+            "db_name": plan.db_name,
+            "failure": failure,
+            "rollback": {
+                "started": bool(rollback_started),
+                "completed": bool(rollback_started),
+                "errors": [_safe_runtime_detail(item) for item in rollback_errors],
+            },
+        }
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary.write_text(json.dumps(payload, ensure_ascii=True, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        os.chmod(temporary, 0o600)
+        temporary.replace(path)
+        os.chmod(path, 0o600)
+        return path
+    except Exception:
+        return None
 
 
 def _download(url: str, token: str, dst: Path) -> None:
@@ -903,11 +1082,12 @@ def _run_certbot_cloudflare_dns01(cfg: AgentConfig, plan: ImageInstallPlan, cred
     )
     if rc != 0:
         raise RuntimeError("certbot dns-cloudflare failed: " + out)
+    _expected_image_certificate(plan)
     _write_nginx_vhost(plan, ssl_enabled=True)
     rc, out = _run(["nginx", "-t"], timeout_sec=30)
     if rc != 0:
-        raise RuntimeError("nginx -t failed after SSL vhost update: " + out)
-    _run(["systemctl", "reload", "nginx"], timeout_sec=30)
+        raise RuntimeError("nginx -t failed after SSL vhost update: " + _safe_runtime_detail(out))
+    _reload_nginx()
 
 
 def _skip_image_archive_member(name: str) -> bool:
@@ -953,26 +1133,75 @@ def _warm_image_runtime(plan: ImageInstallPlan) -> dict[str, Any]:
 
 
 def _verify_image_https(plan: ImageInstallPlan) -> dict[str, Any]:
-    """Probe this exact local vhost with real hostname/SNI and normal CA validation."""
+    """Probe the activated local vhost with SNI, CA validation and bounded readiness."""
     import hashlib
 
     with tempfile.TemporaryDirectory(prefix="mcd-image-https-") as td:
         body = Path(td) / "login.html"
-        rc, status = _run(
-            ["curl", "--silent", "--show-error", "--noproxy", "*",
-             "--connect-timeout", "5", "--max-time", "30",
-             "--resolve", f"{plan.domain}:443:127.0.0.1",
-             "--output", str(body), "--write-out", "%{http_code}",
-             f"https://{plan.domain}/s/login"], timeout_sec=40,
+        last: dict[str, Any] = {
+            "server_name": plan.domain,
+            "connect_address": "127.0.0.1",
+            "expected_certificate": str(_LETSENCRYPT_LIVE / plan.domain / "fullchain.pem"),
+        }
+        for attempt in range(1, _IMAGE_HTTPS_ATTEMPTS + 1):
+            if body.exists():
+                body.unlink()
+            rc, output = _run(
+                ["curl", "--silent", "--show-error", "--noproxy", "*",
+                 "--connect-timeout", "5", "--max-time", "30",
+                 "--resolve", f"{plan.domain}:443:127.0.0.1",
+                 "--output", str(body), "--write-out", "MCD_HTTP_STATUS:%{http_code}",
+                 f"https://{plan.domain}/s/login"], timeout_sec=40,
+            )
+            marker = re.search(r"MCD_HTTP_STATUS:(\d{3})", str(output or ""))
+            status = marker.group(1) if marker else (str(output or "").strip() if re.fullmatch(r"\d{3}", str(output or "").strip()) else "")
+            peer = _peer_certificate_identity(plan)
+            detail = _safe_runtime_detail(re.sub(r"MCD_HTTP_STATUS:\d{3}", "", str(output or "")))
+            last = {
+                "attempt": attempt,
+                "server_name": plan.domain,
+                "connect_address": "127.0.0.1",
+                "curl_rc": int(rc),
+                "http_status": status,
+                "stderr": detail,
+                "peer_certificate": peer,
+                "expected_certificate": str(_LETSENCRYPT_LIVE / plan.domain / "fullchain.pem"),
+            }
+            if rc == 0 and status == "200":
+                html = body.read_bytes() if body.is_file() else b""
+                if not re.search(rb"type\s*=\s*[\"']password[\"']", html, re.IGNORECASE):
+                    last["failure_code"] = "login_form_missing"
+                elif peer.get("status") != "ok" or not bool(peer.get("hostname_matches")):
+                    last["failure_code"] = "tls_peer_certificate_mismatch"
+                else:
+                    return {
+                        "status": "ok",
+                        "url": f"https://{plan.domain}/s/login",
+                        "http_status": 200,
+                        "connect_address": "127.0.0.1",
+                        "server_name": plan.domain,
+                        "tls_verified": True,
+                        "login_form": True,
+                        "body_sha256": hashlib.sha256(html).hexdigest(),
+                        "peer_certificate": peer,
+                        "attempts": attempt,
+                    }
+            elif int(rc) == 60:
+                last["failure_code"] = "tls_certificate_mismatch"
+            elif int(rc) != 0:
+                last["failure_code"] = "tls_connection_failed"
+            else:
+                last["failure_code"] = "http_status_not_200"
+            if attempt < _IMAGE_HTTPS_ATTEMPTS:
+                time.sleep(_IMAGE_HTTPS_RETRY_SEC)
+
+        failure_code = str(last.get("failure_code") or "image_https_verification_failed")
+        message = (
+            f"image HTTPS login verification failed code={failure_code} "
+            f"rc={last.get('curl_rc', '')} http={last.get('http_status', '') or '000'} "
+            f"server_name={plan.domain} peer={last.get('peer_certificate', {}).get('dns_names', [])}"
         )
-        if rc != 0 or status.strip() != "200":
-            raise RuntimeError(f"image HTTPS login verification failed rc={rc} http={status.strip()[:3]}")
-        html = body.read_bytes() if body.is_file() else b""
-        if not re.search(rb"type\s*=\s*[\"']password[\"']", html, re.IGNORECASE):
-            raise RuntimeError("image HTTPS response is not a login form")
-        return {"status": "ok", "url": f"https://{plan.domain}/s/login", "http_status": 200,
-                "connect_address": "127.0.0.1", "tls_verified": True,
-                "login_form": True, "body_sha256": hashlib.sha256(html).hexdigest()}
+        raise ImageHTTPSVerificationError(message, last)
 
 
 @stable_source_operation
@@ -1080,9 +1309,7 @@ def install_from_image(
             rc, out = _run(["nginx", "-t"], timeout_sec=30)
             if rc != 0:
                 raise RuntimeError("nginx -t failed: " + out)
-            reload_rc, reload_out = _run(["systemctl", "reload", "nginx"], timeout_sec=30)
-            if reload_rc != 0:
-                raise RuntimeError("nginx reload failed: " + reload_out)
+            _reload_nginx()
 
             if run_certbot:
                 dns_ref = str(certbot_dns_credential_ref or "").strip()
@@ -1122,6 +1349,21 @@ def install_from_image(
             print("Verifying local HTTPS login with certificate validation")
             runtime_verification = _verify_image_https(plan)
         except Exception as exc:
+            failure = getattr(exc, "evidence", None)
+            if not isinstance(failure, dict):
+                failure = {
+                    "failure_code": type(exc).__name__,
+                    "message": _safe_runtime_detail(str(exc)),
+                    "server_name": plan.domain,
+                    "expected_certificate": str(_LETSENCRYPT_LIVE / plan.domain / "fullchain.pem"),
+                }
+            evidence_path = _persist_image_failure_evidence(
+                cfg,
+                plan,
+                failure=failure,
+                rollback_errors=[],
+                rollback_started=False,
+            )
             rollback_errors = _rollback_failed_install(
                 cfg,
                 plan,
@@ -1130,8 +1372,18 @@ def install_from_image(
                 resources_started=resources_started,
                 mail_requested=mail_requested,
             )
+            final_evidence_path = _persist_image_failure_evidence(
+                cfg,
+                plan,
+                failure=failure,
+                rollback_errors=rollback_errors,
+                rollback_started=True,
+            ) or evidence_path
+            evidence_note = f"; failure evidence: {final_evidence_path}" if final_evidence_path else ""
             if rollback_errors:
-                raise RuntimeError(f"{exc}; rollback errors: {'; '.join(rollback_errors)}") from exc
+                raise RuntimeError(f"{exc}; rollback errors: {'; '.join(rollback_errors)}{evidence_note}") from exc
+            if evidence_note:
+                raise RuntimeError(f"{exc}{evidence_note}") from exc
             raise
 
     from mcd_agent.inventory import InstanceInventory

@@ -1,3 +1,12 @@
+## 1.6.111 - 2026-11-19
+
+- Make image HTTPS acceptance fail closed on unverified nginx reloads and
+  certificate readiness errors; wait for the exact local SNI vhost to become
+  active instead of accepting a stale/default certificate.
+- Record the actual peer certificate identity, safe curl classification and
+  rollback evidence outside the disposable install root.
+- Preserve MCC-provided instance UID/code on every new image-install receipt.
+
 ## 1.6.110 - 2026-11-19
 
 - Accept MCC-owned instance UID and five-character code without generating a
