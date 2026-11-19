@@ -5123,6 +5123,7 @@ def main() -> int:
                     target_root=str(args.target_root or "").strip(),
                     input_stream=sys.stdin.buffer,
                     wipe_target=bool(args.wipe_target),
+                    domains_json=str(args.domains_json or "[]"),
                 )
             print(json.dumps(payload, ensure_ascii=True, indent=2))
             return 0 if bool(payload.get("ok", False)) else 1

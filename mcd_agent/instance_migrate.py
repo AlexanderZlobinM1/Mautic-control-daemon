@@ -43,6 +43,8 @@ _MYSQL_DATE_FORMAT_GENERATED_RE = re.compile(
     re.IGNORECASE,
 )
 LETSENCRYPT_ROOT = Path("/etc/letsencrypt")
+MIGRATION_ROOT = Path("/var/www")
+MIGRATION_TARGET_MARKER = ".mcd-instance-migration-target.json"
 
 
 def _mcc_wire_host_name(config: AgentConfig) -> str:
@@ -116,6 +118,141 @@ def _json_domains(raw: str | None) -> list[str]:
             seen.add(d)
             out.append(d)
     return out
+
+
+def _path_is_below(path: Path, parent: Path) -> bool:
+    try:
+        path.resolve().relative_to(parent.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _canonical_migration_target(domains: list[str]) -> Path | None:
+    if not domains:
+        return None
+    return MIGRATION_ROOT / domains[0] / "public_html"
+
+
+def _migration_target_marker(target: Path) -> Path:
+    return target / MIGRATION_TARGET_MARKER
+
+
+def _migration_target_owned(target: Path) -> bool:
+    marker = _migration_target_marker(target)
+    if not marker.is_file():
+        return False
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return (
+        isinstance(data, dict)
+        and data.get("schema") == "mcd-instance-migration-target-v1"
+        and data.get("state") in {"in_progress", "failed"}
+    )
+
+
+def _utc_archive_path(path: Path) -> Path:
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    candidate = path.with_name(f"{stamp}-{path.name}")
+    index = 2
+    while candidate.exists():
+        candidate = path.with_name(f"{stamp}-{path.name}-{index}")
+        index += 1
+    return candidate
+
+
+def _archive_migration_target(target: Path) -> Path:
+    if not _migration_target_owned(target):
+        raise RuntimeError(f"target is not an unfinished MCD migration target: {target}")
+    archive = _utc_archive_path(target)
+    target.rename(archive)
+    return archive
+
+
+def _write_migration_target_marker(target: Path, *, domains: list[str], source_root: str = "") -> Path:
+    marker = _migration_target_marker(target)
+    marker.write_text(
+        json.dumps(
+            {
+                "schema": "mcd-instance-migration-target-v1",
+                "state": "in_progress",
+                "domains": domains,
+                "source_root": source_root,
+                "created_at_utc": _utc_now(),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return marker
+
+
+def _mark_migration_target_failed(target: Path, error: str) -> None:
+    marker = _migration_target_marker(target)
+    if not marker.is_file():
+        return
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(data, dict) or data.get("schema") != "mcd-instance-migration-target-v1":
+        return
+    data["state"] = "failed"
+    data["error"] = str(error)[-2000:]
+    data["failed_at_utc"] = _utc_now()
+    try:
+        marker.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    except OSError:
+        return
+
+
+def _prepare_migration_target(
+    target: Path,
+    *,
+    domains: list[str],
+    claim: bool,
+    source_root: str = "",
+) -> Path | None:
+    """Validate a new target and claim only MCD-owned unfinished residue."""
+    managed = _path_is_below(target, MIGRATION_ROOT)
+    canonical = _canonical_migration_target(domains)
+    if managed and canonical is None:
+        raise RuntimeError("new /var/www migration target requires a domain")
+    if managed and not target.exists() and canonical is not None and target != canonical:
+        raise RuntimeError(
+            f"new migration target must use canonical full-FQDN path {canonical}, got {target}"
+        )
+
+    archived: Path | None = None
+    if target.exists():
+        if target.is_symlink() or not target.is_dir():
+            raise RuntimeError(f"target root is occupied by a non-directory: {target}")
+        if _migration_target_owned(target):
+            archived = _archive_migration_target(target)
+        elif any(target.iterdir()):
+            raise RuntimeError(f"target root already exists and is not empty: {target}")
+        else:
+            if managed and canonical is not None and target != canonical:
+                raise RuntimeError(
+                    f"new migration target must use canonical full-FQDN path {canonical}, got {target}"
+                )
+            target.rmdir()
+
+    if claim:
+        target.mkdir(parents=True, exist_ok=True)
+        if managed:
+            _write_migration_target_marker(target, domains=domains, source_root=source_root)
+    return archived
+
+
+def _finish_migration_target(target: Path) -> None:
+    marker = _migration_target_marker(target)
+    if marker.is_file():
+        marker.unlink()
 
 
 def _local_php_path(root: Path) -> Path:
@@ -434,6 +571,7 @@ def preflight_target_relay(
     target = Path(target_root).resolve()
     if not str(target).startswith("/"):
         raise RuntimeError("target root must be absolute")
+    domains = _json_domains(domains_json)
     problems: list[str] = []
     cleanup: list[str] = []
     adapter_result: dict[str, Any] = {}
@@ -471,6 +609,7 @@ def preflight_target_relay(
             "ok": False,
             "target_root": str(target),
             "target_db_name": str(target_db_name or ""),
+            "domains": domains,
             "wipe_target_root": bool(wipe_target_root),
             "wipe_target_db": bool(wipe_target_db),
             "cleanup": cleanup,
@@ -478,16 +617,20 @@ def preflight_target_relay(
             "adapter": adapter_result,
             "problems": problems,
         }
-    if target.exists() and any(target.iterdir()):
-        if wipe_target_root:
-            try:
+    try:
+        if _path_is_below(target, MIGRATION_ROOT):
+            archived = _prepare_migration_target(target, domains=domains, claim=False)
+            if archived is not None:
+                cleanup.append(f"target root archived: {target} -> {archived}")
+        elif target.exists() and any(target.iterdir()):
+            if wipe_target_root:
                 _assert_safe_target_wipe_path(target)
                 shutil.rmtree(target)
                 cleanup.append(f"target root removed: {target}")
-            except Exception as exc:
-                problems.append(f"target root cleanup failed: {exc}")
-        else:
-            problems.append(f"target root already exists and is not empty: {target}")
+            else:
+                problems.append(f"target root already exists and is not empty: {target}")
+    except Exception as exc:
+        problems.append(f"target root cleanup failed: {exc}")
     if _DB_IDENT_RE.match(str(target_db_name or "")):
         try:
             if _target_db_exists(str(target_db_name)):
@@ -503,6 +646,7 @@ def preflight_target_relay(
         "ok": not problems,
         "target_root": str(target),
         "target_db_name": str(target_db_name or ""),
+        "domains": domains,
         "wipe_target_root": bool(wipe_target_root),
         "wipe_target_db": bool(wipe_target_db),
         "cleanup": cleanup,
@@ -555,15 +699,26 @@ def stream_source_files(config: AgentConfig, *, selector: str | None, output: An
     return rc
 
 
-def receive_target_files(*, target_root: str, input_stream: Any, wipe_target: bool = False) -> dict[str, Any]:
+def receive_target_files(
+    *,
+    target_root: str,
+    input_stream: Any,
+    wipe_target: bool = False,
+    domains_json: str = "[]",
+) -> dict[str, Any]:
     target = Path(target_root).resolve()
     if not str(target).startswith("/"):
         raise RuntimeError("target root must be absolute")
-    if wipe_target and target.exists():
-        shutil.rmtree(target)
-    if target.exists() and any(target.iterdir()):
-        raise RuntimeError(f"target root already exists and is not empty: {target}")
-    target.mkdir(parents=True, exist_ok=True)
+    domains = _json_domains(domains_json)
+    archived: Path | None = None
+    if _path_is_below(target, MIGRATION_ROOT):
+        archived = _prepare_migration_target(target, domains=domains, claim=True)
+    else:
+        if wipe_target and target.exists():
+            shutil.rmtree(target)
+        if target.exists() and any(target.iterdir()):
+            raise RuntimeError(f"target root already exists and is not empty: {target}")
+        target.mkdir(parents=True, exist_ok=True)
     proc = subprocess.Popen(["tar", "-xzf", "-", "-C", str(target)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     assert proc.stdin is not None
     try:
@@ -584,7 +739,13 @@ def receive_target_files(*, target_root: str, input_stream: Any, wipe_target: bo
     if proc.returncode != 0:
         out = ((out_b or b"") + (err_b or b"")).decode("utf-8", errors="replace").strip()
         raise RuntimeError("target file extraction failed: " + out)
-    return {"schema": "mcd-instance-migration-target-files-v1", "ok": True, "target_root": str(target), "wipe_target": bool(wipe_target)}
+    return {
+        "schema": "mcd-instance-migration-target-files-v1",
+        "ok": True,
+        "target_root": str(target),
+        "wipe_target": bool(wipe_target),
+        "target_archive_root": str(archived) if archived is not None else "",
+    }
 
 
 def _letsencrypt_paths_for_domains(domains: list[str]) -> list[Path]:
@@ -828,7 +989,7 @@ def finalize_target_relay(
     domains = _json_domains(domains_json)
     target_db = _target_db_from_direct_values(name=target_db_name, user=target_db_user, password=target_db_password)
     if runtime_adapter:
-        return run_runtime_adapter(
+        result = run_runtime_adapter(
             runtime_adapter,
             operation="target-finalize",
             payload={
@@ -843,6 +1004,9 @@ def finalize_target_relay(
             },
             timeout_sec=1800,
         )
+        if bool(result.get("ok")) and bool(result.get("catchup_ok", True)):
+            _finish_migration_target(target)
+        return result
     cert_live = _matching_live_certificate(domains, require_current=True)
     if cert_live is None:
         raise RuntimeError(
@@ -859,6 +1023,7 @@ def finalize_target_relay(
     health = _target_healthcheck(target)
     inv = InstanceInventory(config.state_db_path)
     instances = inv.rescan(config)
+    _finish_migration_target(target)
     return {
         "schema": "mcd-instance-migration-result-v1",
         "ok": True,
@@ -1004,9 +1169,15 @@ def run_target_pull_migration(
     target = Path(target_root).resolve()
     if not str(target).startswith("/"):
         raise RuntimeError("target root must be absolute")
-    if target.exists() and any(target.iterdir()):
-        raise RuntimeError(f"target root already exists and is not empty: {target}")
     domains = _json_domains(domains_json)
+    target_archive = _prepare_migration_target(
+        target,
+        domains=domains,
+        claim=True,
+        source_root=source_root_clean,
+    ) if _path_is_below(target, MIGRATION_ROOT) else None
+    if not _path_is_below(target, MIGRATION_ROOT) and target.exists() and any(target.iterdir()):
+        raise RuntimeError(f"target root already exists and is not empty: {target}")
 
     started = _utc_now()
     result: dict[str, Any] = {
@@ -1015,6 +1186,7 @@ def run_target_pull_migration(
         "catchup_ok": False,
         "started_at_utc": started,
         "target_root": str(target),
+        "target_archive_root": str(target_archive) if target_archive is not None else "",
         "domains": domains,
         "target_db_name": str(target_db_name or ""),
         "target_db_user": str(target_db_user or ""),
@@ -1027,6 +1199,7 @@ def run_target_pull_migration(
         "/var/tmp/***",
         "/app/cache/***",
         "/app/logs/***",
+        MIGRATION_TARGET_MARKER,
     ]
     source_maintenance_on = False
     tunnel: subprocess.Popen[Any] | None = None
@@ -1144,9 +1317,11 @@ def run_target_pull_migration(
                 "instances": instances,
             }
         )
+        _finish_migration_target(target)
         print("progress: 100 migration complete")
         return result
-    except Exception:
+    except Exception as exc:
+        _mark_migration_target_failed(target, str(exc))
         if source_maintenance_on:
             try:
                 _remote_mcd(

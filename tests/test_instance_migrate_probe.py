@@ -13,6 +13,73 @@ import mcd_agent.instance_migrate as instance_migrate
 
 
 class InstanceMigrateProbeTests(unittest.TestCase):
+    def test_new_var_www_target_must_use_full_fqdn(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "www"
+            target = root / "short" / "public_html"
+            with (
+                patch.object(instance_migrate, "MIGRATION_ROOT", root),
+                patch.object(instance_migrate, "_target_db_exists", return_value=False),
+                patch.object(instance_migrate.shutil, "which", return_value="/usr/bin/tool"),
+            ):
+                payload = instance_migrate.preflight_target_relay(
+                    target_root=str(target),
+                    target_db_name="baza_testmove",
+                    domains_json='["full.example.com"]',
+                )
+
+        self.assertFalse(payload["ok"])
+        self.assertTrue(any("canonical full-FQDN path" in x for x in payload["problems"]))
+        self.assertFalse(target.exists())
+
+    def test_failed_migration_target_is_archived_only_when_marked_owned(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "www"
+            target = root / "full.example.com" / "public_html"
+            target.mkdir(parents=True)
+            instance_migrate._write_migration_target_marker(
+                target,
+                domains=["full.example.com"],
+                source_root="/var/www/source/public_html",
+            )
+            with (
+                patch.object(instance_migrate, "MIGRATION_ROOT", root),
+                patch.object(instance_migrate, "_target_db_exists", return_value=False),
+                patch.object(instance_migrate.shutil, "which", return_value="/usr/bin/tool"),
+            ):
+                payload = instance_migrate.preflight_target_relay(
+                    target_root=str(target),
+                    target_db_name="baza_testmove",
+                    domains_json='["full.example.com"]',
+                )
+
+        self.assertTrue(payload["ok"])
+        self.assertFalse(target.exists())
+        self.assertTrue(any("target root archived" in x for x in payload["cleanup"]))
+
+    def test_unmarked_live_target_is_not_archived_or_removed(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "www"
+            target = root / "full.example.com" / "public_html"
+            target.mkdir(parents=True)
+            sentinel = target / "index.php"
+            sentinel.write_text("<?php\n", encoding="utf-8")
+            with (
+                patch.object(instance_migrate, "MIGRATION_ROOT", root),
+                patch.object(instance_migrate, "_target_db_exists", return_value=False),
+                patch.object(instance_migrate.shutil, "which", return_value="/usr/bin/tool"),
+            ):
+                payload = instance_migrate.preflight_target_relay(
+                    target_root=str(target),
+                    target_db_name="baza_testmove",
+                    domains_json='["full.example.com"]',
+                )
+            sentinel_survived = sentinel.exists()
+
+        self.assertFalse(payload["ok"])
+        self.assertTrue(sentinel_survived)
+        self.assertFalse(any("target root archived" in x for x in payload["cleanup"]))
+
     def test_select_instance_accepts_domain_alias(self) -> None:
         inst = MauticInstall(
             instance_uid="uid-1",

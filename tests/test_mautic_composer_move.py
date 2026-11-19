@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import tempfile
+import tarfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import mcd_agent.mautic_composer_move as mautic_composer_move
 from mcd_agent.discovery import _is_retired_instance_root
 from mcd_agent.mautic_composer_move import (
+    COMPOSER_TARGET_MARKER,
     ComposerMovePlan,
+    _archive_existing_composer_target,
+    _archive_source_root,
     _copy_mutable_state,
     _ensure_runtime_dirs,
     _image_ref_for_major,
@@ -18,6 +23,7 @@ from mcd_agent.mautic_composer_move import (
     _rewrite_composer_move_cron_wrapper,
     _rewrite_composer_move_crontab,
     _short,
+    _target_root,
 )
 
 
@@ -107,6 +113,120 @@ class ComposerMoveHelpersTest(unittest.TestCase):
 
     def test_short_name_uses_first_domain_label(self) -> None:
         self.assertEqual(_short("Example-Shop.sales-snap.com"), "example_shop")
+
+    def test_new_composer_target_uses_full_fqdn_without_short_name_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td) / "www"
+            with patch.object(mautic_composer_move, "COMPOSER_ROOT", base):
+                self.assertEqual(
+                    _target_root("Example-Shop.sales-snap.com"),
+                    base / "example-shop.sales-snap.com" / "public_html",
+                )
+
+    def test_only_marked_composer_residue_is_archived(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td) / "example.com" / "public_html"
+            target.mkdir(parents=True)
+            (target / COMPOSER_TARGET_MARKER).write_text(
+                '{"schema":"mcd-composer-target-ownership-v1","state":"in_progress"}\n',
+                encoding="utf-8",
+            )
+
+            archived = _archive_existing_composer_target(target)
+
+            self.assertIsNotNone(archived)
+            assert archived is not None
+            self.assertFalse(target.exists())
+            self.assertTrue(archived.name.endswith("-public_html"))
+            self.assertTrue((archived / COMPOSER_TARGET_MARKER).exists())
+
+    def test_unmarked_composer_target_is_never_archived(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td) / "example.com" / "public_html"
+            target.mkdir(parents=True)
+            (target / "index.php").write_text("<?php\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "live or foreign instance"):
+                _archive_existing_composer_target(target)
+
+            self.assertTrue((target / "index.php").exists())
+
+    def test_source_instance_parent_is_archived_after_successful_move(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td) / "www"
+            source = base / "legacy" / "public_html"
+            source.mkdir(parents=True)
+            with patch.object(mautic_composer_move, "COMPOSER_ROOT", base):
+                archived = _archive_source_root(source)
+
+            self.assertFalse(source.exists())
+            self.assertEqual(archived.name, "public_html")
+            self.assertEqual(archived.parent.parent, base)
+            self.assertTrue(archived.parent.name.endswith("-legacy"))
+
+    def test_zip_to_composer_uses_staging_and_archives_source_after_switch(self) -> None:
+        class FakeInventory:
+            def __init__(self, _path: str) -> None:
+                pass
+
+            def rescan(self, _config):
+                return 1
+
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td) / "www"
+            source = base / "legacy" / "public_html"
+            (source / "config").mkdir(parents=True)
+            (source / "config" / "local.php").write_text(
+                "<?php return ['tmp_path' => '" + str(source / "var" / "tmp") + "'];\n",
+                encoding="utf-8",
+            )
+            skeleton = Path(td) / "skeleton"
+            (skeleton / "bin").mkdir(parents=True)
+            (skeleton / "bin" / "console").write_text("#!/usr/bin/env php\n", encoding="utf-8")
+            (skeleton / "config").mkdir(parents=True)
+            (skeleton / "config" / "local.php").write_text("<?php return [];\n", encoding="utf-8")
+            archive = Path(td) / "skeleton.tar.gz"
+            with tarfile.open(archive, "w:gz") as tf:
+                tf.add(skeleton / "bin" / "console", arcname="bin/console")
+                tf.add(skeleton / "config" / "local.php", arcname="config/local.php")
+
+            def fake_download(_url, _token, output):
+                Path(output).write_bytes(archive.read_bytes())
+
+            class Config:
+                mcc_token = "token"
+                state_db_path = str(Path(td) / "state.sqlite")
+
+            with (
+                patch.object(mautic_composer_move, "COMPOSER_ROOT", base),
+                patch.object(mautic_composer_move, "_find_site", return_value=(base / "site.conf", None)),
+                patch.object(mautic_composer_move, "_preflight", return_value=[]),
+                patch.object(mautic_composer_move, "_artifact_url", return_value="https://example.test/skeleton"),
+                patch.object(mautic_composer_move, "_download", side_effect=fake_download),
+                patch.object(mautic_composer_move, "_run", return_value=(0, "Mautic 7")),
+                patch.object(mautic_composer_move, "_migrate_composer_move_crontabs", return_value={}),
+                patch.object(
+                    mautic_composer_move,
+                    "_external_write_switched_vhost",
+                    return_value={"active": "site", "backup": "backup"},
+                ),
+                patch("mcd_agent.inventory.InstanceInventory", FakeInventory),
+                patch.object(mautic_composer_move.os, "geteuid", return_value=0),
+            ):
+                result = mautic_composer_move.move_zip_to_composer(
+                    Config(),
+                    root=str(source),
+                    domain="Example-Shop.sales-snap.com",
+                    mautic_major=7,
+                    yes=True,
+                )
+
+            target = base / "example-shop.sales-snap.com" / "public_html"
+            self.assertEqual(result["target_root"], str(target))
+            self.assertTrue(target.exists())
+            self.assertTrue(result["source_archive_root"].endswith("/public_html"))
+            self.assertFalse(source.exists())
+            self.assertEqual(result["healthcheck_tail"], ["Mautic 7"])
 
     def test_copy_mutable_state_to_composer_layout(self) -> None:
         with tempfile.TemporaryDirectory() as td:
