@@ -77,6 +77,27 @@ def test_http_failure_cannot_publish_success(scenario, monkeypatch):
     assert "rescan" not in scenario[2]
 
 
+def test_https_failure_keeps_safe_evidence_outside_rollback_root(scenario, monkeypatch):
+    cfg, plan, events = scenario
+    failure = install.ImageHTTPSVerificationError(
+        "image HTTPS login verification failed code=tls_certificate_mismatch",
+        {
+            "failure_code": "tls_certificate_mismatch",
+            "server_name": plan.domain,
+            "peer_certificate": {"dns_names": ["gc.example.org"]},
+        },
+    )
+    monkeypatch.setattr(install, "_verify_image_https", lambda _plan: (_ for _ in ()).throw(failure))
+    with pytest.raises(RuntimeError, match="failure evidence:"):
+        run(scenario)
+    evidence = list((Path(cfg.state_db_path).parent / "image-install-failures").glob("*.json"))
+    assert evidence
+    payload = evidence[-1].read_text(encoding="utf-8")
+    assert "tls_certificate_mismatch" in payload
+    assert plan.domain in payload
+    assert "rollback" in events
+
+
 def test_mail_cache_mutation_is_followed_by_final_warmup(scenario, monkeypatch):
     from mcd_agent import mail_config
     monkeypatch.setattr(mail_config, "apply_mail_profile", lambda *a, **kw: scenario[2].append("mail"))
@@ -107,11 +128,43 @@ def test_https_gate_requires_real_tls_success_200_and_login_form(monkeypatch, rc
         Path(args[args.index("--output")+1]).write_text(body)
         return rc, status
     monkeypatch.setattr(install, "_run", command)
+    monkeypatch.setattr(
+        install,
+        "_peer_certificate_identity",
+        lambda plan: {
+            "status": "ok",
+            "source": "local_sni_peer",
+            "server_name": plan.domain,
+            "dns_names": [plan.domain],
+            "hostname_matches": True,
+        },
+    )
     if accepted:
         assert install._verify_image_https(plan)["tls_verified"] is True
     else:
         with pytest.raises(RuntimeError):
             install._verify_image_https(plan)
+
+
+def test_https_gate_retries_until_new_sni_vhost_is_active(monkeypatch):
+    plan = install.build_plan(image_ref="any", domain="verify.example.org", php_version="8.4")
+    outcomes = iter([(60, "000"), (0, "200")])
+    peers = iter([
+        {"status": "ok", "server_name": plan.domain, "dns_names": ["old.example.org"], "hostname_matches": False},
+        {"status": "ok", "server_name": plan.domain, "dns_names": [plan.domain], "hostname_matches": True},
+    ])
+
+    def command(args, **kw):
+        rc, status = next(outcomes)
+        Path(args[args.index("--output") + 1]).write_text('<input type="password">', encoding="utf-8")
+        return rc, status
+
+    monkeypatch.setattr(install, "_run", command)
+    monkeypatch.setattr(install, "_peer_certificate_identity", lambda _plan: next(peers))
+    monkeypatch.setattr(install.time, "sleep", lambda _seconds: None)
+    result = install._verify_image_https(plan)
+    assert result["attempts"] == 2
+    assert result["peer_certificate"]["dns_names"] == [plan.domain]
 
 
 def test_warmup_nonzero_is_failure_without_secret_console_output(tmp_path, monkeypatch):
