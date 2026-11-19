@@ -15,10 +15,11 @@ from mcd_agent.instance_identity import (
 )
 from mcd_agent.inventory import InstanceInventory
 from mcd_agent.mautic_image_install import build_plan
-from mcd_agent.models import MauticInstall
+from mcd_agent.models import DBConfig, MauticInstall
 from mcd_agent.state_push import (
     _observe_mautic_version_change,
     _read_pending_instance_change_events,
+    _wire_instance_identity,
     record_mautic_version_change,
 )
 
@@ -65,6 +66,52 @@ def test_identity_marker_survives_readback_and_inventory_rescan(tmp_path: Path) 
     restored = inv.list_instances()[0]
     assert restored.instance_uid == "mcc-instance-001"
     assert restored.instance_code == "7k4m2"
+    inv._upsert_install(
+        MauticInstall(
+            instance_uid="legacy-rescan-uid",
+            name="news.example.com",
+            root=str(root),
+            console_path=str(root / "bin/console"),
+            primary_domain="news.example.com",
+        )
+    )
+    inv.conn.commit()
+    restored_after_rescan = inv.list_instances()[0]
+    assert restored_after_rescan.instance_uid == "mcc-instance-001"
+    assert restored_after_rescan.instance_code == "7k4m2"
+
+
+def test_identity_snapshot_uses_bare_uid_and_complete_database_tuple() -> None:
+    install = MauticInstall(
+        instance_uid="mcc-instance-001",
+        name="news.example.com",
+        root="/var/www/news.example.com_7k4m2/public_html",
+        console_path="/var/www/news.example.com_7k4m2/public_html/bin/console",
+        instance_code="7k4m2",
+        db=DBConfig(
+            host="127.0.0.1",
+            port=3306,
+            name="db_7k4m2",
+            user="usr_7k4m2",
+            password="secret",
+            table_prefix="",
+        ),
+    )
+    assert _wire_instance_identity(install, "MauticFarm-02") == {
+        "instance_uid": "mcc-instance-001",
+        "instance_code": "7k4m2",
+        "database_name": "db_7k4m2",
+        "database_user": "usr_7k4m2",
+    }
+    legacy = install.__class__(
+        instance_uid="news.example.com",
+        name="news.example.com",
+        root="/var/www/news/public_html",
+        console_path="/var/www/news/public_html/bin/console",
+    )
+    assert _wire_instance_identity(legacy, "MauticFarm-02") == {
+        "instance_uid": "news.example.com@MauticFarm-02",
+    }
 
 
 def test_new_image_plan_uses_mcc_identity_but_legacy_plan_is_unchanged() -> None:

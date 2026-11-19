@@ -237,8 +237,12 @@ class InstanceInventory:
               install_type, runtime_capabilities_json, runtime_adapter, updated_at
             ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(root) DO UPDATE SET
-              instance_uid=excluded.instance_uid,
-              instance_code=excluded.instance_code,
+              instance_uid=CASE
+                WHEN excluded.instance_code IS NULL AND instances.instance_code IS NOT NULL
+                THEN instances.instance_uid
+                ELSE excluded.instance_uid
+              END,
+              instance_code=COALESCE(excluded.instance_code, instances.instance_code),
               name=excluded.name,
               root=excluded.root,
               primary_domain=excluded.primary_domain,
