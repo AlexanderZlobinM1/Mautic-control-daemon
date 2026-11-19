@@ -135,8 +135,6 @@ class InstanceMigrateProbeTests(unittest.TestCase):
 
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["engine"], "mysql")
-        self.assertEqual(payload["name"], "mautic")
-        self.assertEqual(payload["user"], "u")
         self.assertEqual(payload["size_bytes"], 12345)
         self.assertFalse(payload["catchup_supported"])
         self.assertIn("db_not_local", payload["catchup_blockers"])

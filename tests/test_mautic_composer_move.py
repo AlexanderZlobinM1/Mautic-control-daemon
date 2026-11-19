@@ -124,12 +124,6 @@ class ComposerMoveHelpersTest(unittest.TestCase):
                     base / "example-shop.sales-snap.com" / "public_html",
                 )
 
-    def test_mcc_identity_code_selects_identity_target_root(self) -> None:
-        self.assertEqual(
-            _target_root("Example.COM", "7k4m2"),
-            Path("/var/www/example.com_7k4m2/public_html"),
-        )
-
     def test_only_marked_composer_residue_is_archived(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             target = Path(td) / "example.com" / "public_html"

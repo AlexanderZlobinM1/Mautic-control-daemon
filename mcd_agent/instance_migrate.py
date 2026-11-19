@@ -1649,7 +1649,6 @@ def _database_probe(inst: MauticInstall) -> dict[str, Any]:
         "host": inst.db.host,
         "port": int(inst.db.port or 3306),
         "name": inst.db.name,
-        "user": inst.db.user,
         "table_prefix": inst.db.table_prefix,
         "local": local,
         "engine": "",
