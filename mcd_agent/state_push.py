@@ -91,6 +91,27 @@ _CAMPAIGN_NATIVE_FALLBACK_MAX_EVENTS = 5000
 _INSTANCE_CHANGE_EVENT_TYPE = "instance_change_event"
 
 
+def _wire_instance_identity(inst: MauticInstall, host_name: str) -> dict[str, str | None]:
+    """Publish MCC identity as bare UID plus its complete identity tuple.
+
+    Legacy installations retain the host-qualified compatibility wire UID.
+    Once MCC has assigned an instance code, the identity is global and the
+    snapshot must carry the bare UID together with the database projections so
+    MCC can validate one complete identity instead of receiving ``uid@host``
+    or a partial tuple.
+    """
+
+    code = str(getattr(inst, "instance_code", None) or "").strip() or None
+    if code is None:
+        return {"instance_uid": qualify_instance_uid(inst.instance_uid, host_name)}
+    return {
+        "instance_uid": str(inst.instance_uid or "").strip(),
+        "instance_code": code,
+        "database_name": str(inst.db.name if inst.db else "").strip(),
+        "database_user": str(inst.db.user if inst.db else "").strip(),
+    }
+
+
 def _galera_routing_eligibility(galera: dict[str, Any]) -> tuple[bool, str]:
     """Return whether this Galera node is safe for new DB traffic/source use."""
     ready = _to_bool(galera.get("ready"))
@@ -2837,8 +2858,7 @@ class MCCStatePusher:
             )
             instances.append(
                 {
-                    "instance_uid": qualify_instance_uid(i.instance_uid, wire_host_name),
-                    "instance_code": str(getattr(i, "instance_code", None) or "") or None,
+                    **_wire_instance_identity(i, wire_host_name),
                     "name": i.name,
                     "root": i.root,
                     "source": i.source,
