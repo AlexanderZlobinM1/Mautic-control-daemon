@@ -17,6 +17,7 @@ class MauticInstall:
     name: str
     root: str
     console_path: str
+    instance_code: str | None = None
     primary_domain: str | None = None
     local_php_path: str | None = None
     mautic_timezone: str | None = None
@@ -38,6 +39,7 @@ class MauticInstall:
     def safe_dict(self) -> dict[str, object]:
         payload: dict[str, object] = {
             "instance_uid": self.instance_uid,
+            "instance_code": self.instance_code,
             "name": self.name,
             "root": self.root,
             "primary_domain": self.primary_domain,

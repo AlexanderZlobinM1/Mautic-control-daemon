@@ -9,6 +9,7 @@ from pathlib import Path
 from mcd_agent.config import AgentConfig
 from mcd_agent.discovery import discover_mautic
 from mcd_agent.instance_uid import build_domain_uid
+from mcd_agent.instance_identity import validate_instance_code, validate_mcc_instance_uid
 from mcd_agent.models import DBConfig, MauticInstall
 from mcd_agent.secret_store import SecretStore
 
@@ -56,6 +57,7 @@ class InstanceInventory:
             CREATE TABLE IF NOT EXISTS instances (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               instance_uid TEXT UNIQUE,
+              instance_code TEXT,
               name TEXT NOT NULL,
               root TEXT NOT NULL UNIQUE,
               primary_domain TEXT,
@@ -94,6 +96,8 @@ class InstanceInventory:
             self.conn.execute("ALTER TABLE instances ADD COLUMN mautic_timezone TEXT")
         if "instance_uid" not in names:
             self.conn.execute("ALTER TABLE instances ADD COLUMN instance_uid TEXT")
+        if "instance_code" not in names:
+            self.conn.execute("ALTER TABLE instances ADD COLUMN instance_code TEXT")
         if "primary_domain" not in names:
             self.conn.execute("ALTER TABLE instances ADD COLUMN primary_domain TEXT")
         if "domains_json" not in names:
@@ -159,6 +163,7 @@ class InstanceInventory:
             CREATE TABLE instances (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               instance_uid TEXT UNIQUE,
+              instance_code TEXT,
               name TEXT NOT NULL,
               root TEXT NOT NULL UNIQUE,
               primary_domain TEXT,
@@ -190,13 +195,13 @@ class InstanceInventory:
         self.conn.execute(
             """
             INSERT OR REPLACE INTO instances(
-              instance_uid, name, root, primary_domain, domains_json, console_path, local_php_path, mautic_timezone, mautic_major, source,
+              instance_uid, instance_code, name, root, primary_domain, domains_json, console_path, local_php_path, mautic_timezone, mautic_major, source,
               db_host, db_port, db_name, db_user, db_password, db_table_prefix,
               runtime, runtime_id, runtime_root, runtime_user, runtime_php_bin, runtime_image_ref,
               install_type, runtime_capabilities_json, runtime_adapter, updated_at
             )
             SELECT
-              NULL, name, root, NULL, NULL, console_path, local_php_path, mautic_timezone, mautic_major, source,
+              NULL, NULL, name, root, NULL, NULL, console_path, local_php_path, mautic_timezone, mautic_major, source,
               db_host, db_port, db_name, db_user, db_password, db_table_prefix,
               'host', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, updated_at
             FROM instances_legacy
@@ -218,16 +223,22 @@ class InstanceInventory:
     def _upsert_install(self, inst: MauticInstall, source: str | None = None) -> None:
         db = inst.db
         uid = self._resolve_unique_uid(inst.instance_uid or build_domain_uid(domain=inst.primary_domain, root=inst.root, name=inst.name), inst.root)
+        instance_code = None
+        if str(inst.instance_code or "").strip():
+            instance_code = validate_instance_code(inst.instance_code)
+        if str(inst.instance_uid or "").strip() and "@" not in str(inst.instance_uid):
+            validate_mcc_instance_uid(str(inst.instance_uid))
         self.conn.execute(
             """
             INSERT INTO instances(
-              instance_uid, name, root, primary_domain, domains_json, console_path, local_php_path, mautic_timezone, mautic_major, source,
+              instance_uid, instance_code, name, root, primary_domain, domains_json, console_path, local_php_path, mautic_timezone, mautic_major, source,
               db_host, db_port, db_name, db_user, db_password, db_table_prefix,
               runtime, runtime_id, runtime_root, runtime_user, runtime_php_bin, runtime_image_ref,
               install_type, runtime_capabilities_json, runtime_adapter, updated_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(root) DO UPDATE SET
               instance_uid=excluded.instance_uid,
+              instance_code=excluded.instance_code,
               name=excluded.name,
               root=excluded.root,
               primary_domain=excluded.primary_domain,
@@ -256,6 +267,7 @@ class InstanceInventory:
             """,
             (
                 uid,
+                instance_code,
                 inst.name,
                 inst.root,
                 inst.primary_domain,
@@ -306,6 +318,7 @@ class InstanceInventory:
                     root=str(r["root"]),
                     primary_domain=str(r["primary_domain"]) if r["primary_domain"] else None,
                     console_path=str(r["console_path"]),
+                    instance_code=validate_instance_code(r["instance_code"]) if r["instance_code"] else None,
                     local_php_path=str(r["local_php_path"]) if r["local_php_path"] else None,
                     mautic_timezone=str(r["mautic_timezone"]) if r["mautic_timezone"] else None,
                     mautic_major=int(r["mautic_major"]) if r["mautic_major"] is not None else None,

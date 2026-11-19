@@ -1,3 +1,14 @@
+## 1.6.110 - 2026-11-19
+
+- Accept MCC-owned instance UID and five-character code without generating a
+  second identity; persist and return the identity through image installation
+  and migration readbacks while leaving legacy installations unchanged.
+- Use MCC code names for new installations (`/var/www/<domain>_<code>`,
+  `db_<code>`, `usr_<code>`) and preserve the identity through ZIP-to-Composer
+  moves.
+- Emit a durable state-push change event only when a Mautic version actually
+  changes; unchanged polling remains silent.
+
 ## 1.6.107 - 2026-11-18
 
 - Fail closed when the release wrapper, runtime package metadata, systemd

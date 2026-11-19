@@ -119,6 +119,30 @@ root-only, docroot-only и symlink layouts сохраняют fail-closed semant
 и наружу больше не передаётся; qualified UID другого хоста отклоняется fail-closed.
 Patch context, migration selectors и state sync используют одну и ту же проверку.
 
+### MCC-owned instance identity and installation readback
+
+Для нового инстанса MCC передаёт MCD один сквозной bare `instance_uid` и
+канонический пятисимвольный код Crockford Base32 в нижнем регистре. MCD не
+генерирует эти значения и не использует `instance_uid@host` в интерфейсе или
+в высокоуровневых операциях. Локальный marker и inventory сохраняют именно
+полученные значения, поэтому rescan, перенос ZIP в Composer и миграция между
+хостами не создают новую сущность. Старые инсталляции без marker не
+переименовываются и продолжают работать по legacy-пути.
+
+Для нового image/migration-пути код задаёт только имена, переданные MCC:
+`/var/www/<domain>_<code>/public_html`, `db_<code>` и `usr_<code>`. При
+завершении MCD возвращает фактический `identity`/`actual_state` с root,
+UID/code и DB names; MCC принимает этот readback как результат операции.
+Внутренняя реализация не дублирует MCC authority и не добавляет worker/task.
+
+Обычный state polling не создаёт audit event. MCD хранит последнее
+подтверждённое чтение версии Mautic. Известная операция MCD/MCC сначала
+фиксирует свой `actor/source`, поэтому следующий polling не дублирует событие;
+если версия изменилась без известной операции, MCD добавляет в существующий
+`mcd-state-v1` один durable `mcd-instance-change-event-v1` с `before`, `after`,
+`actor`, `source` и UTC timestamp. После успешной доставки событие закрывается;
+при ошибке остаётся в очереди до следующего обычного state push.
+
 Plugin replacement is resolved from the selected package's valid `replaces`
 bundle list and the factual plugin inventory on the target instance. A
 predecessor does not need to remain in the MCC catalog, and its installed

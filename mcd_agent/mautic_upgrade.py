@@ -2751,6 +2751,20 @@ def run_upgrade_apply(
             config = replace(config, php_bin=rebind_php_after_system_upgrade(config.php_bin))
         _post_upgrade_verify(config, inst)
         cache_count = _write_upgrade_version_cache(install_root, final_version)
+        try:
+            from mcd_agent.state_push import record_mautic_version_change
+
+            record_mautic_version_change(
+                config,
+                instance_uid=str(inst.instance_uid or ""),
+                root=str(install_root),
+                before=str(current),
+                after=str(final_version),
+                actor="mcd",
+                source="mautic_upgrade",
+            )
+        except Exception as exc:
+            logging.warning("Mautic version audit event enqueue failed: %s", exc)
         print(f"Mautic version cache refreshed: {final_version} ({cache_count} path(s))")
         print(f"Upgrade completed: {current} -> {final_version}")
     except Exception:

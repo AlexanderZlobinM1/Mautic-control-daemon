@@ -2487,6 +2487,8 @@ def _build_parser() -> argparse.ArgumentParser:
     img.add_argument("--image-ref", required=True)
     img.add_argument("--domain", required=True)
     img.add_argument("--php-version", required=True)
+    img.add_argument("--instance-uid", default="", help="MCC-owned bare instance UID")
+    img.add_argument("--instance-code", default="", help="MCC-owned five-character instance code")
     img.add_argument("--certbot-dns-credential-ref", default="")
     img.add_argument("--yes", action="store_true")
     img.add_argument("--no-certbot", action="store_true")
@@ -2539,6 +2541,8 @@ def _build_parser() -> argparse.ArgumentParser:
     cmove.add_argument("--root", required=True)
     cmove.add_argument("--domain", required=True)
     cmove.add_argument("--mautic-major", type=int, required=True)
+    cmove.add_argument("--instance-uid", default="", help="MCC-owned bare instance UID")
+    cmove.add_argument("--instance-code", default="", help="MCC-owned five-character instance code")
     cmove.add_argument("--yes", action="store_true")
     cmove.add_argument("--json", action="store_true")
 
@@ -2786,6 +2790,8 @@ def _build_parser() -> argparse.ArgumentParser:
     inst_migrate.add_argument("--target-db-name")
     inst_migrate.add_argument("--target-db-user")
     inst_migrate.add_argument("--target-db-password")
+    inst_migrate.add_argument("--instance-uid", default="", help="MCC-owned bare instance UID")
+    inst_migrate.add_argument("--instance-code", default="", help="MCC-owned five-character instance code")
     inst_migrate.add_argument("--domains-json", default="[]")
     inst_migrate.add_argument("--php-version")
     inst_migrate.add_argument("--runtime-adapter")
@@ -4095,6 +4101,8 @@ def main() -> int:
                     certbot_dns_credential_ref=str(args.certbot_dns_credential_ref or "").strip() or None,
                     own_mail=bool(args.own_mail),
                     mail_profile_id=str(args.mail_profile_id or "").strip() or None,
+                    instance_uid=str(args.instance_uid or "").strip() or None,
+                    instance_code=str(args.instance_code or "").strip() or None,
                 )
         else:
             result = install_from_image(
@@ -4107,6 +4115,8 @@ def main() -> int:
                 certbot_dns_credential_ref=str(args.certbot_dns_credential_ref or "").strip() or None,
                 own_mail=bool(args.own_mail),
                 mail_profile_id=str(args.mail_profile_id or "").strip() or None,
+                instance_uid=str(args.instance_uid or "").strip() or None,
+                instance_code=str(args.instance_code or "").strip() or None,
             )
         if bool(args.json):
             print(json.dumps(result, ensure_ascii=True, indent=2))
@@ -4195,6 +4205,8 @@ def main() -> int:
                     domain=str(args.domain),
                     mautic_major=int(args.mautic_major or 0),
                     yes=bool(args.yes),
+                    instance_uid=str(args.instance_uid or "").strip() or None,
+                    instance_code=str(args.instance_code or "").strip() or None,
                 )
         else:
             result = move_zip_to_composer(
@@ -4203,6 +4215,8 @@ def main() -> int:
                 domain=str(args.domain),
                 mautic_major=int(args.mautic_major or 0),
                 yes=bool(args.yes),
+                instance_uid=str(args.instance_uid or "").strip() or None,
+                instance_code=str(args.instance_code or "").strip() or None,
             )
         if bool(args.json):
             print(json.dumps(result, ensure_ascii=True, indent=2))
@@ -4981,6 +4995,7 @@ def main() -> int:
                     "target-db-name": args.target_db_name,
                 }.items()
                 if not str(value or "").strip()
+                and not (name == "target-db-name" and str(args.instance_code or "").strip())
             ]
             if missing:
                 raise RuntimeError("missing required target-preflight arguments: " + ", ".join(missing))
@@ -4995,6 +5010,8 @@ def main() -> int:
                     install_type=str(args.install_type or "").strip() or None,
                     image_ref=str(args.image_ref or "").strip() or None,
                     domains_json=str(args.domains_json or "[]"),
+                    instance_uid=str(args.instance_uid or "").strip() or None,
+                    instance_code=str(args.instance_code or "").strip() or None,
                 )
             print(json.dumps(payload, ensure_ascii=True, indent=2))
             return 0 if bool(payload.get("ok", False)) else 1
@@ -5007,6 +5024,8 @@ def main() -> int:
                     input_stream=sys.stdin.buffer,
                     wipe_target=bool(args.wipe_target),
                     domains_json=str(args.domains_json or "[]"),
+                    instance_uid=str(args.instance_uid or "").strip() or None,
+                    instance_code=str(args.instance_code or "").strip() or None,
                 )
             print(json.dumps(payload, ensure_ascii=True, indent=2))
             return 0 if bool(payload.get("ok", False)) else 1
@@ -5048,6 +5067,7 @@ def main() -> int:
                     "target-db-password": target_db_password,
                 }.items()
                 if not str(value or "").strip()
+                and not (name in {"target-db-name", "target-db-user"} and str(args.instance_code or "").strip())
             ]
             if missing:
                 raise RuntimeError("missing required target-finalize arguments: " + ", ".join(missing))
@@ -5063,6 +5083,8 @@ def main() -> int:
                 runtime=str(args.runtime or "").strip() or None,
                 image_ref=str(args.image_ref or "").strip() or None,
                 install_type=str(args.install_type or "").strip() or None,
+                instance_uid=str(args.instance_uid or "").strip() or None,
+                instance_code=str(args.instance_code or "").strip() or None,
             )
             print(json.dumps(payload, ensure_ascii=True, indent=2))
             return 0 if bool(payload.get("ok", False)) and bool(payload.get("catchup_ok", False)) else 1
@@ -5093,6 +5115,8 @@ def main() -> int:
                 target_db_user=str(args.target_db_user or "").strip() or None,
                 target_db_password=target_db_password.strip() or None,
                 php_version=str(args.php_version or "").strip() or None,
+                instance_uid=str(args.instance_uid or "").strip() or None,
+                instance_code=str(args.instance_code or "").strip() or None,
             )
             if args.json:
                 print(json.dumps(payload, ensure_ascii=True, indent=2))

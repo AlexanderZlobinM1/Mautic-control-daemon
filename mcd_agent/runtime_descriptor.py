@@ -7,6 +7,7 @@ import re
 from urllib.parse import urlparse
 
 from mcd_agent.instance_uid import build_domain_uid
+from mcd_agent.instance_identity import validate_instance_code
 from mcd_agent.localphp import parse_local_php
 from mcd_agent.models import DBConfig, MauticInstall
 
@@ -45,6 +46,7 @@ class RuntimeDescriptor:
     runtime_plugins_path: str | None
     host_composer_lock_path: Path | None
     migration_adapter: str | None
+    instance_code: str | None = None
 
     def docker_exec_prefix(self) -> list[str]:
         return [
@@ -177,6 +179,8 @@ def load_runtime_descriptor(path: Path, *, require_root_owner: bool = True) -> R
     instance_uid = str(raw.get("instance_uid") or "").strip()
     if not instance_uid:
         instance_uid = build_domain_uid(domain=primary, root=str(host_root), name=name)
+    instance_code_raw = str(raw.get("instance_code") or "").strip()
+    instance_code = validate_instance_code(instance_code_raw) if instance_code_raw else None
     major_raw = raw.get("mautic_major")
     try:
         major = int(major_raw) if major_raw is not None else None
@@ -194,6 +198,7 @@ def load_runtime_descriptor(path: Path, *, require_root_owner: bool = True) -> R
         host_db_host=host_db_host,
         image_ref=image_ref,
         instance_uid=instance_uid,
+        instance_code=instance_code,
         name=name,
         primary_domain=primary,
         domains=domains,
@@ -271,6 +276,7 @@ def discover_runtime_instances(
         installs.append(
             MauticInstall(
                 instance_uid=descriptor.instance_uid,
+                instance_code=descriptor.instance_code,
                 name=descriptor.name,
                 root=str(descriptor.host_root),
                 console_path=descriptor.console_path,

@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 
 from mcd_agent.config import ManualInstanceConfig
 from mcd_agent.instance_uid import build_domain_uid
+from mcd_agent.instance_identity import read_instance_identity
 from mcd_agent.localphp import parse_local_php
 from mcd_agent.models import DBConfig, MauticInstall
 from mcd_agent.runtime_descriptor import discover_runtime_instances
@@ -359,13 +360,15 @@ def discover_mautic(
         if domain and domain in domains and domains[0] != domain:
             domains = [domain] + [x for x in domains if x != domain]
         name = domain or (Path(resolved_root).name or "mautic")
+        identity = read_instance_identity(resolved_root) or {}
         installs.append(
             MauticInstall(
-                instance_uid=build_domain_uid(domain=domain, root=resolved_root, name=name),
+                instance_uid=str(identity.get("instance_uid") or build_domain_uid(domain=domain, root=resolved_root, name=name)),
                 name=name,
                 root=resolved_root,
                 primary_domain=domain,
                 console_path=console_path,
+                instance_code=str(identity.get("instance_code") or "") or None,
                 local_php_path=local_php,
                 mautic_timezone=_read_mautic_timezone(local_php),
                 mautic_major=major,
@@ -389,11 +392,12 @@ def discover_mautic(
                 local_php_path = None
         installs.append(
             MauticInstall(
-                instance_uid=build_domain_uid(domain=None, root=item.root, name=item.name),
+                instance_uid=str((read_instance_identity(item.root) or {}).get("instance_uid") or build_domain_uid(domain=None, root=item.root, name=item.name)),
                 name=item.name,
                 root=item.root,
                 primary_domain=None,
                 console_path=console_path,
+                instance_code=str((read_instance_identity(item.root) or {}).get("instance_code") or "") or None,
                 local_php_path=local_php_path,
                 mautic_timezone=_read_mautic_timezone(local_php_path),
                 mautic_major=_detect_mautic_major(item.root, local_php_path, item.mautic_major),

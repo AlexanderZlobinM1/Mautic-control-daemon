@@ -20,6 +20,13 @@ from urllib.parse import urlencode
 
 from mcd_agent.config import AgentConfig
 from mcd_agent.form_embed import render_form_embed_location
+from mcd_agent.instance_identity import (
+    identity_readback,
+    instance_path_names,
+    validate_instance_code,
+    validate_mcc_instance_uid,
+    write_instance_identity,
+)
 from mcd_agent.nginx_templates import render_nginx_template
 from mcd_agent.source_operation import stable_source_operation
 
@@ -41,6 +48,8 @@ class ImageInstallPlan:
     db_password: str
     webroot: Path
     php_version: str
+    instance_uid: str | None = None
+    instance_code: str | None = None
 
 
 def _run(args: list[str], *, timeout_sec: int = 300, input_text: str | None = None) -> tuple[int, str]:
@@ -166,19 +175,43 @@ def _quote_sql(value: str) -> str:
     return "'" + str(value).replace("\\", "\\\\").replace("'", "\\'") + "'"
 
 
-def build_plan(*, image_ref: str, domain: str, php_version: str) -> ImageInstallPlan:
+def build_plan(
+    *,
+    image_ref: str,
+    domain: str,
+    php_version: str,
+    instance_uid: str | None = None,
+    instance_code: str | None = None,
+) -> ImageInstallPlan:
     d = _domain(domain)
-    short = _short(d)
-    db_name = f"baza_{short}"
+    uid = str(instance_uid or "").strip() or None
+    code = str(instance_code or "").strip() or None
+    if bool(uid) != bool(code):
+        raise RuntimeError("instance_uid and instance_code must be supplied together by MCC")
+    if uid:
+        uid = validate_mcc_instance_uid(uid)
+        code = validate_instance_code(code)
+        names = instance_path_names(d, code)
+        short = code
+        db_name = names["db_name"]
+        db_user = names["db_user"]
+        webroot = Path(names["webroot"])
+    else:
+        short = _short(d)
+        db_name = f"baza_{short}"
+        db_user = f"korisnik_{short}"
+        webroot = Path("/var/www") / short / "public_html"
     return ImageInstallPlan(
         image_ref=str(image_ref or "").strip(),
         domain=d,
         short_name=short,
         db_name=db_name,
-        db_user=f"korisnik_{short}",
+        db_user=db_user,
         db_password=secrets.token_urlsafe(24),
-        webroot=Path("/var/www") / short / "public_html",
+        webroot=webroot,
         php_version=str(php_version or "").strip(),
+        instance_uid=uid,
+        instance_code=code,
     )
 
 
@@ -954,8 +987,16 @@ def install_from_image(
     certbot_dns_credential_ref: str | None = None,
     own_mail: bool = False,
     mail_profile_id: str | None = None,
+    instance_uid: str | None = None,
+    instance_code: str | None = None,
 ) -> dict[str, Any]:
-    plan = build_plan(image_ref=image_ref, domain=domain, php_version=php_version)
+    plan = build_plan(
+        image_ref=image_ref,
+        domain=domain,
+        php_version=php_version,
+        instance_uid=instance_uid,
+        instance_code=instance_code,
+    )
     if not yes:
         raise RuntimeError("--yes is required")
     if not str(cfg.mcc_token or "").strip():
@@ -1009,6 +1050,13 @@ def install_from_image(
                 raise RuntimeError("local.php not found after extraction")
             print("Patching Mautic local.php")
             _patch_local_php(local_php, plan)
+            if plan.instance_uid and plan.instance_code:
+                write_instance_identity(
+                    plan.webroot,
+                    instance_uid=plan.instance_uid,
+                    instance_code=plan.instance_code,
+                    primary_domain=plan.domain,
+                )
 
             print("Importing database")
             _mysql_import_artifact(cfg, db_artifact, plan.db_name)
@@ -1091,6 +1139,12 @@ def install_from_image(
     inv = InstanceInventory(cfg.state_db_path)
     count = inv.rescan(cfg)
     print(f"Rescan complete: {count} instances")
+    actual = identity_readback(
+        plan.webroot,
+        instance_uid=plan.instance_uid,
+        instance_code=plan.instance_code,
+        primary_domain=plan.domain,
+    )
     return {
         "status": "ok",
         "domain": plan.domain,
@@ -1100,6 +1154,16 @@ def install_from_image(
         "mail_mode": "own_host" if own_mail or mail_profile_id else "external",
         "mail_profile_id": str(mail_profile_id or ""),
         "instances": count,
+        "instance_uid": actual["instance_uid"] or None,
+        "instance_code": actual["instance_code"] or None,
+        "actual_state": {
+            "instance_uid": actual["instance_uid"] or None,
+            "instance_code": actual["instance_code"] or None,
+            "root": actual["root"],
+            "webroot": str(plan.webroot),
+            "db_name": plan.db_name,
+            "db_user": plan.db_user,
+        },
         "runtime_warmup": warmup,
         "runtime_verification": runtime_verification,
     }

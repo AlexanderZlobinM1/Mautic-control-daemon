@@ -88,6 +88,7 @@ _MYSQL_WARN_THROTTLE_SEC = 300
 _DEFAULT_STATE_PUSH_TIMEOUT_SEC = 20
 _CAMPAIGN_NATIVE_FALLBACK_RETENTION_SEC = 30 * 86400
 _CAMPAIGN_NATIVE_FALLBACK_MAX_EVENTS = 5000
+_INSTANCE_CHANGE_EVENT_TYPE = "instance_change_event"
 
 
 def _galera_routing_eligibility(galera: dict[str, Any]) -> tuple[bool, str]:
@@ -668,6 +669,241 @@ def _migrate_legacy_profile_event_file(conn: sqlite3.Connection, cfg: AgentConfi
             pass
 
 
+def _queue_instance_change_event(cfg: AgentConfig, payload: dict[str, Any]) -> None:
+    event_id = str(payload.get("event_id") or "").strip() or uuid.uuid4().hex
+    payload = dict(payload)
+    payload["event_id"] = event_id
+    payload_json = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+    now_ts = time.time()
+    mysql_ok, mysql_msg = queue_outbound_event_mysql(
+        cfg,
+        event_type=_INSTANCE_CHANGE_EVENT_TYPE,
+        event_id=event_id,
+        payload_json=payload_json,
+        created_at=now_ts,
+    )
+    if mysql_ok:
+        return
+    if mysql_msg not in {"mysql_state_disabled"} and _should_log_mysql_warning(
+        cfg, bucket="change_event_queue", msg=mysql_msg
+    ):
+        logging.warning("instance change event mysql queue failed, fallback to sqlite: %s", mysql_msg)
+    conn = _state_conn(cfg)
+    try:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO outbound_events
+            (event_id, event_type, payload_json, status, try_count, created_at)
+            VALUES (?, ?, ?, 'pending', 0, ?)
+            """,
+            (event_id, _INSTANCE_CHANGE_EVENT_TYPE, payload_json, now_ts),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _read_pending_instance_change_events(cfg: AgentConfig, limit: int = 50) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    mysql_raw, mysql_msg = read_pending_outbound_event_mysql(
+        cfg, event_type=_INSTANCE_CHANGE_EVENT_TYPE
+    )
+    if isinstance(mysql_raw, dict):
+        out.append(mysql_raw)
+    elif mysql_msg not in {"mysql_state_disabled", "empty"} and _should_log_mysql_warning(
+        cfg, bucket="change_event_read", msg=mysql_msg
+    ):
+        logging.warning("instance change event mysql read failed, using sqlite: %s", mysql_msg)
+    conn = _state_conn(cfg)
+    try:
+        rows = conn.execute(
+            """
+            SELECT event_id, payload_json
+            FROM outbound_events
+            WHERE event_type=? AND status IN ('pending','failed')
+            ORDER BY created_at ASC
+            LIMIT ?
+            """,
+            (_INSTANCE_CHANGE_EVENT_TYPE, max(1, min(100, int(limit or 50)))),
+        ).fetchall()
+    finally:
+        conn.close()
+    for row in rows:
+        try:
+            raw = json.loads(str(row["payload_json"] or "{}"))
+        except Exception:
+            continue
+        if isinstance(raw, dict) and str(raw.get("event_id") or "").strip() not in {
+            str(item.get("event_id") or "").strip() for item in out
+        }:
+            out.append(raw)
+    return out[: max(1, min(100, int(limit or 50)))]
+
+
+def _clear_instance_change_event(
+    cfg: AgentConfig,
+    *,
+    event_id: str,
+    delivered: bool,
+    error: str | None = None,
+) -> None:
+    target = str(event_id or "").strip()
+    if not target:
+        return
+    mark_outbound_event_mysql(cfg, event_id=target, delivered=delivered, error=error)
+    conn = _state_conn(cfg)
+    now_ts = time.time()
+    try:
+        if delivered:
+            conn.execute(
+                "UPDATE outbound_events SET status='sent', sent_at=?, last_try_at=?, last_error=NULL WHERE event_id=?",
+                (now_ts, now_ts, target),
+            )
+        else:
+            conn.execute(
+                "UPDATE outbound_events SET status='failed', try_count=try_count+1, last_try_at=?, last_error=? WHERE event_id=?",
+                (now_ts, (error or "delivery_failed")[:2000], target),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _observe_mautic_version_change(
+    cfg: AgentConfig,
+    *,
+    instance_uid: str,
+    root: str,
+    version: str,
+    now_ts: float,
+) -> None:
+    value = str(version or "").strip()
+    uid = str(instance_uid or "").strip()
+    if not uid or not root or not value or value == "-":
+        return
+    conn = _state_conn(cfg)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mautic_version_observations (
+              instance_uid TEXT PRIMARY KEY,
+              root TEXT NOT NULL,
+              version TEXT NOT NULL,
+              observed_at REAL NOT NULL
+            )
+            """
+        )
+        row = conn.execute(
+            "SELECT root, version FROM mautic_version_observations WHERE instance_uid=?",
+            (uid,),
+        ).fetchone()
+        previous = str(row["version"] or "").strip() if row is not None else ""
+        conn.execute(
+            """
+            INSERT INTO mautic_version_observations(instance_uid, root, version, observed_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(instance_uid) DO UPDATE SET root=excluded.root, version=excluded.version, observed_at=excluded.observed_at
+            """,
+            (uid, str(root), value, float(now_ts)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    if previous and previous != value:
+        _queue_mautic_version_change_event(
+            cfg,
+            instance_uid=uid,
+            root=str(root),
+            before=previous,
+            after=value,
+            actor="external",
+            source="mautic_runtime_sync",
+            now_ts=now_ts,
+        )
+
+
+def _queue_mautic_version_change_event(
+    cfg: AgentConfig,
+    *,
+    instance_uid: str,
+    root: str,
+    before: str,
+    after: str,
+    actor: str,
+    source: str,
+    now_ts: float,
+) -> None:
+    if not before or not after or before == after:
+        return
+    _queue_instance_change_event(
+        cfg,
+        {
+            "schema": "mcd-instance-change-event-v1",
+            "event_id": uuid.uuid4().hex,
+            "event_type": "mautic_version_changed",
+            "instance_uid": instance_uid,
+            "root": root,
+            "before": before,
+            "after": after,
+            "actor": actor,
+            "source": source,
+            "timestamp": datetime.fromtimestamp(now_ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        },
+    )
+
+
+def record_mautic_version_change(
+    cfg: AgentConfig,
+    *,
+    instance_uid: str,
+    root: str,
+    before: str,
+    after: str,
+    actor: str,
+    source: str,
+    now_ts: float | None = None,
+) -> None:
+    """Record a known MCD/MCC version change before the next state poll."""
+    uid = str(instance_uid or "").strip()
+    root_value = str(root or "").strip()
+    before_value = str(before or "").strip()
+    after_value = str(after or "").strip()
+    if not uid or not root_value or not before_value or not after_value or before_value == after_value:
+        return
+    ts = float(now_ts or time.time())
+    conn = _state_conn(cfg)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mautic_version_observations (
+              instance_uid TEXT PRIMARY KEY,
+              root TEXT NOT NULL,
+              version TEXT NOT NULL,
+              observed_at REAL NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO mautic_version_observations(instance_uid, root, version, observed_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(instance_uid) DO UPDATE SET root=excluded.root, version=excluded.version, observed_at=excluded.observed_at
+            """,
+            (uid, root_value, after_value, ts),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    _queue_mautic_version_change_event(
+        cfg,
+        instance_uid=uid,
+        root=root_value,
+        before=before_value,
+        after=after_value,
+        actor=str(actor or "mcd").strip() or "mcd",
+        source=str(source or "mautic_upgrade").strip() or "mautic_upgrade",
+        now_ts=ts,
+    )
 def queue_profile_event(
     cfg: AgentConfig,
     *,
@@ -2585,21 +2821,30 @@ class MCCStatePusher:
                 install_type=install_type,
                 capabilities=i.runtime_capabilities,
             )
+            observed_mautic_version = collect_mautic_version(
+                i.root,
+                self.cfg.php_bin,
+                console_path=i.console_path,
+                run_as_user=self.cfg.mautic_run_as_user,
+                expected_major=i.mautic_major,
+            )
+            _observe_mautic_version_change(
+                self.cfg,
+                instance_uid=str(i.instance_uid or ""),
+                root=str(i.root or ""),
+                version=observed_mautic_version,
+                now_ts=now_ts,
+            )
             instances.append(
                 {
                     "instance_uid": qualify_instance_uid(i.instance_uid, wire_host_name),
+                    "instance_code": str(getattr(i, "instance_code", None) or "") or None,
                     "name": i.name,
                     "root": i.root,
                     "source": i.source,
                     "domains": list(i.domains or ([] if not i.primary_domain else [i.primary_domain])),
                     "mautic_major": i.mautic_major,
-                    "mautic_version": collect_mautic_version(
-                        i.root,
-                        self.cfg.php_bin,
-                        console_path=i.console_path,
-                        run_as_user=self.cfg.mautic_run_as_user,
-                        expected_major=i.mautic_major,
-                    ),
+                    "mautic_version": observed_mautic_version,
                     "runtime": str(i.runtime or "host").strip().lower() or "host",
                     "install_type": install_type,
                     "runtime_capabilities": release_capabilities(i.runtime, install_type, runtime_profile.capabilities),
@@ -2698,6 +2943,9 @@ class MCCStatePusher:
             payload["signals_collected_at_ts"] = int(self.latest_signals_ts or 0)
         if isinstance(profile_event, dict) and profile_event:
             payload["profile_event"] = profile_event
+        change_events = _read_pending_instance_change_events(self.cfg)
+        if change_events:
+            payload["change_events"] = change_events
         self._store_state_snapshot(payload, now_ts)
         return payload
 
@@ -2862,6 +3110,14 @@ def push_state_now(
                 delivered=bool(ok),
                 error=None if ok else str(msg),
             )
+        for event in payload.get("change_events") or []:
+            if isinstance(event, dict):
+                _clear_instance_change_event(
+                    cfg,
+                    event_id=str(event.get("event_id") or ""),
+                    delivered=bool(ok),
+                    error=None if ok else str(msg),
+                )
         return ok, msg
     finally:
         if owned_runtime_store is not None:
