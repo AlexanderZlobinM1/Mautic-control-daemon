@@ -225,6 +225,7 @@ from mcd_agent.signals import collect_monitor_signals, collect_signals
 from mcd_agent.web_availability import collect_web_availability
 from mcd_agent.state_push import (
     MCCStatePusher,
+    _clear_instance_change_event,
     clear_pending_profile_event,
     log_push_result,
     prune_sent_profile_events,
@@ -24697,6 +24698,8 @@ def run_loop(
             do_push, _changed = pusher.should_push(now, payload_no_ts)
             if pending_profile_event:
                 do_push = True
+            if payload.get("change_events"):
+                do_push = True
             if do_push:
                 ok, msg = pusher.send(payload)
                 log_push_result(ok, msg)
@@ -24709,6 +24712,14 @@ def run_loop(
                         delivered=bool(ok),
                         error=None if ok else str(msg),
                     )
+                for event in payload.get("change_events") or []:
+                    if isinstance(event, dict):
+                        _clear_instance_change_event(
+                            config,
+                            event_id=str(event.get("event_id") or ""),
+                            delivered=bool(ok),
+                            error=None if ok else str(msg),
+                        )
 
         if (
             bool(getattr(config, "mcc_profile_guard_enabled", False))

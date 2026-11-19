@@ -23,6 +23,7 @@ from mcd_agent.install_readiness import collect_mautic_install_readiness
 from mcd_agent.inventory import InstanceInventory, ensure_seeded
 from mcd_agent.localphp import parse_local_php
 from mcd_agent.mautic_image_install import _mysql_admin_base, _mysql_exec, _quote_ident, _quote_sql
+from mcd_agent.mautic_version_cache import read_mautic_version_evidence_read_only
 from mcd_agent.form_embed import render_form_embed_location
 from mcd_agent.models import DBConfig
 from mcd_agent.models import MauticInstall
@@ -38,6 +39,13 @@ from mcd_agent.runtime_descriptor import descriptor_for_root
 from mcd_agent.runtime_matrix import build_runtime_profile
 from mcd_agent.source_operation import stable_source_operation
 from mcd_agent.instance_uid import instance_uid_matches
+from mcd_agent.instance_identity import (
+    identity_readback,
+    instance_path_names,
+    validate_instance_code,
+    validate_mcc_instance_uid,
+    write_instance_identity,
+)
 
 
 _MIN_TARGET_HEADROOM_BYTES = 5 * 1024 * 1024 * 1024
@@ -135,9 +143,12 @@ def _path_is_below(path: Path, parent: Path) -> bool:
         return False
 
 
-def _canonical_migration_target(domains: list[str]) -> Path | None:
+def _canonical_migration_target(domains: list[str], instance_code: str | None = None) -> Path | None:
     if not domains:
         return None
+    if instance_code:
+        code = validate_instance_code(instance_code)
+        return Path(instance_path_names(domains[0], code)["webroot"])
     return MIGRATION_ROOT / domains[0] / "public_html"
 
 
@@ -178,7 +189,22 @@ def _archive_migration_target(target: Path) -> Path:
     return archive
 
 
-def _write_migration_target_marker(target: Path, *, domains: list[str], source_root: str = "") -> Path:
+def _write_migration_target_marker(
+    target: Path,
+    *,
+    domains: list[str],
+    source_root: str = "",
+    instance_uid: str | None = None,
+    instance_code: str | None = None,
+) -> Path:
+    identity: dict[str, str] = {}
+    if instance_uid or instance_code:
+        if not instance_uid or not instance_code:
+            raise RuntimeError("instance_uid and instance_code must be supplied together by MCC")
+        identity = {
+            "instance_uid": validate_mcc_instance_uid(instance_uid),
+            "instance_code": validate_instance_code(instance_code),
+        }
     marker = _migration_target_marker(target)
     marker.write_text(
         json.dumps(
@@ -188,6 +214,7 @@ def _write_migration_target_marker(target: Path, *, domains: list[str], source_r
                 "domains": domains,
                 "source_root": source_root,
                 "created_at_utc": _utc_now(),
+                **identity,
             },
             ensure_ascii=False,
             indent=2,
@@ -223,15 +250,24 @@ def _prepare_migration_target(
     domains: list[str],
     claim: bool,
     source_root: str = "",
+    instance_uid: str | None = None,
+    instance_code: str | None = None,
 ) -> Path | None:
     """Validate a new target and claim only MCD-owned unfinished residue."""
     managed = _path_is_below(target, MIGRATION_ROOT)
-    canonical = _canonical_migration_target(domains)
+    if bool(instance_uid) != bool(instance_code):
+        raise RuntimeError("instance_uid and instance_code must be supplied together by MCC")
+    if instance_uid:
+        validate_mcc_instance_uid(instance_uid)
+    if instance_code:
+        validate_instance_code(instance_code)
+    canonical = _canonical_migration_target(domains, instance_code)
+    canonical_label = "canonical MCC identity path" if instance_code else "canonical full-FQDN path"
     if managed and canonical is None:
         raise RuntimeError("new /var/www migration target requires a domain")
     if managed and not target.exists() and canonical is not None and target != canonical:
         raise RuntimeError(
-            f"new migration target must use canonical full-FQDN path {canonical}, got {target}"
+            f"new migration target must use {canonical_label} {canonical}, got {target}"
         )
 
     archived: Path | None = None
@@ -245,14 +281,20 @@ def _prepare_migration_target(
         else:
             if managed and canonical is not None and target != canonical:
                 raise RuntimeError(
-                    f"new migration target must use canonical full-FQDN path {canonical}, got {target}"
+                    f"new migration target must use {canonical_label} {canonical}, got {target}"
                 )
             target.rmdir()
 
     if claim:
         target.mkdir(parents=True, exist_ok=True)
         if managed:
-            _write_migration_target_marker(target, domains=domains, source_root=source_root)
+            _write_migration_target_marker(
+                target,
+                domains=domains,
+                source_root=source_root,
+                instance_uid=instance_uid,
+                instance_code=instance_code,
+            )
     return archived
 
 
@@ -574,11 +616,21 @@ def preflight_target_relay(
     install_type: str | None = None,
     image_ref: str | None = None,
     domains_json: str = "[]",
+    instance_uid: str | None = None,
+    instance_code: str | None = None,
 ) -> dict[str, Any]:
     target = Path(target_root).resolve()
     if not str(target).startswith("/"):
         raise RuntimeError("target root must be absolute")
     domains = _json_domains(domains_json)
+    if bool(instance_uid) != bool(instance_code):
+        raise RuntimeError("instance_uid and instance_code must be supplied together by MCC")
+    if instance_uid:
+        validate_mcc_instance_uid(instance_uid)
+    if instance_code:
+        validate_instance_code(instance_code)
+        identity_names = instance_path_names(domains[0], instance_code) if domains else {}
+        target_db_name = str(target_db_name or identity_names.get("db_name") or "")
     problems: list[str] = []
     cleanup: list[str] = []
     adapter_result: dict[str, Any] = {}
@@ -601,6 +653,8 @@ def preflight_target_relay(
                     "install_type": str(install_type or "unknown").strip().lower() or "unknown",
                     "image_ref": str(image_ref or ""),
                     "domains": _json_domains(domains_json),
+                    "instance_uid": str(instance_uid or ""),
+                    "instance_code": str(instance_code or ""),
                 },
                 timeout_sec=120,
             )
@@ -617,6 +671,8 @@ def preflight_target_relay(
             "target_root": str(target),
             "target_db_name": str(target_db_name or ""),
             "domains": domains,
+            "instance_uid": str(instance_uid or ""),
+            "instance_code": str(instance_code or ""),
             "wipe_target_root": bool(wipe_target_root),
             "wipe_target_db": bool(wipe_target_db),
             "cleanup": cleanup,
@@ -626,7 +682,13 @@ def preflight_target_relay(
         }
     try:
         if _path_is_below(target, MIGRATION_ROOT):
-            archived = _prepare_migration_target(target, domains=domains, claim=False)
+            archived = _prepare_migration_target(
+                target,
+                domains=domains,
+                claim=False,
+                instance_uid=instance_uid,
+                instance_code=instance_code,
+            )
             if archived is not None:
                 cleanup.append(f"target root archived: {target} -> {archived}")
         elif target.exists() and any(target.iterdir()):
@@ -654,6 +716,14 @@ def preflight_target_relay(
         "target_root": str(target),
         "target_db_name": str(target_db_name or ""),
         "domains": domains,
+        "instance_uid": str(instance_uid or ""),
+        "instance_code": str(instance_code or ""),
+        "identity": identity_readback(
+            target,
+            instance_uid=instance_uid,
+            instance_code=instance_code,
+            primary_domain=domains[0] if domains else None,
+        ),
         "wipe_target_root": bool(wipe_target_root),
         "wipe_target_db": bool(wipe_target_db),
         "cleanup": cleanup,
@@ -712,14 +782,28 @@ def receive_target_files(
     input_stream: Any,
     wipe_target: bool = False,
     domains_json: str = "[]",
+    instance_uid: str | None = None,
+    instance_code: str | None = None,
 ) -> dict[str, Any]:
     target = Path(target_root).resolve()
     if not str(target).startswith("/"):
         raise RuntimeError("target root must be absolute")
     domains = _json_domains(domains_json)
+    if bool(instance_uid) != bool(instance_code):
+        raise RuntimeError("instance_uid and instance_code must be supplied together by MCC")
+    if instance_uid:
+        validate_mcc_instance_uid(instance_uid)
+    if instance_code:
+        validate_instance_code(instance_code)
     archived: Path | None = None
     if _path_is_below(target, MIGRATION_ROOT):
-        archived = _prepare_migration_target(target, domains=domains, claim=True)
+        archived = _prepare_migration_target(
+            target,
+            domains=domains,
+            claim=True,
+            instance_uid=instance_uid,
+            instance_code=instance_code,
+        )
     else:
         if wipe_target and target.exists():
             shutil.rmtree(target)
@@ -746,12 +830,27 @@ def receive_target_files(
     if proc.returncode != 0:
         out = ((out_b or b"") + (err_b or b"")).decode("utf-8", errors="replace").strip()
         raise RuntimeError("target file extraction failed: " + out)
+    if instance_uid and instance_code:
+        write_instance_identity(
+            target,
+            instance_uid=instance_uid,
+            instance_code=instance_code,
+            primary_domain=domains[0] if domains else None,
+        )
     return {
         "schema": "mcd-instance-migration-target-files-v1",
         "ok": True,
         "target_root": str(target),
         "wipe_target": bool(wipe_target),
         "target_archive_root": str(archived) if archived is not None else "",
+        "instance_uid": str(instance_uid or ""),
+        "instance_code": str(instance_code or ""),
+        "identity": identity_readback(
+            target,
+            instance_uid=instance_uid,
+            instance_code=instance_code,
+            primary_domain=domains[0] if domains else None,
+        ),
     }
 
 
@@ -991,9 +1090,20 @@ def finalize_target_relay(
     runtime: str | None = None,
     image_ref: str | None = None,
     install_type: str | None = None,
+    instance_uid: str | None = None,
+    instance_code: str | None = None,
 ) -> dict[str, Any]:
     target = Path(target_root).resolve()
     domains = _json_domains(domains_json)
+    if bool(instance_uid) != bool(instance_code):
+        raise RuntimeError("instance_uid and instance_code must be supplied together by MCC")
+    if instance_uid:
+        validate_mcc_instance_uid(instance_uid)
+    if instance_code:
+        validate_instance_code(instance_code)
+        identity_names = instance_path_names(domains[0], instance_code) if domains else {}
+        target_db_name = str(target_db_name or identity_names.get("db_name") or "")
+        target_db_user = str(target_db_user or identity_names.get("db_user") or "")
     target_db = _target_db_from_direct_values(name=target_db_name, user=target_db_user, password=target_db_password)
     if runtime_adapter:
         result = run_runtime_adapter(
@@ -1008,11 +1118,31 @@ def finalize_target_relay(
                 "runtime": str(runtime or "host").strip().lower() or "host",
                 "image_ref": str(image_ref or ""),
                 "install_type": str(install_type or "unknown"),
+                "instance_uid": str(instance_uid or ""),
+                "instance_code": str(instance_code or ""),
             },
             timeout_sec=1800,
         )
         if bool(result.get("ok")) and bool(result.get("catchup_ok", True)):
+            if instance_uid and instance_code:
+                write_instance_identity(
+                    target,
+                    instance_uid=instance_uid,
+                    instance_code=instance_code,
+                    primary_domain=domains[0] if domains else None,
+                )
             _finish_migration_target(target)
+            result.setdefault("instance_uid", str(instance_uid or ""))
+            result.setdefault("instance_code", str(instance_code or ""))
+            result.setdefault(
+                "identity",
+                identity_readback(
+                    target,
+                    instance_uid=instance_uid,
+                    instance_code=instance_code,
+                    primary_domain=domains[0] if domains else None,
+                ),
+            )
         return result
     cert_live = _matching_live_certificate(domains, require_current=True)
     if cert_live is None:
@@ -1028,6 +1158,13 @@ def finalize_target_relay(
     _run_checked(["chown", "-R", "www-data:www-data", str(target)], timeout_sec=1800)
     print("progress: 94 target healthcheck")
     health = _target_healthcheck(target)
+    if instance_uid and instance_code:
+        write_instance_identity(
+            target,
+            instance_uid=instance_uid,
+            instance_code=instance_code,
+            primary_domain=domains[0] if domains else None,
+        )
     inv = InstanceInventory(config.state_db_path)
     instances = inv.rescan(config)
     _finish_migration_target(target)
@@ -1040,6 +1177,14 @@ def finalize_target_relay(
         "domains": domains,
         "target_db_name": target_db.name,
         "target_db_user": target_db.user,
+        "instance_uid": str(instance_uid or ""),
+        "instance_code": str(instance_code or ""),
+        "identity": identity_readback(
+            target,
+            instance_uid=instance_uid,
+            instance_code=instance_code,
+            primary_domain=domains[0] if domains else None,
+        ),
         "nginx_vhost": site,
         "tls_certificate": str(cert_live),
         "healthcheck_tail": health,
@@ -1228,6 +1373,8 @@ def run_target_pull_migration(
     target_db_user: str | None = None,
     target_db_password: str | None = None,
     php_version: str | None = None,
+    instance_uid: str | None = None,
+    instance_code: str | None = None,
 ) -> dict[str, Any]:
     if os.geteuid() != 0:
         raise RuntimeError("target migration runner must run as root")
@@ -1242,11 +1389,22 @@ def run_target_pull_migration(
     if not str(target).startswith("/"):
         raise RuntimeError("target root must be absolute")
     domains = _json_domains(domains_json)
+    if bool(instance_uid) != bool(instance_code):
+        raise RuntimeError("instance_uid and instance_code must be supplied together by MCC")
+    if instance_uid:
+        validate_mcc_instance_uid(instance_uid)
+    if instance_code:
+        validate_instance_code(instance_code)
+        identity_names = instance_path_names(domains[0], instance_code) if domains else {}
+        target_db_name = str(target_db_name or identity_names.get("db_name") or "") or None
+        target_db_user = str(target_db_user or identity_names.get("db_user") or "") or None
     target_archive = _prepare_migration_target(
         target,
         domains=domains,
         claim=True,
         source_root=source_root_clean,
+        instance_uid=instance_uid,
+        instance_code=instance_code,
     ) if _path_is_below(target, MIGRATION_ROOT) else None
     if not _path_is_below(target, MIGRATION_ROOT) and target.exists() and any(target.iterdir()):
         raise RuntimeError(f"target root already exists and is not empty: {target}")
@@ -1262,6 +1420,14 @@ def run_target_pull_migration(
         "domains": domains,
         "target_db_name": str(target_db_name or ""),
         "target_db_user": str(target_db_user or ""),
+        "instance_uid": str(instance_uid or ""),
+        "instance_code": str(instance_code or ""),
+        "identity": identity_readback(
+            target,
+            instance_uid=instance_uid,
+            instance_code=instance_code,
+            primary_domain=domains[0] if domains else None,
+        ),
         "steps": [],
     }
 
@@ -1324,6 +1490,13 @@ def run_target_pull_migration(
             delete=True,
             excludes=exclusions,
         )
+        if instance_uid and instance_code:
+            write_instance_identity(
+                target,
+                instance_uid=instance_uid,
+                instance_code=instance_code,
+                primary_domain=domains[0] if domains else None,
+            )
         source_db_port = int(copied_source_db.port or 3306)
 
         print("progress: 72 source DB tunnel")
@@ -1387,6 +1560,12 @@ def run_target_pull_migration(
                 "letsencrypt_copied": copied_certs,
                 "healthcheck_tail": health,
                 "instances": instances,
+                "identity": identity_readback(
+                    target,
+                    instance_uid=instance_uid,
+                    instance_code=instance_code,
+                    primary_domain=domains[0] if domains else None,
+                ),
             }
         )
         _finish_migration_target(target)
@@ -1596,17 +1775,21 @@ def collect_source_probe(config: AgentConfig, selector: str | None = None) -> di
         install_type=install_type,
         capabilities=inst.runtime_capabilities,
     )
+    version_evidence = read_mautic_version_evidence_read_only(str(root))
     payload: dict[str, Any] = {
         "schema": "mcd-instance-migration-source-probe-v1",
         "ok": True,
         "checked_at_utc": _utc_now(),
         "instance": {
             "instance_uid": inst.instance_uid,
+            "instance_code": str(getattr(inst, "instance_code", None) or "") or None,
             "name": inst.name,
             "root": str(root),
             "primary_domain": inst.primary_domain or "",
             "domains": list(inst.domains or []),
             "mautic_major": inst.mautic_major,
+            "mautic_version": version_evidence.get("version"),
+            "mautic_version_source": version_evidence.get("source"),
             "source": inst.source,
             "runtime": runtime,
             "install_type": install_type,

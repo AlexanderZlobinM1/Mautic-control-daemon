@@ -12,6 +12,14 @@ import tempfile
 from typing import Any
 
 from mcd_agent.config import AgentConfig
+from mcd_agent.instance_identity import (
+    identity_readback,
+    instance_path_names,
+    read_instance_identity,
+    validate_instance_code,
+    validate_mcc_instance_uid,
+    write_instance_identity,
+)
 from mcd_agent.mautic_image_install import _artifact_url, _download, _run, _safe_extract
 from mcd_agent.nginx_baseline import (
     _nginx_supports_http2_directive,
@@ -40,6 +48,8 @@ class ComposerMovePlan:
     php_version: str
     site_available: Path
     site_enabled: Path | None
+    instance_uid: str | None = None
+    instance_code: str | None = None
 
 
 def _domain(raw: str) -> str:
@@ -69,8 +79,10 @@ def _php_version_for_major(major: int) -> str:
     return "8.4" if int(major or 0) >= 7 else "8.3"
 
 
-def _target_root(domain: str) -> Path:
+def _target_root(domain: str, instance_code: str | None = None) -> Path:
     """Return the one canonical target path for a new Composer operation."""
+    if instance_code:
+        return Path(instance_path_names(_domain(domain), instance_code)["webroot"])
     return COMPOSER_ROOT / _domain(domain) / "public_html"
 
 
@@ -563,6 +575,8 @@ def move_zip_to_composer(
     domain: str,
     mautic_major: int,
     yes: bool = False,
+    instance_uid: str | None = None,
+    instance_code: str | None = None,
 ) -> dict[str, Any]:
     if not yes:
         raise RuntimeError("--yes is required")
@@ -570,9 +584,17 @@ def move_zip_to_composer(
         raise RuntimeError("mcc.token is not configured")
     source_root = Path(root).resolve()
     d = _domain(domain)
+    source_identity = read_instance_identity(source_root) or {}
+    uid = str(instance_uid or source_identity.get("instance_uid") or "").strip() or None
+    code = str(instance_code or source_identity.get("instance_code") or "").strip() or None
+    if bool(uid) != bool(code):
+        raise RuntimeError("instance_uid and instance_code must be supplied together by MCC")
+    if uid:
+        uid = validate_mcc_instance_uid(uid)
+        code = validate_instance_code(code)
     image_ref = _image_ref_for_major(int(mautic_major or 0))
     php_version = _php_version_for_major(int(mautic_major or 0))
-    target_root = _target_root(d)
+    target_root = _target_root(d, code)
     site_available, site_enabled = _find_site(d, source_root)
     plan = ComposerMovePlan(
         source_root=source_root,
@@ -583,6 +605,8 @@ def move_zip_to_composer(
         php_version=php_version,
         site_available=site_available,
         site_enabled=site_enabled,
+        instance_uid=uid,
+        instance_code=code,
     )
     print(f"Preflight: {d} {source_root} -> {target_root} via {image_ref}")
     problems = _preflight(plan)
@@ -614,6 +638,13 @@ def move_zip_to_composer(
                 _safe_extract(tf, staging_root)
             print("Copying mutable state")
             copied = _copy_mutable_state(plan.source_root, staging_root)
+            if plan.instance_uid and plan.instance_code:
+                write_instance_identity(
+                    staging_root,
+                    instance_uid=plan.instance_uid,
+                    instance_code=plan.instance_code,
+                    primary_domain=plan.domain,
+                )
             _write_composer_target_marker(staging_root, domain=plan.domain, source_root=plan.source_root)
             print("Fixing permissions")
             _run(["chown", "-R", "www-data:www-data", str(staging_parent)], timeout_sec=600)
@@ -623,6 +654,13 @@ def move_zip_to_composer(
             _run(["chown", "-R", "www-data:www-data", str(staging_root / "var"), str(staging_root / "docroot" / "media" / "files")], timeout_sec=300)
             staging_root.rename(plan.target_root)
             path_patched = _patch_paths_in_local_php(plan.target_root, plan.source_root)
+            if plan.instance_uid and plan.instance_code:
+                write_instance_identity(
+                    plan.target_root,
+                    instance_uid=plan.instance_uid,
+                    instance_code=plan.instance_code,
+                    primary_domain=plan.domain,
+                )
             _run(["chown", "-R", "www-data:www-data", str(plan.target_root)], timeout_sec=600)
             print("Checking Composer target health")
             healthcheck = _composer_target_healthcheck(plan)
@@ -656,6 +694,14 @@ def move_zip_to_composer(
         "source_root": str(plan.source_root),
         "source_archive_root": str(source_archive) if source_archive is not None else "",
         "target_root": str(plan.target_root),
+        "instance_uid": plan.instance_uid,
+        "instance_code": plan.instance_code,
+        "identity": identity_readback(
+            plan.target_root,
+            instance_uid=plan.instance_uid,
+            instance_code=plan.instance_code,
+            primary_domain=plan.domain,
+        ),
         "target_archive_root": str(target_archive) if target_archive is not None else "",
         "nginx_root": str(plan.nginx_root),
         "image_ref": plan.image_ref,
