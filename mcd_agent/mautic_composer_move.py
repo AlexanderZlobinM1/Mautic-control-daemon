@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 import json
 import os
@@ -21,9 +21,11 @@ from mcd_agent.nginx_baseline import (
 from mcd_agent.mode import _read_crontab, _write_crontab
 
 RETIRED_INSTANCE_MARKER = ".mcd-retired-after-composer-move"
+COMPOSER_TARGET_MARKER = ".mcd-composer-move-target.json"
 NGINX_SITES_AVAILABLE = Path("/etc/nginx/sites-available")
 NGINX_SITES_ENABLED = Path("/etc/nginx/sites-enabled")
 COMPOSER_MOVE_CRON_MARKER = "MCD_COMPOSER_MOVE"
+COMPOSER_ROOT = Path("/var/www")
 _MAX_CRON_WRAPPER_BYTES = 128 * 1024
 _ABSOLUTE_PATH_RE = re.compile(r"(?<![\w./-])(/[A-Za-z0-9_@%+=:,./-]+)")
 
@@ -68,18 +70,87 @@ def _php_version_for_major(major: int) -> str:
 
 
 def _target_root(domain: str) -> Path:
-    short = _short(domain)
-    base = Path("/var/www") / short / "public_html"
-    if not base.exists() and not base.parent.exists():
-        return base
-    prefixed = Path("/var/www") / f"composer-{short}" / "public_html"
-    if not prefixed.exists() and not prefixed.parent.exists():
-        return prefixed
-    for idx in range(2, 100):
-        candidate = Path("/var/www") / f"composer-{short}-{idx}" / "public_html"
-        if not candidate.exists() and not candidate.parent.exists():
-            return candidate
-    raise RuntimeError(f"no free target root found for {domain}")
+    """Return the one canonical target path for a new Composer operation."""
+    return COMPOSER_ROOT / _domain(domain) / "public_html"
+
+
+def _utc_archive_path(path: Path, *, now: datetime | None = None) -> Path:
+    stamp = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    candidate = path.with_name(f"{stamp}-{path.name}")
+    index = 2
+    while candidate.exists():
+        candidate = path.with_name(f"{stamp}-{path.name}-{index}")
+        index += 1
+    return candidate
+
+
+def _write_composer_target_marker(target_root: Path, *, domain: str, source_root: Path) -> Path:
+    marker = target_root / COMPOSER_TARGET_MARKER
+    marker.write_text(
+        json.dumps(
+            {
+                "schema": "mcd-composer-target-ownership-v1",
+                "state": "in_progress",
+                "domain": domain,
+                "source_root": str(source_root),
+                "created_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return marker
+
+
+def _archive_existing_composer_target(target_root: Path) -> Path | None:
+    """Archive only a target proven to be an unfinished MCD Composer operation."""
+    if not target_root.exists():
+        return None
+    if target_root.is_symlink() or not target_root.is_dir():
+        raise RuntimeError(f"canonical target is occupied by a non-directory: {target_root}")
+    marker = target_root / COMPOSER_TARGET_MARKER
+    if not marker.exists():
+        if any(target_root.iterdir()):
+            raise RuntimeError(
+                f"canonical target is occupied by a live or foreign instance: {target_root}"
+            )
+        target_root.rmdir()
+        return None
+    try:
+        marker_data = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        raise RuntimeError(f"canonical target ownership marker is invalid: {target_root}")
+    if not isinstance(marker_data, dict) or marker_data.get("state") not in {"in_progress", "failed"}:
+        raise RuntimeError(f"canonical target is already active or foreign: {target_root}")
+    archive = _utc_archive_path(target_root)
+    target_root.rename(archive)
+    return archive
+
+
+def _set_composer_target_state(target_root: Path, state: str) -> None:
+    marker = target_root / COMPOSER_TARGET_MARKER
+    data = json.loads(marker.read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or data.get("schema") != "mcd-composer-target-ownership-v1":
+        raise RuntimeError(f"Composer target ownership marker is invalid: {marker}")
+    data["state"] = state
+    data["updated_at_utc"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    marker.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _archive_source_root(source_root: Path) -> Path:
+    """Archive the migrated source without touching any unrelated sibling."""
+    if not source_root.exists() or not source_root.is_dir():
+        raise RuntimeError(f"source root disappeared before archive: {source_root}")
+    parent = source_root.parent
+    if parent.parent.resolve() == COMPOSER_ROOT.resolve() and parent != COMPOSER_ROOT:
+        archive_parent = _utc_archive_path(parent)
+        parent.rename(archive_parent)
+        return archive_parent / source_root.name
+    archive_root = _utc_archive_path(source_root)
+    source_root.rename(archive_root)
+    return archive_root
 
 
 def _find_site(domain: str, source_root: Path) -> tuple[Path, Path | None]:
@@ -269,6 +340,18 @@ def _write_switched_vhost(plan: ComposerMovePlan) -> dict[str, str]:
     return {"active": str(target_site), "backup": str(backup)}
 
 
+def _external_write_switched_vhost(plan: ComposerMovePlan, *, cfg: Any = None) -> dict[str, str]:
+    """Keep the stable line's existing writer behind the shared operation boundary."""
+    result = _write_switched_vhost(plan)
+    rc, out = _run(["nginx", "-t"], timeout_sec=30)
+    if rc != 0:
+        raise RuntimeError("nginx -t failed: " + out)
+    rc, out = _run(["systemctl", "reload", "nginx"], timeout_sec=30)
+    if rc != 0:
+        raise RuntimeError("nginx reload failed: " + out)
+    return result
+
+
 def _mark_source_root_retired(plan: ComposerMovePlan) -> str:
     marker = plan.source_root / RETIRED_INSTANCE_MARKER
     payload = {
@@ -276,7 +359,7 @@ def _mark_source_root_retired(plan: ComposerMovePlan) -> str:
         "domain": plan.domain,
         "target_root": str(plan.target_root),
         "nginx_root": str(plan.nginx_root),
-        "created_at_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "created_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     marker.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return str(marker)
@@ -450,8 +533,6 @@ def _preflight(plan: ComposerMovePlan) -> list[str]:
         problems.append("must run as root")
     if not plan.source_root.exists():
         problems.append(f"source root does not exist: {plan.source_root}")
-    if plan.target_root.exists() or plan.target_root.parent.exists():
-        problems.append(f"target root already exists: {plan.target_root}")
     if not Path(f"/run/php/php{plan.php_version}-fpm.sock").exists():
         problems.append(f"missing PHP-FPM socket: /run/php/php{plan.php_version}-fpm.sock")
     for cmd in ("tar", "nginx"):
@@ -460,6 +541,19 @@ def _preflight(plan: ComposerMovePlan) -> list[str]:
     if not str(plan.image_ref or "").strip():
         problems.append("image_ref is required")
     return problems
+
+
+def _composer_target_healthcheck(plan: ComposerMovePlan) -> list[str]:
+    console = plan.target_root / "bin" / "console"
+    if not console.exists():
+        raise RuntimeError(f"Composer target console was not found: {console}")
+    rc, output = _run(
+        ["sudo", "-u", "www-data", "php", str(console), "--version"],
+        timeout_sec=600,
+    )
+    if rc != 0:
+        raise RuntimeError(f"Composer target healthcheck failed: {output[-2000:]}")
+    return output.splitlines()[-8:]
 
 
 def move_zip_to_composer(
@@ -497,41 +591,59 @@ def move_zip_to_composer(
             print(f"preflight_error: {p}")
         raise RuntimeError("preflight failed")
 
-    with tempfile.TemporaryDirectory(prefix="mcd-composer-move-") as td:
-        tmp = Path(td)
-        files_tgz = tmp / "files.tar.gz"
+    target_archive: Path | None = None
+    source_archive: Path | None = None
+    source_retired_marker = ""
+    vhost: dict[str, str] = {}
+    healthcheck: list[str] = []
+    staging_parent: Path | None = None
+    download_tmp = Path(tempfile.mkdtemp(prefix="mcd-composer-move-"))
+    try:
+        files_tgz = download_tmp / "files.tar.gz"
         print("Downloading composer skeleton")
         _download(_artifact_url(cfg, image_ref, "files"), str(cfg.mcc_token), files_tgz)
         print("Extracting composer skeleton")
-        plan.target_root.parent.mkdir(parents=True, exist_ok=False)
-        plan.target_root.mkdir(parents=True, exist_ok=False)
+        target_archive = _archive_existing_composer_target(plan.target_root)
+        plan.target_root.parent.mkdir(parents=True, exist_ok=True)
+        staging_parent = Path(tempfile.mkdtemp(prefix=f".mcd-composer-{plan.domain}-", dir=str(COMPOSER_ROOT)))
+        staging_root = staging_parent / "public_html"
+        staging_root.mkdir(parents=True, exist_ok=False)
         cron_migration: dict[str, Any] = {}
         try:
             with tarfile.open(files_tgz, "r:gz") as tf:
-                _safe_extract(tf, plan.target_root)
+                _safe_extract(tf, staging_root)
             print("Copying mutable state")
-            copied = _copy_mutable_state(plan.source_root, plan.target_root)
-            path_patched = _patch_paths_in_local_php(plan.target_root, plan.source_root)
+            copied = _copy_mutable_state(plan.source_root, staging_root)
+            _write_composer_target_marker(staging_root, domain=plan.domain, source_root=plan.source_root)
             print("Fixing permissions")
-            _run(["chown", "-R", "www-data:www-data", str(plan.target_root.parent)], timeout_sec=600)
+            _run(["chown", "-R", "www-data:www-data", str(staging_parent)], timeout_sec=600)
             for rel in ("var/cache", "var/logs", "var/tmp", "docroot/var/cache", "docroot/var/logs"):
-                shutil.rmtree(plan.target_root / rel, ignore_errors=True)
-            runtime_dirs = _ensure_runtime_dirs(plan.target_root)
-            _run(["chown", "-R", "www-data:www-data", str(plan.target_root / "var"), str(plan.target_root / "docroot" / "media" / "files")], timeout_sec=300)
+                shutil.rmtree(staging_root / rel, ignore_errors=True)
+            runtime_dirs = _ensure_runtime_dirs(staging_root)
+            _run(["chown", "-R", "www-data:www-data", str(staging_root / "var"), str(staging_root / "docroot" / "media" / "files")], timeout_sec=300)
+            staging_root.rename(plan.target_root)
+            path_patched = _patch_paths_in_local_php(plan.target_root, plan.source_root)
+            _run(["chown", "-R", "www-data:www-data", str(plan.target_root)], timeout_sec=600)
+            print("Checking Composer target health")
+            healthcheck = _composer_target_healthcheck(plan)
             print("Migrating crontabs to Composer root")
             cron_migration = _migrate_composer_move_crontabs(plan, int(mautic_major or 0))
             print("Switching nginx vhost")
-            vhost = _write_switched_vhost(plan)
-            rc, out = _run(["nginx", "-t"], timeout_sec=30)
-            if rc != 0:
-                raise RuntimeError("nginx -t failed: " + out)
-            _run(["systemctl", "reload", "nginx"], timeout_sec=30)
-            retired_marker = _mark_source_root_retired(plan)
+            vhost = _external_write_switched_vhost(plan, cfg=cfg)
+            _set_composer_target_state(plan.target_root, "committed")
+            print("Archiving migrated source")
+            source_retired_marker = _mark_source_root_retired(plan)
+            source_archive = _archive_source_root(plan.source_root)
+            (plan.target_root / COMPOSER_TARGET_MARKER).unlink(missing_ok=True)
         except Exception:
             if cron_migration:
                 _restore_composer_move_crontabs(cron_migration)
-            shutil.rmtree(plan.target_root.parent, ignore_errors=True)
             raise
+
+    finally:
+        if staging_parent is not None:
+            shutil.rmtree(staging_parent, ignore_errors=True)
+        shutil.rmtree(download_tmp, ignore_errors=True)
 
     from mcd_agent.inventory import InstanceInventory
 
@@ -542,16 +654,19 @@ def move_zip_to_composer(
         "status": "ok",
         "domain": plan.domain,
         "source_root": str(plan.source_root),
+        "source_archive_root": str(source_archive) if source_archive is not None else "",
         "target_root": str(plan.target_root),
+        "target_archive_root": str(target_archive) if target_archive is not None else "",
         "nginx_root": str(plan.nginx_root),
         "image_ref": plan.image_ref,
         "php_version": plan.php_version,
         "copied": copied,
         "local_php_path_patched": path_patched,
+        "healthcheck_tail": healthcheck,
         "runtime_dirs": runtime_dirs,
         "cron_migration": cron_migration.get("users", {}),
         "cron_wrapper_migration": cron_migration.get("wrappers", {}),
-        "source_retired_marker": retired_marker,
+        "source_retired_marker": str(Path(source_archive or plan.source_root) / RETIRED_INSTANCE_MARKER),
         "vhost": vhost,
         "instances": count,
     }

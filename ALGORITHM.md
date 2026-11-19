@@ -2383,6 +2383,20 @@ is implemented and accepted, this section is a future contract and does not
 change the current verified runtime-package release path.
 
 
+### Migration target paths and Composer move
+
+Новая операция миграции использует полный FQDN в target-пути:
+`/var/www/<full-domain>/public_html`. Старые каталоги не переименовываются
+задним числом. Остаток незавершённой MCD-операции определяется только по
+ownership-маркеру этой операции, переносится в архив с UTC-префиксом и не
+заменяет живой или чужой каталог без такого доказательства.
+
+ZIP→Composer сначала собирается во временном target, затем проходит проверку
+запуска Mautic и штатное переключение web-конфигурации. После успешного
+переключения исходный ZIP-каталог помечается и переименовывается в UTC-архив,
+а Composer остаётся на каноническом FQDN-пути. Host-specific workaround в этот
+алгоритм не входит.
+
 ## Shared 1.6 / 1.7 hotfix invariants (2026-11-01)
 
 An explicitly selected Dev policy stays Dev, including an empty-channel response;
