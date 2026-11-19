@@ -1,3 +1,12 @@
+## Unreleased
+
+- Keep MCC-issued identity tuples authoritative during inventory rescan: a
+  legacy discovery result cannot replace an existing instance UID/code. State
+  snapshots publish a bare MCC UID with the complete code/database tuple, while
+  legacy installations retain their host-qualified compatibility UID. Source
+  migration probes now include the database user needed to preserve ZIP-to-
+  Composer's existing database identity.
+
 ## 1.6.111 - 2026-11-19
 
 - Make image HTTPS acceptance fail closed on unverified nginx reloads and
