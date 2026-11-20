@@ -1,3 +1,18 @@
+## 1.6.114 - 2026-11-20
+
+- Add a fail-closed exact-artifact deletion contract for MCC-owned instances.
+  A requested artifact must identify one absolute root, one explicit domain,
+  the bare MCC UID and its five-character instance code; local marker and
+  inventory evidence must agree, and duplicate UID registrations are refused.
+- Accept only the canonical managed database/user pairs
+  (`baza_X`/`korisnik_X` or `db_<code>`/`usr_<same-code>`). A mismatched or
+  shared-looking pair stops before any database mutation. Public dry-run plans
+  expose the matched identity and database contract for MCC/Operations review.
+- Keep exact artifact cleanup scoped to the selected root, paired database/user,
+  owned nginx vhost and a dedicated certificate. It does not touch DNS,
+  Cloudflare, mail routing, or another instance; historical host artifacts stay
+  an Operations cleanup task rather than becoming MCD compatibility behavior.
+
 ## 1.6.113 - 2026-11-20
 
 - Use one shared generated-column-safe SQL import filter for image installs and

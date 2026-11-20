@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import os
 import re
@@ -13,6 +13,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from mcd_agent.config import AgentConfig
+from mcd_agent.instance_identity import read_instance_identity, validate_instance_code, validate_mcc_instance_uid
 from mcd_agent.localphp import parse_local_php
 from mcd_agent.models import DBConfig
 
@@ -48,6 +49,10 @@ class InstanceDeletePlan:
     delete_files: bool
     delete_vhost: bool
     delete_db: bool
+    instance_uid: str = ""
+    instance_code: str = ""
+    artifact_scope: bool = False
+    identity_evidence: dict[str, Any] = field(default_factory=dict)
 
 
 def _run(
@@ -377,6 +382,131 @@ def _inventory_db_for_root(cfg: AgentConfig | None, root: Path) -> DBConfig | No
     return None
 
 
+def _inventory_identity_records(cfg: AgentConfig | None) -> list[dict[str, Any]]:
+    state_db_path = str(getattr(cfg, "state_db_path", "") or "").strip()
+    if not state_db_path:
+        return []
+    try:
+        from mcd_agent.inventory import InstanceInventory
+
+        inventory = InstanceInventory(state_db_path)
+        records: list[dict[str, Any]] = []
+        for inst in inventory.list_instances():
+            domains = [str(value).strip().lower().rstrip(".") for value in (getattr(inst, "domains", []) or []) if str(value).strip()]
+            primary = str(getattr(inst, "primary_domain", "") or "").strip().lower().rstrip(".")
+            if primary and primary not in domains:
+                domains.insert(0, primary)
+            records.append(
+                {
+                    "source": "inventory",
+                    "root": str(Path(getattr(inst, "root", "")).resolve(strict=False)),
+                    "instance_uid": str(getattr(inst, "instance_uid", "") or "").strip(),
+                    "instance_code": str(getattr(inst, "instance_code", "") or "").strip(),
+                    "primary_domain": primary,
+                    "domains": domains,
+                }
+            )
+        return records
+    except Exception:
+        return []
+
+
+def _bare_identity_uid(value: object) -> str:
+    return str(value or "").strip().split("@", 1)[0]
+
+
+def _artifact_identity_evidence(
+    *,
+    cfg: AgentConfig | None,
+    root: Path,
+    requested_domains: list[str],
+    site_domain: str,
+    instance_uid: str | None,
+    instance_code: str | None,
+) -> dict[str, Any]:
+    supplied_uid = str(instance_uid or "").strip()
+    supplied_code = str(instance_code or "").strip()
+    if not supplied_uid and not supplied_code:
+        return {"scope": "ordinary", "status": "not_requested"}
+    if not supplied_uid or not supplied_code:
+        raise RuntimeError("instance_uid and instance_code must be supplied together for exact artifact deletion")
+    try:
+        expected_uid = validate_mcc_instance_uid(supplied_uid)
+        expected_code = validate_instance_code(supplied_code)
+    except ValueError as exc:
+        raise RuntimeError(f"invalid exact artifact identity: {exc}") from exc
+
+    explicit_domains = [_clean_domain(value) for value in requested_domains if str(value or "").strip()]
+    explicit_domains = list(dict.fromkeys(value for value in explicit_domains if value))
+    if len(explicit_domains) != 1:
+        raise RuntimeError("exact artifact deletion requires one explicit domain")
+    expected_domain = explicit_domains[0]
+    if site_domain and site_domain != expected_domain:
+        raise RuntimeError(
+            f"exact artifact identity domain mismatch: local.php={site_domain} requested={expected_domain}"
+        )
+
+    target_root = str(root.resolve(strict=False))
+    marker_path = root / ".mcd-instance-identity.json"
+    marker = read_instance_identity(root)
+    if marker_path.exists() and marker is None:
+        raise RuntimeError("exact artifact identity marker is invalid")
+
+    records = _inventory_identity_records(cfg)
+    root_records = [record for record in records if str(record.get("root") or "") == target_root]
+    if len(root_records) > 1:
+        raise RuntimeError("exact artifact identity is ambiguous: multiple inventory rows share the root")
+
+    duplicate_uid_roots = sorted(
+        {
+            str(record.get("root") or "")
+            for record in records
+            if _bare_identity_uid(record.get("instance_uid")) == expected_uid
+            and str(record.get("root") or "") != target_root
+        }
+    )
+    if duplicate_uid_roots:
+        raise RuntimeError(
+            "exact artifact identity is ambiguous: UID is registered on another local root "
+            + ", ".join(duplicate_uid_roots)
+        )
+
+    candidates: list[dict[str, Any]] = []
+    if marker is not None:
+        candidates.append({"source": "marker", **marker})
+    candidates.extend(root_records)
+    if not candidates:
+        raise RuntimeError("exact artifact identity evidence is unavailable")
+
+    sources: list[str] = []
+    for candidate in candidates:
+        candidate_uid = _bare_identity_uid(candidate.get("instance_uid"))
+        candidate_code = str(candidate.get("instance_code") or "").strip()
+        candidate_domain = str(candidate.get("primary_domain") or "").strip().lower().rstrip(".")
+        candidate_domains = {
+            str(value).strip().lower().rstrip(".")
+            for value in (candidate.get("domains") or [])
+            if str(value).strip()
+        }
+        if candidate_uid != expected_uid or candidate_code != expected_code:
+            raise RuntimeError("exact artifact identity evidence does not match requested UID/code")
+        if candidate_domain and candidate_domain != expected_domain:
+            raise RuntimeError("exact artifact identity evidence does not match requested domain")
+        if candidate_domains and expected_domain not in candidate_domains:
+            raise RuntimeError("exact artifact identity domain is not registered for the requested root")
+        sources.append(str(candidate.get("source") or "unknown"))
+
+    return {
+        "scope": "exact-artifact",
+        "status": "matched",
+        "instance_uid": expected_uid,
+        "instance_code": expected_code,
+        "domain": expected_domain,
+        "root": target_root,
+        "sources": list(dict.fromkeys(sources)),
+    }
+
+
 def build_delete_plan(
     *,
     cfg: AgentConfig | None = None,
@@ -386,6 +516,8 @@ def build_delete_plan(
     delete_files: bool = False,
     delete_vhost: bool = False,
     delete_db: bool = False,
+    instance_uid: str | None = None,
+    instance_code: str | None = None,
 ) -> InstanceDeletePlan:
     target_root = _safe_root(root)
     local_php = _local_php_path(target_root)
@@ -403,6 +535,15 @@ def build_delete_plan(
     site_domain = _domain_from_url(local_cfg.get("site_url", ""))
     if site_domain and site_domain not in seen_domains:
         cleaned_domains.append(site_domain)
+
+    identity_evidence = _artifact_identity_evidence(
+        cfg=cfg,
+        root=target_root,
+        requested_domains=list(domains or []),
+        site_domain=site_domain,
+        instance_uid=instance_uid,
+        instance_code=instance_code,
+    )
 
     inventory_db = _inventory_db_for_root(cfg, target_root) if delete_db else None
     explicit_db_name = str(db_name or "").strip()
@@ -435,10 +576,21 @@ def build_delete_plan(
         delete_files=bool(delete_files),
         delete_vhost=bool(delete_vhost),
         delete_db=bool(delete_db),
+        instance_uid=str(instance_uid or "").strip(),
+        instance_code=str(instance_code or "").strip(),
+        artifact_scope=identity_evidence.get("scope") == "exact-artifact",
+        identity_evidence=identity_evidence,
     )
 
 
 def _plan_public(plan: InstanceDeletePlan) -> dict[str, Any]:
+    managed_db_user = _managed_image_db_user(plan.db_name, plan.db_user) if plan.delete_db else ""
+    if not plan.delete_db:
+        db_identity_status = "not_requested"
+    elif managed_db_user:
+        db_identity_status = "matched"
+    else:
+        db_identity_status = "invalid"
     return {
         "root": str(plan.root),
         "local_php": str(plan.local_php) if plan.local_php else "",
@@ -448,6 +600,13 @@ def _plan_public(plan: InstanceDeletePlan) -> dict[str, Any]:
         "db_host": plan.db_host or "localhost",
         "db_port": plan.db_port or "3306",
         "db_user": plan.db_user,
+        "db_identity": {
+            "contract": "mcd-managed-instance-db-v1",
+            "status": db_identity_status,
+            "managed_db_user": managed_db_user,
+        },
+        "artifact_identity": dict(plan.identity_evidence),
+        "artifact_scope": plan.artifact_scope,
         "delete_files": plan.delete_files,
         "delete_vhost": plan.delete_vhost,
         "delete_db": plan.delete_db,
@@ -571,15 +730,34 @@ def _remove_empty_instance_parent(path: Path) -> bool:
 
 
 def _managed_image_db_user(db_name: str, db_user: str) -> str:
+    """Return the user only for an exact MCD-managed database/user pair.
+
+    MCD has two canonical instance layouts in the field: the legacy image
+    layout (``baza_X``/``korisnik_X``) and the MCC identity layout
+    (``db_<instance-code>``/``usr_<instance-code>``).  A database name alone
+    is never enough to authorize user deletion: an empty, mismatched, or
+    shared-looking user fails closed.
+    """
     clean_name = str(db_name or "").strip()
     clean_user = str(db_user or "").strip()
-    if not clean_name.startswith("baza_"):
+    expected = ""
+    if clean_name.startswith("baza_"):
+        suffix = clean_name[len("baza_") :]
+        if not suffix:
+            return ""
+        expected = f"korisnik_{suffix}"
+    elif clean_name.startswith("db_"):
+        code = clean_name[len("db_") :]
+        try:
+            code = validate_instance_code(code)
+        except ValueError:
+            return ""
+        expected = f"usr_{code}"
+    else:
         return ""
-    suffix = clean_name[len("baza_") :]
-    expected = f"korisnik_{suffix}"
-    if not suffix or len(expected) > 64 or not _DB_NAME_RE.match(expected):
+    if not expected or len(expected) > 64 or not _DB_NAME_RE.match(expected):
         return ""
-    if clean_user and clean_user != expected:
+    if clean_user != expected:
         return ""
     return expected
 
@@ -623,6 +801,8 @@ def delete_instance_artifacts(
     delete_db: bool = False,
     yes: bool = False,
     dry_run: bool = False,
+    instance_uid: str | None = None,
+    instance_code: str | None = None,
 ) -> dict[str, Any]:
     if not (delete_files or delete_vhost or delete_db):
         raise RuntimeError("select at least one deletion target")
@@ -634,6 +814,8 @@ def delete_instance_artifacts(
         delete_files=delete_files,
         delete_vhost=delete_vhost,
         delete_db=delete_db,
+        instance_uid=instance_uid,
+        instance_code=instance_code,
     )
     result: dict[str, Any] = {
         "status": "planned" if dry_run else "ok",
@@ -656,9 +838,16 @@ def delete_instance_artifacts(
     if os.geteuid() != 0:
         raise RuntimeError("must run as root")
 
+    managed_db_user = _managed_image_db_user(plan.db_name, plan.db_user) if plan.delete_db else ""
+    if plan.delete_db and not managed_db_user:
+        raise RuntimeError(
+            "refusing database deletion: db_name/db_user must be an exact managed pair "
+            "(baza_X/korisnik_X or db_<5-char-code>/usr_<same-code>)"
+        )
+
     retained_certificates = _remove_nginx_configs_safely(plan, result) if plan.delete_vhost else set()
 
-    if plan.delete_vhost:
+    if plan.delete_vhost and not plan.artifact_scope:
         from mcd_agent.local_mail import disable_local_mail
 
         for domain in plan.domains:
@@ -680,16 +869,14 @@ def delete_instance_artifacts(
             password=plan.db_password,
         )
         result["deleted"]["db"] = True
-        managed_db_user = _managed_image_db_user(plan.db_name, plan.db_user)
-        if managed_db_user:
-            try:
-                _mysql_exec(
-                    f"DROP USER IF EXISTS {_quote_sql(managed_db_user)}@'localhost'",
-                    timeout_sec=120,
-                )
-                result["deleted"]["db_user"] = True
-            except Exception as exc:
-                result["warnings"].append(f"managed database user cleanup failed: {exc}")
+        try:
+            _mysql_exec(
+                f"DROP USER IF EXISTS {_quote_sql(managed_db_user)}@'localhost'",
+                timeout_sec=120,
+            )
+            result["deleted"]["db_user"] = True
+        except Exception as exc:
+            result["warnings"].append(f"managed database user cleanup failed: {exc}")
 
     if plan.delete_vhost:
         print("Deleting nginx vhost")

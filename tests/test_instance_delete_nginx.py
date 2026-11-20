@@ -105,8 +105,10 @@ class InstanceDeleteNginxTests(unittest.TestCase):
         self.assertTrue(instance_parent.exists())
 
     def test_managed_database_user_requires_exact_image_naming(self) -> None:
-        self.assertEqual(instance_delete._managed_image_db_user("baza_shop", ""), "korisnik_shop")
         self.assertEqual(instance_delete._managed_image_db_user("baza_shop", "korisnik_shop"), "korisnik_shop")
+        self.assertEqual(instance_delete._managed_image_db_user("db_00006", "usr_00006"), "usr_00006")
+        self.assertEqual(instance_delete._managed_image_db_user("db_7k4m2", "usr_7k4m2"), "usr_7k4m2")
+        self.assertEqual(instance_delete._managed_image_db_user("baza_shop", ""), "")
         self.assertEqual(instance_delete._managed_image_db_user("baza_shop", "custom_user"), "")
         self.assertEqual(instance_delete._managed_image_db_user("customer_db", "korisnik_customer"), "")
 
