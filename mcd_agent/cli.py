@@ -2222,6 +2222,8 @@ def _build_parser() -> argparse.ArgumentParser:
     inst_delete.add_argument("--root", help="Mautic root or instance uid")
     inst_delete.add_argument("--domain", action="append", help="Expected instance domain (repeatable)")
     inst_delete.add_argument("--db-name", help="Expected database name (defaults to local.php db_name)")
+    inst_delete.add_argument("--instance-uid", help="Exact bare MCC instance UID for artifact-scoped deletion")
+    inst_delete.add_argument("--instance-code", help="Exact five-character MCC instance code for artifact-scoped deletion")
     inst_delete.add_argument("--delete-files", action="store_true", help="Remove the application root directory")
     inst_delete.add_argument("--delete-vhost", action="store_true", help="Remove matching nginx vhost files/symlinks")
     inst_delete.add_argument("--delete-db", action="store_true", help="Drop the local database from local.php/--db-name")
@@ -3262,6 +3264,15 @@ def main() -> int:
         note = maybe_notify_update(cfg)
         if note:
             print(f"NOTICE: {note}")
+        if (str(args.instance_uid or "").strip() or str(args.instance_code or "").strip()) and (
+            not str(args.root or "").strip() or not Path(str(args.root)).is_absolute()
+        ):
+            message = "exact artifact deletion requires an absolute --root together with --instance-uid/--instance-code"
+            if bool(args.json):
+                print(json.dumps({"status": "error", "reason": message}, ensure_ascii=True, indent=2))
+            else:
+                print(message)
+            return 2
         try:
             root = _select_root_for_ops(cfg, args.root, allow_missing_absolute=True)
         except Exception as e:
@@ -3280,6 +3291,8 @@ def main() -> int:
                         delete_db=bool(args.delete_db),
                         yes=bool(args.yes),
                         dry_run=bool(args.dry_run),
+                        instance_uid=args.instance_uid,
+                        instance_code=args.instance_code,
                     )
                 print(json.dumps(payload, ensure_ascii=True, indent=2))
             else:
@@ -3293,6 +3306,8 @@ def main() -> int:
                     delete_db=bool(args.delete_db),
                     yes=bool(args.yes),
                     dry_run=bool(args.dry_run),
+                    instance_uid=args.instance_uid,
+                    instance_code=args.instance_code,
                 )
                 print(json.dumps(payload, ensure_ascii=True, indent=2))
         except Exception as e:

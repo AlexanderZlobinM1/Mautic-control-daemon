@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from mcd_agent import cli
 import mcd_agent.instance_delete as instance_delete
+from mcd_agent.instance_identity import write_instance_identity
 from mcd_agent.inventory import InstanceInventory
 
 
@@ -23,6 +24,30 @@ class _Inventory:
 
 
 class InstanceDeleteCliTests(unittest.TestCase):
+    def test_managed_db_user_accepts_mcc_instance_code_pair(self) -> None:
+        self.assertEqual(
+            instance_delete._managed_image_db_user("db_00006", "usr_00006"),
+            "usr_00006",
+        )
+        self.assertEqual(
+            instance_delete._managed_image_db_user("db_7k4m2", "usr_7k4m2"),
+            "usr_7k4m2",
+        )
+
+    def test_managed_db_user_rejects_mismatch_and_unrelated_names(self) -> None:
+        for db_name, db_user in (
+            ("db_00006", "usr_00007"),
+            ("db_00006", "shared_user"),
+            ("db_00006", ""),
+            ("shared_db", "shared_user"),
+            ("db_not-a-code", "usr_not-a-code"),
+        ):
+            self.assertEqual(
+                instance_delete._managed_image_db_user(db_name, db_user),
+                "",
+                (db_name, db_user),
+            )
+
     def test_delete_drops_exact_managed_image_database_user(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "public_html"
@@ -63,6 +88,239 @@ class InstanceDeleteCliTests(unittest.TestCase):
         self.assertTrue(result["deleted"]["db_user"])
         self.assertEqual(sql[0], "DROP DATABASE IF EXISTS `baza_shop`")
         self.assertEqual(sql[1], "DROP USER IF EXISTS 'korisnik_shop'@'localhost'")
+
+    def test_delete_drops_exact_mcc_identity_database_user(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "public_html"
+            root.mkdir()
+            plan = instance_delete.InstanceDeletePlan(
+                root=root,
+                local_php=None,
+                domains=[],
+                nginx_paths=[],
+                db_name="db_00006",
+                db_host="localhost",
+                db_port="3306",
+                db_user="usr_00006",
+                db_password="secret",
+                delete_files=False,
+                delete_vhost=False,
+                delete_db=True,
+            )
+            sql: list[str] = []
+
+            with (
+                patch.object(instance_delete, "build_delete_plan", return_value=plan),
+                patch.object(instance_delete.os, "geteuid", return_value=0),
+                patch.object(instance_delete, "_mysql_exec", side_effect=lambda statement, **_: sql.append(statement) or ""),
+                patch("mcd_agent.inventory.InstanceInventory.rescan", return_value=0),
+            ):
+                result = instance_delete.delete_instance_artifacts(
+                    SimpleNamespace(state_db_path=str(Path(tmp) / "state.db")),
+                    root=str(root),
+                    delete_db=True,
+                    yes=True,
+                )
+
+        self.assertEqual(result["plan"]["db_identity"]["status"], "matched")
+        self.assertTrue(result["deleted"]["db_user"])
+        self.assertEqual(sql, [
+            "DROP DATABASE IF EXISTS `db_00006`",
+            "DROP USER IF EXISTS 'usr_00006'@'localhost'",
+        ])
+
+    def test_delete_rejects_mismatched_managed_pair_before_database_work(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "public_html"
+            root.mkdir()
+            plan = instance_delete.InstanceDeletePlan(
+                root=root,
+                local_php=None,
+                domains=[],
+                nginx_paths=[],
+                db_name="db_00006",
+                db_host="localhost",
+                db_port="3306",
+                db_user="usr_00007",
+                db_password="secret",
+                delete_files=False,
+                delete_vhost=False,
+                delete_db=True,
+            )
+            with (
+                patch.object(instance_delete, "build_delete_plan", return_value=plan),
+                patch.object(instance_delete.os, "geteuid", return_value=0),
+                patch.object(instance_delete, "_mysql_exec") as mysql_exec,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "exact managed pair"):
+                    instance_delete.delete_instance_artifacts(
+                        SimpleNamespace(state_db_path=str(Path(tmp) / "state.db")),
+                        root=str(root),
+                        delete_db=True,
+                        yes=True,
+                    )
+
+        mysql_exec.assert_not_called()
+
+    def test_dry_run_public_plan_exposes_mcc_identity_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "instance" / "public_html"
+            (root / "config").mkdir(parents=True)
+            (root / "config" / "local.php").write_text(
+                "<?php $parameters = ['db_host'=>'localhost', 'db_name'=>'db_00006', "
+                "'db_user'=>'usr_00006', 'db_password'=>'secret', "
+                "'site_url'=>'https://hobotnicapamcenje.sales-snap.com'];",
+                encoding="utf-8",
+            )
+            write_instance_identity(
+                root,
+                instance_uid="8286ff8b-5fc2-47f3-8c53-917fcea22f64",
+                instance_code="00006",
+                primary_domain="hobotnicapamcenje.sales-snap.com",
+            )
+            with patch.object(instance_delete, "_safe_root", return_value=root.resolve(strict=False)):
+                result = instance_delete.delete_instance_artifacts(
+                    SimpleNamespace(state_db_path=str(Path(tmp) / "state.db")),
+                    root=str(root),
+                    domains=["hobotnicapamcenje.sales-snap.com"],
+                    delete_db=True,
+                    dry_run=True,
+                    instance_uid="8286ff8b-5fc2-47f3-8c53-917fcea22f64",
+                    instance_code="00006",
+                )
+
+        self.assertEqual(result["status"], "planned")
+        self.assertEqual(result["plan"]["db_identity"]["contract"], "mcd-managed-instance-db-v1")
+        self.assertEqual(result["plan"]["db_identity"]["status"], "matched")
+        self.assertEqual(result["plan"]["db_identity"]["managed_db_user"], "usr_00006")
+
+    def test_exact_artifact_identity_rejects_duplicate_uid_on_another_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "artifact" / "public_html"
+            root.mkdir(parents=True)
+            write_instance_identity(
+                root,
+                instance_uid="8286ff8b-5fc2-47f3-8c53-917fcea22f64",
+                instance_code="00006",
+                primary_domain="hobotnicapamcenje.sales-snap.com",
+            )
+            records = [
+                {
+                    "source": "inventory",
+                    "root": str(root.resolve()),
+                    "instance_uid": "8286ff8b-5fc2-47f3-8c53-917fcea22f64",
+                    "instance_code": "00006",
+                    "primary_domain": "hobotnicapamcenje.sales-snap.com",
+                    "domains": ["hobotnicapamcenje.sales-snap.com"],
+                },
+                {
+                    "source": "inventory",
+                    "root": str((Path(tmp) / "active" / "public_html").resolve()),
+                    "instance_uid": "8286ff8b-5fc2-47f3-8c53-917fcea22f64",
+                    "instance_code": "00006",
+                    "primary_domain": "hobotnicapamcenje.sales-snap.com",
+                    "domains": ["hobotnicapamcenje.sales-snap.com"],
+                },
+            ]
+            with (
+                patch.object(instance_delete, "_safe_root", return_value=root.resolve(strict=False)),
+                patch.object(instance_delete, "_inventory_identity_records", return_value=records),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "ambiguous"):
+                    instance_delete.build_delete_plan(
+                        cfg=SimpleNamespace(state_db_path=str(Path(tmp) / "state.db")),
+                        root=str(root),
+                        domains=["hobotnicapamcenje.sales-snap.com"],
+                        instance_uid="8286ff8b-5fc2-47f3-8c53-917fcea22f64",
+                        instance_code="00006",
+                    )
+
+    def test_exact_artifact_identity_rejects_wrong_local_domain(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "artifact" / "public_html"
+            (root / "config").mkdir(parents=True)
+            (root / "config" / "local.php").write_text(
+                "<?php $parameters = ['db_name'=>'db_00006', 'db_user'=>'usr_00006', "
+                "'site_url'=>'https://other.example.com'];",
+                encoding="utf-8",
+            )
+            write_instance_identity(
+                root,
+                instance_uid="8286ff8b-5fc2-47f3-8c53-917fcea22f64",
+                instance_code="00006",
+                primary_domain="other.example.com",
+            )
+            with patch.object(instance_delete, "_safe_root", return_value=root.resolve(strict=False)):
+                with self.assertRaisesRegex(RuntimeError, "domain mismatch"):
+                    instance_delete.build_delete_plan(
+                        cfg=SimpleNamespace(state_db_path=str(Path(tmp) / "state.db")),
+                        root=str(root),
+                        domains=["hobotnicapamcenje.sales-snap.com"],
+                        instance_uid="8286ff8b-5fc2-47f3-8c53-917fcea22f64",
+                        instance_code="00006",
+                    )
+
+    def test_exact_artifact_delete_does_not_touch_local_mail(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "artifact" / "public_html"
+            root.mkdir(parents=True)
+            plan = instance_delete.InstanceDeletePlan(
+                root=root,
+                local_php=None,
+                domains=["hobotnicapamcenje.sales-snap.com"],
+                nginx_paths=[],
+                db_name="db_00006",
+                db_host="localhost",
+                db_port="3306",
+                db_user="usr_00006",
+                db_password="secret",
+                delete_files=True,
+                delete_vhost=True,
+                delete_db=True,
+                instance_uid="8286ff8b-5fc2-47f3-8c53-917fcea22f64",
+                instance_code="00006",
+                artifact_scope=True,
+                identity_evidence={"scope": "exact-artifact", "status": "matched"},
+            )
+            order: list[str] = []
+            with (
+                patch.object(instance_delete, "build_delete_plan", return_value=plan),
+                patch.object(instance_delete.os, "geteuid", return_value=0),
+                patch.object(instance_delete, "_remove_nginx_configs_safely", return_value={
+                    "hobotnicapamcenje.sales-snap.com"
+                }),
+                patch.object(instance_delete, "_mysql_exec", side_effect=lambda *_a, **_k: order.append("db")),
+                patch.object(instance_delete, "_remove_instance_root", side_effect=lambda *_a, **_k: order.append("files")),
+                patch.object(instance_delete, "_remove_empty_instance_parent", return_value=False),
+                patch("mcd_agent.local_mail.disable_local_mail") as disable_mail,
+                patch("mcd_agent.inventory.InstanceInventory.rescan", return_value=0),
+            ):
+                result = instance_delete.delete_instance_artifacts(
+                    SimpleNamespace(state_db_path=str(Path(tmp) / "state.db")),
+                    root=str(root),
+                    delete_files=True,
+                    delete_vhost=True,
+                    delete_db=True,
+                    yes=True,
+                )
+
+        disable_mail.assert_not_called()
+        self.assertEqual(order, ["db", "db", "files"])
+        self.assertEqual(result["plan"]["artifact_scope"], True)
+
+    def test_exact_artifact_identity_rejects_root_without_local_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "wrong-root" / "public_html"
+            root.mkdir(parents=True)
+            with patch.object(instance_delete, "_safe_root", return_value=root.resolve(strict=False)):
+                with self.assertRaisesRegex(RuntimeError, "evidence is unavailable"):
+                    instance_delete.build_delete_plan(
+                        cfg=SimpleNamespace(state_db_path=str(Path(tmp) / "state.db")),
+                        root=str(root),
+                        domains=["hobotnicapamcenje.sales-snap.com"],
+                        instance_uid="8286ff8b-5fc2-47f3-8c53-917fcea22f64",
+                        instance_code="00006",
+                    )
 
     def test_delete_removes_empty_parent_when_webroot_is_already_absent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -152,7 +410,7 @@ class InstanceDeleteCliTests(unittest.TestCase):
                 db_name="baza_shop",
                 db_host="localhost",
                 db_port="3306",
-                db_user="shop",
+                db_user="korisnik_shop",
                 db_password="secret",
                 delete_files=True,
                 delete_vhost=True,
@@ -182,7 +440,7 @@ class InstanceDeleteCliTests(unittest.TestCase):
                     yes=True,
                 )
 
-        self.assertEqual(order, ["mail", "db", "files"])
+        self.assertEqual(order, ["mail", "db", "db", "files"])
         self.assertEqual(result["deleted"]["local_mail"], ["shop.example.com"])
 
     def test_delete_can_use_absolute_root_after_inventory_row_is_gone(self) -> None:
