@@ -463,6 +463,9 @@ def _instance_state_evidence(
         if observed_domain and requested_domains_clean and observed_domain not in requested_domains_clean:
             raise RuntimeError("instance state conflict for primary domain")
 
+    effective_uid = str(instance_uid or (local_state or {}).get("instance_uid") or "").strip()
+    effective_code = str(instance_code or (local_state or {}).get("instance_code") or "").strip()
+
     if supplied_state:
         selected = {
             "schema": INSTANCE_STATE_SCHEMA,
@@ -502,10 +505,18 @@ def _instance_state_evidence(
         raise RuntimeError(f"destructive deletion requires instance state profile artifact, got {profile}")
     if not bool(selected.get("ownership_confirmed")):
         raise RuntimeError("instance state ownership confirmation is missing")
-    if not instance_uid or not instance_code:
-        raise RuntimeError("artifact state requires instance_uid and instance_code")
+    if not effective_uid:
+        raise RuntimeError("artifact state requires a persisted instance_uid")
+    if not effective_code and (local_state is None or str(local_state.get("instance_code") or "").strip()):
+        raise RuntimeError("artifact state requires instance_code unless persisted state is legacy UID-only")
 
-    return {**selected, "status": "matched"}
+    return {
+        **selected,
+        "status": "matched",
+        "instance_uid": effective_uid,
+        "instance_code": effective_code,
+        "legacy_uid_only": not bool(effective_code),
+    }
 
 
 def _artifact_identity_evidence(
@@ -522,16 +533,32 @@ def _artifact_identity_evidence(
     supplied_code = str(instance_code or "").strip()
     if not supplied_uid and not supplied_code and not force_exact:
         return {"scope": "ordinary", "status": "not_requested"}
-    if not supplied_uid or not supplied_code:
-        raise RuntimeError("instance_uid and instance_code must be supplied together for exact artifact deletion")
     try:
-        expected_uid = validate_mcc_instance_uid(supplied_uid)
-        expected_code = validate_instance_code(supplied_code)
+        local_state = read_instance_state(root)
+    except ValueError as exc:
+        raise RuntimeError(f"instance state evidence invalid: {exc}") from exc
+    effective_uid = supplied_uid or str((local_state or {}).get("instance_uid") or "").strip()
+    effective_code = supplied_code or str((local_state or {}).get("instance_code") or "").strip()
+    legacy_uid_only = (
+        not effective_code
+        and local_state is not None
+        and str(local_state.get("profile") or "").strip().lower() == "artifact"
+        and bool(str(local_state.get("instance_uid") or "").strip())
+    )
+    if not effective_uid or (not effective_code and not legacy_uid_only):
+        raise RuntimeError("exact artifact deletion requires a persisted UID and code, except for legacy UID-only artifact state")
+    try:
+        expected_uid = validate_mcc_instance_uid(effective_uid)
+        expected_code = validate_instance_code(effective_code) if effective_code else ""
     except ValueError as exc:
         raise RuntimeError(f"invalid exact artifact identity: {exc}") from exc
 
     explicit_domains = [_clean_domain(value) for value in requested_domains if str(value or "").strip()]
     explicit_domains = list(dict.fromkeys(value for value in explicit_domains if value))
+    if not explicit_domains and local_state is not None:
+        persisted_domain = _clean_domain(str(local_state.get("primary_domain") or ""))
+        if persisted_domain:
+            explicit_domains = [persisted_domain]
     if len(explicit_domains) != 1:
         raise RuntimeError("exact artifact deletion requires one explicit domain")
     expected_domain = explicit_domains[0]
@@ -545,11 +572,6 @@ def _artifact_identity_evidence(
     marker = read_instance_identity(root)
     if marker_path.exists() and marker is None:
         raise RuntimeError("exact artifact identity marker is invalid")
-    try:
-        local_state = read_instance_state(root)
-    except ValueError as exc:
-        raise RuntimeError(f"instance state evidence invalid: {exc}") from exc
-
     records = _inventory_identity_records(cfg)
     root_records = [record for record in records if str(record.get("root") or "") == target_root]
     if len(root_records) > 1:
@@ -588,8 +610,12 @@ def _artifact_identity_evidence(
             for value in (candidate.get("domains") or [])
             if str(value).strip()
         }
-        if candidate_uid != expected_uid or candidate_code != expected_code:
+        if candidate_uid != expected_uid:
+            raise RuntimeError("exact artifact identity evidence does not match requested UID")
+        if expected_code and candidate_code != expected_code:
             raise RuntimeError("exact artifact identity evidence does not match requested UID/code")
+        if not expected_code and candidate_code:
+            raise RuntimeError("legacy UID-only artifact has coded identity evidence")
         if candidate_domain and candidate_domain != expected_domain:
             raise RuntimeError("exact artifact identity evidence does not match requested domain")
         if candidate_domains and expected_domain not in candidate_domains:
@@ -601,6 +627,7 @@ def _artifact_identity_evidence(
         "status": "matched",
         "instance_uid": expected_uid,
         "instance_code": expected_code,
+        "legacy_uid_only": legacy_uid_only,
         "domain": expected_domain,
         "root": target_root,
         "sources": list(dict.fromkeys(sources)),
@@ -685,8 +712,8 @@ def build_delete_plan(
         delete_files=bool(delete_files),
         delete_vhost=bool(delete_vhost),
         delete_db=bool(delete_db),
-        instance_uid=str(instance_uid or "").strip(),
-        instance_code=str(instance_code or "").strip(),
+        instance_uid=str(identity_evidence.get("instance_uid") or instance_uid or "").strip(),
+        instance_code=str(identity_evidence.get("instance_code") or instance_code or "").strip(),
         artifact_scope=identity_evidence.get("scope") == "exact-artifact",
         identity_evidence=identity_evidence,
         state_evidence=state_evidence,

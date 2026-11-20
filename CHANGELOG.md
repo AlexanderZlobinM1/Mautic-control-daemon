@@ -1,3 +1,10 @@
+## 1.6.118 - 2026-11-20
+
+- Allow exact artifact cleanup to use a persisted legacy UID-only artifact
+  state when root, domain and ownership evidence are confirmed. Coded artifacts
+  still require and match their five-character instance code; no active-instance
+  or broad cleanup fallback is added.
+
 ## 1.6.117 - 2026-11-20
 
 - Persist a non-destructive `artifact` state profile on the source root after a
