@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from types import SimpleNamespace
 
 import pytest
 
@@ -26,6 +27,7 @@ from mcd_agent.state_push import (
     _observe_mautic_version_change,
     _read_pending_instance_change_events,
     _wire_instance_identity,
+    _wire_instance_state,
     record_mautic_version_change,
 )
 
@@ -159,6 +161,126 @@ def test_identity_snapshot_uses_bare_uid_and_complete_database_tuple() -> None:
     assert _wire_instance_identity(legacy, "MauticFarm-02") == {
         "instance_uid": "news.example.com@MauticFarm-02",
     }
+
+
+def test_identity_snapshot_publishes_local_artifact_state_and_invalid_state(tmp_path: Path) -> None:
+    root = tmp_path / "news.example.com_7k4m2" / "public_html"
+    root.mkdir(parents=True)
+    install = MauticInstall(
+        instance_uid="mcc-instance-001",
+        name="news.example.com",
+        root=str(root),
+        console_path=str(root / "bin/console"),
+        primary_domain="news.example.com",
+        domains=["news.example.com"],
+        instance_code="7k4m2",
+    )
+    identity = _wire_instance_identity(install, "MauticFarm-02")
+    derived = _wire_instance_state(install, identity)
+    assert derived["profile"] == "active"
+    assert derived["source"] == "inventory"
+    assert derived["status"] == "derived"
+
+    write_instance_state(
+        root,
+        profile="artifact",
+        instance_uid="mcc-instance-001",
+        instance_code="7k4m2",
+        primary_domain="news.example.com",
+        ownership_confirmed=True,
+    )
+    artifact = _wire_instance_state(install, identity)
+    assert artifact["profile"] == "artifact"
+    assert artifact["source"] == "local"
+    assert artifact["status"] == "confirmed"
+    assert artifact["ownership_confirmed"] is True
+
+    instance_state_path(root).write_text(
+        '{"schema":"mcd-instance-state-profile-v1","version":99,"profile":"artifact"}',
+        encoding="utf-8",
+    )
+    invalid = _wire_instance_state(install, identity)
+    assert invalid["profile"] == "unknown"
+    assert invalid["source"] == "local"
+    assert invalid["status"] == "invalid"
+
+
+def test_artifact_state_is_excluded_from_active_inventory_and_survives_restart(tmp_path: Path) -> None:
+    db_path = tmp_path / "inventory.db"
+    source = tmp_path / "source" / "public_html"
+    target = tmp_path / "target" / "public_html"
+    source.mkdir(parents=True)
+    target.mkdir(parents=True)
+    write_instance_state(
+        source,
+        profile="artifact",
+        instance_uid="mcc-source-001",
+        instance_code="7k4m2",
+        primary_domain="source.example.com",
+        ownership_confirmed=True,
+    )
+    inv = InstanceInventory(str(db_path))
+    for uid, root, domain, code in (
+        ("mcc-source-001", source, "source.example.com", "7k4m2"),
+        ("mcc-target-001", target, "target.example.com", "7k4m3"),
+    ):
+        inv._upsert_install(
+            MauticInstall(
+                instance_uid=uid,
+                name=domain,
+                root=str(root),
+                console_path=str(root / "bin/console"),
+                primary_domain=domain,
+                instance_code=code,
+            )
+        )
+    inv.conn.commit()
+    assert [item.instance_uid for item in inv.list_instances()] == ["mcc-target-001"]
+    assert [item.instance_uid for item in inv.list_artifact_instances()] == ["mcc-source-001"]
+
+    restarted = InstanceInventory(str(db_path))
+    assert [item.instance_uid for item in restarted.list_instances()] == ["mcc-target-001"]
+    assert [item.instance_uid for item in restarted.list_artifact_instances()] == ["mcc-source-001"]
+
+
+def test_rescan_keeps_artifact_out_of_active_inventory(monkeypatch, tmp_path: Path) -> None:
+    db_path = tmp_path / "inventory.db"
+    source = tmp_path / "source" / "public_html"
+    target = tmp_path / "target" / "public_html"
+    source.mkdir(parents=True)
+    target.mkdir(parents=True)
+    write_instance_state(
+        source,
+        profile="artifact",
+        instance_uid="mcc-source-001",
+        instance_code="7k4m2",
+        primary_domain="source.example.com",
+        ownership_confirmed=True,
+    )
+    source_install = MauticInstall(
+        instance_uid="mcc-source-001",
+        name="source.example.com",
+        root=str(source),
+        console_path=str(source / "bin/console"),
+        primary_domain="source.example.com",
+        instance_code="7k4m2",
+    )
+    target_install = MauticInstall(
+        instance_uid="mcc-target-001",
+        name="target.example.com",
+        root=str(target),
+        console_path=str(target / "bin/console"),
+        primary_domain="target.example.com",
+        instance_code="7k4m3",
+    )
+    inv = InstanceInventory(str(db_path))
+    inv._upsert_install(source_install)
+    inv.conn.commit()
+    monkeypatch.setattr("mcd_agent.inventory.discover_mautic", lambda *args, **kwargs: [target_install])
+    count = inv.rescan(SimpleNamespace(discovery_roots=[], exclude_path_contains=[], supported_mautic_majors=[7], custom_instances=[]))
+    assert count == 1
+    assert [item.instance_uid for item in inv.list_instances()] == ["mcc-target-001"]
+    assert [item.instance_uid for item in inv.list_artifact_instances()] == ["mcc-source-001"]
 
 
 def test_new_image_plan_uses_mcc_identity_but_legacy_plan_is_unchanged() -> None:

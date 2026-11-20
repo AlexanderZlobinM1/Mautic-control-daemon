@@ -454,6 +454,9 @@ class InstanceMigrateProbeTests(unittest.TestCase):
 
         def fake_remote_mcd(**kwargs):
             args = list(kwargs.get("args") or [])
+            if args and args[0] == "instance-state":
+                events.append("source_state_artifact")
+                return '{"status":"ok","state":{"profile":"artifact"}}'
             if "off" in args:
                 events.append("maintenance_off")
             else:
@@ -514,6 +517,9 @@ class InstanceMigrateProbeTests(unittest.TestCase):
         self.assertEqual([x for x in events if x.startswith("db_import:")], ["db_import:single"])
         self.assertLess(events.index("maintenance_on"), events.index("db_import:single"))
         self.assertLess(events.index("db_import:single"), events.index("patch_db"))
+        self.assertLess(events.index("patch_db"), events.index("source_state_artifact"))
+        self.assertLess(events.index("source_state_artifact"), events.index("maintenance_off"))
+        self.assertEqual(result["source_instance_state"]["state"]["profile"], "artifact")
         self.assertLess(events.index("patch_db"), events.index("maintenance_off"))
 
     def test_nginx_sites_layout_is_created_for_target_finalize(self) -> None:

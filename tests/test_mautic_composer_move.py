@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import mcd_agent.mautic_composer_move as mautic_composer_move
 from mcd_agent.discovery import _is_retired_instance_root
+from mcd_agent.instance_identity import read_instance_state
 from mcd_agent.mautic_composer_move import (
     COMPOSER_TARGET_MARKER,
     ComposerMovePlan,
@@ -467,6 +468,10 @@ class ComposerMoveHelpersTest(unittest.TestCase):
             self.assertTrue(Path(marker).exists())
             self.assertTrue(_is_retired_instance_root(str(source)))
             self.assertIn(str(target), Path(marker).read_text(encoding="utf-8"))
+            state = read_instance_state(source)
+            self.assertIsNotNone(state)
+            self.assertEqual(state["profile"], "artifact")
+            self.assertTrue(state["ownership_confirmed"])
 
 
 if __name__ == "__main__":

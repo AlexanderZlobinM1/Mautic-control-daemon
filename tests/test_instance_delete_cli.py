@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -729,6 +730,37 @@ class InstanceDeleteCliTests(unittest.TestCase):
             self.assertEqual(cli.main(), 0)
 
         self.assertEqual(calls, [{"root": "/var/www/ss/public_html", "allow_missing_absolute": True}])
+
+    def test_instance_state_cli_persists_non_destructive_artifact_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "source" / "public_html"
+            root.mkdir(parents=True)
+            output = io.StringIO()
+            with (
+                patch.object(sys, "argv", [
+                    "mcd-cli",
+                    "instance-state",
+                    "--root",
+                    str(root),
+                    "--profile",
+                    "artifact",
+                    "--instance-uid",
+                    "mcc-instance-001",
+                    "--instance-code",
+                    "7k4m2",
+                    "--domain",
+                    "news.example.com",
+                    "--ownership-confirmed",
+                    "--json",
+                ]),
+                patch.object(cli, "load_config", return_value=SimpleNamespace(state_db_path=str(Path(tmp) / "state.sqlite"))),
+                patch.object(cli, "_push_state_after_change"),
+                contextlib.redirect_stdout(output),
+            ):
+                self.assertEqual(cli.main(), 0)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["state"]["profile"], "artifact")
+            self.assertEqual(payload["state"]["instance_uid"], "mcc-instance-001")
 
     def test_delete_plan_uses_inventory_db_when_local_php_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

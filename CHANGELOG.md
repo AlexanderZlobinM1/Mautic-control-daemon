@@ -1,3 +1,15 @@
+## 1.6.117 - 2026-11-20
+
+- Persist a non-destructive `artifact` state profile on the source root after a
+  successful target-pull migration. The source remains physically present,
+  leaves the active selector and live operations, and publishes the same MCC
+  UID/code only in the artifact cleanup projection.
+- Use the same local state profile for Composer Move and publish versioned
+  instance-state evidence in every MCD snapshot. Invalid local evidence is
+  reported as `unknown/invalid` rather than hidden or treated as active.
+- Add the safe `mcd-cli instance-state` operation used by the migration relay;
+  it writes only MCD state and never deletes or archives application data.
+
 ## 1.6.116 - 2026-11-20
 
 - Enumerate every host entry for the exact managed database user before

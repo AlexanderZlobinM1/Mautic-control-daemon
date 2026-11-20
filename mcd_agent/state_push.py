@@ -44,6 +44,12 @@ from mcd_agent.commercial_portal import _host_fingerprint
 from mcd_agent.install_readiness import collect_mautic_install_readiness
 from mcd_agent.instance_size import collect_instance_sizes
 from mcd_agent.install_type import detect_install_type, is_complete_plugin_bundle, plugin_dir_candidates
+from mcd_agent.instance_identity import (
+    INSTANCE_STATE_SCHEMA,
+    INSTANCE_STATE_VERSION,
+    instance_state_path,
+    read_instance_state,
+)
 from mcd_agent.plugin_inventory import (
     PLUGIN_INVENTORY_PENDING_KEY,
     PLUGIN_INVENTORY_SYNC_SCHEMA,
@@ -101,14 +107,81 @@ def _wire_instance_identity(inst: MauticInstall, host_name: str) -> dict[str, st
     or a partial tuple.
     """
 
-    code = str(getattr(inst, "instance_code", None) or "").strip() or None
+    local_state: dict[str, Any] | None = None
+    try:
+        local_state = read_instance_state(inst.root)
+    except ValueError:
+        # The state projection below reports invalid evidence explicitly.  Do
+        # not let one malformed local file suppress the rest of the host
+        # snapshot or turn it into an invented identity.
+        local_state = None
+    code = str(getattr(inst, "instance_code", None) or local_state and local_state.get("instance_code") or "").strip() or None
     if code is None:
         return {"instance_uid": qualify_instance_uid(inst.instance_uid, host_name)}
+    state_uid = str((local_state or {}).get("instance_uid") or "").strip()
+    inventory_uid = str(inst.instance_uid or "").strip()
+    effective_uid = state_uid if str((local_state or {}).get("profile") or "").strip().lower() == "artifact" and state_uid else inventory_uid
     return {
-        "instance_uid": str(inst.instance_uid or "").strip(),
+        "instance_uid": effective_uid,
         "instance_code": code,
         "database_name": str(inst.db.name if inst.db else "").strip(),
         "database_user": str(inst.db.user if inst.db else "").strip(),
+    }
+
+
+def _wire_instance_state(inst: MauticInstall, identity: Mapping[str, Any]) -> dict[str, Any]:
+    """Publish the local instance-state profile without hiding invalid evidence."""
+    path = instance_state_path(inst.root)
+    fallback_uid = str(identity.get("instance_uid") or "").strip()
+    fallback_code = str(identity.get("instance_code") or "").strip()
+    domains = list(getattr(inst, "domains", None) or [])
+    fallback_domain = str(getattr(inst, "primary_domain", None) or (domains[0] if domains else "") or "").strip().lower().rstrip(".")
+    try:
+        local = read_instance_state(inst.root)
+    except ValueError as exc:
+        return {
+            "schema": INSTANCE_STATE_SCHEMA,
+            "version": INSTANCE_STATE_VERSION,
+            "profile": "unknown",
+            "source": "local",
+            "status": "invalid",
+            "path": str(path),
+            "root": str(inst.root),
+            "instance_uid": fallback_uid,
+            "instance_code": fallback_code,
+            "primary_domain": fallback_domain,
+            "ownership_confirmed": False,
+            "cluster_id": "",
+            "error": str(exc),
+        }
+    if local is None:
+        return {
+            "schema": INSTANCE_STATE_SCHEMA,
+            "version": INSTANCE_STATE_VERSION,
+            "profile": "active",
+            "source": "inventory",
+            "status": "derived",
+            "path": str(path),
+            "root": str(inst.root),
+            "instance_uid": fallback_uid,
+            "instance_code": fallback_code,
+            "primary_domain": fallback_domain,
+            "ownership_confirmed": False,
+            "cluster_id": "",
+        }
+    return {
+        "schema": local["schema"],
+        "version": local["version"],
+        "profile": local["profile"],
+        "source": "local",
+        "status": "confirmed",
+        "path": str(path),
+        "root": str(inst.root),
+        "instance_uid": str(local.get("instance_uid") or fallback_uid),
+        "instance_code": str(local.get("instance_code") or fallback_code),
+        "primary_domain": str(local.get("primary_domain") or fallback_domain),
+        "ownership_confirmed": bool(local.get("ownership_confirmed")),
+        "cluster_id": str(local.get("cluster_id") or ""),
     }
 
 
@@ -2830,8 +2903,27 @@ class MCCStatePusher:
         )
         from mcd_agent.mautic_release_authorization import runtime_capabilities as release_capabilities
         instances = []
+        artifacts = []
+        active_installs: list[MauticInstall] = []
         plugin_inventory_observations: list[dict[str, Any]] = []
         for i in installs:
+            identity_wire = _wire_instance_identity(i, wire_host_name)
+            instance_state_wire = _wire_instance_state(i, identity_wire)
+            if instance_state_wire["profile"] in {"artifact", "unknown"}:
+                artifacts.append(
+                    {
+                        **identity_wire,
+                        "instance_state": instance_state_wire,
+                        "name": i.name,
+                        "root": i.root,
+                        "source": i.source,
+                        "domains": list(i.domains or ([] if not i.primary_domain else [i.primary_domain])),
+                        "mautic_major": i.mautic_major,
+                        "cleanup_operations": ["delete"] if instance_state_wire["profile"] == "artifact" else [],
+                    }
+                )
+                continue
+            active_installs.append(i)
             plugin_observation = _plugin_inventory_observation(i, self.runtime_store)
             plugins = canonical_inventory(plugin_observation.get("inventory"))
             plugin_inventory_observations.append(plugin_observation)
@@ -2858,7 +2950,8 @@ class MCCStatePusher:
             )
             instances.append(
                 {
-                    **_wire_instance_identity(i, wire_host_name),
+                    **identity_wire,
+                    "instance_state": instance_state_wire,
                     "name": i.name,
                     "root": i.root,
                     "source": i.source,
@@ -2888,6 +2981,7 @@ class MCCStatePusher:
                 }
             )
         instances.sort(key=lambda x: str(x["instance_uid"]))
+        artifacts.sort(key=lambda x: str(x["instance_uid"]))
 
         payload: dict[str, Any] = {
             "schema": "mcd-state-v1",
@@ -2946,10 +3040,11 @@ class MCCStatePusher:
             "mautic_install_readiness": collect_mautic_install_readiness(),
             "cluster_db": self._cluster_db_state(now_ts),
             "state_backend": self._state_backend_payload(now_ts),
-            "cluster_assets": self._cluster_assets_payload(now_ts, installs),
+            "cluster_assets": self._cluster_assets_payload(now_ts, active_installs),
             "instances": instances,
+            "artifacts": artifacts,
             "instances_snapshot_complete": bool(instances_snapshot_complete),
-            "instance_sizes": collect_instance_sizes(installs),
+            "instance_sizes": collect_instance_sizes(active_installs),
             "sent_at_utc": datetime.fromtimestamp(now_ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
         _advertise_image_compatibility(payload)
@@ -3112,7 +3207,7 @@ def push_state_now(
 
         inv = InstanceInventory(cfg.state_db_path)
         ensure_seeded(inv, cfg)
-        installs = inv.list_instances()
+        installs = inv.list_all_instances()
         now_ts = datetime.now(timezone.utc).timestamp()
         profile_event = read_pending_profile_event(cfg)
         payload = pusher.build_payload(
