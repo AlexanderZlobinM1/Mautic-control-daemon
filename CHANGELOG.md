@@ -1,3 +1,12 @@
+## 1.6.113 - 2026-11-20
+
+- Use one shared generated-column-safe SQL import filter for image installs and
+  live instance migration relay imports. Every generated column is omitted
+  from positional dump INSERTs so the target MySQL/MariaDB engine computes it;
+  the rule is schema-agnostic and is not tied to `ss_email_stats` or any other
+  table. Preserve the existing MySQL 8 generated-date compatibility rewrite
+  and add migration-path regression coverage for multiple unrelated tables.
+
 ## 1.6.112 - 2026-11-19
 
 - Keep MCC-issued identity tuples authoritative during inventory rescan: a

@@ -23,6 +23,7 @@ from mcd_agent.install_readiness import collect_mautic_install_readiness
 from mcd_agent.inventory import InstanceInventory, ensure_seeded
 from mcd_agent.localphp import parse_local_php
 from mcd_agent.mautic_image_install import _mysql_admin_base, _mysql_exec, _quote_ident, _quote_sql
+from mcd_agent.mysql_dump_compat import iter_mysql_import_sql
 from mcd_agent.mautic_version_cache import read_mautic_version_evidence_read_only
 from mcd_agent.form_embed import render_form_embed_location
 from mcd_agent.models import DBConfig
@@ -1039,12 +1040,16 @@ def _rewrite_mysql_generated_date_format_sql_line(line: str) -> str:
 
 
 def _iter_mysql_generated_date_format_compat_sql(lines: Any) -> Any:
-    for raw in lines:
-        if isinstance(raw, bytes):
-            text = raw.decode("utf-8", errors="surrogateescape")
-            yield _rewrite_mysql_generated_date_format_sql_line(text).encode("utf-8", errors="surrogateescape")
-        else:
-            yield _rewrite_mysql_generated_date_format_sql_line(str(raw)).encode("utf-8", errors="surrogateescape")
+    def rewritten_lines() -> Any:
+        for raw in lines:
+            if isinstance(raw, bytes):
+                text = raw.decode("utf-8", errors="surrogateescape")
+            else:
+                text = str(raw)
+            yield _rewrite_mysql_generated_date_format_sql_line(text)
+
+    for rewritten in iter_mysql_import_sql(rewritten_lines()):
+        yield rewritten.encode("utf-8", errors="surrogateescape")
 
 
 def import_target_db_stream(*, target_db_name: str, target_db_user: str, target_db_password: str, input_stream: Any) -> dict[str, Any]:

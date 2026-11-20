@@ -665,6 +665,77 @@ class InstanceMigrateProbeTests(unittest.TestCase):
         self.assertIn("concat(year(`date_added`),'-',lpad(month(`date_added`),2,'0'))", imported_sql)
         self.assertIn("year(`date_added`)", imported_sql)
 
+    def test_target_db_stream_omits_any_generated_column_from_import_rows(self) -> None:
+        sql = (
+            "CREATE TABLE `ss_email_stats` (\n"
+            "  `id` int NOT NULL,\n"
+            "  `date_sent` datetime NOT NULL,\n"
+            "  `generated_sent_date` date GENERATED ALWAYS AS (date(`date_sent`)) VIRTUAL,\n"
+            "  PRIMARY KEY (`id`)\n"
+            ") ENGINE=InnoDB;\n"
+            "CREATE TABLE `custom_derived_rows` (\n"
+            "  `id` int NOT NULL,\n"
+            "  `base_value` int NOT NULL,\n"
+            "  `derived_value` int GENERATED ALWAYS AS (`base_value` * 2) STORED,\n"
+            "  PRIMARY KEY (`id`)\n"
+            ") ENGINE=InnoDB;\n"
+            "INSERT INTO `ss_email_stats` VALUES\n"
+            "(1,'2026-05-27 10:00:00','2026-05-27');\n"
+            "INSERT INTO `custom_derived_rows` VALUES\n"
+            "(1,21,42);\n"
+        )
+        gzipped = io.BytesIO()
+        with gzip.GzipFile(fileobj=gzipped, mode="wb") as gz:
+            gz.write(sql.encode("utf-8"))
+        gzipped.seek(0)
+
+        class FakeStdin(io.BytesIO):
+            def close(self) -> None:
+                pass
+
+        fake_stdin = FakeStdin()
+
+        class FakeProc:
+            def __init__(self) -> None:
+                self.stdin = fake_stdin
+                self.stdout = io.BytesIO(b"")
+                self.stderr = io.BytesIO(b"")
+                self.returncode = 0
+
+            def communicate(self):
+                self.returncode = 0
+                return b"", b""
+
+            def kill(self):
+                self.returncode = -9
+
+        with (
+            patch.object(instance_migrate, "_prepare_target_db", return_value=None),
+            patch.object(instance_migrate, "_mysql_admin_base", return_value=["mysql"]),
+            patch.object(instance_migrate.subprocess, "Popen", return_value=FakeProc()),
+        ):
+            result = instance_migrate.import_target_db_stream(
+                target_db_name="baza_target",
+                target_db_user="korisnik_target",
+                target_db_password="target_password",
+                input_stream=gzipped,
+            )
+
+        imported_sql = fake_stdin.getvalue().decode("utf-8")
+        self.assertTrue(result["ok"])
+        self.assertIn(
+            "INSERT INTO `ss_email_stats` (`id`,`date_sent`) VALUES\n"
+            "(1,'2026-05-27 10:00:00');",
+            imported_sql,
+        )
+        self.assertIn(
+            "INSERT INTO `custom_derived_rows` (`id`,`base_value`) VALUES\n"
+            "(1,21);",
+            imported_sql,
+        )
+        self.assertNotIn("'2026-05-27');", imported_sql)
+        self.assertNotIn("(1,21,42);", imported_sql)
+
 
 if __name__ == "__main__":
     unittest.main()
