@@ -1543,6 +1543,34 @@ def run_target_pull_migration(
         inv = InstanceInventory(config.state_db_path)
         instances = inv.rescan(config)
 
+        print("progress: 96 mark source artifact state")
+        source_state_output = _remote_mcd(
+            source_ssh_user=source_ssh_user,
+            source_address=source_address,
+            source_ssh_port=source_ssh_port,
+            source_ssh_key_file=source_ssh_key_file,
+            args=[
+                "instance-state",
+                "--root",
+                source_root_clean,
+                "--profile",
+                "artifact",
+                "--instance-uid",
+                str(instance_uid or ""),
+                "--instance-code",
+                str(instance_code or ""),
+                "--domain",
+                domains[0] if domains else "",
+                "--ownership-confirmed",
+                "--json",
+            ],
+            timeout_sec=120,
+        )
+        try:
+            result["source_instance_state"] = json.loads(source_state_output)
+        except (TypeError, json.JSONDecodeError):
+            result["source_instance_state"] = {"raw": str(source_state_output or "")}
+
         print("progress: 98 source maintenance off")
         _remote_mcd(
             source_ssh_user=source_ssh_user,

@@ -9,7 +9,7 @@ from pathlib import Path
 from mcd_agent.config import AgentConfig
 from mcd_agent.discovery import discover_mautic
 from mcd_agent.instance_uid import build_domain_uid
-from mcd_agent.instance_identity import validate_instance_code, validate_mcc_instance_uid
+from mcd_agent.instance_identity import read_instance_state, validate_instance_code, validate_mcc_instance_uid
 from mcd_agent.models import DBConfig, MauticInstall
 from mcd_agent.secret_store import SecretStore
 
@@ -300,7 +300,7 @@ class InstanceInventory:
             ),
         )
 
-    def list_instances(self) -> list[MauticInstall]:
+    def list_all_instances(self) -> list[MauticInstall]:
         rows = self.conn.execute("SELECT * FROM instances ORDER BY root, name").fetchall()
         out: list[MauticInstall] = []
         for r in rows:
@@ -353,11 +353,42 @@ class InstanceInventory:
             )
         return out
 
+    @staticmethod
+    def _local_state_profile(root: str) -> str:
+        try:
+            state = read_instance_state(root)
+        except ValueError:
+            return "unknown"
+        return str((state or {}).get("profile") or "active").strip().lower() or "active"
+
+    def list_instances(self) -> list[MauticInstall]:
+        """Return only live/active instances eligible for ordinary operations."""
+        return [
+            inst
+            for inst in self.list_all_instances()
+            if self._local_state_profile(inst.root) not in {"artifact", "unknown"}
+        ]
+
+    def list_artifact_instances(self) -> list[MauticInstall]:
+        """Return persistent retired artifacts eligible only for exact deletion."""
+        return [
+            inst for inst in self.list_all_instances() if self._local_state_profile(inst.root) == "artifact"
+        ]
+
+    def list_retired_instances(self) -> list[MauticInstall]:
+        """Return artifact and invalid-state roots for safe state reconciliation."""
+        return [
+            inst
+            for inst in self.list_all_instances()
+            if self._local_state_profile(inst.root) in {"artifact", "unknown"}
+        ]
+
     def count(self) -> int:
         row = self.conn.execute("SELECT COUNT(*) AS cnt FROM instances").fetchone()
         return int(row["cnt"]) if row else 0
 
     def rescan(self, config: AgentConfig, *, preserve_manual: bool = False) -> int:
+        retired = self.list_retired_instances()
         installs = discover_mautic(
             config.discovery_roots,
             config.exclude_path_contains,
@@ -374,6 +405,9 @@ class InstanceInventory:
             )
         for inst in installs:
             self._upsert_install(inst, source=inst.source or "autodiscovery")
+        for inst in retired:
+            if Path(inst.root).is_dir():
+                self._upsert_install(inst, source="artifact")
         self.conn.commit()
         return len(installs)
 

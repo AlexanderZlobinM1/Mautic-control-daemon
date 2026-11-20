@@ -15,9 +15,11 @@ from mcd_agent.config import AgentConfig
 from mcd_agent.instance_identity import (
     identity_readback,
     instance_path_names,
+    instance_state_path,
     read_instance_identity,
     validate_instance_code,
     validate_mcc_instance_uid,
+    write_instance_state,
     write_instance_identity,
 )
 from mcd_agent.mautic_image_install import _artifact_url, _download, _run, _safe_extract
@@ -365,6 +367,14 @@ def _external_write_switched_vhost(plan: ComposerMovePlan, *, cfg: Any = None) -
 
 
 def _mark_source_root_retired(plan: ComposerMovePlan) -> str:
+    write_instance_state(
+        plan.source_root,
+        profile="artifact",
+        instance_uid=plan.instance_uid,
+        instance_code=plan.instance_code,
+        primary_domain=plan.domain,
+        ownership_confirmed=True,
+    )
     marker = plan.source_root / RETIRED_INSTANCE_MARKER
     payload = {
         "reason": "composer_move_completed",
@@ -713,6 +723,7 @@ def move_zip_to_composer(
         "cron_migration": cron_migration.get("users", {}),
         "cron_wrapper_migration": cron_migration.get("wrappers", {}),
         "source_retired_marker": str(Path(source_archive or plan.source_root) / RETIRED_INSTANCE_MARKER),
+        "source_state_path": str(instance_state_path(Path(source_archive or plan.source_root))),
         "vhost": vhost,
         "instances": count,
     }

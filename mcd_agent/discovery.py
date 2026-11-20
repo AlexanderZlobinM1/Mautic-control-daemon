@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 
 from mcd_agent.config import ManualInstanceConfig
 from mcd_agent.instance_uid import build_domain_uid
-from mcd_agent.instance_identity import read_instance_identity
+from mcd_agent.instance_identity import read_instance_identity, read_instance_state
 from mcd_agent.localphp import parse_local_php
 from mcd_agent.models import DBConfig, MauticInstall
 from mcd_agent.runtime_descriptor import discover_runtime_instances
@@ -270,7 +270,16 @@ def _detect_mautic_local_php(root: str) -> str | None:
 
 def _is_retired_instance_root(root: str) -> bool:
     try:
-        return (Path(root) / RETIRED_INSTANCE_MARKER).exists()
+        if (Path(root) / RETIRED_INSTANCE_MARKER).exists():
+            return True
+        state_path = Path(root) / ".mcd" / "state" / "instance-state.json"
+        if not state_path.exists():
+            return False
+        try:
+            state = read_instance_state(root)
+        except ValueError:
+            return True
+        return str((state or {}).get("profile") or "").strip().lower() in {"artifact", "unknown"}
     except OSError:
         return False
 

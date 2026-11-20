@@ -93,6 +93,7 @@ from mcd_agent.executor import (
 from mcd_agent.fs_permissions import effective_guard_identity, ensure_instance_permissions
 from mcd_agent.runtime_descriptor import descriptor_for_root
 from mcd_agent.instance_delete import delete_instance_artifacts
+from mcd_agent.instance_identity import read_instance_state, write_instance_state
 from mcd_agent.instance_runtime import apply_instance_runtime
 from mcd_agent.instance_migrate import (
     collect_source_probe,
@@ -2232,6 +2233,25 @@ def _build_parser() -> argparse.ArgumentParser:
     inst_delete.add_argument("--dry-run", action="store_true", help="Plan only; do not delete")
     inst_delete.add_argument("--json", action="store_true")
 
+    inst_state = sub.add_parser("instance-state", help="Persist one non-destructive MCD instance state profile")
+    inst_state.add_argument("--config", default=default_cfg)
+    inst_state.add_argument("--root", required=True, help="Absolute Mautic instance root")
+    inst_state.add_argument(
+        "--profile",
+        required=True,
+        choices=("active", "artifact", "backup", "quarantine", "cluster", "unknown"),
+    )
+    inst_state.add_argument("--instance-uid", default="")
+    inst_state.add_argument("--instance-code", default="")
+    inst_state.add_argument("--domain", default="")
+    inst_state.add_argument("--cluster-id", default="")
+    inst_state.add_argument("--ownership-confirmed", action="store_true")
+    inst_state.add_argument("--json", action="store_true")
+
+    inst_artifacts = sub.add_parser("instance-artifacts", help="List retired instance artifacts; only exact Delete is allowed")
+    inst_artifacts.add_argument("--config", default=default_cfg)
+    inst_artifacts.add_argument("--json", action="store_true")
+
     reset_admin = sub.add_parser("admin:reset-password", help="Reset/create admin Mautic user for one instance")
     reset_admin.add_argument("--config", default=default_cfg)
     reset_admin.add_argument("--root", help="Mautic root or instance uid (optional when one local instance exists)")
@@ -3259,6 +3279,58 @@ def main() -> int:
             return 0 if str(payload.get("status") or "") != "error" else 1
         finally:
             runtime_store.close()
+
+    if args.cmd == "instance-state":
+        cfg = load_config(args.config)
+        root = Path(str(args.root or "").strip())
+        try:
+            if not root.is_absolute():
+                raise ValueError("instance-state requires an absolute --root")
+            state = write_instance_state(
+                root,
+                profile=args.profile,
+                instance_uid=args.instance_uid or None,
+                instance_code=args.instance_code or None,
+                primary_domain=args.domain or None,
+                ownership_confirmed=bool(args.ownership_confirmed),
+                cluster_id=args.cluster_id or None,
+            )
+            payload = {
+                "status": "ok",
+                "operation": "instance-state",
+                "state": state,
+            }
+            _push_state_after_change(cfg, "instance-state")
+        except Exception as e:
+            payload = {"status": "error", "operation": "instance-state", "reason": str(e)}
+        print(json.dumps(payload, ensure_ascii=True, indent=2))
+        return 0 if payload["status"] == "ok" else 1
+
+    if args.cmd == "instance-artifacts":
+        cfg = load_config(args.config)
+        inv = InstanceInventory(cfg.state_db_path)
+        ensure_seeded(inv, cfg)
+        artifacts = []
+        for install in inv.list_artifact_instances():
+            try:
+                state = read_instance_state(install.root)
+            except ValueError as exc:
+                state = {"profile": "unknown", "status": "invalid", "error": str(exc)}
+            artifacts.append(
+                {
+                    "instance_uid": str((state or {}).get("instance_uid") or install.instance_uid or ""),
+                    "instance_code": str((state or {}).get("instance_code") or install.instance_code or ""),
+                    "name": install.name,
+                    "root": install.root,
+                    "primary_domain": str((state or {}).get("primary_domain") or install.primary_domain or ""),
+                    "domains": list(install.domains or []),
+                    "instance_state": state,
+                    "cleanup_operations": ["delete"],
+                }
+            )
+        payload = {"status": "ok", "artifacts": artifacts}
+        print(json.dumps(payload, ensure_ascii=True, indent=2))
+        return 0
 
     if args.cmd == "instance-delete":
         cfg = load_config(args.config)

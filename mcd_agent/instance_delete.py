@@ -384,7 +384,7 @@ def _inventory_db_for_root(cfg: AgentConfig | None, root: Path) -> DBConfig | No
         from mcd_agent.inventory import InstanceInventory
 
         inventory = InstanceInventory(state_db_path)
-        for inst in inventory.list_instances():
+        for inst in inventory.list_all_instances():
             if Path(inst.root).resolve(strict=False) == root and inst.db is not None:
                 return inst.db
     except Exception:
@@ -401,17 +401,21 @@ def _inventory_identity_records(cfg: AgentConfig | None) -> list[dict[str, Any]]
 
         inventory = InstanceInventory(state_db_path)
         records: list[dict[str, Any]] = []
-        for inst in inventory.list_instances():
+        for inst in inventory.list_all_instances():
+            try:
+                local_state = read_instance_state(inst.root) or {}
+            except ValueError:
+                local_state = {}
             domains = [str(value).strip().lower().rstrip(".") for value in (getattr(inst, "domains", []) or []) if str(value).strip()]
-            primary = str(getattr(inst, "primary_domain", "") or "").strip().lower().rstrip(".")
+            primary = str(local_state.get("primary_domain") or getattr(inst, "primary_domain", "") or "").strip().lower().rstrip(".")
             if primary and primary not in domains:
                 domains.insert(0, primary)
             records.append(
                 {
                     "source": "inventory",
                     "root": str(Path(getattr(inst, "root", "")).resolve(strict=False)),
-                    "instance_uid": str(getattr(inst, "instance_uid", "") or "").strip(),
-                    "instance_code": str(getattr(inst, "instance_code", "") or "").strip(),
+                    "instance_uid": str(local_state.get("instance_uid") or getattr(inst, "instance_uid", "") or "").strip(),
+                    "instance_code": str(local_state.get("instance_code") or getattr(inst, "instance_code", "") or "").strip(),
                     "primary_domain": primary,
                     "domains": domains,
                 }
@@ -541,6 +545,10 @@ def _artifact_identity_evidence(
     marker = read_instance_identity(root)
     if marker_path.exists() and marker is None:
         raise RuntimeError("exact artifact identity marker is invalid")
+    try:
+        local_state = read_instance_state(root)
+    except ValueError as exc:
+        raise RuntimeError(f"instance state evidence invalid: {exc}") from exc
 
     records = _inventory_identity_records(cfg)
     root_records = [record for record in records if str(record.get("root") or "") == target_root]
@@ -564,6 +572,8 @@ def _artifact_identity_evidence(
     candidates: list[dict[str, Any]] = []
     if marker is not None:
         candidates.append({"source": "marker", **marker})
+    if local_state is not None:
+        candidates.append({"source": "local_state", **local_state})
     candidates.extend(root_records)
     if not candidates:
         raise RuntimeError("exact artifact identity evidence is unavailable")
