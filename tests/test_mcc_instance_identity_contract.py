@@ -7,11 +7,17 @@ import pytest
 
 from mcd_agent import instance_migrate
 from mcd_agent.instance_identity import (
+    INSTANCE_STATE_PROFILES,
+    INSTANCE_STATE_SCHEMA,
+    INSTANCE_STATE_VERSION,
     identity_readback,
+    instance_state_path,
     instance_path_names,
+    read_instance_state,
     read_instance_identity,
     validate_instance_code,
     write_instance_identity,
+    write_instance_state,
 )
 from mcd_agent.inventory import InstanceInventory
 from mcd_agent.mautic_image_install import build_plan
@@ -79,6 +85,47 @@ def test_identity_marker_survives_readback_and_inventory_rescan(tmp_path: Path) 
     restored_after_rescan = inv.list_instances()[0]
     assert restored_after_rescan.instance_uid == "mcc-instance-001"
     assert restored_after_rescan.instance_code == "7k4m2"
+
+
+def test_instance_state_profile_is_versioned_and_round_trips(tmp_path: Path) -> None:
+    root = tmp_path / "news.example.com_7k4m2" / "public_html"
+    root.mkdir(parents=True)
+    for profile in sorted(INSTANCE_STATE_PROFILES - {"cluster"}):
+        payload = write_instance_state(
+            root,
+            profile=profile,
+            instance_uid="mcc-instance-001",
+            instance_code="7k4m2",
+            primary_domain="news.example.com",
+            ownership_confirmed=profile == "artifact",
+        )
+        assert payload["schema"] == INSTANCE_STATE_SCHEMA
+        assert payload["version"] == INSTANCE_STATE_VERSION
+        assert read_instance_state(root) == payload
+    assert instance_state_path(root).is_file()
+
+
+def test_cluster_state_requires_complete_ownership_evidence(tmp_path: Path) -> None:
+    root = tmp_path / "cluster" / "public_html"
+    root.mkdir(parents=True)
+    with pytest.raises(ValueError, match="cluster instance state is incomplete"):
+        write_instance_state(root, profile="cluster", ownership_confirmed=False)
+    payload = write_instance_state(root, profile="cluster", ownership_confirmed=True, cluster_id="cluster-01")
+    assert read_instance_state(root) == payload
+
+
+def test_unknown_or_unversioned_local_state_fails_closed(tmp_path: Path) -> None:
+    root = tmp_path / "unknown" / "public_html"
+    root.mkdir(parents=True)
+    state_path = instance_state_path(root)
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(
+        '{"schema":"mcd-instance-state-profile-v1","version":99,"profile":"unknown",'
+        '"ownership_confirmed":false}',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="version is unsupported"):
+        read_instance_state(root)
 
 
 def test_identity_snapshot_uses_bare_uid_and_complete_database_tuple() -> None:

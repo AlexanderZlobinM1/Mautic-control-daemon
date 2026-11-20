@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from mcd_agent import cli
 import mcd_agent.instance_delete as instance_delete
-from mcd_agent.instance_identity import write_instance_identity
+from mcd_agent.instance_identity import write_instance_identity, write_instance_state
 from mcd_agent.inventory import InstanceInventory
 
 
@@ -178,6 +178,14 @@ class InstanceDeleteCliTests(unittest.TestCase):
                 instance_code="00006",
                 primary_domain="hobotnicapamcenje.sales-snap.com",
             )
+            write_instance_state(
+                root,
+                profile="artifact",
+                instance_uid="8286ff8b-5fc2-47f3-8c53-917fcea22f64",
+                instance_code="00006",
+                primary_domain="hobotnicapamcenje.sales-snap.com",
+                ownership_confirmed=True,
+            )
             with patch.object(instance_delete, "_safe_root", return_value=root.resolve(strict=False)):
                 result = instance_delete.delete_instance_artifacts(
                     SimpleNamespace(state_db_path=str(Path(tmp) / "state.db")),
@@ -187,12 +195,82 @@ class InstanceDeleteCliTests(unittest.TestCase):
                     dry_run=True,
                     instance_uid="8286ff8b-5fc2-47f3-8c53-917fcea22f64",
                     instance_code="00006",
+                    instance_state="artifact",
                 )
 
         self.assertEqual(result["status"], "planned")
         self.assertEqual(result["plan"]["db_identity"]["contract"], "mcd-managed-instance-db-v1")
         self.assertEqual(result["plan"]["db_identity"]["status"], "matched")
         self.assertEqual(result["plan"]["db_identity"]["managed_db_user"], "usr_00006")
+        self.assertEqual(result["plan"]["instance_state"]["profile"], "artifact")
+        self.assertEqual(result["plan"]["instance_state"]["source"], "mcc_registry")
+        self.assertEqual(result["plan"]["instance_state"]["status"], "matched")
+
+    def test_active_local_state_blocks_destructive_delete(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "active" / "public_html"
+            root.mkdir(parents=True)
+            write_instance_state(
+                root,
+                profile="active",
+                instance_uid="8286ff8b-5fc2-47f3-8c53-917fcea22f64",
+                instance_code="00006",
+                primary_domain="hobotnicapamcenje.sales-snap.com",
+            )
+            with patch.object(instance_delete, "_safe_root", return_value=root.resolve(strict=False)):
+                with self.assertRaisesRegex(RuntimeError, "requires instance state profile artifact"):
+                    instance_delete.delete_instance_artifacts(
+                        SimpleNamespace(state_db_path=str(Path(tmp) / "state.db")),
+                        root=str(root),
+                        domains=["hobotnicapamcenje.sales-snap.com"],
+                        delete_files=True,
+                        yes=True,
+                        instance_uid="8286ff8b-5fc2-47f3-8c53-917fcea22f64",
+                        instance_code="00006",
+                    )
+
+    def test_complete_cluster_local_state_requires_separate_route(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "cluster" / "public_html"
+            root.mkdir(parents=True)
+            write_instance_state(
+                root,
+                profile="cluster",
+                instance_uid="8286ff8b-5fc2-47f3-8c53-917fcea22f64",
+                instance_code="00006",
+                primary_domain="hobotnicapamcenje.sales-snap.com",
+                ownership_confirmed=True,
+                cluster_id="cluster-01",
+            )
+            with patch.object(instance_delete, "_safe_root", return_value=root.resolve(strict=False)):
+                with self.assertRaisesRegex(RuntimeError, "separate routing"):
+                    instance_delete.delete_instance_artifacts(
+                        SimpleNamespace(state_db_path=str(Path(tmp) / "state.db")),
+                        root=str(root),
+                        domains=["hobotnicapamcenje.sales-snap.com"],
+                        delete_files=True,
+                        yes=True,
+                        instance_uid="8286ff8b-5fc2-47f3-8c53-917fcea22f64",
+                        instance_code="00006",
+                    )
+
+    def test_mcc_state_conflict_with_local_state_blocks_delete(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "conflict" / "public_html"
+            root.mkdir(parents=True)
+            write_instance_state(root, profile="active", ownership_confirmed=False)
+            with patch.object(instance_delete, "_safe_root", return_value=root.resolve(strict=False)):
+                with self.assertRaisesRegex(RuntimeError, "state conflict"):
+                    instance_delete.delete_instance_artifacts(
+                        SimpleNamespace(state_db_path=str(Path(tmp) / "state.db")),
+                        root=str(root),
+                        domains=["hobotnicapamcenje.sales-snap.com"],
+                        delete_files=True,
+                        dry_run=True,
+                        instance_uid="8286ff8b-5fc2-47f3-8c53-917fcea22f64",
+                        instance_code="00006",
+                        instance_state="artifact",
+                    )
 
     def test_exact_artifact_identity_rejects_duplicate_uid_on_another_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -203,6 +281,14 @@ class InstanceDeleteCliTests(unittest.TestCase):
                 instance_uid="8286ff8b-5fc2-47f3-8c53-917fcea22f64",
                 instance_code="00006",
                 primary_domain="hobotnicapamcenje.sales-snap.com",
+            )
+            write_instance_state(
+                root,
+                profile="artifact",
+                instance_uid="8286ff8b-5fc2-47f3-8c53-917fcea22f64",
+                instance_code="00006",
+                primary_domain="hobotnicapamcenje.sales-snap.com",
+                ownership_confirmed=True,
             )
             records = [
                 {
@@ -249,6 +335,14 @@ class InstanceDeleteCliTests(unittest.TestCase):
                 instance_uid="8286ff8b-5fc2-47f3-8c53-917fcea22f64",
                 instance_code="00006",
                 primary_domain="other.example.com",
+            )
+            write_instance_state(
+                root,
+                profile="artifact",
+                instance_uid="8286ff8b-5fc2-47f3-8c53-917fcea22f64",
+                instance_code="00006",
+                primary_domain="other.example.com",
+                ownership_confirmed=True,
             )
             with patch.object(instance_delete, "_safe_root", return_value=root.resolve(strict=False)):
                 with self.assertRaisesRegex(RuntimeError, "domain mismatch"):

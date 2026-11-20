@@ -13,7 +13,16 @@ from typing import Any
 from urllib.parse import urlparse
 
 from mcd_agent.config import AgentConfig
-from mcd_agent.instance_identity import read_instance_identity, validate_instance_code, validate_mcc_instance_uid
+from mcd_agent.instance_identity import (
+    INSTANCE_STATE_PROFILES,
+    INSTANCE_STATE_SCHEMA,
+    INSTANCE_STATE_VERSION,
+    instance_state_path,
+    read_instance_identity,
+    read_instance_state,
+    validate_instance_code,
+    validate_mcc_instance_uid,
+)
 from mcd_agent.localphp import parse_local_php
 from mcd_agent.models import DBConfig
 
@@ -53,6 +62,7 @@ class InstanceDeletePlan:
     instance_code: str = ""
     artifact_scope: bool = False
     identity_evidence: dict[str, Any] = field(default_factory=dict)
+    state_evidence: dict[str, Any] = field(default_factory=dict)
 
 
 def _run(
@@ -415,6 +425,85 @@ def _bare_identity_uid(value: object) -> str:
     return str(value or "").strip().split("@", 1)[0]
 
 
+def _instance_state_evidence(
+    *,
+    root: Path,
+    requested_state: str | None,
+    instance_uid: str | None,
+    instance_code: str | None,
+    requested_domains: list[str],
+) -> dict[str, Any]:
+    """Resolve MCC state first, using the local state file only as fallback evidence."""
+    local_path = instance_state_path(root)
+    try:
+        local_state = read_instance_state(root)
+    except ValueError as exc:
+        raise RuntimeError(f"instance state evidence invalid: {exc}") from exc
+
+    supplied_state = str(requested_state or "").strip().lower()
+    if supplied_state and supplied_state not in INSTANCE_STATE_PROFILES:
+        raise RuntimeError(f"instance state profile is unknown: {supplied_state}")
+
+    if supplied_state and local_state is not None:
+        if str(local_state.get("profile") or "") != supplied_state:
+            raise RuntimeError("instance state conflict between MCC registry and local .mcd/state evidence")
+        for key, expected in (
+            ("instance_uid", str(instance_uid or "").strip()),
+            ("instance_code", str(instance_code or "").strip()),
+        ):
+            observed = str(local_state.get(key) or "").strip()
+            if observed and expected and observed != expected:
+                raise RuntimeError(f"instance state conflict for {key}")
+        requested_domains_clean = {_clean_domain(value) for value in requested_domains if str(value or "").strip()}
+        observed_domain = str(local_state.get("primary_domain") or "").strip().lower().rstrip(".")
+        if observed_domain and requested_domains_clean and observed_domain not in requested_domains_clean:
+            raise RuntimeError("instance state conflict for primary domain")
+
+    if supplied_state:
+        selected = {
+            "schema": INSTANCE_STATE_SCHEMA,
+            "version": INSTANCE_STATE_VERSION,
+            "profile": supplied_state,
+            "source": "mcc_registry",
+            "path": str(local_path),
+            "local_evidence": local_state is not None,
+            "ownership_confirmed": True,
+            "cluster_id": str((local_state or {}).get("cluster_id") or ""),
+        }
+    elif local_state is not None:
+        selected = {
+            **local_state,
+            "source": "local_fallback",
+            "path": str(local_path),
+            "local_evidence": True,
+        }
+    else:
+        if instance_uid or instance_code:
+            raise RuntimeError("instance state evidence is unavailable for exact artifact deletion")
+        return {
+            "schema": INSTANCE_STATE_SCHEMA,
+            "version": INSTANCE_STATE_VERSION,
+            "status": "not_requested",
+            "source": "none",
+            "profile": "",
+            "path": str(local_path),
+        }
+
+    profile = str(selected.get("profile") or "")
+    if profile == "cluster":
+        if not str(selected.get("cluster_id") or "").strip() or not bool(selected.get("ownership_confirmed")):
+            raise RuntimeError("cluster instance state is incomplete")
+        raise RuntimeError("cluster instance state requires separate routing; destructive deletion refused")
+    if profile != "artifact":
+        raise RuntimeError(f"destructive deletion requires instance state profile artifact, got {profile}")
+    if not bool(selected.get("ownership_confirmed")):
+        raise RuntimeError("instance state ownership confirmation is missing")
+    if not instance_uid or not instance_code:
+        raise RuntimeError("artifact state requires instance_uid and instance_code")
+
+    return {**selected, "status": "matched"}
+
+
 def _artifact_identity_evidence(
     *,
     cfg: AgentConfig | None,
@@ -423,10 +512,11 @@ def _artifact_identity_evidence(
     site_domain: str,
     instance_uid: str | None,
     instance_code: str | None,
+    force_exact: bool = False,
 ) -> dict[str, Any]:
     supplied_uid = str(instance_uid or "").strip()
     supplied_code = str(instance_code or "").strip()
-    if not supplied_uid and not supplied_code:
+    if not supplied_uid and not supplied_code and not force_exact:
         return {"scope": "ordinary", "status": "not_requested"}
     if not supplied_uid or not supplied_code:
         raise RuntimeError("instance_uid and instance_code must be supplied together for exact artifact deletion")
@@ -518,6 +608,7 @@ def build_delete_plan(
     delete_db: bool = False,
     instance_uid: str | None = None,
     instance_code: str | None = None,
+    instance_state: str | None = None,
 ) -> InstanceDeletePlan:
     target_root = _safe_root(root)
     local_php = _local_php_path(target_root)
@@ -536,6 +627,13 @@ def build_delete_plan(
     if site_domain and site_domain not in seen_domains:
         cleaned_domains.append(site_domain)
 
+    state_evidence = _instance_state_evidence(
+        root=target_root,
+        requested_state=instance_state,
+        instance_uid=instance_uid,
+        instance_code=instance_code,
+        requested_domains=list(domains or []),
+    )
     identity_evidence = _artifact_identity_evidence(
         cfg=cfg,
         root=target_root,
@@ -543,6 +641,7 @@ def build_delete_plan(
         site_domain=site_domain,
         instance_uid=instance_uid,
         instance_code=instance_code,
+        force_exact=state_evidence.get("profile") == "artifact",
     )
 
     inventory_db = _inventory_db_for_root(cfg, target_root) if delete_db else None
@@ -580,6 +679,7 @@ def build_delete_plan(
         instance_code=str(instance_code or "").strip(),
         artifact_scope=identity_evidence.get("scope") == "exact-artifact",
         identity_evidence=identity_evidence,
+        state_evidence=state_evidence,
     )
 
 
@@ -607,6 +707,7 @@ def _plan_public(plan: InstanceDeletePlan) -> dict[str, Any]:
         },
         "artifact_identity": dict(plan.identity_evidence),
         "artifact_scope": plan.artifact_scope,
+        "instance_state": dict(plan.state_evidence),
         "delete_files": plan.delete_files,
         "delete_vhost": plan.delete_vhost,
         "delete_db": plan.delete_db,
@@ -803,6 +904,7 @@ def delete_instance_artifacts(
     dry_run: bool = False,
     instance_uid: str | None = None,
     instance_code: str | None = None,
+    instance_state: str | None = None,
 ) -> dict[str, Any]:
     if not (delete_files or delete_vhost or delete_db):
         raise RuntimeError("select at least one deletion target")
@@ -816,6 +918,7 @@ def delete_instance_artifacts(
         delete_db=delete_db,
         instance_uid=instance_uid,
         instance_code=instance_code,
+        instance_state=instance_state,
     )
     result: dict[str, Any] = {
         "status": "planned" if dry_run else "ok",
