@@ -2561,6 +2561,23 @@ State snapshot каждого active-инстанса содержит `instance
 выведенный из inventory `active`, а повреждённый файл публикуется как
 `unknown/invalid` и не маскируется.
 
+Периодический и автономный state push формирует payload из полного
+persisted inventory MCD, а не из active-only selector. Поэтому перед каждым
+complete push daemon читает `list_all_instances()`: active-инстансы остаются
+в `instances`, подтверждённые retired roots — только в `artifacts`, а
+`instance_state.profile=artifact` никогда не попадает в планировщик,
+runtime-карты или другие active-операции. Rescan может менять active view,
+но не имеет права выкинуть сохранённую artifact-строку из следующего
+payload. Если чтение полного inventory не удалось, push маркируется
+неполным и не подменяет persisted artifact registry пустым списком.
+
+Ручной `push_state_now` и daemon periodic push используют одну и ту же
+границу полного inventory. Это исключает расхождение «ручная проверка
+видит artifact — следующий daemon snapshot удаляет его на MCC». Повторные
+циклы после rescan обязаны публиковать тот же root, UID и
+`cleanup_operations: ["delete"]`, пока artifact state не удалён штатной
+точной операцией.
+
 Перед удалением базы MCD читает все строки `mysql.user` для точного managed
 username. Он принимает только строки с этим же username и корректным Host,
 запоминает весь список `user@host`, удаляет каждую запись и повторяет чтение.

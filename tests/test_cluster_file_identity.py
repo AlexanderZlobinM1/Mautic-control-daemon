@@ -34,13 +34,57 @@ def _cfg(**overrides: object) -> SimpleNamespace:
 class ClusterFileIdentityTests(unittest.TestCase):
     def test_state_push_refreshes_inventory_from_shared_state_db(self) -> None:
         current = [SimpleNamespace(root="/var/www/deleted/public_html")]
-        fresh = [SimpleNamespace(root="/var/www/active/public_html")]
-        inventory = SimpleNamespace(list_instances=lambda: fresh)
+        fresh = [
+            SimpleNamespace(root="/var/www/active/public_html"),
+            SimpleNamespace(root="/var/www/retired/public_html"),
+        ]
+
+        def active_inventory_must_not_be_used() -> list[SimpleNamespace]:
+            raise AssertionError("periodic state payload must use complete inventory")
+
+        inventory = SimpleNamespace(
+            list_all_instances=lambda: fresh,
+            list_instances=active_inventory_must_not_be_used,
+        )
 
         snapshot, complete = _inventory_snapshot_for_push(inventory, current)
 
         self.assertIs(snapshot, fresh)
         self.assertTrue(complete)
+
+    def test_periodic_snapshot_keeps_persisted_artifact_after_rescan(self) -> None:
+        active = SimpleNamespace(
+            instance_uid="active-001",
+            root="/var/www/active/public_html",
+        )
+        artifact = SimpleNamespace(
+            instance_uid="gc.sales-snap.com",
+            root="/var/www/ss/public_html",
+        )
+        complete_inventory = [active, artifact]
+
+        class Inventory:
+            def list_all_instances(self) -> list[SimpleNamespace]:
+                return list(complete_inventory)
+
+            def list_instances(self) -> list[SimpleNamespace]:
+                return [active]
+
+        inventory = Inventory()
+        current = inventory.list_instances()
+
+        # Model the daemon's repeated autonomous pushes after a rescan.  The
+        # active scheduler view remains one row, while each payload view keeps
+        # the persisted artifact row available for build_payload().
+        first, first_complete = _inventory_snapshot_for_push(inventory, current)
+        second, second_complete = _inventory_snapshot_for_push(inventory, current)
+
+        self.assertTrue(first_complete)
+        self.assertTrue(second_complete)
+        self.assertEqual([row.instance_uid for row in current], ["active-001"])
+        self.assertEqual([row.instance_uid for row in first], ["active-001", "gc.sales-snap.com"])
+        self.assertEqual([row.instance_uid for row in second], ["active-001", "gc.sales-snap.com"])
+        self.assertEqual(second[1].root, "/var/www/ss/public_html")
 
     def test_state_push_marks_fallback_snapshot_incomplete(self) -> None:
         current = [SimpleNamespace(root="/var/www/active/public_html")]

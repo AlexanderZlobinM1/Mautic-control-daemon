@@ -185,6 +185,24 @@ def _wire_instance_state(inst: MauticInstall, identity: Mapping[str, Any]) -> di
     }
 
 
+def _artifact_state_row(
+    inst: MauticInstall,
+    identity_wire: Mapping[str, Any],
+    instance_state_wire: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the complete top-level artifact projection for one retired root."""
+    return {
+        **identity_wire,
+        "instance_state": dict(instance_state_wire),
+        "name": inst.name,
+        "root": inst.root,
+        "source": inst.source,
+        "domains": list(inst.domains or ([] if not inst.primary_domain else [inst.primary_domain])),
+        "mautic_major": inst.mautic_major,
+        "cleanup_operations": ["delete"] if instance_state_wire["profile"] == "artifact" else [],
+    }
+
+
 def _galera_routing_eligibility(galera: dict[str, Any]) -> tuple[bool, str]:
     """Return whether this Galera node is safe for new DB traffic/source use."""
     ready = _to_bool(galera.get("ready"))
@@ -2910,18 +2928,7 @@ class MCCStatePusher:
             identity_wire = _wire_instance_identity(i, wire_host_name)
             instance_state_wire = _wire_instance_state(i, identity_wire)
             if instance_state_wire["profile"] in {"artifact", "unknown"}:
-                artifacts.append(
-                    {
-                        **identity_wire,
-                        "instance_state": instance_state_wire,
-                        "name": i.name,
-                        "root": i.root,
-                        "source": i.source,
-                        "domains": list(i.domains or ([] if not i.primary_domain else [i.primary_domain])),
-                        "mautic_major": i.mautic_major,
-                        "cleanup_operations": ["delete"] if instance_state_wire["profile"] == "artifact" else [],
-                    }
-                )
+                artifacts.append(_artifact_state_row(i, identity_wire, instance_state_wire))
                 continue
             active_installs.append(i)
             plugin_observation = _plugin_inventory_observation(i, self.runtime_store)

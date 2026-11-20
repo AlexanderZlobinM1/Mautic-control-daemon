@@ -1,3 +1,11 @@
+## 1.6.119 - 2026-11-21
+
+- Keep persisted MCD artifact rows in every complete daemon state push by
+  reading the full inventory for payload construction while retaining the
+  active-only inventory for scheduling and runtime operations. Repeated pushes
+  after rescan keep the artifact root, UID and exact `delete` contract in the
+  top-level `artifacts` projection.
+
 ## 1.6.118 - 2026-11-20
 
 - Allow exact artifact cleanup to use a persisted legacy UID-only artifact
