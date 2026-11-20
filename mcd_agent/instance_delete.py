@@ -863,6 +863,37 @@ def _managed_image_db_user(db_name: str, db_user: str) -> str:
     return expected
 
 
+def _managed_db_user_hosts(managed_user: str) -> list[str]:
+    """Enumerate every host row for one exact managed account.
+
+    The query is deliberately scoped to the canonical managed username. Any
+    malformed or differently named row is treated as an ownership ambiguity,
+    never as permission to broaden cleanup.
+    """
+    expected_user = str(managed_user or "").strip()
+    if not expected_user:
+        raise RuntimeError("managed database user is empty")
+    output = _mysql_exec(
+        "SELECT User, Host FROM mysql.user "
+        f"WHERE User = {_quote_sql(expected_user)} ORDER BY Host",
+        timeout_sec=120,
+    )
+    hosts: set[str] = set()
+    for line in str(output or "").splitlines():
+        if not line.strip():
+            continue
+        fields = line.split("\t")
+        if len(fields) != 2:
+            raise RuntimeError("managed database user inventory row is malformed")
+        observed_user, host = (value.strip() for value in fields)
+        if observed_user != expected_user:
+            raise RuntimeError("managed database user inventory contains an unrelated account")
+        if not host or any(char in host for char in "\x00\r\n\t") or len(host) > 255:
+            raise RuntimeError("managed database user inventory contains an invalid host")
+        hosts.add(host)
+    return sorted(hosts)
+
+
 def _remove_dedicated_certificate(domain: str) -> tuple[bool, str]:
     cert_dir = _LETSENCRYPT_LIVE / domain
     renewal = _LETSENCRYPT_RENEWAL / f"{domain}.conf"
@@ -929,6 +960,8 @@ def delete_instance_artifacts(
             "vhost": [],
             "db": False,
             "db_user": False,
+            "db_user_hosts": [],
+            "db_user_remaining_hosts": [],
             "local_mail": [],
             "certificates": [],
         },
@@ -947,6 +980,15 @@ def delete_instance_artifacts(
             "refusing database deletion: db_name/db_user must be an exact managed pair "
             "(baza_X/korisnik_X or db_<5-char-code>/usr_<same-code>)"
         )
+    managed_db_user_hosts: list[str] = []
+    if plan.delete_db:
+        try:
+            managed_db_user_hosts = _managed_db_user_hosts(managed_db_user)
+        except Exception as exc:
+            raise RuntimeError(
+                f"refusing database deletion: managed user ownership inventory failed: {exc}"
+            ) from exc
+        result["deleted"]["db_user_hosts"] = list(managed_db_user_hosts)
 
     retained_certificates = _remove_nginx_configs_safely(plan, result) if plan.delete_vhost else set()
 
@@ -972,14 +1014,25 @@ def delete_instance_artifacts(
             password=plan.db_password,
         )
         result["deleted"]["db"] = True
+        for host in managed_db_user_hosts:
+            try:
+                _mysql_exec(
+                    f"DROP USER IF EXISTS {_quote_sql(managed_db_user)}@{_quote_sql(host)}",
+                    timeout_sec=120,
+                )
+            except Exception as exc:
+                result["warnings"].append(f"managed database user cleanup failed for {host}: {exc}")
         try:
-            _mysql_exec(
-                f"DROP USER IF EXISTS {_quote_sql(managed_db_user)}@'localhost'",
-                timeout_sec=120,
-            )
-            result["deleted"]["db_user"] = True
+            remaining_hosts = _managed_db_user_hosts(managed_db_user)
+            result["deleted"]["db_user_remaining_hosts"] = list(remaining_hosts)
+            if remaining_hosts:
+                result["warnings"].append(
+                    "managed database user accounts remain: " + ", ".join(remaining_hosts)
+                )
+            else:
+                result["deleted"]["db_user"] = True
         except Exception as exc:
-            result["warnings"].append(f"managed database user cleanup failed: {exc}")
+            result["warnings"].append(f"managed database user verification failed: {exc}")
 
     if plan.delete_vhost:
         print("Deleting nginx vhost")
