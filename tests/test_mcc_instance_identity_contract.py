@@ -26,6 +26,7 @@ from mcd_agent.models import DBConfig, MauticInstall
 from mcd_agent.state_push import (
     _observe_mautic_version_change,
     _read_pending_instance_change_events,
+    _artifact_state_row,
     _wire_instance_identity,
     _wire_instance_state,
     record_mautic_version_change,
@@ -281,6 +282,36 @@ def test_rescan_keeps_artifact_out_of_active_inventory(monkeypatch, tmp_path: Pa
     assert count == 1
     assert [item.instance_uid for item in inv.list_instances()] == ["mcc-target-001"]
     assert [item.instance_uid for item in inv.list_artifact_instances()] == ["mcc-source-001"]
+
+
+def test_periodic_artifact_projection_keeps_exact_delete_contract(tmp_path: Path) -> None:
+    root = tmp_path / "gc.sales-snap.com" / "public_html"
+    root.mkdir(parents=True)
+    write_instance_state(
+        root,
+        profile="artifact",
+        instance_uid="gc.sales-snap.com",
+        primary_domain="gc.sales-snap.com",
+        ownership_confirmed=True,
+    )
+    install = MauticInstall(
+        instance_uid="gc.sales-snap.com",
+        name="gc.sales-snap.com",
+        root=str(root),
+        console_path=str(root / "bin/console"),
+        primary_domain="gc.sales-snap.com",
+        source="artifact",
+    )
+
+    identity = _wire_instance_identity(install, "host-37-27-225-92")
+    state = _wire_instance_state(install, identity)
+    row = _artifact_state_row(install, identity, state)
+
+    assert row["root"] == str(root)
+    assert row["instance_uid"] == "gc.sales-snap.com@host-37-27-225-92"
+    assert row["instance_state"]["profile"] == "artifact"
+    assert row["instance_state"]["ownership_confirmed"] is True
+    assert row["cleanup_operations"] == ["delete"]
 
 
 def test_new_image_plan_uses_mcc_identity_but_legacy_plan_is_unchanged() -> None:

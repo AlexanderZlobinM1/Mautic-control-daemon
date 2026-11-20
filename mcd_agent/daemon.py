@@ -19061,8 +19061,17 @@ def _inventory_snapshot_for_push(
     inventory: InstanceInventory,
     current: list[MauticInstall],
 ) -> tuple[list[MauticInstall], bool]:
+    """Return the complete inventory used only to build an MCC snapshot.
+
+    The scheduler keeps using ``list_instances()`` so artifact roots remain
+    excluded from active work.  A state snapshot has a different contract:
+    it must include those persisted, MCD-owned artifact rows in the separate
+    top-level ``artifacts`` projection.  Reading ``list_all_instances()`` at
+    this boundary keeps the two concerns separate and prevents a successful
+    rescan from pruning an artifact on MCC.
+    """
     try:
-        return inventory.list_instances(), True
+        return inventory.list_all_instances(), True
     except Exception as exc:
         logging.warning("inventory refresh before MCC state push failed: %s", exc)
         return current, False
@@ -24675,19 +24684,23 @@ def run_loop(
             )
 
         if pusher.enabled():
-            previous_roots = {str(item.root) for item in installs}
-            installs, instances_snapshot_complete = _inventory_snapshot_for_push(inventory, installs)
-            current_roots = {str(item.root) for item in installs}
-            if instances_snapshot_complete and current_roots != previous_roots:
+            # Keep ``installs`` as the active-only scheduler inventory.  The
+            # payload boundary deliberately reads the complete persisted
+            # inventory so artifact rows survive every autonomous push while
+            # never becoming launchable work.
+            payload_installs, instances_snapshot_complete = _inventory_snapshot_for_push(
+                inventory,
+                installs,
+            )
+            if instances_snapshot_complete:
                 logging.info(
-                    "inventory refreshed before MCC state push: before=%s after=%s",
-                    len(previous_roots),
-                    len(current_roots),
+                    "complete inventory refreshed before MCC state push: active=%s total=%s",
+                    len(installs),
+                    len(payload_installs),
                 )
-                _refresh_instance_db_maps(installs, db_configs_by_root, mautic_timezones_by_root)
             pending_profile_event = read_pending_profile_event(config)
             payload = pusher.build_payload(
-                installs=installs,
+                installs=payload_installs,
                 profile_name=config.profile_name,
                 now_ts=now,
                 profile_event=pending_profile_event,
