@@ -351,6 +351,38 @@ class InstanceDeleteCliTests(unittest.TestCase):
         self.assertEqual(result["plan"]["instance_state"]["source"], "mcc_registry")
         self.assertEqual(result["plan"]["instance_state"]["status"], "matched")
 
+    def test_legacy_uid_only_artifact_state_is_deleteable_without_code(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "ss" / "public_html"
+            (root / "config").mkdir(parents=True)
+            (root / "config" / "local.php").write_text(
+                "<?php $parameters = ['db_host'=>'localhost', 'db_name'=>'baza_legacy', "
+                "'db_user'=>'korisnik_legacy', 'db_password'=>'secret', "
+                "'site_url'=>'https://gc.sales-snap.com'];",
+                encoding="utf-8",
+            )
+            write_instance_state(
+                root,
+                profile="artifact",
+                instance_uid="gc.sales-snap.com",
+                primary_domain="gc.sales-snap.com",
+                ownership_confirmed=True,
+            )
+            with patch.object(instance_delete, "_safe_root", return_value=root.resolve(strict=False)):
+                result = instance_delete.delete_instance_artifacts(
+                    SimpleNamespace(state_db_path=str(Path(tmp) / "state.db")),
+                    root=str(root),
+                    delete_files=True,
+                    dry_run=True,
+                )
+
+            self.assertEqual(result["status"], "planned")
+            self.assertTrue(result["plan"]["artifact_scope"])
+            self.assertEqual(result["plan"]["artifact_identity"]["instance_uid"], "gc.sales-snap.com")
+            self.assertEqual(result["plan"]["artifact_identity"]["instance_code"], "")
+            self.assertTrue(result["plan"]["artifact_identity"]["legacy_uid_only"])
+            self.assertEqual(result["plan"]["instance_state"]["profile"], "artifact")
+
     def test_active_local_state_blocks_destructive_delete(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "active" / "public_html"
