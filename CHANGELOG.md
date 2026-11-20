@@ -1,3 +1,15 @@
+## 1.6.115 - 2026-11-20
+
+- Add the versioned unified instance-state profile
+  (`active`, `artifact`, `backup`, `quarantine`, `cluster`, `unknown`). MCC
+  state supplied to `instance-delete --instance-state` is authoritative;
+  `.mcd/state/instance-state.json` is local fallback/evidence only.
+- Make destructive deletion fail closed on state conflict, unknown or invalid
+  state, missing ownership confirmation, and incomplete/cluster state. Cluster
+  behavior remains frozen and is only recognized and routed away from deletion.
+- Publish the selected state source/profile in dry-run JSON alongside the exact
+  UID/code/domain/root and database ownership evidence.
+
 ## 1.6.114 - 2026-11-20
 
 - Add a fail-closed exact-artifact deletion contract for MCC-owned instances.
