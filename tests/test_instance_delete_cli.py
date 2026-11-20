@@ -67,9 +67,14 @@ class InstanceDeleteCliTests(unittest.TestCase):
                 delete_db=True,
             )
             sql: list[str] = []
+            remaining_hosts = {"localhost"}
 
             def mysql_exec(statement: str, **_kwargs: object) -> str:
                 sql.append(statement)
+                if statement.startswith("SELECT User, Host"):
+                    return "korisnik_shop\tlocalhost\n" if remaining_hosts else ""
+                if statement.startswith("DROP USER"):
+                    remaining_hosts.clear()
                 return ""
 
             with (
@@ -86,8 +91,8 @@ class InstanceDeleteCliTests(unittest.TestCase):
                 )
 
         self.assertTrue(result["deleted"]["db_user"])
-        self.assertEqual(sql[0], "DROP DATABASE IF EXISTS `baza_shop`")
-        self.assertEqual(sql[1], "DROP USER IF EXISTS 'korisnik_shop'@'localhost'")
+        self.assertEqual(sql[1], "DROP DATABASE IF EXISTS `baza_shop`")
+        self.assertEqual(sql[2], "DROP USER IF EXISTS 'korisnik_shop'@'localhost'")
 
     def test_delete_drops_exact_mcc_identity_database_user(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -108,11 +113,20 @@ class InstanceDeleteCliTests(unittest.TestCase):
                 delete_db=True,
             )
             sql: list[str] = []
+            remaining_hosts = {"localhost"}
+
+            def mysql_exec(statement: str, **_kwargs: object) -> str:
+                sql.append(statement)
+                if statement.startswith("SELECT User, Host"):
+                    return "usr_00006\tlocalhost\n" if remaining_hosts else ""
+                if statement.startswith("DROP USER"):
+                    remaining_hosts.clear()
+                return ""
 
             with (
                 patch.object(instance_delete, "build_delete_plan", return_value=plan),
                 patch.object(instance_delete.os, "geteuid", return_value=0),
-                patch.object(instance_delete, "_mysql_exec", side_effect=lambda statement, **_: sql.append(statement) or ""),
+                patch.object(instance_delete, "_mysql_exec", side_effect=mysql_exec),
                 patch("mcd_agent.inventory.InstanceInventory.rescan", return_value=0),
             ):
                 result = instance_delete.delete_instance_artifacts(
@@ -125,9 +139,139 @@ class InstanceDeleteCliTests(unittest.TestCase):
         self.assertEqual(result["plan"]["db_identity"]["status"], "matched")
         self.assertTrue(result["deleted"]["db_user"])
         self.assertEqual(sql, [
+            "SELECT User, Host FROM mysql.user WHERE User = 'usr_00006' ORDER BY Host",
             "DROP DATABASE IF EXISTS `db_00006`",
             "DROP USER IF EXISTS 'usr_00006'@'localhost'",
+            "SELECT User, Host FROM mysql.user WHERE User = 'usr_00006' ORDER BY Host",
         ])
+
+    def test_delete_drops_every_host_entry_and_verifies_empty_account(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "public_html"
+            root.mkdir()
+            plan = instance_delete.InstanceDeletePlan(
+                root=root,
+                local_php=None,
+                domains=[],
+                nginx_paths=[],
+                db_name="db_00006",
+                db_host="localhost",
+                db_port="3306",
+                db_user="usr_00006",
+                db_password="secret",
+                delete_files=False,
+                delete_vhost=False,
+                delete_db=True,
+            )
+            remaining_hosts = {"localhost", "127.0.0.1"}
+            sql: list[str] = []
+
+            def mysql_exec(statement: str, **_kwargs: object) -> str:
+                sql.append(statement)
+                if statement.startswith("SELECT User, Host"):
+                    return "".join(f"usr_00006\t{host}\n" for host in sorted(remaining_hosts))
+                if statement.startswith("DROP USER"):
+                    remaining_hosts.discard(statement.rsplit("@", 1)[1].strip("'"))
+                return ""
+
+            with (
+                patch.object(instance_delete, "build_delete_plan", return_value=plan),
+                patch.object(instance_delete.os, "geteuid", return_value=0),
+                patch.object(instance_delete, "_mysql_exec", side_effect=mysql_exec),
+                patch("mcd_agent.inventory.InstanceInventory.rescan", return_value=0),
+            ):
+                result = instance_delete.delete_instance_artifacts(
+                    SimpleNamespace(state_db_path=str(Path(tmp) / "state.db")),
+                    root=str(root),
+                    delete_db=True,
+                    yes=True,
+                )
+
+        self.assertTrue(result["deleted"]["db_user"])
+        self.assertEqual(remaining_hosts, set())
+        self.assertEqual(result["deleted"]["db_user_hosts"], ["127.0.0.1", "localhost"])
+        self.assertEqual(result["deleted"]["db_user_remaining_hosts"], [])
+        self.assertIn("DROP USER IF EXISTS 'usr_00006'@'127.0.0.1'", sql)
+        self.assertIn("DROP USER IF EXISTS 'usr_00006'@'localhost'", sql)
+
+    def test_delete_receipt_keeps_db_user_false_when_host_entry_remains(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "public_html"
+            root.mkdir()
+            plan = instance_delete.InstanceDeletePlan(
+                root=root,
+                local_php=None,
+                domains=[],
+                nginx_paths=[],
+                db_name="db_00006",
+                db_host="localhost",
+                db_port="3306",
+                db_user="usr_00006",
+                db_password="secret",
+                delete_files=False,
+                delete_vhost=False,
+                delete_db=True,
+            )
+            with (
+                patch.object(instance_delete, "build_delete_plan", return_value=plan),
+                patch.object(instance_delete.os, "geteuid", return_value=0),
+                patch.object(
+                    instance_delete,
+                    "_mysql_exec",
+                    side_effect=lambda statement, **_: "usr_00006\t127.0.0.1\n" if statement.startswith("SELECT User, Host") else "",
+                ),
+                patch("mcd_agent.inventory.InstanceInventory.rescan", return_value=0),
+            ):
+                result = instance_delete.delete_instance_artifacts(
+                    SimpleNamespace(state_db_path=str(Path(tmp) / "state.db")),
+                    root=str(root),
+                    delete_db=True,
+                    yes=True,
+                )
+
+        self.assertFalse(result["deleted"]["db_user"])
+        self.assertEqual(result["deleted"]["db_user_remaining_hosts"], ["127.0.0.1"])
+        self.assertTrue(any("accounts remain" in warning for warning in result["warnings"]))
+
+    def test_unrelated_account_in_managed_user_inventory_fails_before_database_drop(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "public_html"
+            root.mkdir()
+            plan = instance_delete.InstanceDeletePlan(
+                root=root,
+                local_php=None,
+                domains=[],
+                nginx_paths=[],
+                db_name="db_00006",
+                db_host="localhost",
+                db_port="3306",
+                db_user="usr_00006",
+                db_password="secret",
+                delete_files=False,
+                delete_vhost=False,
+                delete_db=True,
+            )
+            sql: list[str] = []
+            with (
+                patch.object(instance_delete, "build_delete_plan", return_value=plan),
+                patch.object(instance_delete.os, "geteuid", return_value=0),
+                patch.object(
+                    instance_delete,
+                    "_mysql_exec",
+                    side_effect=lambda statement, **_: sql.append(statement)
+                    or "usr_00006\tlocalhost\nshared_user\t127.0.0.1\n",
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "unrelated account"):
+                    instance_delete.delete_instance_artifacts(
+                        SimpleNamespace(state_db_path=str(Path(tmp) / "state.db")),
+                        root=str(root),
+                        delete_db=True,
+                        yes=True,
+                    )
+
+        self.assertEqual(len(sql), 1)
+        self.assertTrue(sql[0].startswith("SELECT User, Host"))
 
     def test_delete_rejects_mismatched_managed_pair_before_database_work(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -399,7 +543,7 @@ class InstanceDeleteCliTests(unittest.TestCase):
                 )
 
         disable_mail.assert_not_called()
-        self.assertEqual(order, ["db", "db", "files"])
+        self.assertEqual(order, ["db", "db", "db", "files"])
         self.assertEqual(result["plan"]["artifact_scope"], True)
 
     def test_exact_artifact_identity_rejects_root_without_local_evidence(self) -> None:
@@ -534,7 +678,7 @@ class InstanceDeleteCliTests(unittest.TestCase):
                     yes=True,
                 )
 
-        self.assertEqual(order, ["mail", "db", "db", "files"])
+        self.assertEqual(order, ["db", "mail", "db", "db", "files"])
         self.assertEqual(result["deleted"]["local_mail"], ["shop.example.com"])
 
     def test_delete_can_use_absolute_root_after_inventory_row_is_gone(self) -> None:

@@ -1,3 +1,14 @@
+## 1.6.116 - 2026-11-20
+
+- Enumerate every host entry for the exact managed database user before
+  deletion, remove each exact `user@host` account, and verify the account is
+  absent afterwards. The deletion receipt reports `db_user=true` only after
+  that final empty readback; residual accounts remain an explicit warning and
+  are listed in the receipt.
+- Reject malformed or unrelated account rows before dropping the database.
+  This keeps shared/ambiguous ownership fail-closed without broadening the
+  cleanup target or changing DNS, mail, or certificate routing.
+
 ## 1.6.115 - 2026-11-20
 
 - Add the versioned unified instance-state profile
