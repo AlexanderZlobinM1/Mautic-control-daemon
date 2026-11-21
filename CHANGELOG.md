@@ -1,3 +1,13 @@
+## 1.6.121 - 2026-11-21
+
+- Make migration database relay streams completion-fenced. Source MCD builds a
+  complete local compressed spool before emitting relay bytes, uses the dump
+  client's large-table network timeout when available, and publishes matching
+  begin/complete markers only after `mariadb-dump`/`mysqldump` succeeds. Target
+  MCD validates gzip integrity and the completion markers before preparing the
+  database, so failed or truncated large-table dumps cannot be accepted as a
+  successful import. No table, including audit log, is skipped or truncated.
+
 ## 1.6.120 - 2026-11-21
 
 - Run normal MCC full-state and monitor-signals publishing in an independent

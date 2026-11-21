@@ -56,6 +56,10 @@ _MYSQL_DATE_FORMAT_GENERATED_RE = re.compile(
     r"GENERATED\s+ALWAYS\s+AS\s*\(\s*date_format\s*\(\s*`(?P<column>[^`]+)`\s*,\s*(?:_[A-Za-z0-9]+)?'(?P<fmt>[^']+)'\s*\)\s*\)",
     re.IGNORECASE,
 )
+_DB_STREAM_MARKER_RE = re.compile(
+    rb"^-- MCD-DB-STREAM-V1 (?P<phase>BEGIN|COMPLETE) (?P<stream_id>[0-9a-f]{32})\n$"
+)
+_DB_STREAM_COPY_BUFFER_BYTES = 1024 * 1024
 NGINX_SITES_AVAILABLE = Path("/etc/nginx/sites-available")
 NGINX_SITES_ENABLED = Path("/etc/nginx/sites-enabled")
 LETSENCRYPT_ROOT = Path("/etc/letsencrypt")
@@ -960,6 +964,55 @@ def receive_target_letsencrypt(*, input_stream: Any) -> dict[str, Any]:
     return {"schema": "mcd-instance-migration-target-letsencrypt-v1", "ok": True, "extracted": extracted}
 
 
+def _dump_supports_network_timeout(dump_bin: str) -> bool:
+    """Return whether this dump client exposes MySQL's large-table timeout switch."""
+    try:
+        proc = subprocess.run(
+            [dump_bin, "--help"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+            timeout=10,
+        )
+    except Exception:
+        return False
+    help_text = (proc.stdout or b"").decode("utf-8", errors="replace")
+    return "--network-timeout" in help_text
+
+
+def _db_stream_marker(phase: str, stream_id: str) -> bytes:
+    return f"-- MCD-DB-STREAM-V1 {phase} {stream_id}\n".encode("ascii")
+
+
+def _verify_db_stream_file(path: Path) -> str:
+    """Verify gzip integrity and the source completion fence before DB mutation."""
+    first_line = b""
+    last_nonempty = b""
+    try:
+        with gzip.open(path, mode="rb") as gz:
+            first_line = gz.readline()
+            last_nonempty = first_line if first_line.strip() else b""
+            while True:
+                line = gz.readline()
+                if not line:
+                    break
+                if line.strip():
+                    last_nonempty = line
+    except (EOFError, OSError) as exc:
+        raise RuntimeError(f"database stream gzip is incomplete or corrupt: {exc}") from exc
+
+    begin = _DB_STREAM_MARKER_RE.fullmatch(first_line)
+    complete = _DB_STREAM_MARKER_RE.fullmatch(last_nonempty)
+    if begin is None or begin.group("phase") != b"BEGIN":
+        raise RuntimeError("database stream begin marker is missing")
+    if complete is None or complete.group("phase") != b"COMPLETE":
+        raise RuntimeError("database stream completion marker is missing")
+    stream_id = begin.group("stream_id")
+    if complete.group("stream_id") != stream_id:
+        raise RuntimeError("database stream completion marker does not match begin marker")
+    return stream_id.decode("ascii")
+
+
 @stable_source_operation
 def stream_source_db(config: AgentConfig, *, selector: str | None, output: Any) -> int:
     inv = InstanceInventory(config.state_db_path)
@@ -988,29 +1041,68 @@ def stream_source_db(config: AgentConfig, *, selector: str | None, output: Any) 
         dump_bin = shutil.which("mariadb-dump") or shutil.which("mysqldump")
         if not dump_bin:
             raise RuntimeError("mariadb-dump or mysqldump is required for source database stream")
-        proc = subprocess.Popen(
-            [
-                dump_bin,
-                f"--defaults-extra-file={defaults}",
-                "--single-transaction",
-                "--quick",
-                "--routines",
-                "--triggers",
-                source_db.name,
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        assert proc.stdout is not None
-        try:
-            with gzip.GzipFile(fileobj=output, mode="wb") as gz:
-                shutil.copyfileobj(proc.stdout, gz)
-        finally:
-            proc.stdout.close()
-        err = proc.stderr.read().decode("utf-8", errors="replace") if proc.stderr is not None else ""
-        rc = int(proc.wait())
+        stream_id = secrets.token_hex(16)
+        spool_path = Path(td) / "source-database.sql.gz"
+        stderr_path = Path(td) / "mariadb-dump.stderr"
+        dump_argv = [
+            dump_bin,
+            f"--defaults-extra-file={defaults}",
+            "--single-transaction",
+            "--quick",
+            "--max-allowed-packet=1073741824",
+            "--routines",
+            "--triggers",
+        ]
+        if _dump_supports_network_timeout(dump_bin):
+            dump_argv.append("--network-timeout")
+        dump_argv.append(source_db.name)
+
+        with stderr_path.open("wb") as stderr_file:
+            proc = subprocess.Popen(
+                dump_argv,
+                stdout=subprocess.PIPE,
+                stderr=stderr_file,
+            )
+            assert proc.stdout is not None
+            copy_error: Exception | None = None
+            try:
+                with spool_path.open("wb") as spool_file:
+                    with gzip.GzipFile(fileobj=spool_file, mode="wb", compresslevel=1) as gz:
+                        gz.write(_db_stream_marker("BEGIN", stream_id))
+                        try:
+                            shutil.copyfileobj(proc.stdout, gz, length=_DB_STREAM_COPY_BUFFER_BYTES)
+                        except Exception as exc:
+                            copy_error = exc
+                    spool_file.flush()
+                    os.fsync(spool_file.fileno())
+            finally:
+                proc.stdout.close()
+
+            if copy_error is not None and proc.poll() is None:
+                proc.terminate()
+            rc = int(proc.wait())
+
+        err = stderr_path.read_text(encoding="utf-8", errors="replace").strip()
+        if copy_error is not None:
+            raise RuntimeError(
+                f"source database stream failed while writing local spool rc={rc}: {copy_error}"
+                + (f"; {err}" if err else "")
+            ) from copy_error
         if rc != 0:
-            raise RuntimeError(f"source database stream failed rc={rc}: {err.strip()}")
+            raise RuntimeError(f"source database stream failed rc={rc}: {err}")
+
+        # The completion marker is added only after the dump process has
+        # returned success.  A failed source therefore emits no relay bytes.
+        with spool_path.open("ab") as spool_file:
+            with gzip.GzipFile(fileobj=spool_file, mode="ab", compresslevel=1) as gz:
+                gz.write(b"\n")
+                gz.write(_db_stream_marker("COMPLETE", stream_id))
+            spool_file.flush()
+            os.fsync(spool_file.fileno())
+
+        _verify_db_stream_file(spool_path)
+        with spool_path.open("rb") as complete_stream:
+            shutil.copyfileobj(complete_stream, output, length=_DB_STREAM_COPY_BUFFER_BYTES)
         return rc
 
 
@@ -1054,31 +1146,55 @@ def _iter_mysql_generated_date_format_compat_sql(lines: Any) -> Any:
 
 def import_target_db_stream(*, target_db_name: str, target_db_user: str, target_db_password: str, input_stream: Any) -> dict[str, Any]:
     target_db = _target_db_from_direct_values(name=target_db_name, user=target_db_user, password=target_db_password)
-    _prepare_target_db(target_db)
-    proc = subprocess.Popen([*_mysql_admin_base(), target_db.name], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    assert proc.stdin is not None
-    try:
-        with gzip.GzipFile(fileobj=input_stream, mode="rb") as gz:
-            for chunk in _iter_mysql_generated_date_format_compat_sql(gz):
-                proc.stdin.write(chunk)
-        proc.stdin.close()
-        proc.stdin = None
-        out_b, err_b = proc.communicate()
-    except Exception:
-        if proc.stdin is not None:
-            try:
-                proc.stdin.close()
-            except Exception:
-                pass
+    with tempfile.TemporaryDirectory(prefix="mcd-migrate-target-db-") as td:
+        spool_path = Path(td) / "source-database.sql.gz"
+        with spool_path.open("wb") as spool_file:
+            shutil.copyfileobj(input_stream, spool_file, length=_DB_STREAM_COPY_BUFFER_BYTES)
+            spool_file.flush()
+            os.fsync(spool_file.fileno())
+        stream_id = _verify_db_stream_file(spool_path)
+
+        # No target DB mutation is allowed before the complete source stream
+        # has passed both transport integrity and source-completion checks.
+        _prepare_target_db(target_db)
+        proc = subprocess.Popen(
+            [*_mysql_admin_base(), target_db.name],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert proc.stdin is not None
+        try:
+            with gzip.open(spool_path, mode="rb") as gz:
+                for chunk in _iter_mysql_generated_date_format_compat_sql(gz):
+                    proc.stdin.write(chunk)
+            proc.stdin.close()
             proc.stdin = None
-        proc.kill()
-        out_b, err_b = proc.communicate()
-        out = ((out_b or b"") + (err_b or b"")).decode("utf-8", errors="replace").strip()
-        raise RuntimeError("target database import failed" + (": " + out if out else ""))
-    if proc.returncode != 0:
-        out = ((out_b or b"") + (err_b or b"")).decode("utf-8", errors="replace").strip()
-        raise RuntimeError("target database import failed: " + out)
-    return {"schema": "mcd-instance-migration-target-db-v1", "ok": True, "target_db_name": target_db.name, "target_db_user": target_db.user}
+            out_b, err_b = proc.communicate()
+        except Exception as exc:
+            if proc.stdin is not None:
+                try:
+                    proc.stdin.close()
+                except Exception:
+                    pass
+                proc.stdin = None
+            proc.kill()
+            out_b, err_b = proc.communicate()
+            out = ((out_b or b"") + (err_b or b"")).decode("utf-8", errors="replace").strip()
+            detail = str(exc).strip()
+            if out:
+                detail = f"{detail}; {out}" if detail else out
+            raise RuntimeError("target database import failed" + (": " + detail if detail else "")) from exc
+        if proc.returncode != 0:
+            out = ((out_b or b"") + (err_b or b"")).decode("utf-8", errors="replace").strip()
+            raise RuntimeError("target database import failed: " + out)
+        return {
+            "schema": "mcd-instance-migration-target-db-v1",
+            "ok": True,
+            "target_db_name": target_db.name,
+            "target_db_user": target_db.user,
+            "stream_id": stream_id,
+        }
 
 
 @stable_source_operation
