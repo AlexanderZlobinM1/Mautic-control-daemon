@@ -40,6 +40,16 @@ def test_runtime_adapter_preflight_replaces_host_php_requirements(tmp_path: Path
 
 def test_runtime_adapter_finalizer_receives_database_and_layout(tmp_path: Path, monkeypatch) -> None:
     captured: dict[str, object] = {}
+    uid = "a1179058-985d-4117-91b8-e951fa734a66"
+    code = "00007"
+    target = tmp_path / "instances/newlook"
+    target.mkdir(parents=True)
+    instance_migrate._write_migration_target_marker(
+        target,
+        domains=["newlook.example.com"],
+        instance_uid=uid,
+        instance_code=code,
+    )
 
     def fake_run(name, *, operation, payload, timeout_sec):
         captured.update(payload)
@@ -48,7 +58,7 @@ def test_runtime_adapter_finalizer_receives_database_and_layout(tmp_path: Path, 
     monkeypatch.setattr(instance_migrate, "run_runtime_adapter", fake_run)
     result = instance_migrate.finalize_target_relay(
         type("Config", (), {"state_db_path": str(tmp_path / "state.db")})(),
-        target_root=str(tmp_path / "instances/newlook"),
+        target_root=str(target),
         target_db_name="baza_newlook",
         target_db_user="korisnik_newlook",
         target_db_password="secret",
@@ -57,12 +67,17 @@ def test_runtime_adapter_finalizer_receives_database_and_layout(tmp_path: Path, 
         runtime="docker",
         image_ref="playground7",
         install_type="composer",
+        instance_uid=uid,
+        instance_code=code,
     )
 
     assert result["ok"] is True
     assert captured["target_db_password"] == "secret"
     assert captured["runtime"] == "docker"
     assert captured["install_type"] == "composer"
+    assert captured["tls_mode"] == "post_cutover_certbot"
+    assert result["phase"] == "target_prepared"
+    assert result["migration_complete"] is False
 
 
 def test_runtime_adapter_failure_never_wipes_target(tmp_path: Path, monkeypatch) -> None:

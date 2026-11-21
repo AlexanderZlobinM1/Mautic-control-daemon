@@ -86,7 +86,11 @@ def test_mcd_instance_migration_entrypoints_use_explicit_source_barrier():
     for name in (
         "stream_source_files",
         "stream_source_db",
+        "quiesce_migration_source",
+        "restore_migration_source",
+        "finalize_migration_source",
         "finalize_target_relay",
+        "issue_target_certificate",
         "run_target_pull_migration",
     ):
         function = getattr(instance_migrate, name)

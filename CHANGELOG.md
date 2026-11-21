@@ -1,3 +1,21 @@
+## 1.6.122 - 2026-11-21
+
+- Split instance migration TLS into an explicit post-cutover phase. Certificate
+  bundles are no longer streamed or copied from source. `target-finalize`
+  prepares an HTTP-only vhost and returns a non-terminal `target_prepared`
+  receipt; the new `target-issue-certificate` action issues a fresh target
+  certificate with certbot and verifies its SAN, expiry, local SNI and HTTPS
+  login. Its successful receipt routes MCC to `source-finalize`; only source
+  artifact finalization returns terminal migration success. Failures retain the
+  ownership evidence and require MCC DNS/source rollback before target cleanup.
+- Add source-side migration fencing with `source-quiesce`, `source-restore` and
+  `source-finalize`. Quiesce atomically replaces only the active nginx symlink
+  with a static Sales Snap 503 vhost, then stops cron/background work and proves
+  background plus in-flight web-request drain before the final transfer. Restore
+  returns the original symlink and prior runtime state. Finalize keeps the
+  maintenance symlink, original vhost, root and DB intact while classifying the
+  source as a recoverable non-authoritative artifact with the same UID/code.
+
 ## 1.6.121 - 2026-11-21
 
 - Make migration database relay streams completion-fenced. Source MCD builds a
