@@ -218,6 +218,47 @@ def _archive_migration_target(target: Path) -> Path:
     return archive
 
 
+def _remove_exact_migration_target(
+    target: Path,
+    *,
+    domains: list[str],
+    instance_uid: str,
+    instance_code: str,
+) -> bool:
+    uid = validate_mcc_instance_uid(instance_uid)
+    code = validate_instance_code(instance_code)
+    canonical = _canonical_migration_target(domains, code)
+    if canonical is None or target.resolve(strict=False) != canonical.resolve(strict=False):
+        raise RuntimeError("target cleanup path does not match the canonical MCC identity path")
+    if target.is_symlink():
+        raise RuntimeError(f"target cleanup root is not a directory: {target}")
+    if not target.exists():
+        return False
+    if not target.is_dir():
+        raise RuntimeError(f"target cleanup root is not a directory: {target}")
+    marker_path = _migration_target_marker(target)
+    if marker_path.exists():
+        marker = _read_migration_target_marker(target)
+        marker_domains = [_clean_domain(str(value or "")) for value in list(marker.get("domains") or [])]
+        if marker.get("state") not in {"in_progress", "failed"}:
+            raise RuntimeError("target cleanup migration marker is not transient")
+        if str(marker.get("instance_uid") or "") != uid or str(marker.get("instance_code") or "") != code:
+            raise RuntimeError("target cleanup migration marker identity does not match request")
+        if marker_domains != domains:
+            raise RuntimeError("target cleanup migration marker domains do not match request")
+    else:
+        identity = read_instance_identity(target)
+        if identity is None:
+            raise RuntimeError("target cleanup durable instance identity is missing")
+        if identity.get("instance_uid") != uid or identity.get("instance_code") != code:
+            raise RuntimeError("target cleanup durable instance identity does not match request")
+        if identity.get("primary_domain") != domains[0]:
+            raise RuntimeError("target cleanup durable instance domain does not match request")
+    _assert_safe_target_wipe_path(target)
+    shutil.rmtree(target)
+    return True
+
+
 def _write_migration_target_marker(
     target: Path,
     *,
@@ -1674,15 +1715,27 @@ def preflight_target_relay(
         }
     try:
         if _path_is_below(target, MIGRATION_ROOT):
-            archived = _prepare_migration_target(
-                target,
-                domains=domains,
-                claim=False,
-                instance_uid=instance_uid,
-                instance_code=instance_code,
-            )
-            if archived is not None:
-                cleanup.append(f"target root archived: {target} -> {archived}")
+            if wipe_target_root:
+                if not instance_uid or not instance_code:
+                    raise RuntimeError("exact managed target cleanup requires instance_uid and instance_code")
+                removed = _remove_exact_migration_target(
+                    target,
+                    domains=domains,
+                    instance_uid=instance_uid,
+                    instance_code=instance_code,
+                )
+                if removed:
+                    cleanup.append(f"target root removed: {target}")
+            else:
+                archived = _prepare_migration_target(
+                    target,
+                    domains=domains,
+                    claim=False,
+                    instance_uid=instance_uid,
+                    instance_code=instance_code,
+                )
+                if archived is not None:
+                    cleanup.append(f"target root archived: {target} -> {archived}")
         elif target.exists() and any(target.iterdir()):
             if wipe_target_root:
                 _assert_safe_target_wipe_path(target)
@@ -2356,7 +2409,15 @@ def issue_target_certificate(
 
         stage = "https_verification"
         verification = _verify_image_https(plan)
-        instances = InstanceInventory(config.state_db_path).rescan(config)
+        InstanceInventory(config.state_db_path).rescan(config)
+        completed_at_utc = _utc_now()
+        instances = [
+            {
+                **identity,
+                "domains": domains,
+                "observed_at_utc": completed_at_utc,
+            }
+        ]
         _finish_migration_target(target)
         receipt.update(
             {
@@ -2368,7 +2429,7 @@ def issue_target_certificate(
                 "rollback_required": False,
                 "rollback_contract": {},
                 "next_operation": "source-finalize",
-                "completed_at_utc": _utc_now(),
+                "completed_at_utc": completed_at_utc,
                 "certificate": certificate,
                 "verification": verification,
                 "instances": instances,
