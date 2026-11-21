@@ -2481,6 +2481,63 @@ BEGIN/COMPLETE-маркеры; COMPLETE появляется только при
 таблицы, включая audit log, передаются полностью и не исключаются, не
 обрезаются и не заменяются отдельным обходным сценарием.
 
+TLS instance migration состоит из последовательных подтверждаемых стадий.
+Source Let’s Encrypt bundle не передаётся и команды
+`source-stream-letsencrypt` / `target-receive-letsencrypt` отсутствуют.
+
+Перед финальным переносом source MCD выполняет `source-quiesce` с тем же
+bare UID, instance code, root и domains. Он создаёт отдельный статический
+Sales Snap maintenance-vhost с ответом 503, без PHP/FastCGI/upstream, проверяет
+nginx, атомарно заменяет только активный symlink в `sites-enabled` и reload-ит
+nginx. Исходный vhost-файл, root и DB не переименовываются, не удаляются и не
+изменяются. После переключения MCD останавливает новые фоновые запуски и cron,
+доводит background drain и уже принятые web/PHP-запросы до доказанного
+quiescent state, и только затем разрешает финальные files+DB. Receipt содержит
+hash сохранённого original vhost, исходную цель symlink и доказательства обоих
+drain. Пока миграция не завершена, source показывает maintenance page, но
+остаётся полностью восстановимым.
+
+После files+DB `target-finalize` создаёт только HTTP-vhost, выполняет локальные
+проверки и возвращает `phase: target_prepared`, `dns_cutover_ready: true`,
+`tls_pending: true`, `migration_complete: false`. MCC переключает DNS и
+вызывает `target-issue-certificate` на target с теми же UID/code, root и
+domains. Target MCD сверяет ownership marker, выпускает новый сертификат
+certbot-ом, проверяет срок и все SAN, затем локальные HTTPS/SNI и login page.
+Успешный receipt имеет `phase: target_tls_verified`, `target_ready: true`,
+`migration_complete: false` и `next_operation: source-finalize`.
+
+Последний шаг `source-finalize` выполняется на source только после успешной TLS
+проверки target. Он оставляет maintenance symlink активным, записывает source
+как `artifact` с тем же UID/code, возвращает прежнее host-wide состояние
+планировщика/cron и выдаёт единственный финальный receipt:
+`phase: complete`, `ok: true`, `migration_complete: true`,
+`source_authoritative: false`, `recoverable_artifact: true`. Source root, DB и
+original vhost остаются физически на месте; обычный MCD scheduler их больше не
+считает live-инстансом.
+
+При любой ошибке до финала MCC вызывает `source-restore`: если DNS уже был
+переключён, сначала возвращает DNS на source, затем MCD атомарно восстанавливает
+original symlink, проверяет и reload-ит nginx и возвращает прежнее состояние
+cron/планировщика. Только после доказанного source restore допускается cleanup
+target. Ошибка сертификата возвращает строгий JSON с
+`phase: certificate_failed`, `rollback_required: true` и этим машинным rollback
+contract. MCD не меняет DNS и не использует сертификат source на target.
+
+CLI contract для оркестратора использует один и тот же набор identity/domain
+параметров на всех стадиях:
+
+```text
+mcd-cli instance-migrate source-quiesce --root <SOURCE_ROOT> --domains-json <JSON> --instance-uid <UID> --instance-code <CODE> --json
+mcd-cli instance-migrate target-finalize --target-root <TARGET_ROOT> --domains-json <JSON> --instance-uid <UID> --instance-code <CODE> ...
+mcd-cli instance-migrate target-issue-certificate --target-root <TARGET_ROOT> --domains-json <JSON> --instance-uid <UID> --instance-code <CODE> --json
+mcd-cli instance-migrate source-finalize --root <SOURCE_ROOT> --domains-json <JSON> --instance-uid <UID> --instance-code <CODE> --json
+mcd-cli instance-migrate source-restore --root <SOURCE_ROOT> --domains-json <JSON> --instance-uid <UID> --instance-code <CODE> --json
+```
+
+UID всегда bare и не содержит `@host`; code не создаётся MCD. Несовпадение
+любого из этих значений с локальным marker/state завершает соответствующую
+стадию fail-closed.
+
 ## Shared 1.6 / 1.7 hotfix invariants (2026-11-01)
 
 An explicitly selected Dev policy stays Dev, including an empty-channel response;

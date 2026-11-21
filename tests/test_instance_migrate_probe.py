@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import gzip
 import io
+import json
 from pathlib import Path
-import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -25,6 +25,46 @@ def _complete_db_stream(sql: bytes, stream_id: str = "a" * 32) -> io.BytesIO:
 
 
 class InstanceMigrateProbeTests(unittest.TestCase):
+    def test_migration_cli_exposes_target_certificate_and_removes_certificate_transfer(self) -> None:
+        from mcd_agent.cli import _build_parser
+
+        parser = _build_parser()
+        parsed = parser.parse_args(
+            [
+                "instance-migrate",
+                "target-issue-certificate",
+                "--target-root",
+                "/var/www/example/public_html",
+                "--domains-json",
+                '["example.sales-snap.com"]',
+                "--instance-uid",
+                "a1179058-985d-4117-91b8-e951fa734a66",
+                "--instance-code",
+                "00007",
+            ]
+        )
+
+        self.assertEqual(parsed.op, "target-issue-certificate")
+        for source_op in ("source-quiesce", "source-restore", "source-finalize"):
+            parsed_source = parser.parse_args(
+                [
+                    "instance-migrate",
+                    source_op,
+                    "--root",
+                    "/var/www/example/public_html",
+                    "--domains-json",
+                    '["example.sales-snap.com"]',
+                    "--instance-uid",
+                    "a1179058-985d-4117-91b8-e951fa734a66",
+                    "--instance-code",
+                    "00007",
+                ]
+            )
+            self.assertEqual(parsed_source.op, source_op)
+        for removed in ("source-stream-letsencrypt", "target-receive-letsencrypt"):
+            with self.assertRaises(SystemExit), patch("sys.stderr", new=io.StringIO()):
+                parser.parse_args(["instance-migrate", removed])
+
     def test_new_var_www_target_must_use_full_fqdn(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td) / "www"
@@ -296,57 +336,12 @@ class InstanceMigrateProbeTests(unittest.TestCase):
         self.assertIn("target root removed: " + str(root.resolve()), payload["cleanup"])
         self.assertIn("target database dropped: baza_testmove", payload["cleanup"])
 
-    def test_letsencrypt_stream_has_safe_relative_members(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            live = Path(td) / "etc" / "letsencrypt" / "live" / "example.com"
-            live.mkdir(parents=True)
-            (live / "fullchain.pem").write_text("cert", encoding="utf-8")
-            buf = io.BytesIO()
-
-            with patch.object(instance_migrate, "_letsencrypt_paths_for_domains", return_value=[live]):
-                instance_migrate.stream_source_letsencrypt(domains_json='["example.com"]', output=buf)
-
-            buf.seek(0)
-            with tarfile.open(fileobj=buf, mode="r:gz") as tf:
-                names = tf.getnames()
-
-        self.assertTrue(names)
-        self.assertTrue(all(not name.startswith("/") for name in names))
-        self.assertTrue(any(name.endswith("fullchain.pem") for name in names))
-
-    def test_letsencrypt_paths_include_certificate_named_for_another_domain_when_san_matches(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td) / "letsencrypt"
-            cert_name = "dijasporashop.sales-snap.com"
-            live = root / "live" / cert_name
-            archive = root / "archive" / cert_name
-            renewal = root / "renewal" / f"{cert_name}.conf"
-            live.mkdir(parents=True)
-            archive.mkdir(parents=True)
-            (live / "fullchain.pem").write_text("cert", encoding="utf-8")
-            (live / "privkey.pem").write_text("key", encoding="utf-8")
-            (archive / "fullchain1.pem").write_text("cert", encoding="utf-8")
-            renewal.parent.mkdir(parents=True, exist_ok=True)
-            renewal.write_text("renewal", encoding="utf-8")
-
-            with (
-                patch.object(instance_migrate, "LETSENCRYPT_ROOT", root),
-                patch.object(instance_migrate, "_certificate_dns_names", return_value={"winwin.sales-snap.com"}),
-            ):
-                paths = instance_migrate._letsencrypt_paths_for_domains(["winwin.sales-snap.com"])
-
-        self.assertEqual(paths, [live, archive, renewal])
-
-    def test_write_nginx_vhost_uses_current_san_matched_certificate(self) -> None:
+    def test_write_nginx_vhost_is_http_only_before_dns_cutover(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             app_root = root / "app" / "public_html"
             (app_root / "docroot").mkdir(parents=True)
             (app_root / "docroot" / "index.php").write_text("<?php\n", encoding="utf-8")
-            cert_live = root / "letsencrypt" / "live" / "shared-certificate"
-            cert_live.mkdir(parents=True)
-            (cert_live / "fullchain.pem").write_text("cert", encoding="utf-8")
-            (cert_live / "privkey.pem").write_text("key", encoding="utf-8")
             php_socket = root / "php8.3-fpm.sock"
             php_socket.touch()
             available = root / "sites-available"
@@ -360,9 +355,6 @@ class InstanceMigrateProbeTests(unittest.TestCase):
                 instance_migrate.NGINX_SITES_AVAILABLE = available
                 instance_migrate.NGINX_SITES_ENABLED = enabled
                 with (
-                    patch.object(instance_migrate, "LETSENCRYPT_ROOT", root / "letsencrypt"),
-                    patch.object(instance_migrate, "_certificate_dns_names", return_value={"winwin.sales-snap.com"}),
-                    patch.object(instance_migrate, "_certificate_is_current", return_value=True),
                     patch.object(instance_migrate, "_ensure_nginx_sites_layout"),
                     patch.object(instance_migrate, "_detect_php_version", return_value="8.3"),
                     patch.object(instance_migrate, "_php_fpm_socket", return_value=php_socket),
@@ -380,13 +372,14 @@ class InstanceMigrateProbeTests(unittest.TestCase):
 
             content = Path(site).read_text(encoding="utf-8")
 
-        self.assertIn("listen 443 ssl", content)
-        self.assertIn(f"ssl_certificate {cert_live / 'fullchain.pem'};", content)
-        self.assertIn(f"ssl_certificate_key {cert_live / 'privkey.pem'};", content)
+        self.assertIn("listen 80;", content)
+        self.assertNotIn("listen 443", content)
+        self.assertNotIn("ssl_certificate", content)
+        self.assertNotIn("/etc/letsencrypt", content)
         self.assertIn("# BEGIN MCD managed form embed", content)
         self.assertIn("frame-ancestors 'self'", content)
 
-    def test_target_finalize_blocks_dns_cutover_without_current_certificate(self) -> None:
+    def test_target_finalize_prepares_http_vhost_without_source_certificate(self) -> None:
         db = DBConfig(
             host="localhost",
             port=3306,
@@ -395,22 +388,423 @@ class InstanceMigrateProbeTests(unittest.TestCase):
             password="target_password",
             table_prefix="",
         )
-        with patch.object(instance_migrate, "_target_db_from_direct_values", return_value=db), patch.object(
-            instance_migrate, "_matching_live_certificate", return_value=None
-        ):
-            with self.assertRaisesRegex(RuntimeError, "DNS cutover blocked"):
-                instance_migrate.finalize_target_relay(
-                    type("Cfg", (), {"state_db_path": "/tmp/mcd-state.sqlite"})(),
-                    target_root="/var/www/example/public_html",
+        class FakeInventory:
+            def __init__(self, _path: str) -> None:
+                pass
+
+            def rescan(self, _config):
+                return []
+
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td) / "public_html"
+            target.mkdir()
+            instance_migrate._write_migration_target_marker(
+                target,
+                domains=["example.sales-snap.com"],
+                instance_uid="a1179058-985d-4117-91b8-e951fa734a66",
+                instance_code="00007",
+            )
+            with (
+                patch.object(instance_migrate, "_target_db_from_direct_values", return_value=db),
+                patch.object(instance_migrate, "_patch_local_php_db"),
+                patch.object(instance_migrate, "_patch_local_php_instance_paths"),
+                patch.object(instance_migrate, "_write_nginx_vhost", return_value="/etc/nginx/sites-available/example.conf"),
+                patch.object(instance_migrate, "_run_checked", return_value=""),
+                patch.object(instance_migrate, "_target_healthcheck", return_value=["ok"]),
+                patch.object(instance_migrate, "write_instance_identity"),
+                patch.object(instance_migrate, "identity_readback", return_value={"status": "ok"}),
+                patch.object(instance_migrate, "InstanceInventory", FakeInventory),
+            ):
+                result = instance_migrate.finalize_target_relay(
+                    type("Cfg", (), {"state_db_path": str(Path(td) / "state.sqlite")})(),
+                    target_root=str(target),
                     target_db_name="baza_target",
                     target_db_user="target_user",
                     target_db_password="target_password",
                     domains_json='["example.sales-snap.com"]',
+                    instance_uid="a1179058-985d-4117-91b8-e951fa734a66",
+                    instance_code="00007",
                 )
 
-    def test_safe_tar_member_target_rejects_traversal(self) -> None:
-        with self.assertRaisesRegex(RuntimeError, "unsafe tar member path"):
-            instance_migrate._safe_tar_member_target(Path("/"), "../etc/passwd")
+            marker = instance_migrate._read_migration_target_marker(target)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["phase"], "target_prepared")
+        self.assertFalse(result["migration_complete"])
+        self.assertTrue(result["dns_cutover_ready"])
+        self.assertTrue(result["tls_pending"])
+        self.assertFalse(result["source_certificate_used"])
+        self.assertEqual(result["next_operation"], "target-issue-certificate")
+        self.assertEqual(marker["phase"], "target_prepared")
+
+    def test_target_finalize_rejects_identity_mismatch_before_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td) / "public_html"
+            target.mkdir()
+            instance_migrate._write_migration_target_marker(
+                target,
+                domains=["example.sales-snap.com"],
+                instance_uid="a1179058-985d-4117-91b8-e951fa734a66",
+                instance_code="00007",
+            )
+            with (
+                patch.object(instance_migrate, "_patch_local_php_db") as patch_db,
+                patch.object(instance_migrate, "_write_nginx_vhost") as write_vhost,
+                self.assertRaisesRegex(RuntimeError, "UID does not match"),
+            ):
+                instance_migrate.finalize_target_relay(
+                    type("Cfg", (), {"state_db_path": str(Path(td) / "state.sqlite")})(),
+                    target_root=str(target),
+                    target_db_name="baza_target",
+                    target_db_user="target_user",
+                    target_db_password="target_password",
+                    domains_json='["example.sales-snap.com"]',
+                    instance_uid="different-uid",
+                    instance_code="00007",
+                )
+
+            patch_db.assert_not_called()
+            write_vhost.assert_not_called()
+
+    def test_target_certificate_success_requires_source_finalize(self) -> None:
+        class FakeInventory:
+            def __init__(self, _path: str) -> None:
+                pass
+
+            def rescan(self, _config):
+                return ["instance"]
+
+        uid = "a1179058-985d-4117-91b8-e951fa734a66"
+        code = "00007"
+        domains = ["example.sales-snap.com", "alias.sales-snap.com"]
+        captured: dict[str, list[str]] = {}
+
+        def fake_certbot(args, *, timeout_sec):
+            captured["args"] = list(args)
+            return 0, "ok"
+
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td) / "public_html"
+            target.mkdir()
+            instance_migrate._write_migration_target_marker(
+                target,
+                domains=domains,
+                instance_uid=uid,
+                instance_code=code,
+            )
+            instance_migrate._mark_migration_target_prepared(target)
+            with (
+                patch.object(instance_migrate, "identity_readback", return_value={"status": "ok"}),
+                patch.object(instance_migrate, "_detect_php_version", return_value="8.3"),
+                patch.object(instance_migrate, "_run_certbot", side_effect=fake_certbot),
+                patch.object(
+                    instance_migrate,
+                    "_load_pem_certificate_identity",
+                    return_value={
+                        "status": "ok",
+                        "dns_names": domains,
+                        "not_after": "2027-02-19T00:00:00+00:00",
+                    },
+                ),
+                patch.object(instance_migrate, "_verify_image_https", return_value={"status": "ok", "tls_verified": True}),
+                patch.object(instance_migrate, "InstanceInventory", FakeInventory),
+            ):
+                result = instance_migrate.issue_target_certificate(
+                    type("Cfg", (), {"state_db_path": str(Path(td) / "state.sqlite")})(),
+                    target_root=str(target),
+                    domains_json='["example.sales-snap.com","alias.sales-snap.com"]',
+                    instance_uid=uid,
+                    instance_code=code,
+                    php_version="8.3",
+                )
+
+            marker_exists = instance_migrate._migration_target_marker(target).exists()
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["migration_complete"])
+        self.assertEqual(result["phase"], "target_tls_verified")
+        self.assertEqual(result["next_operation"], "source-finalize")
+        self.assertFalse(result["rollback_required"])
+        self.assertFalse(marker_exists)
+        self.assertEqual(captured["args"].count("-d"), 2)
+        self.assertIn("--cert-name", captured["args"])
+
+    def test_target_certificate_failure_requires_dns_and_source_rollback(self) -> None:
+        uid = "a1179058-985d-4117-91b8-e951fa734a66"
+        code = "00007"
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td) / "public_html"
+            target.mkdir()
+            instance_migrate._write_migration_target_marker(
+                target,
+                domains=["example.sales-snap.com"],
+                instance_uid=uid,
+                instance_code=code,
+            )
+            instance_migrate._mark_migration_target_prepared(target)
+            with (
+                patch.object(instance_migrate, "identity_readback", return_value={"status": "ok"}),
+                patch.object(instance_migrate, "_detect_php_version", return_value="8.3"),
+                patch.object(instance_migrate, "_run_certbot", return_value=(1, "challenge failed")),
+            ):
+                result = instance_migrate.issue_target_certificate(
+                    type("Cfg", (), {"state_db_path": str(Path(td) / "state.sqlite")})(),
+                    target_root=str(target),
+                    domains_json='["example.sales-snap.com"]',
+                    instance_uid=uid,
+                    instance_code=code,
+                )
+            marker = instance_migrate._read_migration_target_marker(target)
+
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["migration_complete"])
+        self.assertTrue(result["rollback_required"])
+        self.assertEqual(result["phase"], "certificate_failed")
+        self.assertEqual(result["error_code"], "certbot_failed")
+        self.assertEqual(result["rollback_contract"]["dns"], "restore_source_route")
+        self.assertEqual(marker["state"], "failed")
+
+    def test_target_certificate_preflight_failure_is_a_strict_json_receipt(self) -> None:
+        result = instance_migrate.issue_target_certificate(
+            type("Cfg", (), {"state_db_path": "/tmp/state.sqlite"})(),
+            target_root="/var/www/missing/public_html",
+            domains_json='["example.sales-snap.com"]',
+            instance_uid="a1179058-985d-4117-91b8-e951fa734a66",
+            instance_code="00007",
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["phase"], "certificate_failed")
+        self.assertEqual(result["error_code"], "preflight_failed")
+        self.assertTrue(result["rollback_required"])
+        json.dumps(result)
+
+    def _source_migration_fixture(self, td: str):
+        uid = "a1179058-985d-4117-91b8-e951fa734a66"
+        code = "00007"
+        domain = "example.sales-snap.com"
+        base = Path(td)
+        root = base / "source" / "public_html"
+        root.mkdir(parents=True)
+        (root / "index.php").write_text("<?php\n", encoding="utf-8")
+        instance_migrate.write_instance_identity(
+            root,
+            instance_uid=uid,
+            instance_code=code,
+            primary_domain=domain,
+        )
+        available = base / "nginx" / "sites-available"
+        enabled = base / "nginx" / "sites-enabled"
+        available.mkdir(parents=True)
+        enabled.mkdir(parents=True)
+        original = available / "example.conf"
+        original_text = (
+            "server {\n"
+            "    listen 80;\n"
+            "    listen 443 ssl;\n"
+            f"    server_name {domain};\n"
+            f"    root {root};\n"
+            "    ssl_certificate /etc/letsencrypt/live/example/fullchain.pem;\n"
+            "    ssl_certificate_key /etc/letsencrypt/live/example/privkey.pem;\n"
+            "    location ~ \\.php$ { fastcgi_pass unix:/run/php/php8.3-fpm.sock; }\n"
+            "}\n"
+        )
+        original.write_text(original_text, encoding="utf-8")
+        active = enabled / "example.conf"
+        active.symlink_to(original)
+        install = MauticInstall(
+            instance_uid=uid,
+            instance_code=code,
+            name=domain,
+            root=str(root),
+            console_path=str(root / "bin" / "console"),
+            primary_domain=domain,
+            domains=[domain],
+        )
+        cfg = type(
+            "Cfg",
+            (),
+            {
+                "state_db_path": str(base / "state.sqlite"),
+                "scheduler_pause_flag_path": str(base / "mcd" / "scheduler.pause"),
+            },
+        )()
+        return uid, code, domain, root, original, original_text, active, available, enabled, install, cfg
+
+    def test_source_quiesce_uses_static_503_and_rollback_restores_original_symlink(self) -> None:
+        class FakeInventory:
+            installs = []
+
+            def __init__(self, _path: str) -> None:
+                pass
+
+            def list_instances(self):
+                return list(self.installs)
+
+            def rescan(self, _config):
+                return list(self.installs)
+
+        with tempfile.TemporaryDirectory() as td:
+            uid, code, domain, root, original, original_text, active, available, enabled, install, cfg = self._source_migration_fixture(td)
+            FakeInventory.installs = [install]
+            state_root = Path(td) / "mcd" / "source-state"
+            maintenance_root = Path(td) / "mcd" / "maintenance"
+            with (
+                patch.object(instance_migrate, "NGINX_SITES_AVAILABLE", available),
+                patch.object(instance_migrate, "NGINX_SITES_ENABLED", enabled),
+                patch.object(instance_migrate, "MIGRATION_SOURCE_STATE_ROOT", state_root),
+                patch.object(instance_migrate, "MIGRATION_SOURCE_MAINTENANCE_ROOT", maintenance_root),
+                patch.object(instance_migrate, "InstanceInventory", FakeInventory),
+                patch.object(instance_migrate, "ensure_seeded"),
+                patch.object(instance_migrate, "collect_maintenance_state", return_value={"cron_marker_present": False}),
+                patch.object(instance_migrate, "stop_cron_service", return_value={"ok": True, "was_active": True}),
+                patch.object(
+                    instance_migrate,
+                    "stop_running_tasks_for_maintenance",
+                    return_value={"ok": True, "stable_snapshots": 3, "tracked_running": 0},
+                ),
+                patch.object(
+                    instance_migrate,
+                    "_drain_reloaded_nginx_workers",
+                    return_value={"ok": True, "stable_snapshots": 3, "remaining_worker_pids": []},
+                ),
+                patch.object(instance_migrate, "restore_cron_service_if_needed", return_value={"ok": True, "started": True}),
+                patch.object(instance_migrate, "_run_checked", return_value=""),
+            ):
+                quiesced = instance_migrate.quiesce_migration_source(
+                    cfg,
+                    selector=str(root),
+                    domains_json=f'["{domain}"]',
+                    instance_uid=uid,
+                    instance_code=code,
+                )
+                maintenance_config = Path(quiesced["preservation"]["original_config"]).parent / f"zz-mcd-migration-maintenance-{code}.conf"
+                active_target_during_quiescence = (active.parent / active.readlink()).resolve()
+                maintenance_text = maintenance_config.read_text(encoding="utf-8")
+                restored = instance_migrate.restore_migration_source(
+                    cfg,
+                    selector=str(root),
+                    domains_json=f'["{domain}"]',
+                    instance_uid=uid,
+                    instance_code=code,
+                )
+
+            self.assertTrue(quiesced["ok"])
+            self.assertTrue(quiesced["source_quiescent"])
+            self.assertIn("return 503", maintenance_text)
+            self.assertIn("listen 443 ssl", maintenance_text)
+            self.assertIn("/etc/letsencrypt/live/example/fullchain.pem", maintenance_text)
+            self.assertNotIn("fastcgi", maintenance_text.lower())
+            self.assertNotIn("proxy_pass", maintenance_text.lower())
+            self.assertEqual(active_target_during_quiescence, maintenance_config.resolve())
+            self.assertEqual(original.read_text(encoding="utf-8"), original_text)
+            self.assertTrue(restored["ok"])
+            self.assertEqual(active.readlink(), original)
+            self.assertTrue(restored["preservation"]["original_config_unchanged"])
+
+    def test_source_finalize_keeps_files_and_vhost_as_recoverable_artifact(self) -> None:
+        class FakeInventory:
+            installs = []
+
+            def __init__(self, _path: str) -> None:
+                pass
+
+            def list_instances(self):
+                return list(self.installs)
+
+            def rescan(self, _config):
+                return []
+
+        with tempfile.TemporaryDirectory() as td:
+            uid, code, domain, root, original, original_text, active, available, enabled, install, cfg = self._source_migration_fixture(td)
+            FakeInventory.installs = [install]
+            state_root = Path(td) / "mcd" / "source-state"
+            maintenance_root = Path(td) / "mcd" / "maintenance"
+            with (
+                patch.object(instance_migrate, "NGINX_SITES_AVAILABLE", available),
+                patch.object(instance_migrate, "NGINX_SITES_ENABLED", enabled),
+                patch.object(instance_migrate, "MIGRATION_SOURCE_STATE_ROOT", state_root),
+                patch.object(instance_migrate, "MIGRATION_SOURCE_MAINTENANCE_ROOT", maintenance_root),
+                patch.object(instance_migrate, "InstanceInventory", FakeInventory),
+                patch.object(instance_migrate, "ensure_seeded"),
+                patch.object(instance_migrate, "collect_maintenance_state", return_value={"cron_marker_present": False}),
+                patch.object(instance_migrate, "stop_cron_service", return_value={"ok": True}),
+                patch.object(instance_migrate, "stop_running_tasks_for_maintenance", return_value={"ok": True}),
+                patch.object(instance_migrate, "_drain_reloaded_nginx_workers", return_value={"ok": True}),
+                patch.object(instance_migrate, "restore_cron_service_if_needed", return_value={"ok": True}),
+                patch.object(instance_migrate, "_run_checked", return_value=""),
+            ):
+                quiesced = instance_migrate.quiesce_migration_source(
+                    cfg,
+                    selector=str(root),
+                    domains_json=f'["{domain}"]',
+                    instance_uid=uid,
+                    instance_code=code,
+                )
+                maintenance_target = (active.parent / active.readlink()).resolve()
+                finalized = instance_migrate.finalize_migration_source(
+                    cfg,
+                    selector=str(root),
+                    domains_json=f'["{domain}"]',
+                    instance_uid=uid,
+                    instance_code=code,
+                )
+
+            state = json.loads((root / ".mcd" / "state" / "instance-state.json").read_text(encoding="utf-8"))
+            self.assertTrue(quiesced["ok"])
+            self.assertTrue(finalized["ok"])
+            self.assertTrue(finalized["migration_complete"])
+            self.assertFalse(finalized["source_authoritative"])
+            self.assertTrue(finalized["recoverable_artifact"])
+            self.assertEqual(state["profile"], "artifact")
+            self.assertTrue(root.is_dir())
+            self.assertEqual(original.read_text(encoding="utf-8"), original_text)
+            self.assertEqual((active.parent / active.readlink()).resolve(), maintenance_target)
+
+    def test_source_quiesce_failure_restores_original_vhost_and_runtime(self) -> None:
+        class FakeInventory:
+            installs = []
+
+            def __init__(self, _path: str) -> None:
+                pass
+
+            def list_instances(self):
+                return list(self.installs)
+
+        with tempfile.TemporaryDirectory() as td:
+            uid, code, domain, root, original, original_text, active, available, enabled, install, cfg = self._source_migration_fixture(td)
+            FakeInventory.installs = [install]
+            with (
+                patch.object(instance_migrate, "NGINX_SITES_AVAILABLE", available),
+                patch.object(instance_migrate, "NGINX_SITES_ENABLED", enabled),
+                patch.object(instance_migrate, "MIGRATION_SOURCE_STATE_ROOT", Path(td) / "mcd" / "source-state"),
+                patch.object(instance_migrate, "MIGRATION_SOURCE_MAINTENANCE_ROOT", Path(td) / "mcd" / "maintenance"),
+                patch.object(instance_migrate, "InstanceInventory", FakeInventory),
+                patch.object(instance_migrate, "ensure_seeded"),
+                patch.object(instance_migrate, "collect_maintenance_state", return_value={"cron_marker_present": False}),
+                patch.object(instance_migrate, "stop_cron_service", return_value={"ok": True}),
+                patch.object(
+                    instance_migrate,
+                    "stop_running_tasks_for_maintenance",
+                    return_value={"ok": False, "tracked_running": 1, "drain_timed_out": True},
+                ),
+                patch.object(instance_migrate, "restore_cron_service_if_needed", return_value={"ok": True}),
+                patch.object(instance_migrate, "_run_checked", return_value=""),
+            ):
+                result = instance_migrate.quiesce_migration_source(
+                    cfg,
+                    selector=str(root),
+                    domains_json=f'["{domain}"]',
+                    instance_uid=uid,
+                    instance_code=code,
+                )
+
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["phase"], "source_quiesce_failed")
+            self.assertFalse(result["rollback_required"])
+            self.assertEqual(active.readlink(), original)
+            self.assertEqual(original.read_text(encoding="utf-8"), original_text)
+            self.assertFalse(Path(cfg.scheduler_pause_flag_path).exists())
 
     def test_nginx_web_root_prefers_mautic_docroot(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -465,14 +859,11 @@ class InstanceMigrateProbeTests(unittest.TestCase):
 
         def fake_remote_mcd(**kwargs):
             args = list(kwargs.get("args") or [])
-            if args and args[0] == "instance-state":
-                events.append("source_state_artifact")
-                return '{"status":"ok","state":{"profile":"artifact"}}'
-            if "off" in args:
-                events.append("maintenance_off")
-            else:
-                events.append("maintenance_on")
-            return "{}"
+            if "source-restore" in args:
+                events.append("source_restore")
+                return json.dumps({"ok": True, "phase": "source_restored"})
+            events.append("source_quiesce")
+            return json.dumps({"ok": True, "phase": "quiescent", "source_quiescent": True})
 
         def fake_tunnel(**_kwargs):
             events.append("tunnel")
@@ -485,10 +876,12 @@ class InstanceMigrateProbeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             key = Path(td) / "source.key"
             key.write_text("key", encoding="utf-8")
-            target_root = Path(td) / "target" / "public_html"
+            migration_root = (Path(td) / "www").resolve()
+            target_root = migration_root / "example.com_00007" / "public_html"
             cfg = type("Cfg", (), {"state_db_path": str(Path(td) / "state.sqlite")})()
 
             with (
+                patch.object(instance_migrate, "MIGRATION_ROOT", migration_root),
                 patch.object(instance_migrate.os, "geteuid", return_value=0),
                 patch.object(instance_migrate.shutil, "which", return_value="/usr/bin/rsync"),
                 patch.object(instance_migrate, "_mysql_admin_base", return_value=["mysql"]),
@@ -502,7 +895,6 @@ class InstanceMigrateProbeTests(unittest.TestCase):
                 patch.object(instance_migrate, "_dump_source_into_target", side_effect=fake_dump),
                 patch.object(instance_migrate, "_patch_local_php_db", side_effect=lambda *_args: events.append("patch_db")),
                 patch.object(instance_migrate, "_patch_local_php_instance_paths", side_effect=lambda *_args: events.append("patch_paths") or []),
-                patch.object(instance_migrate, "_copy_letsencrypt", return_value=False),
                 patch.object(instance_migrate, "_write_nginx_vhost", return_value="/etc/nginx/sites-available/example.conf"),
                 patch.object(instance_migrate, "_target_healthcheck", return_value=[]),
                 patch.object(instance_migrate, "InstanceInventory", FakeInventory),
@@ -520,18 +912,25 @@ class InstanceMigrateProbeTests(unittest.TestCase):
                     target_db_user="target_user",
                     target_db_password="target_password",
                     php_version="8.4",
+                    instance_uid="a1179058-985d-4117-91b8-e951fa734a66",
+                    instance_code="00007",
                 )
 
         self.assertTrue(result["ok"])
-        self.assertFalse(result["source_maintenance_active"])
-        self.assertTrue(result["source_maintenance_restored"])
+        self.assertTrue(result["source_maintenance_active"])
+        self.assertFalse(result["source_maintenance_restored"])
+        self.assertTrue(result["source_quiescent"])
         self.assertEqual([x for x in events if x.startswith("db_import:")], ["db_import:single"])
-        self.assertLess(events.index("maintenance_on"), events.index("db_import:single"))
+        self.assertLess(events.index("source_quiesce"), events.index("db_import:single"))
         self.assertLess(events.index("db_import:single"), events.index("patch_db"))
-        self.assertLess(events.index("patch_db"), events.index("source_state_artifact"))
-        self.assertLess(events.index("source_state_artifact"), events.index("maintenance_off"))
-        self.assertEqual(result["source_instance_state"]["state"]["profile"], "artifact")
-        self.assertLess(events.index("patch_db"), events.index("maintenance_off"))
+        self.assertNotIn("source_restore", events)
+        self.assertFalse(result["migration_complete"])
+        self.assertTrue(result["dns_cutover_ready"])
+        self.assertTrue(result["tls_pending"])
+        self.assertFalse(result["source_certificate_used"])
+        self.assertFalse(result["source_instance_state_changed"])
+        self.assertEqual(result["next_operation"], "target-issue-certificate")
+        self.assertNotIn("source_state_artifact", events)
 
     def test_nginx_sites_layout_is_created_for_target_finalize(self) -> None:
         with tempfile.TemporaryDirectory() as td:

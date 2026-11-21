@@ -97,17 +97,19 @@ from mcd_agent.instance_identity import read_instance_state, write_instance_stat
 from mcd_agent.instance_runtime import apply_instance_runtime
 from mcd_agent.instance_migrate import (
     collect_source_probe,
+    finalize_migration_source,
     finalize_target_relay,
     format_source_probe_json,
     format_source_probe_text,
     import_target_db_stream,
+    issue_target_certificate,
     preflight_target_relay,
-    receive_target_letsencrypt,
+    quiesce_migration_source,
     receive_target_files,
+    restore_migration_source,
     run_target_pull_migration,
     stream_source_db,
     stream_source_files,
-    stream_source_letsencrypt,
 )
 from mcd_agent.source_operation import source_operation_lease
 from mcd_agent.inventory import InstanceInventory, ensure_seeded
@@ -2790,15 +2792,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "op",
         choices=[
             "source-probe",
+            "source-quiesce",
+            "source-restore",
+            "source-finalize",
             "target-pull",
             "source-stream-files",
             "source-stream-db",
-            "source-stream-letsencrypt",
             "target-preflight",
             "target-receive-files",
-            "target-receive-letsencrypt",
             "target-import-db",
             "target-finalize",
+            "target-issue-certificate",
         ],
         nargs="?",
         default="source-probe",
@@ -5070,19 +5074,46 @@ def main() -> int:
 
     if args.cmd == "instance-migrate":
         cfg = load_config(args.config)
+        if args.op in {"source-quiesce", "source-restore", "source-finalize"}:
+            missing = [
+                name
+                for name, value in {
+                    "root": args.root,
+                    "instance-uid": args.instance_uid,
+                    "instance-code": args.instance_code,
+                }.items()
+                if not str(value or "").strip()
+            ]
+            if missing:
+                raise RuntimeError(f"missing required {args.op} arguments: " + ", ".join(missing))
+            operation = {
+                "source-quiesce": quiesce_migration_source,
+                "source-restore": restore_migration_source,
+                "source-finalize": finalize_migration_source,
+            }[args.op]
+            payload = operation(
+                cfg,
+                selector=str(args.root or "").strip(),
+                domains_json=str(args.domains_json or "[]"),
+                instance_uid=str(args.instance_uid or "").strip(),
+                instance_code=str(args.instance_code or "").strip(),
+            )
+            print(json.dumps(payload, ensure_ascii=True, indent=2))
+            if args.op == "source-finalize":
+                return 0 if bool(payload.get("ok", False)) and bool(payload.get("migration_complete", False)) else 1
+            return 0 if bool(payload.get("ok", False)) else 1
         if args.op == "source-stream-files":
             return stream_source_files(cfg, selector=args.root, output=sys.stdout.buffer)
         if args.op == "source-stream-db":
             return stream_source_db(cfg, selector=args.root, output=sys.stdout.buffer)
-        if args.op == "source-stream-letsencrypt":
-            with source_operation_lease(cfg):
-                return stream_source_letsencrypt(domains_json=str(args.domains_json or "[]"), output=sys.stdout.buffer)
         if args.op == "target-preflight":
             missing = [
                 name
                 for name, value in {
                     "target-root": args.target_root,
                     "target-db-name": args.target_db_name,
+                    "instance-uid": args.instance_uid,
+                    "instance-code": args.instance_code,
                 }.items()
                 if not str(value or "").strip()
                 and not (name == "target-db-name" and str(args.instance_code or "").strip())
@@ -5106,8 +5137,17 @@ def main() -> int:
             print(json.dumps(payload, ensure_ascii=True, indent=2))
             return 0 if bool(payload.get("ok", False)) else 1
         if args.op == "target-receive-files":
-            if not str(args.target_root or "").strip():
-                raise RuntimeError("missing required target-receive-files argument: target-root")
+            missing = [
+                name
+                for name, value in {
+                    "target-root": args.target_root,
+                    "instance-uid": args.instance_uid,
+                    "instance-code": args.instance_code,
+                }.items()
+                if not str(value or "").strip()
+            ]
+            if missing:
+                raise RuntimeError("missing required target-receive-files arguments: " + ", ".join(missing))
             with source_operation_lease(cfg):
                 payload = receive_target_files(
                     target_root=str(args.target_root or "").strip(),
@@ -5119,11 +5159,6 @@ def main() -> int:
                 )
             print(json.dumps(payload, ensure_ascii=True, indent=2))
             return 0 if bool(payload.get("ok", False)) else 1
-        if args.op == "target-receive-letsencrypt":
-            with source_operation_lease(cfg):
-                payload = receive_target_letsencrypt(input_stream=sys.stdin.buffer)
-            print(json.dumps(payload, ensure_ascii=True, indent=2))
-            return 0 if bool(payload.get("ok", False)) else 1
         if args.op == "target-import-db":
             target_db_password = str(args.target_db_password or os.environ.get("MCD_MIGRATION_TARGET_DB_PASSWORD", ""))
             missing = [
@@ -5132,6 +5167,8 @@ def main() -> int:
                     "target-db-name": args.target_db_name,
                     "target-db-user": args.target_db_user,
                     "target-db-password": target_db_password,
+                    "instance-uid": args.instance_uid,
+                    "instance-code": args.instance_code,
                 }.items()
                 if not str(value or "").strip()
             ]
@@ -5178,6 +5215,28 @@ def main() -> int:
             )
             print(json.dumps(payload, ensure_ascii=True, indent=2))
             return 0 if bool(payload.get("ok", False)) and bool(payload.get("catchup_ok", False)) else 1
+        if args.op == "target-issue-certificate":
+            missing = [
+                name
+                for name, value in {
+                    "target-root": args.target_root,
+                    "instance-uid": args.instance_uid,
+                    "instance-code": args.instance_code,
+                }.items()
+                if not str(value or "").strip()
+            ]
+            if missing:
+                raise RuntimeError("missing required target-issue-certificate arguments: " + ", ".join(missing))
+            payload = issue_target_certificate(
+                cfg,
+                target_root=str(args.target_root or "").strip(),
+                domains_json=str(args.domains_json or "[]"),
+                instance_uid=str(args.instance_uid or "").strip(),
+                instance_code=str(args.instance_code or "").strip(),
+                php_version=str(args.php_version or "").strip() or None,
+            )
+            print(json.dumps(payload, ensure_ascii=True, indent=2))
+            return 0 if bool(payload.get("ok", False)) and bool(payload.get("target_ready", False)) else 1
         if args.op == "target-pull":
             target_db_password = str(args.target_db_password or os.environ.get("MCD_MIGRATION_TARGET_DB_PASSWORD", ""))
             missing = [
@@ -5187,6 +5246,8 @@ def main() -> int:
                     "source-ssh-key-file": args.source_ssh_key_file,
                     "source-root": args.source_root,
                     "target-root": args.target_root,
+                    "instance-uid": args.instance_uid,
+                    "instance-code": args.instance_code,
                 }.items()
                 if not str(value or "").strip()
             ]

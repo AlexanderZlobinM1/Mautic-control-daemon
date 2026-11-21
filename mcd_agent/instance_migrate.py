@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import gzip
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -22,12 +23,28 @@ from mcd_agent.db import MauticDB
 from mcd_agent.install_readiness import collect_mautic_install_readiness
 from mcd_agent.inventory import InstanceInventory, ensure_seeded
 from mcd_agent.localphp import parse_local_php
-from mcd_agent.mautic_image_install import _mysql_admin_base, _mysql_exec, _quote_ident, _quote_sql
+from mcd_agent.mautic_image_install import (
+    ImageInstallPlan,
+    _load_pem_certificate_identity,
+    _mysql_admin_base,
+    _mysql_exec,
+    _quote_ident,
+    _quote_sql,
+    _run_certbot,
+    _safe_runtime_detail,
+    _verify_image_https,
+)
 from mcd_agent.mysql_dump_compat import iter_mysql_import_sql
 from mcd_agent.mautic_version_cache import read_mautic_version_evidence_read_only
 from mcd_agent.form_embed import render_form_embed_location
 from mcd_agent.models import DBConfig
 from mcd_agent.models import MauticInstall
+from mcd_agent.maintenance_mode import (
+    collect_maintenance_state,
+    restore_cron_service_if_needed,
+    stop_cron_service,
+    stop_running_tasks_for_maintenance,
+)
 from mcd_agent.nginx_baseline import (
     _nginx_supports_http2_directive,
     ensure_mautic_public_app_asset_locations,
@@ -43,9 +60,11 @@ from mcd_agent.instance_uid import instance_uid_matches
 from mcd_agent.instance_identity import (
     identity_readback,
     instance_path_names,
+    read_instance_identity,
     validate_instance_code,
     validate_mcc_instance_uid,
     write_instance_identity,
+    write_instance_state,
 )
 
 
@@ -65,6 +84,9 @@ NGINX_SITES_ENABLED = Path("/etc/nginx/sites-enabled")
 LETSENCRYPT_ROOT = Path("/etc/letsencrypt")
 MIGRATION_ROOT = Path("/var/www")
 MIGRATION_TARGET_MARKER = ".mcd-instance-migration-target.json"
+MIGRATION_SOURCE_STATE_ROOT = Path("/opt/mcd/var/instance-migration-source")
+MIGRATION_SOURCE_MAINTENANCE_ROOT = Path("/opt/mcd/var/instance-migration-maintenance")
+MIGRATION_SOURCE_STATE_SCHEMA = "mcd-instance-migration-source-maintenance-v1"
 
 
 def _mcc_wire_host_name(config: AgentConfig) -> str:
@@ -153,7 +175,7 @@ def _canonical_migration_target(domains: list[str], instance_code: str | None = 
         return None
     if instance_code:
         code = validate_instance_code(instance_code)
-        return Path(instance_path_names(domains[0], code)["webroot"])
+        return MIGRATION_ROOT / f"{domains[0]}_{code}" / "public_html"
     return MIGRATION_ROOT / domains[0] / "public_html"
 
 
@@ -249,6 +271,30 @@ def _mark_migration_target_failed(target: Path, error: str) -> None:
         return
 
 
+def _read_migration_target_marker(target: Path) -> dict[str, Any]:
+    marker = _migration_target_marker(target)
+    if not marker.is_file():
+        raise RuntimeError(f"migration target marker is missing: {target}")
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"migration target marker is invalid: {target}") from exc
+    if not isinstance(data, dict) or data.get("schema") != "mcd-instance-migration-target-v1":
+        raise RuntimeError(f"migration target marker schema is invalid: {target}")
+    return data
+
+
+def _mark_migration_target_prepared(target: Path) -> dict[str, Any]:
+    data = _read_migration_target_marker(target)
+    if str(data.get("state") or "") != "in_progress":
+        raise RuntimeError(f"migration target is not in progress: {target}")
+    data["phase"] = "target_prepared"
+    data["prepared_at_utc"] = _utc_now()
+    marker = _migration_target_marker(target)
+    marker.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return data
+
+
 def _prepare_migration_target(
     target: Path,
     *,
@@ -307,6 +353,651 @@ def _finish_migration_target(target: Path) -> None:
     marker = _migration_target_marker(target)
     if marker.is_file():
         marker.unlink()
+
+
+def _atomic_write_text(path: Path, text: str, *, mode: int = 0o600) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{secrets.token_hex(6)}.tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        tmp.chmod(mode)
+        os.replace(tmp, path)
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as src:
+        while True:
+            chunk = src.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _source_migration_state_path(instance_uid: str) -> Path:
+    uid = validate_mcc_instance_uid(instance_uid)
+    return MIGRATION_SOURCE_STATE_ROOT / f"{uid}.json"
+
+
+def _write_source_migration_state(path: Path, payload: dict[str, Any]) -> None:
+    _atomic_write_text(path, json.dumps(payload, ensure_ascii=True, indent=2) + "\n")
+
+
+def _read_source_migration_state(instance_uid: str) -> tuple[Path, dict[str, Any]]:
+    path = _source_migration_state_path(instance_uid)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise RuntimeError("source migration maintenance state is missing") from exc
+    except (OSError, json.JSONDecodeError, TypeError) as exc:
+        raise RuntimeError("source migration maintenance state is invalid") from exc
+    if not isinstance(raw, dict) or raw.get("schema") != MIGRATION_SOURCE_STATE_SCHEMA:
+        raise RuntimeError("source migration maintenance state schema is invalid")
+    return path, raw
+
+
+def _migration_source_identity(
+    config: AgentConfig,
+    *,
+    selector: str | None,
+    domains: list[str],
+    instance_uid: str,
+    instance_code: str,
+) -> tuple[MauticInstall, Path, dict[str, str]]:
+    uid = validate_mcc_instance_uid(instance_uid)
+    code = validate_instance_code(instance_code)
+    if not domains:
+        raise RuntimeError("source migration maintenance requires at least one domain")
+    inv = InstanceInventory(config.state_db_path)
+    ensure_seeded(inv, config)
+    inst = _select_instance(inv.list_instances(), selector, host_name=_mcc_wire_host_name(config))
+    root = Path(inst.root).resolve()
+    if not root.is_dir():
+        raise RuntimeError(f"source root is not a directory: {root}")
+    observed = read_instance_identity(root)
+    if observed is None:
+        raise RuntimeError("source instance identity marker is missing")
+    if observed.get("instance_uid") != uid or observed.get("instance_code") != code:
+        raise RuntimeError("source instance identity does not match migration request")
+    primary = str(observed.get("primary_domain") or "").strip().lower().rstrip(".")
+    if primary and primary not in domains:
+        raise RuntimeError("source primary domain does not match migration request")
+    return inst, root, observed
+
+
+def _nginx_directive_values(content: str, directive: str) -> list[str]:
+    values: list[str] = []
+    pattern = re.compile(rf"(?m)^\s*{re.escape(directive)}\s+([^;]+);\s*(?:#.*)?$")
+    for match in pattern.finditer(content):
+        value = str(match.group(1) or "").strip().strip("\"'")
+        if value:
+            values.append(value)
+    return values
+
+
+def _find_source_vhost(root: Path, domains: list[str]) -> tuple[Path, str, Path, str]:
+    if not NGINX_SITES_ENABLED.is_dir():
+        raise RuntimeError(f"nginx sites-enabled directory is missing: {NGINX_SITES_ENABLED}")
+    expected_roots = {root.resolve(strict=False), _nginx_web_root(root).resolve(strict=False)}
+    requested = set(domains)
+    matches: list[tuple[Path, str, Path, str]] = []
+    for link in sorted(NGINX_SITES_ENABLED.iterdir()):
+        if not link.is_symlink():
+            continue
+        raw_target = os.readlink(link)
+        config_path = (link.parent / raw_target).resolve(strict=False)
+        if not config_path.is_file():
+            continue
+        try:
+            content = config_path.read_text(encoding="utf-8", errors="strict")
+        except OSError:
+            continue
+        names: set[str] = set()
+        for value in _nginx_directive_values(content, "server_name"):
+            names.update(token.lower().rstrip(".") for token in value.split() if token and token != "_")
+        if not requested.intersection(names):
+            continue
+        configured_roots: set[Path] = set()
+        for value in _nginx_directive_values(content, "root"):
+            if "$" in value:
+                continue
+            configured_roots.add(Path(value).resolve(strict=False))
+        if not expected_roots.intersection(configured_roots):
+            continue
+        matches.append((link, raw_target, config_path, content))
+    if not matches:
+        raise RuntimeError("active source nginx symlink was not found for the selected root and domains")
+    if len(matches) != 1:
+        names = ", ".join(str(item[0]) for item in matches)
+        raise RuntimeError(f"source nginx vhost selection is ambiguous: {names}")
+    return matches[0]
+
+
+def _maintenance_page() -> str:
+    return """<!doctype html>
+<html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">
+<meta http-equiv=\"refresh\" content=\"30\"><title>Sales Snap maintenance</title>
+<style>body{margin:0;background:#f4f7fb;color:#172033;font:16px/1.5 system-ui,sans-serif;display:grid;min-height:100vh;place-items:center}.card{max-width:620px;margin:24px;padding:38px;border-radius:20px;background:#fff;box-shadow:0 18px 60px #24324a20}.brand{font-weight:800;color:#3157d5;letter-spacing:.04em}.muted{color:#60708c}</style></head>
+<body><main class=\"card\"><div class=\"brand\">SALES SNAP</div><h1>Service migration in progress</h1><p>The service is temporarily unavailable while it is moved safely.</p><p class=\"muted\">This page refreshes automatically. Please try again shortly.</p></main></body></html>
+"""
+
+
+def _render_source_maintenance_vhost(*, original: str, domains: list[str], page_root: Path) -> str:
+    certs = _nginx_directive_values(original, "ssl_certificate")
+    keys = _nginx_directive_values(original, "ssl_certificate_key")
+    has_tls = bool(re.search(r"(?m)^\s*listen\s+[^;]*\b443\b[^;]*;", original))
+    if has_tls and (not certs or not keys):
+        raise RuntimeError("source TLS vhost does not expose certificate paths in its preserved config")
+    for value in [*certs[:1], *keys[:1]]:
+        if not value.startswith("/") or any(ch in value for ch in "\r\n;"):
+            raise RuntimeError("source TLS certificate path is unsafe")
+    names = " ".join(domains)
+    page_dir = str(page_root)
+
+    def block(listen: str, tls: bool) -> str:
+        tls_lines = ""
+        if tls:
+            tls_lines = f"    ssl_certificate {certs[0]};\n    ssl_certificate_key {keys[0]};\n"
+        return (
+            "server {\n"
+            f"    listen {listen};\n"
+            f"    server_name {names};\n"
+            f"{tls_lines}"
+            "    add_header Cache-Control \"no-store\" always;\n"
+            "    error_page 503 =503 /mcd-migration-maintenance.html;\n"
+            "    location = /mcd-migration-maintenance.html {\n"
+            f"        root {page_dir};\n"
+            "        internal;\n"
+            "    }\n"
+            "    location / { return 503; }\n"
+            "}\n"
+        )
+
+    rendered = "# Managed by MCD instance migration; static 503 only.\n" + block("80", False)
+    if has_tls:
+        rendered += "\n" + block("443 ssl", True)
+    prohibited = ("fastcgi", "proxy_pass", "uwsgi", "scgi_pass", "php")
+    if any(token in rendered.lower() for token in prohibited):
+        raise RuntimeError("source maintenance vhost must not contain an application upstream")
+    return rendered
+
+
+def _atomic_symlink_replace(link: Path, target: str) -> None:
+    if link.parent.resolve(strict=False) != NGINX_SITES_ENABLED.resolve(strict=False):
+        raise RuntimeError("refusing to replace a symlink outside nginx sites-enabled")
+    tmp = link.with_name(f".{link.name}.{secrets.token_hex(6)}.tmp")
+    try:
+        os.symlink(target, tmp)
+        os.replace(tmp, link)
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _nginx_reload_checked() -> None:
+    _run_checked(["nginx", "-t"], timeout_sec=30)
+    _run_checked(["systemctl", "reload", "nginx"], timeout_sec=30)
+
+
+def _drain_reloaded_nginx_workers(*, timeout_sec: int = 120, stable_snapshots: int = 3) -> dict[str, Any]:
+    deadline = time.monotonic() + max(1, int(timeout_sec))
+    stable = 0
+    attempts = 0
+    remaining: list[int] = []
+    while True:
+        attempts += 1
+        rc, output = _run(["ps", "-eo", "pid=,args="], timeout_sec=10)
+        if rc != 0:
+            raise RuntimeError("cannot observe draining nginx workers")
+        remaining = []
+        for raw in output.splitlines():
+            if "nginx: worker process is shutting down" not in raw:
+                continue
+            try:
+                remaining.append(int(raw.strip().split(None, 1)[0]))
+            except (ValueError, IndexError):
+                continue
+        if remaining:
+            stable = 0
+        else:
+            stable += 1
+        if stable >= max(2, int(stable_snapshots)):
+            return {
+                "ok": True,
+                "attempts": attempts,
+                "stable_snapshots": stable,
+                "stable_snapshots_required": max(2, int(stable_snapshots)),
+                "remaining_worker_pids": [],
+            }
+        if time.monotonic() >= deadline:
+            return {
+                "ok": False,
+                "attempts": attempts,
+                "stable_snapshots": stable,
+                "stable_snapshots_required": max(2, int(stable_snapshots)),
+                "remaining_worker_pids": remaining,
+            }
+        time.sleep(0.2)
+
+
+def _source_original_preserved(state: dict[str, Any]) -> dict[str, Any]:
+    config_path = Path(str(state.get("original_config") or ""))
+    link = Path(str(state.get("active_link") or ""))
+    expected_hash = str(state.get("original_config_sha256") or "")
+    actual_hash = _sha256_file(config_path) if config_path.is_file() else ""
+    return {
+        "original_config": str(config_path),
+        "original_config_exists": config_path.is_file(),
+        "original_config_sha256": actual_hash,
+        "original_config_unchanged": bool(expected_hash and actual_hash == expected_hash),
+        "original_link": str(link),
+        "original_link_target": str(state.get("original_link_target") or ""),
+        "source_root_exists": Path(str(state.get("source_root") or "")).is_dir(),
+    }
+
+
+def _validate_source_migration_state(
+    state: dict[str, Any],
+    *,
+    selector: str | None,
+    domains: list[str],
+    instance_uid: str,
+    instance_code: str,
+) -> None:
+    uid = validate_mcc_instance_uid(instance_uid)
+    code = validate_instance_code(instance_code)
+    if str(state.get("instance_uid") or "") != uid or str(state.get("instance_code") or "") != code:
+        raise RuntimeError("source migration maintenance identity does not match request")
+    if list(state.get("domains") or []) != domains:
+        raise RuntimeError("source migration maintenance domains do not match request")
+    token = str(selector or "").strip()
+    if token and Path(token).is_absolute() and Path(token).resolve() != Path(str(state.get("source_root") or "")).resolve():
+        raise RuntimeError("source migration maintenance root does not match request")
+
+
+def _source_maintenance_link_active(state: dict[str, Any]) -> bool:
+    link = Path(str(state.get("active_link") or ""))
+    if not link.is_symlink():
+        return False
+    return (link.parent / os.readlink(link)).resolve(strict=False) == Path(
+        str(state.get("maintenance_config") or "")
+    ).resolve(strict=False)
+
+
+def _restore_source_runtime(config: AgentConfig, state: dict[str, Any]) -> dict[str, Any]:
+    pause_path = Path(str(getattr(config, "scheduler_pause_flag_path", "/opt/mcd/var/scheduler.pause") or "/opt/mcd/var/scheduler.pause"))
+    pause_restored = True
+    pause_error = ""
+    if not bool(state.get("pause_preexisting", False)) and pause_path.exists():
+        try:
+            pause_path.unlink()
+        except OSError as exc:
+            pause_restored = False
+            pause_error = str(exc)
+    if bool(state.get("cron_marker_preexisting", False)):
+        cron_restore: dict[str, Any] = {
+            "ok": True,
+            "requested": False,
+            "message": "pre-existing cron maintenance state preserved",
+        }
+    else:
+        cron_restore = restore_cron_service_if_needed(config)
+    return {
+        "ok": bool(pause_restored and cron_restore.get("ok", True)),
+        "pause_restored": pause_restored,
+        "pause_error": pause_error,
+        "cron_restore": cron_restore,
+    }
+
+
+def _restore_source_vhost(state: dict[str, Any]) -> dict[str, Any]:
+    evidence = _source_original_preserved(state)
+    if not evidence["original_config_unchanged"]:
+        raise RuntimeError("original source nginx config is missing or changed; automatic restore refused")
+    link = Path(str(state.get("active_link") or ""))
+    original_target = str(state.get("original_link_target") or "")
+    if not original_target:
+        raise RuntimeError("original source nginx symlink target is missing")
+    _atomic_symlink_replace(link, original_target)
+    try:
+        _nginx_reload_checked()
+    except Exception:
+        maintenance_target = str(state.get("maintenance_config") or "")
+        if maintenance_target:
+            _atomic_symlink_replace(link, maintenance_target)
+            try:
+                _nginx_reload_checked()
+            except Exception:
+                pass
+        raise
+    return {
+        **evidence,
+        "original_link_restored": link.is_symlink() and os.readlink(link) == original_target,
+    }
+
+
+def _source_quiescent_receipt(state: dict[str, Any]) -> dict[str, Any]:
+    preservation = _source_original_preserved(state)
+    return {
+        "schema": "mcd-instance-migration-source-quiescence-receipt-v1",
+        "ok": bool(
+            state.get("state") == "quiescent"
+            and _source_maintenance_link_active(state)
+            and preservation.get("original_config_unchanged")
+            and state.get("source_quiescent")
+        ),
+        "phase": str(state.get("state") or "unknown"),
+        "source_quiescent": bool(state.get("source_quiescent", False)),
+        "source_authoritative": True,
+        "source_root": str(state.get("source_root") or ""),
+        "domains": list(state.get("domains") or []),
+        "instance_uid": str(state.get("instance_uid") or ""),
+        "instance_code": str(state.get("instance_code") or ""),
+        "maintenance_vhost_active": _source_maintenance_link_active(state),
+        "maintenance_vhost_static_503": True,
+        "task_drain": dict(state.get("task_drain") or {}),
+        "web_request_drain": dict(state.get("web_request_drain") or {}),
+        "preservation": preservation,
+    }
+
+
+@stable_source_operation
+def quiesce_migration_source(
+    config: AgentConfig,
+    *,
+    selector: str | None,
+    domains_json: str,
+    instance_uid: str,
+    instance_code: str,
+) -> dict[str, Any]:
+    domains = _json_domains(domains_json)
+    _inst, root, identity = _migration_source_identity(
+        config,
+        selector=selector,
+        domains=domains,
+        instance_uid=instance_uid,
+        instance_code=instance_code,
+    )
+    state_path = _source_migration_state_path(instance_uid)
+    if state_path.is_file():
+        try:
+            existing = json.loads(state_path.read_text(encoding="utf-8"))
+        except Exception:
+            existing = {}
+        if isinstance(existing, dict) and existing.get("schema") == MIGRATION_SOURCE_STATE_SCHEMA:
+            _validate_source_migration_state(
+                existing,
+                selector=selector,
+                domains=domains,
+                instance_uid=instance_uid,
+                instance_code=instance_code,
+            )
+            if existing.get("state") == "quiescent":
+                receipt = _source_quiescent_receipt(existing)
+                if receipt["ok"]:
+                    return receipt
+            if existing.get("state") not in {"restored", "finalized"}:
+                raise RuntimeError("source migration maintenance already has an unfinished state")
+
+    link, original_link_target, original_config, original_content = _find_source_vhost(root, domains)
+    uid = validate_mcc_instance_uid(instance_uid)
+    code = validate_instance_code(instance_code)
+    maintenance_dir = MIGRATION_SOURCE_MAINTENANCE_ROOT / uid
+    page_path = maintenance_dir / "mcd-migration-maintenance.html"
+    maintenance_config = NGINX_SITES_AVAILABLE / f"zz-mcd-migration-maintenance-{code}.conf"
+    maintenance_content = _render_source_maintenance_vhost(
+        original=original_content,
+        domains=domains,
+        page_root=maintenance_dir,
+    )
+    maintenance_state = collect_maintenance_state(config)
+    pause_path = Path(str(getattr(config, "scheduler_pause_flag_path", "/opt/mcd/var/scheduler.pause") or "/opt/mcd/var/scheduler.pause"))
+    state: dict[str, Any] = {
+        "schema": MIGRATION_SOURCE_STATE_SCHEMA,
+        "state": "preparing",
+        "created_at_utc": _utc_now(),
+        "source_root": str(root),
+        "domains": domains,
+        "instance_uid": uid,
+        "instance_code": code,
+        "identity": identity,
+        "active_link": str(link),
+        "original_link_target": original_link_target,
+        "original_config": str(original_config),
+        "original_config_sha256": _sha256_file(original_config),
+        "maintenance_config": str(maintenance_config),
+        "maintenance_page": str(page_path),
+        "pause_preexisting": bool(pause_path.exists()),
+        "cron_marker_preexisting": bool(maintenance_state.get("cron_marker_present", False)),
+        "source_quiescent": False,
+    }
+    _write_source_migration_state(state_path, state)
+    switched = False
+    runtime_changed = False
+    try:
+        _atomic_write_text(page_path, _maintenance_page(), mode=0o644)
+        _atomic_write_text(maintenance_config, maintenance_content, mode=0o644)
+        _run_checked(["nginx", "-t"], timeout_sec=30)
+        _atomic_symlink_replace(link, str(maintenance_config))
+        switched = True
+        _nginx_reload_checked()
+
+        pause_path.parent.mkdir(parents=True, exist_ok=True)
+        if not pause_path.exists():
+            _atomic_write_text(pause_path, "paused\n", mode=0o600)
+        runtime_changed = True
+        if bool(state["cron_marker_preexisting"]):
+            cron_stop: dict[str, Any] = {
+                "ok": True,
+                "requested": False,
+                "message": "pre-existing cron maintenance state preserved",
+            }
+        else:
+            cron_stop = stop_cron_service(config)
+        if not bool(cron_stop.get("ok", False)):
+            raise RuntimeError("source cron stop failed: " + str(cron_stop.get("message") or "unknown error"))
+        task_drain = stop_running_tasks_for_maintenance(
+            config,
+            grace_sec=30,
+            kill_orphans=True,
+            stable_snapshots=3,
+            drain_timeout_sec=120,
+        )
+        if not bool(task_drain.get("ok", False)):
+            raise RuntimeError("source Mautic background tasks did not become quiescent")
+        web_drain = _drain_reloaded_nginx_workers(timeout_sec=120, stable_snapshots=3)
+        if not bool(web_drain.get("ok", False)):
+            raise RuntimeError("source PHP/web requests did not drain before timeout")
+
+        state.update(
+            {
+                "state": "quiescent",
+                "source_quiescent": True,
+                "quiescent_at_utc": _utc_now(),
+                "cron_stop": cron_stop,
+                "task_drain": task_drain,
+                "web_request_drain": web_drain,
+            }
+        )
+        _write_source_migration_state(state_path, state)
+        return _source_quiescent_receipt(state)
+    except Exception as exc:
+        restore_errors: list[str] = []
+        if switched:
+            try:
+                _restore_source_vhost(state)
+            except Exception as restore_exc:
+                restore_errors.append(f"vhost: {restore_exc}")
+        if runtime_changed:
+            runtime_restore = _restore_source_runtime(config, state)
+            if not bool(runtime_restore.get("ok", False)):
+                restore_errors.append("runtime: " + json.dumps(runtime_restore, ensure_ascii=True))
+        state.update(
+            {
+                "state": "failed",
+                "source_quiescent": False,
+                "failed_at_utc": _utc_now(),
+                "error": _safe_runtime_detail(exc),
+                "restore_errors": restore_errors,
+            }
+        )
+        _write_source_migration_state(state_path, state)
+        return {
+            "schema": "mcd-instance-migration-source-quiescence-receipt-v1",
+            "ok": False,
+            "phase": "source_quiesce_failed",
+            "source_quiescent": False,
+            "error": _safe_runtime_detail(exc),
+            "restore_errors": restore_errors,
+            "rollback_required": bool(restore_errors),
+            "preservation": _source_original_preserved(state),
+        }
+
+
+@stable_source_operation
+def restore_migration_source(
+    config: AgentConfig,
+    *,
+    selector: str | None,
+    domains_json: str,
+    instance_uid: str,
+    instance_code: str,
+) -> dict[str, Any]:
+    domains = _json_domains(domains_json)
+    state_path, state = _read_source_migration_state(instance_uid)
+    _validate_source_migration_state(
+        state,
+        selector=selector,
+        domains=domains,
+        instance_uid=instance_uid,
+        instance_code=instance_code,
+    )
+    if state.get("state") == "finalized":
+        raise RuntimeError("source is already finalized as a recoverable artifact")
+    vhost = _restore_source_vhost(state)
+    runtime_restore = _restore_source_runtime(config, state)
+    if not bool(runtime_restore.get("ok", False)):
+        raise RuntimeError("source runtime state restore failed: " + json.dumps(runtime_restore, ensure_ascii=True))
+    state.update(
+        {
+            "state": "restored",
+            "source_quiescent": False,
+            "restored_at_utc": _utc_now(),
+            "vhost_restore": vhost,
+            "runtime_restore": runtime_restore,
+        }
+    )
+    _write_source_migration_state(state_path, state)
+    return {
+        "schema": "mcd-instance-migration-source-restore-receipt-v1",
+        "ok": True,
+        "phase": "source_restored",
+        "source_authoritative": True,
+        "source_quiescent": False,
+        "original_vhost_active": True,
+        "source_root": str(state.get("source_root") or ""),
+        "instance_uid": str(state.get("instance_uid") or ""),
+        "instance_code": str(state.get("instance_code") or ""),
+        "preservation": _source_original_preserved(state),
+        "runtime_restore": runtime_restore,
+    }
+
+
+@stable_source_operation
+def finalize_migration_source(
+    config: AgentConfig,
+    *,
+    selector: str | None,
+    domains_json: str,
+    instance_uid: str,
+    instance_code: str,
+) -> dict[str, Any]:
+    domains = _json_domains(domains_json)
+    state_path, state = _read_source_migration_state(instance_uid)
+    _validate_source_migration_state(
+        state,
+        selector=selector,
+        domains=domains,
+        instance_uid=instance_uid,
+        instance_code=instance_code,
+    )
+    if state.get("state") not in {"quiescent", "artifact_pending_runtime_restore", "finalized"}:
+        raise RuntimeError("source is not in a finalizable quiescent state")
+    preservation = _source_original_preserved(state)
+    if not bool(preservation.get("original_config_unchanged")) or not _source_maintenance_link_active(state):
+        raise RuntimeError("source preservation or maintenance-vhost evidence is invalid")
+    root = Path(str(state.get("source_root") or "")).resolve()
+    artifact_state = write_instance_state(
+        root,
+        profile="artifact",
+        instance_uid=instance_uid,
+        instance_code=instance_code,
+        primary_domain=domains[0],
+        ownership_confirmed=True,
+    )
+    state.update(
+        {
+            "state": "artifact_pending_runtime_restore",
+            "source_quiescent": True,
+            "artifact_state": artifact_state,
+            "artifact_at_utc": str(state.get("artifact_at_utc") or _utc_now()),
+        }
+    )
+    _write_source_migration_state(state_path, state)
+    runtime_restore = _restore_source_runtime(config, state)
+    if not bool(runtime_restore.get("ok", False)):
+        state["runtime_restore"] = runtime_restore
+        _write_source_migration_state(state_path, state)
+        return {
+            "schema": "mcd-instance-migration-source-finalize-receipt-v1",
+            "ok": False,
+            "phase": "artifact_pending_runtime_restore",
+            "migration_complete": False,
+            "source_authoritative": False,
+            "recoverable_artifact": True,
+            "runtime_restore": runtime_restore,
+            "preservation": preservation,
+        }
+    state.update(
+        {
+            "state": "finalized",
+            "finalized_at_utc": _utc_now(),
+            "runtime_restore": runtime_restore,
+        }
+    )
+    _write_source_migration_state(state_path, state)
+    inventory_warning = ""
+    try:
+        InstanceInventory(config.state_db_path).rescan(config)
+    except Exception as exc:
+        inventory_warning = _safe_runtime_detail(exc)
+    receipt = {
+        "schema": "mcd-instance-migration-source-finalize-receipt-v1",
+        "ok": True,
+        "phase": "complete",
+        "migration_complete": True,
+        "source_authoritative": False,
+        "source_quiescent": True,
+        "recoverable_artifact": True,
+        "maintenance_vhost_active": True,
+        "source_root": str(root),
+        "instance_uid": validate_mcc_instance_uid(instance_uid),
+        "instance_code": validate_instance_code(instance_code),
+        "artifact_state": artifact_state,
+        "preservation": _source_original_preserved(state),
+        "runtime_restore": runtime_restore,
+    }
+    if inventory_warning:
+        receipt["inventory_warning"] = inventory_warning
+    return receipt
 
 
 def _local_php_path(root: Path) -> Path:
@@ -859,111 +1550,6 @@ def receive_target_files(
     }
 
 
-def _letsencrypt_paths_for_domains(domains: list[str]) -> list[Path]:
-    root = LETSENCRYPT_ROOT
-    wanted = {str(domain or "").strip().lower().rstrip(".") for domain in domains if str(domain or "").strip()}
-    paths: list[Path] = []
-    seen: set[str] = set()
-    live_names: list[str] = []
-
-    # Preserve the old direct-name lookup for certificates issued specifically
-    # for a migrated domain, then add every certificate whose SAN covers it.
-    for domain in domains:
-        name = str(domain or "").strip().lower().rstrip(".")
-        if name and (root / "live" / name).exists():
-            live_names.append(name)
-    live_root = root / "live"
-    if live_root.is_dir():
-        for live_dir in sorted(live_root.iterdir(), key=lambda item: item.name):
-            if not live_dir.is_dir() or not wanted.intersection(_certificate_dns_names(live_dir / "fullchain.pem")):
-                continue
-            live_names.append(live_dir.name)
-
-    for name in live_names:
-        for rel in (Path("live") / name, Path("archive") / name, Path("renewal") / f"{name}.conf"):
-            path = root / rel
-            key = str(path)
-            if key in seen or not path.exists():
-                continue
-            seen.add(key)
-            paths.append(path)
-    return paths
-
-
-def _certificate_dns_names(cert_path: Path) -> set[str]:
-    if not cert_path.exists():
-        return set()
-    rc, out = _run(["openssl", "x509", "-in", str(cert_path), "-noout", "-ext", "subjectAltName"], timeout_sec=20)
-    if rc != 0:
-        return set()
-    return {match.lower().rstrip(".") for match in re.findall(r"DNS:([^,\s]+)", out, flags=re.IGNORECASE)}
-
-
-def _certificate_is_current(cert_path: Path) -> bool:
-    if not cert_path.exists():
-        return False
-    rc, _out = _run(["openssl", "x509", "-in", str(cert_path), "-noout", "-checkend", "0"], timeout_sec=20)
-    return rc == 0
-
-
-def _matching_live_certificate(domains: list[str], *, require_current: bool) -> Path | None:
-    if not domains:
-        return None
-    primary = str(domains[0] or "").strip().lower().rstrip(".")
-    if not primary:
-        return None
-    live_root = LETSENCRYPT_ROOT / "live"
-    if not live_root.is_dir():
-        return None
-    candidates: list[Path] = []
-    direct = live_root / primary
-    if direct.is_dir():
-        candidates.append(direct)
-    candidates.extend(path for path in sorted(live_root.iterdir(), key=lambda item: item.name) if path.is_dir() and path != direct)
-    for live_dir in candidates:
-        cert_path = live_dir / "fullchain.pem"
-        key_path = live_dir / "privkey.pem"
-        if not key_path.exists() or primary not in _certificate_dns_names(cert_path):
-            continue
-        if require_current and not _certificate_is_current(cert_path):
-            continue
-        return live_dir
-    return None
-
-
-def stream_source_letsencrypt(*, domains_json: str, output: Any) -> int:
-    domains = _json_domains(domains_json)
-    with tarfile.open(fileobj=output, mode="w|gz", dereference=False) as tf:
-        for path in _letsencrypt_paths_for_domains(domains):
-            tf.add(path, arcname=str(path).lstrip("/"), recursive=True)
-    return 0
-
-
-def _safe_tar_member_target(root: Path, member_name: str) -> Path:
-    if not member_name or member_name.startswith("/"):
-        raise RuntimeError(f"unsafe tar member path: {member_name}")
-    if any(part == ".." for part in Path(member_name).parts):
-        raise RuntimeError(f"unsafe tar member path: {member_name}")
-    target = (root / member_name).resolve()
-    root_resolved = root.resolve()
-    try:
-        target.relative_to(root_resolved)
-    except ValueError as exc:
-        raise RuntimeError(f"unsafe tar member path: {member_name}") from exc
-    return target
-
-
-def receive_target_letsencrypt(*, input_stream: Any) -> dict[str, Any]:
-    root = Path("/")
-    extracted = 0
-    with tarfile.open(fileobj=input_stream, mode="r|gz") as tf:
-        for member in tf:
-            _safe_tar_member_target(root, member.name)
-            tf.extract(member, path=root)
-            extracted += 1
-    return {"schema": "mcd-instance-migration-target-letsencrypt-v1", "ok": True, "extracted": extracted}
-
-
 def _dump_supports_network_timeout(dump_bin: str) -> bool:
     """Return whether this dump client exposes MySQL's large-table timeout switch."""
     try:
@@ -1197,6 +1783,31 @@ def import_target_db_stream(*, target_db_name: str, target_db_user: str, target_
         }
 
 
+def _assert_migration_target_contract(
+    target: Path,
+    *,
+    domains: list[str],
+    instance_uid: str,
+    instance_code: str,
+    phase: str | None = None,
+) -> dict[str, Any]:
+    expected_uid = validate_mcc_instance_uid(instance_uid)
+    expected_code = validate_instance_code(instance_code)
+    marker = _read_migration_target_marker(target)
+    if str(marker.get("state") or "") != "in_progress":
+        raise RuntimeError("migration target is not in progress")
+    if phase is not None and str(marker.get("phase") or "") != phase:
+        raise RuntimeError(f"migration target is not in {phase} phase")
+    marker_domains = [_clean_domain(str(value or "")) for value in list(marker.get("domains") or [])]
+    if marker_domains != domains:
+        raise RuntimeError("migration target domains do not match request")
+    if str(marker.get("instance_uid") or "") != expected_uid:
+        raise RuntimeError("migration target UID does not match request")
+    if str(marker.get("instance_code") or "") != expected_code:
+        raise RuntimeError("migration target code does not match request")
+    return marker
+
+
 @stable_source_operation
 def finalize_target_relay(
     config: AgentConfig,
@@ -1216,15 +1827,19 @@ def finalize_target_relay(
 ) -> dict[str, Any]:
     target = Path(target_root).resolve()
     domains = _json_domains(domains_json)
-    if bool(instance_uid) != bool(instance_code):
-        raise RuntimeError("instance_uid and instance_code must be supplied together by MCC")
-    if instance_uid:
-        validate_mcc_instance_uid(instance_uid)
-    if instance_code:
-        validate_instance_code(instance_code)
-        identity_names = instance_path_names(domains[0], instance_code) if domains else {}
-        target_db_name = str(target_db_name or identity_names.get("db_name") or "")
-        target_db_user = str(target_db_user or identity_names.get("db_user") or "")
+    if not instance_uid or not instance_code:
+        raise RuntimeError("instance_uid and instance_code are required from MCC")
+    validate_mcc_instance_uid(instance_uid)
+    validate_instance_code(instance_code)
+    _assert_migration_target_contract(
+        target,
+        domains=domains,
+        instance_uid=instance_uid,
+        instance_code=instance_code,
+    )
+    identity_names = instance_path_names(domains[0], instance_code) if domains else {}
+    target_db_name = str(target_db_name or identity_names.get("db_name") or "")
+    target_db_user = str(target_db_user or identity_names.get("db_user") or "")
     target_db = _target_db_from_direct_values(name=target_db_name, user=target_db_user, password=target_db_password)
     if runtime_adapter:
         result = run_runtime_adapter(
@@ -1241,6 +1856,8 @@ def finalize_target_relay(
                 "install_type": str(install_type or "unknown"),
                 "instance_uid": str(instance_uid or ""),
                 "instance_code": str(instance_code or ""),
+                "tls_mode": "post_cutover_certbot",
+                "source_certificate_allowed": False,
             },
             timeout_sec=1800,
         )
@@ -1252,7 +1869,7 @@ def finalize_target_relay(
                     instance_code=instance_code,
                     primary_domain=domains[0] if domains else None,
                 )
-            _finish_migration_target(target)
+            _mark_migration_target_prepared(target)
             result.setdefault("instance_uid", str(instance_uid or ""))
             result.setdefault("instance_code", str(instance_code or ""))
             result.setdefault(
@@ -1264,14 +1881,17 @@ def finalize_target_relay(
                     primary_domain=domains[0] if domains else None,
                 ),
             )
+            result.update(
+                {
+                    "phase": "target_prepared",
+                    "migration_complete": False,
+                    "dns_cutover_ready": True,
+                    "tls_pending": True,
+                    "source_certificate_used": False,
+                    "next_operation": "target-issue-certificate",
+                }
+            )
         return result
-    cert_live = _matching_live_certificate(domains, require_current=True)
-    if cert_live is None:
-        raise RuntimeError(
-            "target TLS certificate is missing, expired, or does not cover "
-            + str(domains[0] if domains else "the migrated domain")
-            + "; DNS cutover blocked"
-        )
     print("progress: 88 target web config")
     _patch_local_php_db(target, target_db)
     _patch_local_php_instance_paths(target)
@@ -1288,11 +1908,17 @@ def finalize_target_relay(
         )
     inv = InstanceInventory(config.state_db_path)
     instances = inv.rescan(config)
-    _finish_migration_target(target)
+    _mark_migration_target_prepared(target)
     return {
-        "schema": "mcd-instance-migration-result-v1",
+        "schema": "mcd-instance-migration-result-v2",
         "ok": True,
         "catchup_ok": True,
+        "phase": "target_prepared",
+        "migration_complete": False,
+        "dns_cutover_ready": True,
+        "tls_pending": True,
+        "source_certificate_used": False,
+        "next_operation": "target-issue-certificate",
         "completed_at_utc": _utc_now(),
         "target_root": str(target),
         "domains": domains,
@@ -1307,10 +1933,160 @@ def finalize_target_relay(
             primary_domain=domains[0] if domains else None,
         ),
         "nginx_vhost": site,
-        "tls_certificate": str(cert_live),
         "healthcheck_tail": health,
         "instances": instances,
     }
+
+
+def _prepared_target_identity(
+    target: Path,
+    *,
+    domains: list[str],
+    instance_uid: str,
+    instance_code: str,
+) -> dict[str, Any]:
+    expected_uid = validate_mcc_instance_uid(instance_uid)
+    expected_code = validate_instance_code(instance_code)
+    _assert_migration_target_contract(
+        target,
+        domains=domains,
+        instance_uid=expected_uid,
+        instance_code=expected_code,
+        phase="target_prepared",
+    )
+    identity = identity_readback(
+        target,
+        instance_uid=expected_uid,
+        instance_code=expected_code,
+        primary_domain=domains[0] if domains else None,
+    )
+    return identity
+
+
+@stable_source_operation
+def issue_target_certificate(
+    config: AgentConfig,
+    *,
+    target_root: str,
+    domains_json: str,
+    instance_uid: str,
+    instance_code: str,
+    php_version: str | None = None,
+) -> dict[str, Any]:
+    target = Path(target_root).resolve()
+    receipt: dict[str, Any] = {
+        "schema": "mcd-instance-migration-certificate-receipt-v1",
+        "ok": False,
+        "phase": "certificate_pending",
+        "migration_complete": False,
+        "target_root": str(target),
+        "domains": [],
+        "instance_uid": str(instance_uid or ""),
+        "instance_code": str(instance_code or ""),
+        "identity": {},
+        "source_certificate_used": False,
+        "rollback_required": True,
+        "rollback_contract": {
+            "dns": "restore_source_route",
+            "source": "instance-migrate source-restore",
+            "target": "cleanup_only_after_dns_rollback",
+        },
+    }
+    stage = "preflight"
+    preflight_complete = False
+    try:
+        domains = _json_domains(domains_json)
+        if not domains:
+            raise RuntimeError("target certificate requires at least one domain")
+        uid = validate_mcc_instance_uid(instance_uid)
+        code = validate_instance_code(instance_code)
+        identity = _prepared_target_identity(
+            target,
+            domains=domains,
+            instance_uid=uid,
+            instance_code=code,
+        )
+        primary = domains[0]
+        plan = ImageInstallPlan(
+            image_ref="instance-migration",
+            domain=primary,
+            short_name=primary.split(".", 1)[0],
+            db_name="migration",
+            db_user="migration",
+            db_password="",
+            webroot=target,
+            php_version=_detect_php_version(php_version or ""),
+            instance_uid=uid,
+            instance_code=code,
+        )
+        receipt.update(
+            {
+                "domains": domains,
+                "instance_uid": uid,
+                "instance_code": code,
+                "identity": identity,
+            }
+        )
+        preflight_complete = True
+        stage = "certbot"
+        certbot_args = [
+            "certbot",
+            "--nginx",
+            "--cert-name",
+            primary,
+            "--non-interactive",
+            "--agree-tos",
+            "--redirect",
+            "--keep-until-expiring",
+            "--register-unsafely-without-email",
+        ]
+        for domain in domains:
+            certbot_args.extend(["-d", domain])
+        rc, out = _run_certbot(certbot_args, timeout_sec=900)
+        if rc != 0:
+            raise RuntimeError(f"certbot failed rc={rc}: {_safe_runtime_detail(out)}")
+
+        stage = "certificate_verification"
+        cert_path = LETSENCRYPT_ROOT / "live" / primary / "fullchain.pem"
+        certificate = _load_pem_certificate_identity(cert_path, domain=primary)
+        covered = {str(value or "").strip().lower().rstrip(".") for value in list(certificate.get("dns_names") or [])}
+        missing_domains = [domain for domain in domains if domain not in covered]
+        if missing_domains:
+            raise RuntimeError("issued certificate does not cover: " + ",".join(missing_domains))
+
+        stage = "https_verification"
+        verification = _verify_image_https(plan)
+        instances = InstanceInventory(config.state_db_path).rescan(config)
+        _finish_migration_target(target)
+        receipt.update(
+            {
+                "ok": True,
+                "phase": "target_tls_verified",
+                "migration_complete": False,
+                "target_ready": True,
+                "tls_pending": False,
+                "rollback_required": False,
+                "rollback_contract": {},
+                "next_operation": "source-finalize",
+                "completed_at_utc": _utc_now(),
+                "certificate": certificate,
+                "verification": verification,
+                "instances": instances,
+            }
+        )
+        return receipt
+    except Exception as exc:
+        if preflight_complete:
+            _mark_migration_target_failed(target, f"{stage}: {exc}")
+        receipt.update(
+            {
+                "phase": "certificate_failed",
+                "error_code": f"{stage}_failed",
+                "error": _safe_runtime_detail(exc),
+                "failed_at_utc": _utc_now(),
+            }
+        )
+        return receipt
 
 
 def _dump_source_into_target(
@@ -1390,21 +2166,12 @@ def _write_nginx_vhost(*, root: Path, domains: list[str], php_version: str) -> s
     site = NGINX_SITES_AVAILABLE / f"{primary}.conf"
     enabled = NGINX_SITES_ENABLED / f"{primary}.conf"
     server_names = " ".join(domains)
-    cert_live = _matching_live_certificate(domains, require_current=True)
-    ssl_block = ""
-    listen = "listen 80;"
-    if cert_live is not None:
-        listen = "listen 80;\n    listen 443 ssl http2;"
-        ssl_block = f"""
-    ssl_certificate {cert_live / "fullchain.pem"};
-    ssl_certificate_key {cert_live / "privkey.pem"};
-"""
     content = render_nginx_template(
         "instance_migrate_vhost.conf",
-        LISTEN_DIRECTIVES=listen,
+        LISTEN_DIRECTIVES="listen 80;",
         SERVER_NAMES=server_names,
         WEB_ROOT=web_root,
-        SSL_BLOCK=ssl_block,
+        SSL_BLOCK="",
         FASTCGI_SOCKET=sock,
         FORM_EMBED_LOCATION="\n".join(
             ("    " + line) if line else ""
@@ -1421,42 +2188,6 @@ def _write_nginx_vhost(*, root: Path, domains: list[str], php_version: str) -> s
     _run_checked(["nginx", "-t"], timeout_sec=30)
     _run_checked(["systemctl", "reload", "nginx"], timeout_sec=30)
     return str(site)
-
-
-def _copy_letsencrypt(
-    *,
-    source_ssh_user: str,
-    source_address: str,
-    source_ssh_port: int,
-    source_ssh_key_file: str,
-) -> bool:
-    rc, _out = _run(
-        [
-            *_ssh_base(
-                source_ssh_user=source_ssh_user,
-                source_address=source_address,
-                source_ssh_port=source_ssh_port,
-                source_ssh_key_file=source_ssh_key_file,
-            ),
-            "test",
-            "-d",
-            "/etc/letsencrypt",
-        ],
-        timeout_sec=20,
-    )
-    if rc != 0:
-        return False
-    Path("/etc/letsencrypt").mkdir(parents=True, exist_ok=True)
-    _rsync_from_source(
-        source_ssh_user=source_ssh_user,
-        source_address=source_address,
-        source_ssh_port=source_ssh_port,
-        source_ssh_key_file=source_ssh_key_file,
-        source_path="/etc/letsencrypt",
-        target_path=Path("/etc/letsencrypt"),
-        delete=False,
-    )
-    return True
 
 
 def _console(root: Path) -> Path:
@@ -1510,12 +2241,11 @@ def run_target_pull_migration(
     if not str(target).startswith("/"):
         raise RuntimeError("target root must be absolute")
     domains = _json_domains(domains_json)
-    if bool(instance_uid) != bool(instance_code):
-        raise RuntimeError("instance_uid and instance_code must be supplied together by MCC")
-    if instance_uid:
-        validate_mcc_instance_uid(instance_uid)
+    if not instance_uid or not instance_code:
+        raise RuntimeError("instance_uid and instance_code are required from MCC")
+    validate_mcc_instance_uid(instance_uid)
+    validate_instance_code(instance_code)
     if instance_code:
-        validate_instance_code(instance_code)
         identity_names = instance_path_names(domains[0], instance_code) if domains else {}
         target_db_name = str(target_db_name or identity_names.get("db_name") or "") or None
         target_db_user = str(target_db_user or identity_names.get("db_user") or "") or None
@@ -1560,7 +2290,8 @@ def run_target_pull_migration(
         "/app/logs/***",
         MIGRATION_TARGET_MARKER,
     ]
-    source_maintenance_on = False
+    source_quiescent = False
+    source_quiescence_receipt: dict[str, Any] = {}
     tunnel: subprocess.Popen[Any] | None = None
     try:
         print("progress: 5 preflight target")
@@ -1589,16 +2320,36 @@ def run_target_pull_migration(
         result["target_db_name"] = target_db.name
         result["target_db_user"] = target_db.user
 
-        print("progress: 60 source maintenance on")
-        _remote_mcd(
+        print("progress: 60 source static maintenance and quiescence")
+        source_quiescence_raw = _remote_mcd(
             source_ssh_user=source_ssh_user,
             source_address=source_address,
             source_ssh_port=source_ssh_port,
             source_ssh_key_file=source_ssh_key_file,
-            args=["maintenance", "on", "--stop-cron", "--kill-orphans", "--grace-sec", "30", "--json"],
-            timeout_sec=180,
+            args=[
+                "instance-migrate",
+                "source-quiesce",
+                "--root",
+                source_root_clean,
+                "--domains-json",
+                json.dumps(domains, ensure_ascii=True, separators=(",", ":")),
+                "--instance-uid",
+                str(instance_uid),
+                "--instance-code",
+                str(instance_code),
+                "--json",
+            ],
+            timeout_sec=360,
         )
-        source_maintenance_on = True
+        try:
+            source_quiescence_receipt = json.loads(source_quiescence_raw)
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise RuntimeError("source quiescence receipt is not valid JSON") from exc
+        if not bool(source_quiescence_receipt.get("ok", False)) or not bool(
+            source_quiescence_receipt.get("source_quiescent", False)
+        ):
+            raise RuntimeError("source quiescence receipt does not prove a quiescent source")
+        source_quiescent = True
 
         print("progress: 68 final file sync")
         _rsync_from_source(
@@ -1645,12 +2396,6 @@ def run_target_pull_migration(
             result["steps"].append({"label": "local_paths", "keys": patched_paths})
 
         print("progress: 88 target web config")
-        copied_certs = _copy_letsencrypt(
-            source_ssh_user=source_ssh_user,
-            source_address=source_address,
-            source_ssh_port=source_ssh_port,
-            source_ssh_key_file=source_ssh_key_file,
-        )
         site = _write_nginx_vhost(root=target, domains=domains, php_version=php_version or "")
         _run_checked(["chown", "-R", "www-data:www-data", str(target)], timeout_sec=1800)
 
@@ -1659,54 +2404,25 @@ def run_target_pull_migration(
         inv = InstanceInventory(config.state_db_path)
         instances = inv.rescan(config)
 
-        print("progress: 96 mark source artifact state")
-        source_state_output = _remote_mcd(
-            source_ssh_user=source_ssh_user,
-            source_address=source_address,
-            source_ssh_port=source_ssh_port,
-            source_ssh_key_file=source_ssh_key_file,
-            args=[
-                "instance-state",
-                "--root",
-                source_root_clean,
-                "--profile",
-                "artifact",
-                "--instance-uid",
-                str(instance_uid or ""),
-                "--instance-code",
-                str(instance_code or ""),
-                "--domain",
-                domains[0] if domains else "",
-                "--ownership-confirmed",
-                "--json",
-            ],
-            timeout_sec=120,
-        )
-        try:
-            result["source_instance_state"] = json.loads(source_state_output)
-        except (TypeError, json.JSONDecodeError):
-            result["source_instance_state"] = {"raw": str(source_state_output or "")}
-
-        print("progress: 98 source maintenance off")
-        _remote_mcd(
-            source_ssh_user=source_ssh_user,
-            source_address=source_address,
-            source_ssh_port=source_ssh_port,
-            source_ssh_key_file=source_ssh_key_file,
-            args=["maintenance", "off", "--json"],
-            timeout_sec=120,
-        )
-        source_maintenance_on = False
+        _mark_migration_target_prepared(target)
 
         result.update(
             {
                 "ok": True,
                 "catchup_ok": True,
+                "phase": "target_prepared",
+                "migration_complete": False,
+                "dns_cutover_ready": True,
+                "tls_pending": True,
+                "source_certificate_used": False,
+                "source_instance_state_changed": False,
+                "next_operation": "target-issue-certificate",
                 "completed_at_utc": _utc_now(),
-                "source_maintenance_active": False,
-                "source_maintenance_restored": True,
+                "source_maintenance_active": True,
+                "source_maintenance_restored": False,
+                "source_quiescent": True,
+                "source_quiescence_receipt": source_quiescence_receipt,
                 "nginx_vhost": site,
-                "letsencrypt_copied": copied_certs,
                 "healthcheck_tail": health,
                 "instances": instances,
                 "identity": identity_readback(
@@ -1717,22 +2433,37 @@ def run_target_pull_migration(
                 ),
             }
         )
-        _finish_migration_target(target)
-        print("progress: 100 migration complete")
+        print("progress: 100 target prepared; DNS cutover and target certificate pending")
         return result
     except Exception as exc:
         _mark_migration_target_failed(target, str(exc))
-        if source_maintenance_on:
+        if source_quiescent:
             try:
-                _remote_mcd(
+                restore_raw = _remote_mcd(
                     source_ssh_user=source_ssh_user,
                     source_address=source_address,
                     source_ssh_port=source_ssh_port,
                     source_ssh_key_file=source_ssh_key_file,
-                    args=["maintenance", "off", "--json"],
-                    timeout_sec=120,
+                    args=[
+                        "instance-migrate",
+                        "source-restore",
+                        "--root",
+                        source_root_clean,
+                        "--domains-json",
+                        json.dumps(domains, ensure_ascii=True, separators=(",", ":")),
+                        "--instance-uid",
+                        str(instance_uid),
+                        "--instance-code",
+                        str(instance_code),
+                        "--json",
+                    ],
+                    timeout_sec=180,
                 )
+                restore_receipt = json.loads(restore_raw)
+                if not bool(restore_receipt.get("ok", False)):
+                    raise RuntimeError("source restore receipt is not successful")
                 result["source_maintenance_restored"] = True
+                result["source_restore_receipt"] = restore_receipt
             except Exception as restore_exc:
                 result["source_maintenance_restore_error"] = str(restore_exc)
         raise
