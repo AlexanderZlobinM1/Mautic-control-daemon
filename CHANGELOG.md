@@ -1,3 +1,15 @@
+## 1.6.126 - 2026-11-21
+
+- Return target certificate success evidence as a real instance list bound to
+  the verified UID, code, root, domains and observation timestamp instead of
+  exposing the numeric inventory rescan count. The completion timestamp and
+  instance observation timestamp are generated together for MCC validation.
+- Make failed-migration target cleanup exact and idempotent. An explicit wipe
+  removes only the canonical identity path when either its transient migration
+  marker or durable instance marker matches UID, code and domain; a missing
+  path is a successful no-op, while absent or mismatched ownership evidence is
+  refused without deleting files.
+
 ## 1.6.124 - 2026-11-21
 
 - Preserve the exact original enabled nginx symlink target before source

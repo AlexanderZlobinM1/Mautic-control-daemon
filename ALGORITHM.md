@@ -2511,6 +2511,9 @@ domains. Target MCD сверяет ownership marker, выпускает новы
 certbot-ом, проверяет срок и все SAN, затем локальные HTTPS/SNI и login page.
 Успешный receipt имеет `phase: target_tls_verified`, `target_ready: true`,
 `migration_complete: false` и `next_operation: source-finalize`.
+Он всегда содержит `completed_at_utc` и список `instances` с фактически
+проверенными UID, code, root, domains и тем же временем наблюдения; числовой
+результат inventory rescan не считается instance evidence.
 
 Последний шаг `source-finalize` выполняется на source только после успешной TLS
 проверки target. Он оставляет maintenance symlink активным, записывает source
@@ -2530,6 +2533,13 @@ cron/планировщика. Повторный `source-restore` исполь�
 target. Ошибка сертификата возвращает строгий JSON с
 `phase: certificate_failed`, `rollback_required: true` и этим машинным rollback
 contract. MCD не меняет DNS и не использует сертификат source на target.
+
+Rollback target выполняется тем же `target-preflight` с явными wipe-флагами,
+UID, code, domain и каноническим target root. MCD удаляет только этот root,
+если transient migration marker или durable instance marker точно совпадает с
+запросом. Повтор при уже отсутствующем root успешен без изменений; отсутствие
+или несовпадение ownership evidence запрещает удаление. Другие каталоги,
+инстансы и архивы операция не затрагивает.
 
 CLI contract для оркестратора использует один и тот же набор identity/domain
 параметров на всех стадиях:

@@ -336,6 +336,114 @@ class InstanceMigrateProbeTests(unittest.TestCase):
         self.assertIn("target root removed: " + str(root.resolve()), payload["cleanup"])
         self.assertIn("target database dropped: baza_testmove", payload["cleanup"])
 
+    def test_managed_target_cleanup_uses_exact_durable_identity_and_is_idempotent(self) -> None:
+        uid = "a1179058-985d-4117-91b8-e951fa734a66"
+        code = "00007"
+        domain = "example.sales-snap.com"
+        with tempfile.TemporaryDirectory() as td:
+            migration_root = Path(td) / "www"
+            target = migration_root / f"{domain}_{code}" / "public_html"
+            target.mkdir(parents=True)
+            (target / "index.php").write_text("<?php\n", encoding="utf-8")
+            instance_migrate.write_instance_identity(
+                target,
+                instance_uid=uid,
+                instance_code=code,
+                primary_domain=domain,
+            )
+            with (
+                patch.object(instance_migrate, "MIGRATION_ROOT", migration_root),
+                patch.object(instance_migrate, "_target_db_exists", return_value=False),
+                patch.object(instance_migrate.shutil, "which", return_value="/usr/bin/tool"),
+            ):
+                removed = instance_migrate.preflight_target_relay(
+                    target_root=str(target),
+                    target_db_name="db_00007",
+                    wipe_target_root=True,
+                    domains_json=f'["{domain}"]',
+                    instance_uid=uid,
+                    instance_code=code,
+                )
+                repeated = instance_migrate.preflight_target_relay(
+                    target_root=str(target),
+                    target_db_name="db_00007",
+                    wipe_target_root=True,
+                    domains_json=f'["{domain}"]',
+                    instance_uid=uid,
+                    instance_code=code,
+                )
+
+        self.assertTrue(removed["ok"])
+        self.assertIn("target root removed: " + str(target.resolve()), removed["cleanup"])
+        self.assertTrue(repeated["ok"])
+        self.assertEqual(repeated["cleanup"], [])
+        self.assertFalse(target.exists())
+
+    def test_managed_target_cleanup_rejects_different_durable_identity(self) -> None:
+        code = "00007"
+        domain = "example.sales-snap.com"
+        with tempfile.TemporaryDirectory() as td:
+            migration_root = Path(td) / "www"
+            target = migration_root / f"{domain}_{code}" / "public_html"
+            target.mkdir(parents=True)
+            (target / "index.php").write_text("<?php\n", encoding="utf-8")
+            instance_migrate.write_instance_identity(
+                target,
+                instance_uid="actual-instance-uid",
+                instance_code=code,
+                primary_domain=domain,
+            )
+            with (
+                patch.object(instance_migrate, "MIGRATION_ROOT", migration_root),
+                patch.object(instance_migrate, "_target_db_exists", return_value=False),
+                patch.object(instance_migrate.shutil, "which", return_value="/usr/bin/tool"),
+            ):
+                result = instance_migrate.preflight_target_relay(
+                    target_root=str(target),
+                    target_db_name="db_00007",
+                    wipe_target_root=True,
+                    domains_json=f'["{domain}"]',
+                    instance_uid="different-instance-uid",
+                    instance_code=code,
+                )
+                target_survived = target.is_dir()
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(any("durable instance identity does not match" in item for item in result["problems"]))
+        self.assertTrue(target_survived)
+
+    def test_managed_target_cleanup_accepts_exact_transient_marker(self) -> None:
+        uid = "a1179058-985d-4117-91b8-e951fa734a66"
+        code = "00007"
+        domain = "example.sales-snap.com"
+        with tempfile.TemporaryDirectory() as td:
+            migration_root = Path(td) / "www"
+            target = migration_root / f"{domain}_{code}" / "public_html"
+            target.mkdir(parents=True)
+            (target / "index.php").write_text("<?php\n", encoding="utf-8")
+            instance_migrate._write_migration_target_marker(
+                target,
+                domains=[domain],
+                instance_uid=uid,
+                instance_code=code,
+            )
+            with (
+                patch.object(instance_migrate, "MIGRATION_ROOT", migration_root),
+                patch.object(instance_migrate, "_target_db_exists", return_value=False),
+                patch.object(instance_migrate.shutil, "which", return_value="/usr/bin/tool"),
+            ):
+                result = instance_migrate.preflight_target_relay(
+                    target_root=str(target),
+                    target_db_name="db_00007",
+                    wipe_target_root=True,
+                    domains_json=f'["{domain}"]',
+                    instance_uid=uid,
+                    instance_code=code,
+                )
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(target.exists())
+
     def test_write_nginx_vhost_is_http_only_before_dns_cutover(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -472,7 +580,7 @@ class InstanceMigrateProbeTests(unittest.TestCase):
                 pass
 
             def rescan(self, _config):
-                return ["instance"]
+                return 1
 
         uid = "a1179058-985d-4117-91b8-e951fa734a66"
         code = "00007"
@@ -494,7 +602,16 @@ class InstanceMigrateProbeTests(unittest.TestCase):
             )
             instance_migrate._mark_migration_target_prepared(target)
             with (
-                patch.object(instance_migrate, "identity_readback", return_value={"status": "ok"}),
+                patch.object(
+                    instance_migrate,
+                    "identity_readback",
+                    return_value={
+                        "instance_uid": uid,
+                        "instance_code": code,
+                        "primary_domain": domains[0],
+                        "root": str(target.resolve()),
+                    },
+                ),
                 patch.object(instance_migrate, "_detect_php_version", return_value="8.3"),
                 patch.object(instance_migrate, "_run_certbot", side_effect=fake_certbot),
                 patch.object(
@@ -528,6 +645,11 @@ class InstanceMigrateProbeTests(unittest.TestCase):
         self.assertFalse(marker_exists)
         self.assertEqual(captured["args"].count("-d"), 2)
         self.assertIn("--cert-name", captured["args"])
+        self.assertEqual(len(result["instances"]), 1)
+        self.assertEqual(result["instances"][0]["instance_uid"], uid)
+        self.assertEqual(result["instances"][0]["instance_code"], code)
+        self.assertEqual(result["instances"][0]["root"], str(target.resolve()))
+        self.assertEqual(result["instances"][0]["observed_at_utc"], result["completed_at_utc"])
         self.assertTrue(
             {
                 "schema", "ok", "phase", "migration_complete", "target_root", "domains",
