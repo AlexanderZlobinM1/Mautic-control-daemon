@@ -1,3 +1,12 @@
+## 1.6.125 - 2026-11-21
+
+- Make fresh source quiescence snapshot-first and persistence-fenced. MCD now
+  reads the exact active nginx symlink with `lstat`/`readlink`, verifies its
+  original config, atomically persists the canonical
+  `original_symlink_target` plus digest, reads and validates that state back,
+  and confirms the live link still matches before maintenance activation.
+  Missing or changed persisted evidence fails before vhost/runtime mutation.
+
 ## 1.6.124 - 2026-11-21
 
 - Preserve the exact original enabled nginx symlink target before source

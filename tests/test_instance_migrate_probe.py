@@ -745,6 +745,7 @@ class InstanceMigrateProbeTests(unittest.TestCase):
             install.instance_code = None
             FakeInventory.installs = [install]
             state_root = Path(td) / "mcd" / "source-state"
+            self.assertFalse(state_root.exists())
             with (
                 patch.object(instance_migrate, "NGINX_SITES_AVAILABLE", available),
                 patch.object(instance_migrate, "NGINX_SITES_ENABLED", enabled),
@@ -1140,6 +1141,54 @@ class InstanceMigrateProbeTests(unittest.TestCase):
             self.assertIn("active source nginx symlink was not found", result["error"])
             self.assertTrue(active.is_symlink())
             self.assertFalse(active.exists())
+
+    def test_source_quiesce_validates_fresh_persisted_snapshot_before_switch(self) -> None:
+        class FakeInventory:
+            installs = []
+
+            def __init__(self, _path: str) -> None:
+                pass
+
+            def list_instances(self):
+                return list(self.installs)
+
+        with tempfile.TemporaryDirectory() as td:
+            uid, code, domain, root, original, _original_text, active, available, enabled, install, cfg = self._source_migration_fixture(td)
+            FakeInventory.installs = [install]
+            state_root = Path(td) / "mcd" / "source-state"
+            write_state = instance_migrate._write_source_migration_state
+
+            def write_without_canonical_snapshot(path: Path, payload: dict) -> None:
+                corrupted = dict(payload)
+                corrupted.pop("original_symlink_target", None)
+                write_state(path, corrupted)
+
+            with (
+                patch.object(instance_migrate, "NGINX_SITES_AVAILABLE", available),
+                patch.object(instance_migrate, "NGINX_SITES_ENABLED", enabled),
+                patch.object(instance_migrate, "MIGRATION_SOURCE_STATE_ROOT", state_root),
+                patch.object(instance_migrate, "MIGRATION_SOURCE_MAINTENANCE_ROOT", Path(td) / "mcd" / "maintenance"),
+                patch.object(instance_migrate, "InstanceInventory", FakeInventory),
+                patch.object(instance_migrate, "ensure_seeded"),
+                patch.object(instance_migrate, "collect_maintenance_state", return_value={"cron_marker_present": False}),
+                patch.object(instance_migrate, "_write_source_migration_state", side_effect=write_without_canonical_snapshot),
+                patch.object(instance_migrate, "_atomic_symlink_replace") as switch_vhost,
+                patch.object(instance_migrate, "stop_cron_service") as stop_cron,
+                patch.object(instance_migrate, "_run_checked", return_value=""),
+            ):
+                result = instance_migrate.quiesce_migration_source(
+                    cfg,
+                    selector=str(root),
+                    domains_json=f'["{domain}"]',
+                    instance_uid=uid,
+                    instance_code=code,
+                )
+
+            self.assertFalse(result["ok"])
+            self.assertIn("original symlink target evidence is missing", result["error"])
+            switch_vhost.assert_not_called()
+            stop_cron.assert_not_called()
+            self.assertEqual(active.readlink(), original)
 
     def test_source_quiesce_failure_restores_original_vhost_and_runtime(self) -> None:
         class FakeInventory:

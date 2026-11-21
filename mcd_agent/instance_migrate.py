@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import secrets
 import shutil
+import stat
 import subprocess
 import tarfile
 import tempfile
@@ -507,9 +508,15 @@ def _find_source_vhost(root: Path, domains: list[str]) -> tuple[Path, str, Path,
     requested = set(domains)
     matches: list[tuple[Path, str, Path, str]] = []
     for link in sorted(NGINX_SITES_ENABLED.iterdir()):
-        if not link.is_symlink():
+        try:
+            mode = os.lstat(link).st_mode
+        except OSError:
+            continue
+        if not stat.S_ISLNK(mode):
             continue
         raw_target = os.readlink(link)
+        if not raw_target:
+            raise RuntimeError(f"active source nginx symlink has an empty target: {link}")
         config_path = (link.parent / raw_target).resolve(strict=False)
         if not config_path.is_file():
             continue
@@ -536,6 +543,36 @@ def _find_source_vhost(root: Path, domains: list[str]) -> tuple[Path, str, Path,
         names = ", ".join(str(item[0]) for item in matches)
         raise RuntimeError(f"source nginx vhost selection is ambiguous: {names}")
     return matches[0]
+
+
+def _persist_source_migration_snapshot(
+    state_path: Path,
+    state: dict[str, Any],
+    *,
+    selector: str | None,
+    domains: list[str],
+    instance_uid: str,
+    instance_code: str,
+) -> dict[str, Any]:
+    _write_source_migration_state(state_path, state)
+    persisted_path, persisted = _read_source_migration_state(instance_uid)
+    if persisted_path != state_path:
+        raise RuntimeError("source migration snapshot path changed during persistence")
+    _validate_source_migration_state(
+        persisted,
+        selector=selector,
+        domains=domains,
+        instance_uid=instance_uid,
+        instance_code=instance_code,
+    )
+    if persisted.get("state") != "preparing":
+        raise RuntimeError("source migration snapshot state changed during persistence")
+    preservation = _source_original_preserved(persisted)
+    if not bool(preservation.get("original_config_unchanged")):
+        raise RuntimeError("source migration original vhost snapshot is missing or changed")
+    if not bool(preservation.get("source_root_exists")):
+        raise RuntimeError("source migration source root disappeared during snapshot persistence")
+    return persisted
 
 
 def _maintenance_page() -> str:
@@ -876,13 +913,27 @@ def _quiesce_migration_source_impl(
         "cron_marker_preexisting": bool(maintenance_state.get("cron_marker_present", False)),
         "source_quiescent": False,
     }
-    _write_source_migration_state(state_path, state)
+    state = _persist_source_migration_snapshot(
+        state_path,
+        state,
+        selector=selector,
+        domains=domains,
+        instance_uid=uid,
+        instance_code=code,
+    )
+    link = Path(str(state["active_link"]))
+    maintenance_config = Path(str(state["maintenance_config"]))
+    page_path = Path(str(state["maintenance_page"]))
     switched = False
     runtime_changed = False
     try:
+        if not _source_original_link_active(state):
+            raise RuntimeError("active source nginx symlink changed after snapshot persistence")
         _atomic_write_text(page_path, _maintenance_page(), mode=0o644)
         _atomic_write_text(maintenance_config, maintenance_content, mode=0o644)
         _run_checked(["nginx", "-t"], timeout_sec=30)
+        if not _source_original_link_active(state):
+            raise RuntimeError("active source nginx symlink changed before maintenance switch")
         _atomic_symlink_replace(link, str(maintenance_config))
         switched = True
         _nginx_reload_checked()
