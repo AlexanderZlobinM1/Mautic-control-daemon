@@ -632,6 +632,22 @@ def _source_maintenance_link_active(state: dict[str, Any]) -> bool:
     ).resolve(strict=False)
 
 
+def _source_original_link_active(state: dict[str, Any]) -> bool:
+    link = Path(str(state.get("active_link") or ""))
+    expected = str(state.get("original_link_target") or "")
+    return bool(expected and link.is_symlink() and os.readlink(link) == expected)
+
+
+def _source_maintenance_vhost_is_static(state: dict[str, Any]) -> bool:
+    path = Path(str(state.get("maintenance_config") or ""))
+    try:
+        content = path.read_text(encoding="utf-8", errors="strict").lower()
+    except (OSError, UnicodeError):
+        return False
+    prohibited = ("fastcgi", "proxy_pass", "uwsgi", "scgi_pass", "php")
+    return "return 503" in content and not any(token in content for token in prohibited)
+
+
 def _restore_source_runtime(config: AgentConfig, state: dict[str, Any]) -> dict[str, Any]:
     pause_path = Path(str(getattr(config, "scheduler_pause_flag_path", "/opt/mcd/var/scheduler.pause") or "/opt/mcd/var/scheduler.pause"))
     pause_restored = True
@@ -686,6 +702,7 @@ def _restore_source_vhost(state: dict[str, Any]) -> dict[str, Any]:
 
 def _source_quiescent_receipt(state: dict[str, Any]) -> dict[str, Any]:
     preservation = _source_original_preserved(state)
+    static_503 = _source_maintenance_vhost_is_static(state)
     return {
         "schema": "mcd-instance-migration-source-quiescence-receipt-v1",
         "ok": bool(
@@ -693,6 +710,7 @@ def _source_quiescent_receipt(state: dict[str, Any]) -> dict[str, Any]:
             and _source_maintenance_link_active(state)
             and preservation.get("original_config_unchanged")
             and state.get("source_quiescent")
+            and static_503
         ),
         "phase": str(state.get("state") or "unknown"),
         "source_quiescent": bool(state.get("source_quiescent", False)),
@@ -702,15 +720,14 @@ def _source_quiescent_receipt(state: dict[str, Any]) -> dict[str, Any]:
         "instance_uid": str(state.get("instance_uid") or ""),
         "instance_code": str(state.get("instance_code") or ""),
         "maintenance_vhost_active": _source_maintenance_link_active(state),
-        "maintenance_vhost_static_503": True,
+        "maintenance_vhost_static_503": static_503,
         "task_drain": dict(state.get("task_drain") or {}),
         "web_request_drain": dict(state.get("web_request_drain") or {}),
         "preservation": preservation,
     }
 
 
-@stable_source_operation
-def quiesce_migration_source(
+def _quiesce_migration_source_impl(
     config: AgentConfig,
     *,
     selector: str | None,
@@ -855,6 +872,15 @@ def quiesce_migration_source(
             "ok": False,
             "phase": "source_quiesce_failed",
             "source_quiescent": False,
+            "source_authoritative": _source_original_link_active(state),
+            "source_root": str(state.get("source_root") or ""),
+            "domains": list(state.get("domains") or []),
+            "instance_uid": str(state.get("instance_uid") or ""),
+            "instance_code": str(state.get("instance_code") or ""),
+            "maintenance_vhost_active": _source_maintenance_link_active(state),
+            "maintenance_vhost_static_503": _source_maintenance_vhost_is_static(state),
+            "task_drain": dict(state.get("task_drain") or {}),
+            "web_request_drain": dict(state.get("web_request_drain") or {}),
             "error": _safe_runtime_detail(exc),
             "restore_errors": restore_errors,
             "rollback_required": bool(restore_errors),
@@ -862,8 +888,7 @@ def quiesce_migration_source(
         }
 
 
-@stable_source_operation
-def restore_migration_source(
+def _restore_migration_source_impl(
     config: AgentConfig,
     *,
     selector: str | None,
@@ -904,6 +929,7 @@ def restore_migration_source(
         "source_quiescent": False,
         "original_vhost_active": True,
         "source_root": str(state.get("source_root") or ""),
+        "domains": domains,
         "instance_uid": str(state.get("instance_uid") or ""),
         "instance_code": str(state.get("instance_code") or ""),
         "preservation": _source_original_preserved(state),
@@ -911,8 +937,7 @@ def restore_migration_source(
     }
 
 
-@stable_source_operation
-def finalize_migration_source(
+def _finalize_migration_source_impl(
     config: AgentConfig,
     *,
     selector: str | None,
@@ -962,9 +987,18 @@ def finalize_migration_source(
             "phase": "artifact_pending_runtime_restore",
             "migration_complete": False,
             "source_authoritative": False,
+            "source_quiescent": True,
             "recoverable_artifact": True,
+            "maintenance_vhost_active": _source_maintenance_link_active(state),
+            "source_root": str(root),
+            "domains": domains,
+            "instance_uid": validate_mcc_instance_uid(instance_uid),
+            "instance_code": validate_instance_code(instance_code),
+            "artifact_state": artifact_state,
             "runtime_restore": runtime_restore,
             "preservation": preservation,
+            "error": "source runtime state restore is pending",
+            "retryable": True,
         }
     state.update(
         {
@@ -989,6 +1023,7 @@ def finalize_migration_source(
         "recoverable_artifact": True,
         "maintenance_vhost_active": True,
         "source_root": str(root),
+        "domains": domains,
         "instance_uid": validate_mcc_instance_uid(instance_uid),
         "instance_code": validate_instance_code(instance_code),
         "artifact_state": artifact_state,
@@ -998,6 +1033,180 @@ def finalize_migration_source(
     if inventory_warning:
         receipt["inventory_warning"] = inventory_warning
     return receipt
+
+
+def _source_operation_failure_receipt(
+    operation: str,
+    exc: Exception,
+    *,
+    selector: str | None,
+    domains_json: str,
+    instance_uid: str,
+    instance_code: str,
+) -> dict[str, Any]:
+    try:
+        domains = _json_domains(domains_json)
+    except Exception:
+        domains = []
+    state: dict[str, Any] = {}
+    try:
+        _path, state = _read_source_migration_state(instance_uid)
+    except Exception:
+        state = {}
+    source_root = str(state.get("source_root") or selector or "")
+    preservation: dict[str, Any] = {}
+    if state:
+        try:
+            preservation = _source_original_preserved(state)
+        except Exception:
+            preservation = {}
+    error = _safe_runtime_detail(exc)
+    if operation == "source-quiesce":
+        restore_errors = list(state.get("restore_errors") or [])
+        maintenance_active = bool(state and _source_maintenance_link_active(state))
+        original_active = not state or _source_original_link_active(state)
+        return {
+            "schema": "mcd-instance-migration-source-quiescence-receipt-v1",
+            "ok": False,
+            "phase": "source_quiesce_failed",
+            "source_quiescent": False,
+            "source_authoritative": original_active,
+            "source_root": source_root,
+            "domains": domains,
+            "instance_uid": str(instance_uid or ""),
+            "instance_code": str(instance_code or ""),
+            "maintenance_vhost_active": maintenance_active,
+            "maintenance_vhost_static_503": bool(state and _source_maintenance_vhost_is_static(state)),
+            "task_drain": dict(state.get("task_drain") or {}),
+            "web_request_drain": dict(state.get("web_request_drain") or {}),
+            "preservation": preservation,
+            "error": error,
+            "restore_errors": restore_errors,
+            "rollback_required": bool(restore_errors or maintenance_active),
+        }
+    if operation == "source-restore":
+        original_active = bool(state and _source_original_link_active(state))
+        return {
+            "schema": "mcd-instance-migration-source-restore-receipt-v1",
+            "ok": False,
+            "phase": "source_restore_failed",
+            "source_authoritative": original_active,
+            "source_quiescent": bool(state.get("source_quiescent", False)),
+            "original_vhost_active": original_active,
+            "source_root": source_root,
+            "domains": domains,
+            "instance_uid": str(instance_uid or ""),
+            "instance_code": str(instance_code or ""),
+            "preservation": preservation,
+            "runtime_restore": dict(state.get("runtime_restore") or {}),
+            "error": error,
+            "rollback_required": True,
+            "retryable": True,
+        }
+    return {
+        "schema": "mcd-instance-migration-source-finalize-receipt-v1",
+        "ok": False,
+        "phase": "source_finalize_failed",
+        "migration_complete": False,
+        "source_authoritative": False,
+        "source_quiescent": bool(state.get("source_quiescent", False)),
+        "recoverable_artifact": bool(state.get("artifact_state")),
+        "maintenance_vhost_active": bool(state and _source_maintenance_link_active(state)),
+        "source_root": source_root,
+        "domains": domains,
+        "instance_uid": str(instance_uid or ""),
+        "instance_code": str(instance_code or ""),
+        "artifact_state": dict(state.get("artifact_state") or {}),
+        "preservation": preservation,
+        "runtime_restore": dict(state.get("runtime_restore") or {}),
+        "error": error,
+        "rollback_required": False,
+        "retryable": True,
+    }
+
+
+@stable_source_operation
+def quiesce_migration_source(
+    config: AgentConfig,
+    *,
+    selector: str | None,
+    domains_json: str,
+    instance_uid: str,
+    instance_code: str,
+) -> dict[str, Any]:
+    try:
+        return _quiesce_migration_source_impl(
+            config,
+            selector=selector,
+            domains_json=domains_json,
+            instance_uid=instance_uid,
+            instance_code=instance_code,
+        )
+    except Exception as exc:
+        return _source_operation_failure_receipt(
+            "source-quiesce",
+            exc,
+            selector=selector,
+            domains_json=domains_json,
+            instance_uid=instance_uid,
+            instance_code=instance_code,
+        )
+
+
+@stable_source_operation
+def restore_migration_source(
+    config: AgentConfig,
+    *,
+    selector: str | None,
+    domains_json: str,
+    instance_uid: str,
+    instance_code: str,
+) -> dict[str, Any]:
+    try:
+        return _restore_migration_source_impl(
+            config,
+            selector=selector,
+            domains_json=domains_json,
+            instance_uid=instance_uid,
+            instance_code=instance_code,
+        )
+    except Exception as exc:
+        return _source_operation_failure_receipt(
+            "source-restore",
+            exc,
+            selector=selector,
+            domains_json=domains_json,
+            instance_uid=instance_uid,
+            instance_code=instance_code,
+        )
+
+
+@stable_source_operation
+def finalize_migration_source(
+    config: AgentConfig,
+    *,
+    selector: str | None,
+    domains_json: str,
+    instance_uid: str,
+    instance_code: str,
+) -> dict[str, Any]:
+    try:
+        return _finalize_migration_source_impl(
+            config,
+            selector=selector,
+            domains_json=domains_json,
+            instance_uid=instance_uid,
+            instance_code=instance_code,
+        )
+    except Exception as exc:
+        return _source_operation_failure_receipt(
+            "source-finalize",
+            exc,
+            selector=selector,
+            domains_json=domains_json,
+            instance_uid=instance_uid,
+            instance_code=instance_code,
+        )
 
 
 def _local_php_path(root: Path) -> Path:
@@ -2000,6 +2209,13 @@ def issue_target_certificate(
             raise RuntimeError("target certificate requires at least one domain")
         uid = validate_mcc_instance_uid(instance_uid)
         code = validate_instance_code(instance_code)
+        receipt.update(
+            {
+                "domains": domains,
+                "instance_uid": uid,
+                "instance_code": code,
+            }
+        )
         identity = _prepared_target_identity(
             target,
             domains=domains,
@@ -2021,9 +2237,6 @@ def issue_target_certificate(
         )
         receipt.update(
             {
-                "domains": domains,
-                "instance_uid": uid,
-                "instance_code": code,
                 "identity": identity,
             }
         )

@@ -528,6 +528,14 @@ class InstanceMigrateProbeTests(unittest.TestCase):
         self.assertFalse(marker_exists)
         self.assertEqual(captured["args"].count("-d"), 2)
         self.assertIn("--cert-name", captured["args"])
+        self.assertTrue(
+            {
+                "schema", "ok", "phase", "migration_complete", "target_root", "domains",
+                "instance_uid", "instance_code", "identity", "source_certificate_used",
+                "rollback_required", "rollback_contract", "target_ready", "tls_pending",
+                "next_operation", "certificate", "verification", "instances", "completed_at_utc",
+            }.issubset(result)
+        )
 
     def test_target_certificate_failure_requires_dns_and_source_rollback(self) -> None:
         uid = "a1179058-985d-4117-91b8-e951fa734a66"
@@ -563,6 +571,13 @@ class InstanceMigrateProbeTests(unittest.TestCase):
         self.assertEqual(result["error_code"], "certbot_failed")
         self.assertEqual(result["rollback_contract"]["dns"], "restore_source_route")
         self.assertEqual(marker["state"], "failed")
+        self.assertTrue(
+            {
+                "schema", "ok", "phase", "migration_complete", "target_root", "domains",
+                "instance_uid", "instance_code", "identity", "source_certificate_used",
+                "rollback_required", "rollback_contract", "error_code", "error", "failed_at_utc",
+            }.issubset(result)
+        )
 
     def test_target_certificate_preflight_failure_is_a_strict_json_receipt(self) -> None:
         result = instance_migrate.issue_target_certificate(
@@ -578,6 +593,86 @@ class InstanceMigrateProbeTests(unittest.TestCase):
         self.assertEqual(result["error_code"], "preflight_failed")
         self.assertTrue(result["rollback_required"])
         json.dumps(result)
+
+    def test_source_operation_preflight_failures_are_strict_json_receipts(self) -> None:
+        uid = "a1179058-985d-4117-91b8-e951fa734a66"
+        code = "00007"
+
+        class EmptyInventory:
+            def __init__(self, _path: str) -> None:
+                pass
+
+            def list_instances(self):
+                return []
+
+        with tempfile.TemporaryDirectory() as td, patch.object(
+            instance_migrate, "MIGRATION_SOURCE_STATE_ROOT", Path(td) / "source-state"
+        ), patch.object(instance_migrate, "InstanceInventory", EmptyInventory), patch.object(
+            instance_migrate, "ensure_seeded"
+        ):
+            cfg = type(
+                "Cfg",
+                (),
+                {
+                    "state_db_path": str(Path(td) / "state.sqlite"),
+                    "scheduler_pause_flag_path": str(Path(td) / "scheduler.pause"),
+                },
+            )()
+            quiesce = instance_migrate.quiesce_migration_source(
+                cfg,
+                selector="/var/www/missing/public_html",
+                domains_json='["example.sales-snap.com"]',
+                instance_uid=uid,
+                instance_code=code,
+            )
+            restore = instance_migrate.restore_migration_source(
+                cfg,
+                selector="/var/www/missing/public_html",
+                domains_json='["example.sales-snap.com"]',
+                instance_uid=uid,
+                instance_code=code,
+            )
+            finalize = instance_migrate.finalize_migration_source(
+                cfg,
+                selector="/var/www/missing/public_html",
+                domains_json='["example.sales-snap.com"]',
+                instance_uid=uid,
+                instance_code=code,
+            )
+
+        expected = {
+            "source-quiesce": (
+                quiesce,
+                {
+                    "schema", "ok", "phase", "source_quiescent", "source_authoritative",
+                    "source_root", "domains", "instance_uid", "instance_code",
+                    "maintenance_vhost_active", "maintenance_vhost_static_503", "task_drain",
+                    "web_request_drain", "preservation", "error", "restore_errors", "rollback_required",
+                },
+            ),
+            "source-restore": (
+                restore,
+                {
+                    "schema", "ok", "phase", "source_authoritative", "source_quiescent",
+                    "original_vhost_active", "source_root", "domains", "instance_uid",
+                    "instance_code", "preservation", "runtime_restore", "error",
+                    "rollback_required", "retryable",
+                },
+            ),
+            "source-finalize": (
+                finalize,
+                {
+                    "schema", "ok", "phase", "migration_complete", "source_authoritative",
+                    "source_quiescent", "recoverable_artifact", "maintenance_vhost_active",
+                    "source_root", "domains", "instance_uid", "instance_code", "artifact_state",
+                    "preservation", "runtime_restore", "error", "rollback_required", "retryable",
+                },
+            ),
+        }
+        for operation, (receipt, fields) in expected.items():
+            self.assertFalse(receipt["ok"], operation)
+            self.assertTrue(fields.issubset(receipt), operation)
+            json.dumps(receipt)
 
     def _source_migration_fixture(self, td: str):
         uid = "a1179058-985d-4117-91b8-e951fa734a66"
@@ -691,6 +786,14 @@ class InstanceMigrateProbeTests(unittest.TestCase):
 
             self.assertTrue(quiesced["ok"])
             self.assertTrue(quiesced["source_quiescent"])
+            self.assertTrue(
+                {
+                    "schema", "ok", "phase", "source_quiescent", "source_authoritative",
+                    "source_root", "domains", "instance_uid", "instance_code",
+                    "maintenance_vhost_active", "maintenance_vhost_static_503", "task_drain",
+                    "web_request_drain", "preservation",
+                }.issubset(quiesced)
+            )
             self.assertIn("return 503", maintenance_text)
             self.assertIn("listen 443 ssl", maintenance_text)
             self.assertIn("/etc/letsencrypt/live/example/fullchain.pem", maintenance_text)
@@ -699,6 +802,13 @@ class InstanceMigrateProbeTests(unittest.TestCase):
             self.assertEqual(active_target_during_quiescence, maintenance_config.resolve())
             self.assertEqual(original.read_text(encoding="utf-8"), original_text)
             self.assertTrue(restored["ok"])
+            self.assertTrue(
+                {
+                    "schema", "ok", "phase", "source_authoritative", "source_quiescent",
+                    "original_vhost_active", "source_root", "domains", "instance_uid",
+                    "instance_code", "preservation", "runtime_restore",
+                }.issubset(restored)
+            )
             self.assertEqual(active.readlink(), original)
             self.assertTrue(restored["preservation"]["original_config_unchanged"])
 
@@ -754,6 +864,14 @@ class InstanceMigrateProbeTests(unittest.TestCase):
             self.assertTrue(quiesced["ok"])
             self.assertTrue(finalized["ok"])
             self.assertTrue(finalized["migration_complete"])
+            self.assertTrue(
+                {
+                    "schema", "ok", "phase", "migration_complete", "source_authoritative",
+                    "source_quiescent", "recoverable_artifact", "maintenance_vhost_active",
+                    "source_root", "domains", "instance_uid", "instance_code", "artifact_state",
+                    "preservation", "runtime_restore",
+                }.issubset(finalized)
+            )
             self.assertFalse(finalized["source_authoritative"])
             self.assertTrue(finalized["recoverable_artifact"])
             self.assertEqual(state["profile"], "artifact")
