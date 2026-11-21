@@ -2492,10 +2492,16 @@ nginx, атомарно заменяет только активный symlink �
 nginx. Исходный vhost-файл, root и DB не переименовываются, не удаляются и не
 изменяются. После переключения MCD останавливает новые фоновые запуски и cron,
 доводит background drain и уже принятые web/PHP-запросы до доказанного
-quiescent state, и только затем разрешает финальные files+DB. Receipt содержит
-hash сохранённого original vhost, исходную цель symlink и доказательства обоих
-drain. Пока миграция не завершена, source показывает maintenance page, но
-остаётся полностью восстановимым.
+quiescent state, и только затем разрешает финальные files+DB. До переключения
+MCD сохраняет точное исходное значение активного symlink как неизменяемый
+снимок. Каждый успешный `source-quiesce`, `source-restore` и `source-finalize`
+receipt возвращает этот непустой снимок в
+`preservation.original_symlink_target`; текущее maintenance-значение никогда
+не подменяет его. Пустой, сломанный, устаревший или противоречащий original
+vhost снимок отклоняется до изменения active vhost. Receipt также содержит
+hash сохранённого original vhost и доказательства обоих drain. Пока миграция не
+завершена, source показывает maintenance page, но остаётся полностью
+восстановимым.
 
 После files+DB `target-finalize` создаёт только HTTP-vhost, выполняет локальные
 проверки и возвращает `phase: target_prepared`, `dns_cutover_ready: true`,
@@ -2518,7 +2524,9 @@ original vhost остаются физически на месте; обычны
 При любой ошибке до финала MCC вызывает `source-restore`: если DNS уже был
 переключён, сначала возвращает DNS на source, затем MCD атомарно восстанавливает
 original symlink, проверяет и reload-ит nginx и возвращает прежнее состояние
-cron/планировщика. Только после доказанного source restore допускается cleanup
+cron/планировщика. Повторный `source-restore` использует тот же сохранённый
+снимок и безопасен, даже если первый успешный запуск был отвергнут из-за
+проверки receipt. Только после доказанного source restore допускается cleanup
 target. Ошибка сертификата возвращает строгий JSON с
 `phase: certificate_failed`, `rollback_required: true` и этим машинным rollback
 contract. MCD не меняет DNS и не использует сертификат source на target.
@@ -2559,7 +2567,8 @@ Source receipt всегда содержит `identity_adoption` с призна
 | `target-issue-certificate` | `schema`, `ok`, `phase`, `migration_complete`, `target_root`, `domains`, `instance_uid`, `instance_code`, `identity`, `source_certificate_used`, `rollback_required`, `rollback_contract`, `target_ready`, `tls_pending`, `next_operation`, `certificate`, `verification`, `instances`, `completed_at_utc` | общие identity/rollback поля плюс `error_code`, `error`, `failed_at_utc` |
 
 `preservation` обязательно доказывает существование и SHA-256 original vhost,
-сохранённую исходную цель symlink и существование source root. `task_drain` и
+сохранённую исходную цель symlink в `original_symlink_target` и существование
+source root. `task_drain` и
 `web_request_drain` являются отдельными доказательствами quiescence; одно не
 заменяет другое.
 
