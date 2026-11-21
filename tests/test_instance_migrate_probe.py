@@ -738,16 +738,17 @@ class InstanceMigrateProbeTests(unittest.TestCase):
                 return list(self.installs)
 
         with tempfile.TemporaryDirectory() as td:
-            uid, code, domain, root, _original, _original_text, _active, available, enabled, install, cfg = self._source_migration_fixture(td)
+            uid, code, domain, root, original, _original_text, active, available, enabled, install, cfg = self._source_migration_fixture(td)
             marker = root / instance_migrate.INSTANCE_IDENTITY_MARKER
             marker.unlink()
             install.instance_uid = "legacy-domain-derived-uid"
             install.instance_code = None
             FakeInventory.installs = [install]
+            state_root = Path(td) / "mcd" / "source-state"
             with (
                 patch.object(instance_migrate, "NGINX_SITES_AVAILABLE", available),
                 patch.object(instance_migrate, "NGINX_SITES_ENABLED", enabled),
-                patch.object(instance_migrate, "MIGRATION_SOURCE_STATE_ROOT", Path(td) / "mcd" / "source-state"),
+                patch.object(instance_migrate, "MIGRATION_SOURCE_STATE_ROOT", state_root),
                 patch.object(instance_migrate, "MIGRATION_SOURCE_MAINTENANCE_ROOT", Path(td) / "mcd" / "maintenance"),
                 patch.object(instance_migrate, "InstanceInventory", FakeInventory),
                 patch.object(instance_migrate, "ensure_seeded"),
@@ -755,6 +756,7 @@ class InstanceMigrateProbeTests(unittest.TestCase):
                 patch.object(instance_migrate, "stop_cron_service", return_value={"ok": True}),
                 patch.object(instance_migrate, "stop_running_tasks_for_maintenance", return_value={"ok": True}),
                 patch.object(instance_migrate, "_drain_reloaded_nginx_workers", return_value={"ok": True}),
+                patch.object(instance_migrate, "restore_cron_service_if_needed", return_value={"ok": True}),
                 patch.object(instance_migrate, "_run_checked", return_value=""),
             ):
                 result = instance_migrate.quiesce_migration_source(
@@ -764,12 +766,36 @@ class InstanceMigrateProbeTests(unittest.TestCase):
                     instance_uid=uid,
                     instance_code=code,
                 )
+                maintenance_target = active.readlink()
+                restored = instance_migrate.restore_migration_source(
+                    cfg,
+                    selector=str(root),
+                    domains_json=f'["{domain}"]',
+                    instance_uid=uid,
+                    instance_code=code,
+                )
+                restored_again = instance_migrate.restore_migration_source(
+                    cfg,
+                    selector=str(root),
+                    domains_json=f'["{domain}"]',
+                    instance_uid=uid,
+                    instance_code=code,
+                )
 
             observed = instance_migrate.read_instance_identity(root)
+            persisted = json.loads((state_root / f"{uid}.json").read_text(encoding="utf-8"))
             self.assertTrue(result["ok"])
             self.assertTrue(result["identity_adoption"]["materialized_from_mcc"])
             self.assertEqual(result["identity_adoption"]["reason"], "legacy_source_marker_missing")
             self.assertEqual(result["identity_adoption"]["inventory_identity"]["instance_uid"], "legacy-domain-derived-uid")
+            self.assertNotEqual(maintenance_target, original)
+            self.assertEqual(result["preservation"]["original_symlink_target"], str(original))
+            self.assertEqual(persisted["original_symlink_target"], str(original))
+            self.assertTrue(restored["ok"])
+            self.assertEqual(restored["preservation"]["original_symlink_target"], str(original))
+            self.assertTrue(restored_again["ok"])
+            self.assertEqual(restored_again["preservation"]["original_symlink_target"], str(original))
+            self.assertEqual(active.readlink(), original)
             self.assertEqual(observed["instance_uid"], uid)
             self.assertEqual(observed["instance_code"], code)
             self.assertEqual(observed["primary_domain"], domain)
@@ -869,6 +895,15 @@ class InstanceMigrateProbeTests(unittest.TestCase):
             FakeInventory.installs = [install]
             state_root = Path(td) / "mcd" / "source-state"
             maintenance_root = Path(td) / "mcd" / "maintenance"
+            atomic_symlink_replace = instance_migrate._atomic_symlink_replace
+            snapshot_before_switch = {}
+
+            def observed_atomic_symlink_replace(link: Path, target: str) -> None:
+                if not snapshot_before_switch:
+                    state_path = state_root / f"{uid}.json"
+                    snapshot_before_switch.update(json.loads(state_path.read_text(encoding="utf-8")))
+                atomic_symlink_replace(link, target)
+
             with (
                 patch.object(instance_migrate, "NGINX_SITES_AVAILABLE", available),
                 patch.object(instance_migrate, "NGINX_SITES_ENABLED", enabled),
@@ -889,6 +924,7 @@ class InstanceMigrateProbeTests(unittest.TestCase):
                     return_value={"ok": True, "stable_snapshots": 3, "remaining_worker_pids": []},
                 ),
                 patch.object(instance_migrate, "restore_cron_service_if_needed", return_value={"ok": True, "started": True}),
+                patch.object(instance_migrate, "_atomic_symlink_replace", side_effect=observed_atomic_symlink_replace),
                 patch.object(instance_migrate, "_run_checked", return_value=""),
             ):
                 quiesced = instance_migrate.quiesce_migration_source(
@@ -926,6 +962,10 @@ class InstanceMigrateProbeTests(unittest.TestCase):
             self.assertNotIn("fastcgi", maintenance_text.lower())
             self.assertNotIn("proxy_pass", maintenance_text.lower())
             self.assertEqual(active_target_during_quiescence, maintenance_config.resolve())
+            self.assertEqual(snapshot_before_switch["original_symlink_target"], str(original))
+            self.assertNotIn("original_link_target", snapshot_before_switch)
+            self.assertEqual(quiesced["preservation"]["original_symlink_target"], str(original))
+            self.assertNotIn("original_link_target", quiesced["preservation"])
             self.assertEqual(original.read_text(encoding="utf-8"), original_text)
             self.assertTrue(restored["ok"])
             self.assertTrue(
@@ -936,6 +976,7 @@ class InstanceMigrateProbeTests(unittest.TestCase):
                 }.issubset(restored)
             )
             self.assertEqual(active.readlink(), original)
+            self.assertEqual(restored["preservation"]["original_symlink_target"], str(original))
             self.assertTrue(restored["preservation"]["original_config_unchanged"])
 
     def test_source_finalize_keeps_files_and_vhost_as_recoverable_artifact(self) -> None:
@@ -1000,10 +1041,105 @@ class InstanceMigrateProbeTests(unittest.TestCase):
             )
             self.assertFalse(finalized["source_authoritative"])
             self.assertTrue(finalized["recoverable_artifact"])
+            self.assertEqual(finalized["preservation"]["original_symlink_target"], str(original))
             self.assertEqual(state["profile"], "artifact")
             self.assertTrue(root.is_dir())
             self.assertEqual(original.read_text(encoding="utf-8"), original_text)
             self.assertEqual((active.parent / active.readlink()).resolve(), maintenance_target)
+
+    def test_source_restore_rejects_legacy_or_conflicting_symlink_snapshot(self) -> None:
+        class FakeInventory:
+            installs = []
+
+            def __init__(self, _path: str) -> None:
+                pass
+
+            def list_instances(self):
+                return list(self.installs)
+
+        for invalid_snapshot in ("legacy_alias_only", "conflicting_canonical"):
+            with self.subTest(invalid_snapshot=invalid_snapshot), tempfile.TemporaryDirectory() as td:
+                uid, code, domain, root, original, _original_text, active, available, enabled, install, cfg = self._source_migration_fixture(td)
+                FakeInventory.installs = [install]
+                state_root = Path(td) / "mcd" / "source-state"
+                with (
+                    patch.object(instance_migrate, "NGINX_SITES_AVAILABLE", available),
+                    patch.object(instance_migrate, "NGINX_SITES_ENABLED", enabled),
+                    patch.object(instance_migrate, "MIGRATION_SOURCE_STATE_ROOT", state_root),
+                    patch.object(instance_migrate, "MIGRATION_SOURCE_MAINTENANCE_ROOT", Path(td) / "mcd" / "maintenance"),
+                    patch.object(instance_migrate, "InstanceInventory", FakeInventory),
+                    patch.object(instance_migrate, "ensure_seeded"),
+                    patch.object(instance_migrate, "collect_maintenance_state", return_value={"cron_marker_present": False}),
+                    patch.object(instance_migrate, "stop_cron_service", return_value={"ok": True}),
+                    patch.object(instance_migrate, "stop_running_tasks_for_maintenance", return_value={"ok": True}),
+                    patch.object(instance_migrate, "_drain_reloaded_nginx_workers", return_value={"ok": True}),
+                    patch.object(instance_migrate, "restore_cron_service_if_needed", return_value={"ok": True}),
+                    patch.object(instance_migrate, "_run_checked", return_value=""),
+                ):
+                    quiesced = instance_migrate.quiesce_migration_source(
+                        cfg,
+                        selector=str(root),
+                        domains_json=f'["{domain}"]',
+                        instance_uid=uid,
+                        instance_code=code,
+                    )
+                    maintenance_target = active.readlink()
+                    state_path = state_root / f"{uid}.json"
+                    state = json.loads(state_path.read_text(encoding="utf-8"))
+                    self.assertNotIn("original_link_target", state)
+                    if invalid_snapshot == "legacy_alias_only":
+                        state.pop("original_symlink_target")
+                        state["original_link_target"] = str(original)
+                    else:
+                        state["original_symlink_target"] = str(available / "wrong.conf")
+                    state_path.write_text(json.dumps(state), encoding="utf-8")
+                    restored = instance_migrate.restore_migration_source(
+                        cfg,
+                        selector=str(root),
+                        domains_json=f'["{domain}"]',
+                        instance_uid=uid,
+                        instance_code=code,
+                    )
+
+                self.assertTrue(quiesced["ok"])
+                self.assertFalse(restored["ok"])
+                self.assertEqual(restored["phase"], "source_restore_failed")
+                self.assertTrue(restored["rollback_required"])
+                self.assertEqual(active.readlink(), maintenance_target)
+
+    def test_source_quiesce_rejects_broken_original_symlink(self) -> None:
+        class FakeInventory:
+            installs = []
+
+            def __init__(self, _path: str) -> None:
+                pass
+
+            def list_instances(self):
+                return list(self.installs)
+
+        with tempfile.TemporaryDirectory() as td:
+            uid, code, domain, root, original, _original_text, active, available, enabled, install, cfg = self._source_migration_fixture(td)
+            FakeInventory.installs = [install]
+            original.unlink()
+            with (
+                patch.object(instance_migrate, "NGINX_SITES_AVAILABLE", available),
+                patch.object(instance_migrate, "NGINX_SITES_ENABLED", enabled),
+                patch.object(instance_migrate, "MIGRATION_SOURCE_STATE_ROOT", Path(td) / "mcd" / "source-state"),
+                patch.object(instance_migrate, "InstanceInventory", FakeInventory),
+                patch.object(instance_migrate, "ensure_seeded"),
+            ):
+                result = instance_migrate.quiesce_migration_source(
+                    cfg,
+                    selector=str(root),
+                    domains_json=f'["{domain}"]',
+                    instance_uid=uid,
+                    instance_code=code,
+                )
+
+            self.assertFalse(result["ok"])
+            self.assertIn("active source nginx symlink was not found", result["error"])
+            self.assertTrue(active.is_symlink())
+            self.assertFalse(active.exists())
 
     def test_source_quiesce_failure_restores_original_vhost_and_runtime(self) -> None:
         class FakeInventory:

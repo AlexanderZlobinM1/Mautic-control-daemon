@@ -647,18 +647,34 @@ def _drain_reloaded_nginx_workers(*, timeout_sec: int = 120, stable_snapshots: i
         time.sleep(0.2)
 
 
+def _source_original_symlink_target(state: dict[str, Any]) -> str:
+    canonical = str(state.get("original_symlink_target") or "")
+    if not canonical:
+        raise RuntimeError("source migration original symlink target evidence is missing")
+    link_raw = str(state.get("active_link") or "")
+    config_raw = str(state.get("original_config") or "")
+    if not link_raw or not config_raw:
+        raise RuntimeError("source migration original symlink snapshot path evidence is missing")
+    link = Path(link_raw)
+    resolved_target = (link.parent / canonical).resolve(strict=False)
+    if resolved_target != Path(config_raw).resolve(strict=False):
+        raise RuntimeError("source migration original symlink target evidence conflicts with original config")
+    return canonical
+
+
 def _source_original_preserved(state: dict[str, Any]) -> dict[str, Any]:
     config_path = Path(str(state.get("original_config") or ""))
     link = Path(str(state.get("active_link") or ""))
     expected_hash = str(state.get("original_config_sha256") or "")
     actual_hash = _sha256_file(config_path) if config_path.is_file() else ""
+    original_symlink_target = _source_original_symlink_target(state)
     return {
         "original_config": str(config_path),
         "original_config_exists": config_path.is_file(),
         "original_config_sha256": actual_hash,
         "original_config_unchanged": bool(expected_hash and actual_hash == expected_hash),
         "original_link": str(link),
-        "original_link_target": str(state.get("original_link_target") or ""),
+        "original_symlink_target": original_symlink_target,
         "source_root_exists": Path(str(state.get("source_root") or "")).is_dir(),
     }
 
@@ -680,6 +696,7 @@ def _validate_source_migration_state(
     token = str(selector or "").strip()
     if token and Path(token).is_absolute() and Path(token).resolve() != Path(str(state.get("source_root") or "")).resolve():
         raise RuntimeError("source migration maintenance root does not match request")
+    _source_original_symlink_target(state)
 
 
 def _source_maintenance_link_active(state: dict[str, Any]) -> bool:
@@ -693,7 +710,10 @@ def _source_maintenance_link_active(state: dict[str, Any]) -> bool:
 
 def _source_original_link_active(state: dict[str, Any]) -> bool:
     link = Path(str(state.get("active_link") or ""))
-    expected = str(state.get("original_link_target") or "")
+    try:
+        expected = _source_original_symlink_target(state)
+    except RuntimeError:
+        return False
     return bool(expected and link.is_symlink() and os.readlink(link) == expected)
 
 
@@ -738,9 +758,7 @@ def _restore_source_vhost(state: dict[str, Any]) -> dict[str, Any]:
     if not evidence["original_config_unchanged"]:
         raise RuntimeError("original source nginx config is missing or changed; automatic restore refused")
     link = Path(str(state.get("active_link") or ""))
-    original_target = str(state.get("original_link_target") or "")
-    if not original_target:
-        raise RuntimeError("original source nginx symlink target is missing")
+    original_target = _source_original_symlink_target(state)
     _atomic_symlink_replace(link, original_target)
     try:
         _nginx_reload_checked()
@@ -768,6 +786,7 @@ def _source_quiescent_receipt(state: dict[str, Any]) -> dict[str, Any]:
             state.get("state") == "quiescent"
             and _source_maintenance_link_active(state)
             and preservation.get("original_config_unchanged")
+            and preservation.get("original_symlink_target")
             and state.get("source_quiescent")
             and static_503
         ),
@@ -824,7 +843,7 @@ def _quiesce_migration_source_impl(
             if existing.get("state") not in {"restored", "finalized"}:
                 raise RuntimeError("source migration maintenance already has an unfinished state")
 
-    link, original_link_target, original_config, original_content = _find_source_vhost(root, domains)
+    link, original_symlink_target, original_config, original_content = _find_source_vhost(root, domains)
     uid = validate_mcc_instance_uid(instance_uid)
     code = validate_instance_code(instance_code)
     maintenance_dir = MIGRATION_SOURCE_MAINTENANCE_ROOT / uid
@@ -848,7 +867,7 @@ def _quiesce_migration_source_impl(
         "identity": identity,
         "identity_adoption": identity_adoption,
         "active_link": str(link),
-        "original_link_target": original_link_target,
+        "original_symlink_target": original_symlink_target,
         "original_config": str(original_config),
         "original_config_sha256": _sha256_file(original_config),
         "maintenance_config": str(maintenance_config),

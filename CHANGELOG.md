@@ -1,3 +1,13 @@
+## 1.6.124 - 2026-11-21
+
+- Preserve the exact original enabled nginx symlink target before source
+  maintenance activation and return it as the required non-empty
+  `preservation.original_symlink_target` evidence in every successful source
+  quiesce, restore and finalize receipt. Source restore always uses that
+  immutable snapshot and remains safe to repeat after a rejected receipt.
+  Missing, broken, legacy-only or contradictory symlink evidence is rejected
+  without changing the active vhost.
+
 ## 1.6.123 - 2026-11-21
 
 - Allow source migration quiescence to materialize a missing legacy local
