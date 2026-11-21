@@ -58,9 +58,11 @@ from mcd_agent.runtime_matrix import build_runtime_profile
 from mcd_agent.source_operation import stable_source_operation
 from mcd_agent.instance_uid import instance_uid_matches
 from mcd_agent.instance_identity import (
+    INSTANCE_IDENTITY_MARKER,
     identity_readback,
     instance_path_names,
     read_instance_identity,
+    read_instance_state,
     validate_instance_code,
     validate_mcc_instance_uid,
     write_instance_identity,
@@ -409,7 +411,7 @@ def _migration_source_identity(
     domains: list[str],
     instance_uid: str,
     instance_code: str,
-) -> tuple[MauticInstall, Path, dict[str, str]]:
+) -> tuple[MauticInstall, Path, dict[str, str], dict[str, Any]]:
     uid = validate_mcc_instance_uid(instance_uid)
     code = validate_instance_code(instance_code)
     if not domains:
@@ -420,15 +422,72 @@ def _migration_source_identity(
     root = Path(inst.root).resolve()
     if not root.is_dir():
         raise RuntimeError(f"source root is not a directory: {root}")
+    selector_token = str(selector or "").strip()
+    inventory_identity = {
+        "instance_uid": str(inst.instance_uid or ""),
+        "instance_code": str(inst.instance_code or ""),
+        "primary_domain": str(inst.primary_domain or "").strip().lower().rstrip("."),
+        "root": str(root),
+    }
     observed = read_instance_identity(root)
     if observed is None:
-        raise RuntimeError("source instance identity marker is missing")
+        marker_path = root / INSTANCE_IDENTITY_MARKER
+        if marker_path.exists():
+            raise RuntimeError("source instance identity marker is present but invalid")
+        if not selector_token or not Path(selector_token).is_absolute() or Path(selector_token).resolve() != root:
+            raise RuntimeError("missing source identity marker can be adopted only for the exact absolute source root")
+        known_domains = {
+            str(value or "").strip().lower().rstrip(".")
+            for value in [inst.primary_domain, inst.name, *(inst.domains or [])]
+            if str(value or "").strip()
+        }
+        if domains[0] not in known_domains:
+            raise RuntimeError("source inventory primary domain does not match migration request")
+        if str(inst.instance_code or "").strip():
+            if validate_instance_code(inst.instance_code) != code:
+                raise RuntimeError("source inventory instance code does not match migration request")
+            if not instance_uid_matches(uid, str(inst.instance_uid or ""), _mcc_wire_host_name(config)):
+                raise RuntimeError("source inventory MCC identity does not match migration request")
+        try:
+            local_state = read_instance_state(root)
+        except ValueError as exc:
+            raise RuntimeError("source instance state evidence is invalid") from exc
+        if local_state is not None:
+            state_uid = str(local_state.get("instance_uid") or "").strip()
+            state_code = str(local_state.get("instance_code") or "").strip()
+            state_domain = str(local_state.get("primary_domain") or "").strip().lower().rstrip(".")
+            if state_uid and state_uid != uid:
+                raise RuntimeError("source instance state UID does not match migration request")
+            if state_code and state_code != code:
+                raise RuntimeError("source instance state code does not match migration request")
+            if state_domain and state_domain not in domains:
+                raise RuntimeError("source instance state domain does not match migration request")
+        write_instance_identity(
+            root,
+            instance_uid=uid,
+            instance_code=code,
+            primary_domain=domains[0],
+        )
+        observed = read_instance_identity(root)
+        if observed is None:
+            raise RuntimeError("source instance identity marker materialization failed")
+        adoption = {
+            "materialized_from_mcc": True,
+            "reason": "legacy_source_marker_missing",
+            "inventory_identity": inventory_identity,
+        }
+    else:
+        adoption = {
+            "materialized_from_mcc": False,
+            "reason": "existing_marker_verified",
+            "inventory_identity": inventory_identity,
+        }
     if observed.get("instance_uid") != uid or observed.get("instance_code") != code:
         raise RuntimeError("source instance identity does not match migration request")
     primary = str(observed.get("primary_domain") or "").strip().lower().rstrip(".")
     if primary and primary not in domains:
         raise RuntimeError("source primary domain does not match migration request")
-    return inst, root, observed
+    return inst, root, observed, adoption
 
 
 def _nginx_directive_values(content: str, directive: str) -> list[str]:
@@ -719,6 +778,7 @@ def _source_quiescent_receipt(state: dict[str, Any]) -> dict[str, Any]:
         "domains": list(state.get("domains") or []),
         "instance_uid": str(state.get("instance_uid") or ""),
         "instance_code": str(state.get("instance_code") or ""),
+        "identity_adoption": dict(state.get("identity_adoption") or {}),
         "maintenance_vhost_active": _source_maintenance_link_active(state),
         "maintenance_vhost_static_503": static_503,
         "task_drain": dict(state.get("task_drain") or {}),
@@ -736,7 +796,7 @@ def _quiesce_migration_source_impl(
     instance_code: str,
 ) -> dict[str, Any]:
     domains = _json_domains(domains_json)
-    _inst, root, identity = _migration_source_identity(
+    _inst, root, identity, identity_adoption = _migration_source_identity(
         config,
         selector=selector,
         domains=domains,
@@ -786,6 +846,7 @@ def _quiesce_migration_source_impl(
         "instance_uid": uid,
         "instance_code": code,
         "identity": identity,
+        "identity_adoption": identity_adoption,
         "active_link": str(link),
         "original_link_target": original_link_target,
         "original_config": str(original_config),
@@ -877,6 +938,7 @@ def _quiesce_migration_source_impl(
             "domains": list(state.get("domains") or []),
             "instance_uid": str(state.get("instance_uid") or ""),
             "instance_code": str(state.get("instance_code") or ""),
+            "identity_adoption": dict(state.get("identity_adoption") or {}),
             "maintenance_vhost_active": _source_maintenance_link_active(state),
             "maintenance_vhost_static_503": _source_maintenance_vhost_is_static(state),
             "task_drain": dict(state.get("task_drain") or {}),
@@ -932,6 +994,7 @@ def _restore_migration_source_impl(
         "domains": domains,
         "instance_uid": str(state.get("instance_uid") or ""),
         "instance_code": str(state.get("instance_code") or ""),
+        "identity_adoption": dict(state.get("identity_adoption") or {}),
         "preservation": _source_original_preserved(state),
         "runtime_restore": runtime_restore,
     }
@@ -994,6 +1057,7 @@ def _finalize_migration_source_impl(
             "domains": domains,
             "instance_uid": validate_mcc_instance_uid(instance_uid),
             "instance_code": validate_instance_code(instance_code),
+            "identity_adoption": dict(state.get("identity_adoption") or {}),
             "artifact_state": artifact_state,
             "runtime_restore": runtime_restore,
             "preservation": preservation,
@@ -1026,6 +1090,7 @@ def _finalize_migration_source_impl(
         "domains": domains,
         "instance_uid": validate_mcc_instance_uid(instance_uid),
         "instance_code": validate_instance_code(instance_code),
+        "identity_adoption": dict(state.get("identity_adoption") or {}),
         "artifact_state": artifact_state,
         "preservation": _source_original_preserved(state),
         "runtime_restore": runtime_restore,
@@ -1075,6 +1140,7 @@ def _source_operation_failure_receipt(
             "domains": domains,
             "instance_uid": str(instance_uid or ""),
             "instance_code": str(instance_code or ""),
+            "identity_adoption": dict(state.get("identity_adoption") or {}),
             "maintenance_vhost_active": maintenance_active,
             "maintenance_vhost_static_503": bool(state and _source_maintenance_vhost_is_static(state)),
             "task_drain": dict(state.get("task_drain") or {}),
@@ -1097,6 +1163,7 @@ def _source_operation_failure_receipt(
             "domains": domains,
             "instance_uid": str(instance_uid or ""),
             "instance_code": str(instance_code or ""),
+            "identity_adoption": dict(state.get("identity_adoption") or {}),
             "preservation": preservation,
             "runtime_restore": dict(state.get("runtime_restore") or {}),
             "error": error,
@@ -1116,6 +1183,7 @@ def _source_operation_failure_receipt(
         "domains": domains,
         "instance_uid": str(instance_uid or ""),
         "instance_code": str(instance_code or ""),
+        "identity_adoption": dict(state.get("identity_adoption") or {}),
         "artifact_state": dict(state.get("artifact_state") or {}),
         "preservation": preservation,
         "runtime_restore": dict(state.get("runtime_restore") or {}),
