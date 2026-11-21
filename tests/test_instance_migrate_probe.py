@@ -13,6 +13,17 @@ from mcd_agent.models import DBConfig, MauticInstall
 import mcd_agent.instance_migrate as instance_migrate
 
 
+def _complete_db_stream(sql: bytes, stream_id: str = "a" * 32) -> io.BytesIO:
+    payload = io.BytesIO()
+    with gzip.GzipFile(fileobj=payload, mode="wb") as gz:
+        gz.write(instance_migrate._db_stream_marker("BEGIN", stream_id))
+        gz.write(sql)
+        gz.write(b"\n")
+        gz.write(instance_migrate._db_stream_marker("COMPLETE", stream_id))
+    payload.seek(0)
+    return payload
+
+
 class InstanceMigrateProbeTests(unittest.TestCase):
     def test_new_var_www_target_must_use_full_fqdn(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -597,6 +608,7 @@ class InstanceMigrateProbeTests(unittest.TestCase):
                 side_effect=lambda name: "/usr/bin/mariadb-dump" if name == "mariadb-dump" else "/usr/bin/mysqldump",
             ),
             patch.object(instance_migrate.subprocess, "Popen", side_effect=fake_popen),
+            patch.object(instance_migrate, "_dump_supports_network_timeout", return_value=True),
         ):
             output = io.BytesIO()
             instance_migrate.stream_source_db(cfg, selector="/var/www/example", output=output)
@@ -605,7 +617,137 @@ class InstanceMigrateProbeTests(unittest.TestCase):
         self.assertEqual(argv[0], "/usr/bin/mariadb-dump")
         self.assertIn("--routines", argv)
         self.assertIn("--triggers", argv)
+        self.assertIn("--max-allowed-packet=1073741824", argv)
+        self.assertIn("--network-timeout", argv)
         self.assertNotIn("--events", argv)
+
+    def test_source_db_stream_emits_complete_large_table_only_after_dump_success(self) -> None:
+        class FakeInventory:
+            def __init__(self, _path: str) -> None:
+                pass
+
+            def list_instances(self):
+                return [
+                    MauticInstall(
+                        instance_uid="uid-large",
+                        name="large",
+                        root="/var/www/large",
+                        console_path="/var/www/large/bin/console",
+                    )
+                ]
+
+        audit_rows = b"INSERT INTO `ss_audit_log` VALUES (1,'payload');\n" * 40000
+
+        class FakeProc:
+            def __init__(self) -> None:
+                self.stdout = io.BytesIO(audit_rows)
+
+            def wait(self):
+                return 0
+
+        cfg = type("Cfg", (), {"state_db_path": "/tmp/mcd-state.sqlite"})()
+        db = DBConfig(
+            host="localhost",
+            port=3306,
+            name="baza_large",
+            user="source_user",
+            password="source_password",
+            table_prefix="ss_",
+        )
+
+        with (
+            patch.object(instance_migrate, "InstanceInventory", FakeInventory),
+            patch.object(instance_migrate, "ensure_seeded", return_value=None),
+            patch.object(instance_migrate, "_db_from_local_php", return_value=db),
+            patch.object(instance_migrate.shutil, "which", return_value="/usr/bin/mariadb-dump"),
+            patch.object(instance_migrate, "_dump_supports_network_timeout", return_value=False),
+            patch.object(instance_migrate.subprocess, "Popen", return_value=FakeProc()),
+            patch.object(instance_migrate.secrets, "token_hex", return_value="b" * 32),
+        ):
+            output = io.BytesIO()
+            result = instance_migrate.stream_source_db(cfg, selector="/var/www/large", output=output)
+
+        with gzip.GzipFile(fileobj=io.BytesIO(output.getvalue()), mode="rb") as gz:
+            emitted = gz.read()
+        self.assertEqual(result, 0)
+        self.assertTrue(emitted.startswith(instance_migrate._db_stream_marker("BEGIN", "b" * 32)))
+        self.assertIn(audit_rows, emitted)
+        self.assertTrue(emitted.rstrip().endswith(instance_migrate._db_stream_marker("COMPLETE", "b" * 32).rstrip()))
+
+    def test_source_db_stream_propagates_dump_failure_without_emitting_partial_output(self) -> None:
+        class FakeInventory:
+            def __init__(self, _path: str) -> None:
+                pass
+
+            def list_instances(self):
+                return [
+                    MauticInstall(
+                        instance_uid="uid-failed",
+                        name="failed",
+                        root="/var/www/failed",
+                        console_path="/var/www/failed/bin/console",
+                    )
+                ]
+
+        class FakeProc:
+            def __init__(self) -> None:
+                self.stdout = io.BytesIO(b"INSERT INTO `ss_audit_log` VALUES (353013);\n")
+
+            def wait(self):
+                return 3
+
+        def fake_popen(_argv, **kwargs):
+            kwargs["stderr"].write(
+                b"mariadb-dump: Error 2013: Lost connection to server during query "
+                b"when dumping table ss_audit_log at row: 353013\n"
+            )
+            return FakeProc()
+
+        cfg = type("Cfg", (), {"state_db_path": "/tmp/mcd-state.sqlite"})()
+        db = DBConfig(
+            host="localhost",
+            port=3306,
+            name="baza_failed",
+            user="source_user",
+            password="source_password",
+            table_prefix="ss_",
+        )
+        output = io.BytesIO()
+        with (
+            patch.object(instance_migrate, "InstanceInventory", FakeInventory),
+            patch.object(instance_migrate, "ensure_seeded", return_value=None),
+            patch.object(instance_migrate, "_db_from_local_php", return_value=db),
+            patch.object(instance_migrate.shutil, "which", return_value="/usr/bin/mariadb-dump"),
+            patch.object(instance_migrate, "_dump_supports_network_timeout", return_value=False),
+            patch.object(instance_migrate.subprocess, "Popen", side_effect=fake_popen),
+        ):
+            with self.assertRaisesRegex(RuntimeError, r"rc=3.*Lost connection.*ss_audit_log"):
+                instance_migrate.stream_source_db(cfg, selector="/var/www/failed", output=output)
+
+        self.assertEqual(output.getvalue(), b"")
+
+    def test_target_db_rejects_truncated_source_before_preparing_database(self) -> None:
+        truncated = io.BytesIO()
+        with gzip.GzipFile(fileobj=truncated, mode="wb") as gz:
+            gz.write(instance_migrate._db_stream_marker("BEGIN", "c" * 32))
+            gz.write(b"CREATE TABLE `ss_audit_log` (`id` int);\n")
+            gz.write(b"INSERT INTO `ss_audit_log` VALUES (1);\n")
+        truncated.seek(0)
+
+        with (
+            patch.object(instance_migrate, "_prepare_target_db") as prepare,
+            patch.object(instance_migrate.subprocess, "Popen") as popen,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "completion marker is missing"):
+                instance_migrate.import_target_db_stream(
+                    target_db_name="baza_target",
+                    target_db_user="korisnik_target",
+                    target_db_password="target_password",
+                    input_stream=truncated,
+                )
+
+        prepare.assert_not_called()
+        popen.assert_not_called()
 
     def test_target_db_stream_rewrites_mysql8_date_format_generated_columns(self) -> None:
         sql = (
@@ -623,10 +765,7 @@ class InstanceMigrateProbeTests(unittest.TestCase):
             "(date_format(`date_added`,_utf8mb4'%Y')) STORED COMMENT '(DC2Type:generated)'\n"
             ") ENGINE=InnoDB;\n"
         )
-        gzipped = io.BytesIO()
-        with gzip.GzipFile(fileobj=gzipped, mode="wb") as gz:
-            gz.write(sql.encode("utf-8"))
-        gzipped.seek(0)
+        gzipped = _complete_db_stream(sql.encode("utf-8"))
 
         class FakeStdin(io.BytesIO):
             def close(self) -> None:
@@ -690,10 +829,7 @@ class InstanceMigrateProbeTests(unittest.TestCase):
             "INSERT INTO `custom_derived_rows` VALUES\n"
             "(1,21,42);\n"
         )
-        gzipped = io.BytesIO()
-        with gzip.GzipFile(fileobj=gzipped, mode="wb") as gz:
-            gz.write(sql.encode("utf-8"))
-        gzipped.seek(0)
+        gzipped = _complete_db_stream(sql.encode("utf-8"))
 
         class FakeStdin(io.BytesIO):
             def close(self) -> None:
