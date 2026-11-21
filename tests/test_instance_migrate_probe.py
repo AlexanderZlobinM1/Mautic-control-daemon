@@ -646,6 +646,7 @@ class InstanceMigrateProbeTests(unittest.TestCase):
                 {
                     "schema", "ok", "phase", "source_quiescent", "source_authoritative",
                     "source_root", "domains", "instance_uid", "instance_code",
+                    "identity_adoption",
                     "maintenance_vhost_active", "maintenance_vhost_static_503", "task_drain",
                     "web_request_drain", "preservation", "error", "restore_errors", "rollback_required",
                 },
@@ -655,7 +656,7 @@ class InstanceMigrateProbeTests(unittest.TestCase):
                 {
                     "schema", "ok", "phase", "source_authoritative", "source_quiescent",
                     "original_vhost_active", "source_root", "domains", "instance_uid",
-                    "instance_code", "preservation", "runtime_restore", "error",
+                    "instance_code", "identity_adoption", "preservation", "runtime_restore", "error",
                     "rollback_required", "retryable",
                 },
             ),
@@ -665,7 +666,7 @@ class InstanceMigrateProbeTests(unittest.TestCase):
                     "schema", "ok", "phase", "migration_complete", "source_authoritative",
                     "source_quiescent", "recoverable_artifact", "maintenance_vhost_active",
                     "source_root", "domains", "instance_uid", "instance_code", "artifact_state",
-                    "preservation", "runtime_restore", "error", "rollback_required", "retryable",
+                    "identity_adoption", "preservation", "runtime_restore", "error", "rollback_required", "retryable",
                 },
             ),
         }
@@ -725,6 +726,130 @@ class InstanceMigrateProbeTests(unittest.TestCase):
             },
         )()
         return uid, code, domain, root, original, original_text, active, available, enabled, install, cfg
+
+    def test_source_quiesce_materializes_missing_legacy_marker_from_exact_mcc_identity(self) -> None:
+        class FakeInventory:
+            installs = []
+
+            def __init__(self, _path: str) -> None:
+                pass
+
+            def list_instances(self):
+                return list(self.installs)
+
+        with tempfile.TemporaryDirectory() as td:
+            uid, code, domain, root, _original, _original_text, _active, available, enabled, install, cfg = self._source_migration_fixture(td)
+            marker = root / instance_migrate.INSTANCE_IDENTITY_MARKER
+            marker.unlink()
+            install.instance_uid = "legacy-domain-derived-uid"
+            install.instance_code = None
+            FakeInventory.installs = [install]
+            with (
+                patch.object(instance_migrate, "NGINX_SITES_AVAILABLE", available),
+                patch.object(instance_migrate, "NGINX_SITES_ENABLED", enabled),
+                patch.object(instance_migrate, "MIGRATION_SOURCE_STATE_ROOT", Path(td) / "mcd" / "source-state"),
+                patch.object(instance_migrate, "MIGRATION_SOURCE_MAINTENANCE_ROOT", Path(td) / "mcd" / "maintenance"),
+                patch.object(instance_migrate, "InstanceInventory", FakeInventory),
+                patch.object(instance_migrate, "ensure_seeded"),
+                patch.object(instance_migrate, "collect_maintenance_state", return_value={"cron_marker_present": False}),
+                patch.object(instance_migrate, "stop_cron_service", return_value={"ok": True}),
+                patch.object(instance_migrate, "stop_running_tasks_for_maintenance", return_value={"ok": True}),
+                patch.object(instance_migrate, "_drain_reloaded_nginx_workers", return_value={"ok": True}),
+                patch.object(instance_migrate, "_run_checked", return_value=""),
+            ):
+                result = instance_migrate.quiesce_migration_source(
+                    cfg,
+                    selector=str(root),
+                    domains_json=f'["{domain}"]',
+                    instance_uid=uid,
+                    instance_code=code,
+                )
+
+            observed = instance_migrate.read_instance_identity(root)
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["identity_adoption"]["materialized_from_mcc"])
+            self.assertEqual(result["identity_adoption"]["reason"], "legacy_source_marker_missing")
+            self.assertEqual(result["identity_adoption"]["inventory_identity"]["instance_uid"], "legacy-domain-derived-uid")
+            self.assertEqual(observed["instance_uid"], uid)
+            self.assertEqual(observed["instance_code"], code)
+            self.assertEqual(observed["primary_domain"], domain)
+
+    def test_source_quiesce_never_overwrites_invalid_existing_identity_marker(self) -> None:
+        class FakeInventory:
+            installs = []
+
+            def __init__(self, _path: str) -> None:
+                pass
+
+            def list_instances(self):
+                return list(self.installs)
+
+        with tempfile.TemporaryDirectory() as td:
+            uid, code, domain, root, _original, _original_text, _active, _available, _enabled, install, cfg = self._source_migration_fixture(td)
+            marker = root / instance_migrate.INSTANCE_IDENTITY_MARKER
+            marker.write_text("{invalid\n", encoding="utf-8")
+            before = marker.read_bytes()
+            FakeInventory.installs = [install]
+            with (
+                patch.object(instance_migrate, "MIGRATION_SOURCE_STATE_ROOT", Path(td) / "mcd" / "source-state"),
+                patch.object(instance_migrate, "InstanceInventory", FakeInventory),
+                patch.object(instance_migrate, "ensure_seeded"),
+            ):
+                result = instance_migrate.quiesce_migration_source(
+                    cfg,
+                    selector=str(root),
+                    domains_json=f'["{domain}"]',
+                    instance_uid=uid,
+                    instance_code=code,
+                )
+
+            self.assertFalse(result["ok"])
+            self.assertIn("present but invalid", result["error"])
+            self.assertEqual(marker.read_bytes(), before)
+            self.assertEqual(result["identity_adoption"], {})
+
+    def test_legacy_identity_adoption_requires_exact_root_and_inventory_domain(self) -> None:
+        class FakeInventory:
+            installs = []
+
+            def __init__(self, _path: str) -> None:
+                pass
+
+            def list_instances(self):
+                return list(self.installs)
+
+        with tempfile.TemporaryDirectory() as td:
+            uid, code, domain, root, _original, _original_text, _active, _available, _enabled, install, cfg = self._source_migration_fixture(td)
+            marker = root / instance_migrate.INSTANCE_IDENTITY_MARKER
+            marker.unlink()
+            install.instance_uid = "legacy-domain-derived-uid"
+            install.instance_code = None
+            FakeInventory.installs = [install]
+            with (
+                patch.object(instance_migrate, "MIGRATION_SOURCE_STATE_ROOT", Path(td) / "mcd" / "source-state"),
+                patch.object(instance_migrate, "InstanceInventory", FakeInventory),
+                patch.object(instance_migrate, "ensure_seeded"),
+            ):
+                non_root = instance_migrate.quiesce_migration_source(
+                    cfg,
+                    selector=domain,
+                    domains_json=f'["{domain}"]',
+                    instance_uid=uid,
+                    instance_code=code,
+                )
+                wrong_domain = instance_migrate.quiesce_migration_source(
+                    cfg,
+                    selector=str(root),
+                    domains_json='["other.sales-snap.com"]',
+                    instance_uid=uid,
+                    instance_code=code,
+                )
+
+            self.assertFalse(non_root["ok"])
+            self.assertIn("exact absolute source root", non_root["error"])
+            self.assertFalse(wrong_domain["ok"])
+            self.assertIn("inventory primary domain", wrong_domain["error"])
+            self.assertFalse(marker.exists())
 
     def test_source_quiesce_uses_static_503_and_rollback_restores_original_symlink(self) -> None:
         class FakeInventory:
@@ -790,6 +915,7 @@ class InstanceMigrateProbeTests(unittest.TestCase):
                 {
                     "schema", "ok", "phase", "source_quiescent", "source_authoritative",
                     "source_root", "domains", "instance_uid", "instance_code",
+                    "identity_adoption",
                     "maintenance_vhost_active", "maintenance_vhost_static_503", "task_drain",
                     "web_request_drain", "preservation",
                 }.issubset(quiesced)
@@ -806,7 +932,7 @@ class InstanceMigrateProbeTests(unittest.TestCase):
                 {
                     "schema", "ok", "phase", "source_authoritative", "source_quiescent",
                     "original_vhost_active", "source_root", "domains", "instance_uid",
-                    "instance_code", "preservation", "runtime_restore",
+                    "instance_code", "identity_adoption", "preservation", "runtime_restore",
                 }.issubset(restored)
             )
             self.assertEqual(active.readlink(), original)
@@ -869,7 +995,7 @@ class InstanceMigrateProbeTests(unittest.TestCase):
                     "schema", "ok", "phase", "migration_complete", "source_authoritative",
                     "source_quiescent", "recoverable_artifact", "maintenance_vhost_active",
                     "source_root", "domains", "instance_uid", "instance_code", "artifact_state",
-                    "preservation", "runtime_restore",
+                    "identity_adoption", "preservation", "runtime_restore",
                 }.issubset(finalized)
             )
             self.assertFalse(finalized["source_authoritative"])

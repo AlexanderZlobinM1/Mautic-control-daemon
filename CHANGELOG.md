@@ -1,3 +1,12 @@
+## 1.6.123 - 2026-11-21
+
+- Allow source migration quiescence to materialize a missing legacy local
+  identity marker from the exact MCC-supplied bare UID/code. Adoption is
+  permitted only for an exact absolute source root whose inventory domain and
+  any existing instance-state/code evidence agree; an existing invalid or
+  conflicting marker still fails closed. Receipts retain explicit adoption
+  evidence, and MCD never invents or replaces the MCC identity.
+
 ## 1.6.122 - 2026-11-21
 
 - Split instance migration TLS into an explicit post-cutover phase. Certificate

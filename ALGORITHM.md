@@ -2538,14 +2538,24 @@ UID всегда bare и не содержит `@host`; code не создаёт
 любого из этих значений с локальным marker/state завершает соответствующую
 стадию fail-closed.
 
+Для legacy source, созданного до локального identity marker, допускается один
+узкий adoption-путь: `source-quiesce` вызван с точным абсолютным source root,
+первичный domain совпадает с локальным inventory, а существующие instance-state
+и instance code (если они есть) не конфликтуют. Тогда MCD один раз записывает
+в marker ровно переданные MCC bare UID/code и немедленно читает их обратно.
+MCD не вычисляет новую identity и не заменяет существующий marker. Наличие
+повреждённого marker или любое расхождение evidence остаётся fail-closed.
+Source receipt всегда содержит `identity_adoption` с признаком
+`materialized_from_mcc` и исходной inventory identity.
+
 Все четыре orchestration-команды всегда печатают один JSON object; exit code 0
 разрешён только для `ok: true`. Обязательные receipt-поля:
 
 | Операция | Success | Failure |
 | --- | --- | --- |
-| `source-quiesce` | `schema`, `ok`, `phase`, `source_quiescent`, `source_authoritative`, `source_root`, `domains`, `instance_uid`, `instance_code`, `maintenance_vhost_active`, `maintenance_vhost_static_503`, `task_drain`, `web_request_drain`, `preservation` | те же identity/state/evidence поля плюс `error`, `restore_errors`, `rollback_required` |
-| `source-restore` | `schema`, `ok`, `phase`, `source_authoritative`, `source_quiescent`, `original_vhost_active`, `source_root`, `domains`, `instance_uid`, `instance_code`, `preservation`, `runtime_restore` | те же поля плюс `error`, `rollback_required`, `retryable` |
-| `source-finalize` | `schema`, `ok`, `phase`, `migration_complete`, `source_authoritative`, `source_quiescent`, `recoverable_artifact`, `maintenance_vhost_active`, `source_root`, `domains`, `instance_uid`, `instance_code`, `artifact_state`, `preservation`, `runtime_restore` | те же поля плюс `error`, `rollback_required`, `retryable` |
+| `source-quiesce` | `schema`, `ok`, `phase`, `source_quiescent`, `source_authoritative`, `source_root`, `domains`, `instance_uid`, `instance_code`, `identity_adoption`, `maintenance_vhost_active`, `maintenance_vhost_static_503`, `task_drain`, `web_request_drain`, `preservation` | те же identity/state/evidence поля плюс `error`, `restore_errors`, `rollback_required` |
+| `source-restore` | `schema`, `ok`, `phase`, `source_authoritative`, `source_quiescent`, `original_vhost_active`, `source_root`, `domains`, `instance_uid`, `instance_code`, `identity_adoption`, `preservation`, `runtime_restore` | те же поля плюс `error`, `rollback_required`, `retryable` |
+| `source-finalize` | `schema`, `ok`, `phase`, `migration_complete`, `source_authoritative`, `source_quiescent`, `recoverable_artifact`, `maintenance_vhost_active`, `source_root`, `domains`, `instance_uid`, `instance_code`, `identity_adoption`, `artifact_state`, `preservation`, `runtime_restore` | те же поля плюс `error`, `rollback_required`, `retryable` |
 | `target-issue-certificate` | `schema`, `ok`, `phase`, `migration_complete`, `target_root`, `domains`, `instance_uid`, `instance_code`, `identity`, `source_certificate_used`, `rollback_required`, `rollback_contract`, `target_ready`, `tls_pending`, `next_operation`, `certificate`, `verification`, `instances`, `completed_at_utc` | общие identity/rollback поля плюс `error_code`, `error`, `failed_at_utc` |
 
 `preservation` обязательно доказывает существование и SHA-256 original vhost,
