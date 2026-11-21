@@ -19077,6 +19077,120 @@ def _inventory_snapshot_for_push(
         return current, False
 
 
+def _mcc_state_push_tick(
+    *,
+    config: AgentConfig,
+    pusher: MCCStatePusher,
+    inventory: InstanceInventory,
+    active_installs: list[Any],
+    now_ts: float,
+    mail_queue_metrics: dict[str, dict[str, object]] | None = None,
+    previous_monitor_error: str = "",
+) -> dict[str, Any]:
+    """Run one independent MCC state/signals tick.
+
+    This is deliberately outside the ordinary scheduler loop.  Planning,
+    imports, and root-local DB work may take minutes, but they must not be the
+    only code path that can publish the MCD heartbeat.  The caller owns the
+    dedicated worker and invokes this function repeatedly.
+    """
+    result: dict[str, Any] = {
+        "state_pushed": False,
+        "monitor_signals_pushed": False,
+        "monitor_error": previous_monitor_error,
+    }
+    pusher.cfg = config
+    if not pusher.enabled():
+        return result
+
+    if should_poll_alert(now_ts, pusher.last_alert_poll_ts, config.mcc_push_alert_poll_interval_sec):
+        try:
+            signals_payload = collect_signals(window_min=config.mcc_push_alert_window_min, cfg=config)
+            web_observation = collect_web_availability(config, list(active_installs))
+            if web_observation is not None:
+                signals_payload["web_availability"] = web_observation
+            if mail_queue_metrics:
+                details_raw = signals_payload.get("details")
+                details = dict(details_raw) if isinstance(details_raw, dict) else {}
+                details["mail_queue"] = {
+                    "instances": {
+                        str(root): dict(metrics)
+                        for root, metrics in dict(mail_queue_metrics).items()
+                        if isinstance(metrics, dict)
+                    },
+                    "updated_at_ts": float(now_ts),
+                }
+                signals_payload["details"] = details
+            pusher.set_signals(signals_payload, now_ts)
+        except Exception as exc:
+            logging.warning("signals collect failed in independent MCC worker: %s", exc)
+        pusher.last_alert_poll_ts = now_ts
+
+    try:
+        monitor_signals = collect_monitor_signals(
+            config,
+            mail_queue_metrics=dict(mail_queue_metrics or {}),
+        )
+        if pusher.should_push_monitor_signals(now_ts, monitor_signals):
+            ok, msg = pusher.send_signals(monitor_signals)
+            if ok:
+                result["monitor_signals_pushed"] = True
+                result["monitor_error"] = ""
+            else:
+                reason = str(msg or "unknown")
+                if reason != previous_monitor_error:
+                    logging.warning("monitor signals push failed: %s", reason)
+                result["monitor_error"] = reason
+    except Exception as exc:
+        reason = str(exc)
+        if reason != previous_monitor_error:
+            logging.warning("monitor signals push failed: %s", reason)
+        result["monitor_error"] = reason
+
+    payload_installs, instances_snapshot_complete = _inventory_snapshot_for_push(
+        inventory,
+        list(active_installs),
+    )
+    pending_profile_event = read_pending_profile_event(config)
+    payload = pusher.build_payload(
+        installs=payload_installs,
+        profile_name=config.profile_name,
+        now_ts=now_ts,
+        include_signals=True,
+        profile_event=pending_profile_event,
+        instances_snapshot_complete=instances_snapshot_complete,
+    )
+    payload_no_ts = dict(payload)
+    payload_no_ts.pop("sent_at_utc", None)
+    do_push, _changed = pusher.should_push(now_ts, payload_no_ts)
+    if pending_profile_event:
+        do_push = True
+    if payload.get("change_events"):
+        do_push = True
+    if do_push:
+        ok, msg = pusher.send(payload)
+        log_push_result(ok, msg)
+        result["state_pushed"] = bool(ok)
+        if ok:
+            pusher.mark_pushed(now_ts, payload_no_ts)
+        if pending_profile_event:
+            clear_pending_profile_event(
+                config,
+                event_id=str(pending_profile_event.get("event_id", "")).strip() or None,
+                delivered=bool(ok),
+                error=None if ok else str(msg),
+            )
+        for event in payload.get("change_events") or []:
+            if isinstance(event, dict):
+                _clear_instance_change_event(
+                    config,
+                    event_id=str(event.get("event_id") or ""),
+                    delivered=bool(ok),
+                    error=None if ok else str(msg),
+                )
+    return result
+
+
 def _apply_instance_runtime_guard(installs: list[MauticInstall], *, reason: str) -> None:
     try:
         payload = apply_instance_runtime(installs, reload_services=True)
@@ -19462,6 +19576,8 @@ def run_loop(
     scheduler_last_promoted_roots: frozenset[str] = frozenset()
     scheduler_next_fairness_log_at = 0.0
     pusher = MCCStatePusher(config, runtime_store=store)
+    state_push_stop_event = threading.Event()
+    state_push_thread: threading.Thread | None = None
     commercial_stop_event = threading.Event()
     commercial_thread: threading.Thread | None = None
     commercial_mode, commercial_mode_reason = _commercial_state_eligibility(config)
@@ -22080,6 +22196,32 @@ def run_loop(
             else:
                 time.sleep(1.0)
 
+    def _state_push_worker() -> None:
+        """Publish MCC state/signals without waiting for scheduler planning."""
+        monitor_error = ""
+        while not state_push_stop_event.is_set() and (
+            _test_stop_event is None or not _test_stop_event.is_set()
+        ):
+            cfg = config
+            try:
+                tick = _mcc_state_push_tick(
+                    config=cfg,
+                    pusher=pusher,
+                    inventory=inventory,
+                    active_installs=list(installs),
+                    now_ts=time.time(),
+                    mail_queue_metrics=mail_queue_metrics,
+                    previous_monitor_error=monitor_error,
+                )
+                monitor_error = str(tick.get("monitor_error") or "")
+            except Exception as exc:
+                logging.warning("independent MCC state worker failed: %s", exc)
+            wait_sec = max(0.5, min(2.0, float(getattr(cfg, "dispatch_interval_sec", 1) or 1)))
+            if _test_stop_event is not None:
+                _test_stop_event.wait(wait_sec)
+            else:
+                state_push_stop_event.wait(wait_sec)
+
     if not single_cycle:
         threading.Thread(
             target=_active_cycle_observation_worker,
@@ -22112,6 +22254,12 @@ def run_loop(
             name="mcd-host-manual-jobs",
             daemon=True,
         ).start()
+        state_push_thread = threading.Thread(
+            target=_state_push_worker,
+            name="mcd-independent-state-push",
+            daemon=True,
+        )
+        state_push_thread.start()
     else:
         _dispatch_host_manual_requests(
             config=config,
@@ -23327,7 +23475,13 @@ def run_loop(
                     last_backup_schedule_ts = now
                     last_backup_schedule_day = run_day
 
-        if pusher.enabled() and should_poll_alert(now, pusher.last_alert_poll_ts, config.mcc_push_alert_poll_interval_sec):
+        # Normal daemon runs use the independent state worker below.  Keep the
+        # synchronous path only for single-cycle CLI/test execution.
+        if single_cycle and pusher.enabled() and should_poll_alert(
+            now,
+            pusher.last_alert_poll_ts,
+            config.mcc_push_alert_poll_interval_sec,
+        ):
             try:
                 signals_payload = collect_signals(window_min=config.mcc_push_alert_window_min, cfg=config)
                 web_observation = collect_web_availability(config, installs)
@@ -24683,7 +24837,7 @@ def run_loop(
                 now_ts=time.time(),
             )
 
-        if pusher.enabled():
+        if single_cycle and pusher.enabled():
             # Keep ``installs`` as the active-only scheduler inventory.  The
             # payload boundary deliberately reads the complete persisted
             # inventory so artifact rows survive every autonomous push while
@@ -27825,7 +27979,7 @@ def run_loop(
                 ):
                     jobs_last_run[(root, job.name)] = time.time()
 
-        if pusher.enabled():
+        if single_cycle and pusher.enabled():
             try:
                 monitor_signals = collect_monitor_signals(
                     config,
@@ -27857,6 +28011,9 @@ def run_loop(
         segment_dispatch_wakeup.wait(timeout=max(0.1, float(config.dispatch_interval_sec)))
         segment_dispatch_wakeup.clear()
 
+    state_push_stop_event.set()
+    if state_push_thread is not None and state_push_thread.ident is not None:
+        state_push_thread.join(timeout=2.0)
     commercial_stop_event.set()
     if commercial_thread is not None:
         commercial_thread.join(timeout=2.0)

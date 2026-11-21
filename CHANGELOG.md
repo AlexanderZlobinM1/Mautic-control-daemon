@@ -1,3 +1,12 @@
+## 1.6.120 - 2026-11-21
+
+- Run normal MCC full-state and monitor-signals publishing in an independent
+  daemon worker so long scheduler planning, imports, DB probes, or backup
+  branches cannot starve `/agent/state` and `/agent/signals`. The scheduler
+  remains responsible for workload execution; `update/check` is not treated as
+  a heartbeat replacement. Single-cycle CLI checks retain their synchronous
+  path.
+
 ## 1.6.119 - 2026-11-21
 
 - Keep persisted MCD artifact rows in every complete daemon state push by

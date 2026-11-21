@@ -2578,6 +2578,22 @@ payload. Если чтение полного inventory не удалось, pus
 `cleanup_operations: ["delete"]`, пока artifact state не удалён штатной
 точной операцией.
 
+### Независимый MCC state/signals worker
+
+В обычном daemon-режиме публикация полного `/api/v1/agent/state` и
+`/api/v1/agent/signals` выполняется отдельным worker-ом
+`mcd-independent-state-push`. Основной scheduler может в это время выполнять
+долгий planning, import, DB probe или другой root-local task; он не является
+единственным источником heartbeat и не имеет права задерживать MCC state.
+
+Worker читает текущий active inventory только для наблюдений, полный
+persisted inventory — для payload, а затем отправляет state и monitor signals
+с обычными timeout/retry правилами. Ошибка scheduler-ветки, backup-ветка с
+`continue` или долгое выполнение Mautic-команды не отменяет следующий
+independent push. `mcd-cli` single-cycle сохраняет синхронный путь для
+проверок и ручных операций. `/api/v1/agent/update/check` является только
+проверкой обновления и никогда не считается заменой state/signals heartbeat.
+
 Перед удалением базы MCD читает все строки `mysql.user` для точного managed
 username. Он принимает только строки с этим же username и корректным Host,
 запоминает весь список `user@host`, удаляет каждую запись и повторяет чтение.
