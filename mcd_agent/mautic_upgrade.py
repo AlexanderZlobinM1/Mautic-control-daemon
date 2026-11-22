@@ -369,30 +369,56 @@ def _enter_upgrade_maintenance_locked(config: AgentConfig, fence: Any) -> Upgrad
     )
 
 
-def _exit_upgrade_maintenance(config: AgentConfig, guard: UpgradeMaintenanceGuard) -> None:
+def _exit_upgrade_maintenance(config: AgentConfig, guard: UpgradeMaintenanceGuard) -> dict[str, Any]:
+    receipt: dict[str, Any] = {
+        "schema": "mcd-upgrade-maintenance-restore-v1",
+        "status": "success",
+        "cron_restored": False,
+        "scheduler_resumed": False,
+    }
+    errors: list[str] = []
     try:
         if guard.owned_cron_stop:
-            cron_restore = restore_cron_service_if_needed(config)
-            if not bool(cron_restore.get("ok", False)):
-                message = str(cron_restore.get("message", "") or "").strip() or "cron service restore failed"
-                unit = str(cron_restore.get("unit", "") or "").strip() or "-"
-                raise RuntimeError(f"Maintenance guard failed: unable to restore cron unit {unit}: {message}")
-            unit = str(cron_restore.get("unit", "") or "").strip() or "-"
-            started = str(bool(cron_restore.get("started", False))).lower()
-            print(f"Maintenance guard: cron restored unit={unit} started={started}")
+            try:
+                cron_restore = restore_cron_service_if_needed(config)
+                receipt["cron_restored"] = bool(cron_restore.get("ok", False))
+                if not receipt["cron_restored"]:
+                    message = str(cron_restore.get("message", "") or "").strip() or "cron service restore failed"
+                    unit = str(cron_restore.get("unit", "") or "").strip() or "-"
+                    errors.append(f"unable to restore cron unit {unit}: {message}")
+                else:
+                    unit = str(cron_restore.get("unit", "") or "").strip() or "-"
+                    started = str(bool(cron_restore.get("started", False))).lower()
+                    print(f"Maintenance guard: cron restored unit={unit} started={started}")
+            except Exception as exc:
+                errors.append(f"cron restore failed: {type(exc).__name__}")
         else:
             print("Maintenance guard: cron ownership unchanged")
+            receipt["cron_restored"] = True
 
         if guard.owned_pause_flag:
-            if guard.pause_flag.exists():
-                guard.pause_flag.unlink()
-            print(f"Maintenance guard: scheduler resumed ({guard.pause_flag})")
+            try:
+                if guard.pause_flag.exists():
+                    guard.pause_flag.unlink()
+                receipt["scheduler_resumed"] = not guard.pause_flag.exists()
+                if receipt["scheduler_resumed"]:
+                    print(f"Maintenance guard: scheduler resumed ({guard.pause_flag})")
+                else:
+                    errors.append("scheduler pause flag remained present")
+            except OSError as exc:
+                errors.append(f"scheduler resume failed: {type(exc).__name__}")
         else:
             print("Maintenance guard: scheduler pause left unchanged")
+            receipt["scheduler_resumed"] = True
     finally:
         if guard.dispatch_fence is not None:
             guard.dispatch_fence.__exit__(None, None, None)
             guard.dispatch_fence = None
+    if errors:
+        receipt["status"] = "error"
+        receipt["errors"] = errors
+        raise RuntimeError("Maintenance guard restore failed: " + "; ".join(errors))
+    return receipt
 
 
 def _default_zip_url(version: str) -> str:
@@ -1294,9 +1320,55 @@ def _report_upgrade_patch_evidence(config: AgentConfig, install: MauticInstall, 
                                    plan: dict[str, Any], *, started_at: str, status: str,
                                    outcomes: list[dict[str, Any]] | None = None,
                                    failure: dict[str, Any] | None = None,
-                                   rollback: dict[str, Any] | None = None) -> bool:
-    """Emit and durably submit one immutable-plan-bound v3 evidence record."""
+                                   rollback: dict[str, Any] | None = None,
+                                   source_version: str | None = None,
+                                   target_version: str | None = None,
+                                   maintenance_guard: dict[str, Any] | None = None) -> bool:
+    """Emit and durably submit one immutable-plan-bound v3 evidence record.
+
+    The evidence request is written to the local outbox before transport. A
+    failed POST therefore cannot be mistaken for a completed upgrade and a
+    later heartbeat can ACK the exact same receipt without replaying Mautic.
+    """
     records = _patch_evidence_records(plan, outcomes, failure)
+    resolved_plan_sha = str((resolution or {}).get("plan_sha256", "") or "")
+    if not resolved_plan_sha:
+        try:
+            from mcd_agent.mautic_patch_resolution import canonical_json_sha256
+            resolved_plan_sha = canonical_json_sha256(plan)
+        except Exception:
+            resolved_plan_sha = ""
+    evidence_identity = {
+        "host_id": (resolution or {}).get("host_id", ""),
+        "instance_uid": install.instance_uid,
+        "catalog_revision": (resolution or {}).get("catalog_revision", ""),
+        "catalog_sha256": (resolution or {}).get("catalog_sha256", ""),
+        "registry_commit": plan.get("registry_commit", ""),
+        "registry_sha256": plan.get("registry_sha256", ""),
+        "trigger": plan.get("trigger", ""),
+        "phase": plan.get("phase", ""),
+        "operation": "apply",
+    }
+    guard = maintenance_guard or {"cron_restored": False, "scheduler_resumed": False}
+    upgrade_receipt = {
+        "schema": "mcd-mautic-upgrade-terminal-receipt-v1",
+        "status": status,
+        "source_version": str(source_version or plan.get("source_version") or ""),
+        "target_version": str(target_version or plan.get("target_version") or ""),
+        "run_id": str(plan.get("run_id", "") or ""),
+        "plan_sha256": resolved_plan_sha,
+        "evidence_identity": evidence_identity,
+        "maintenance_guard": {
+            "cron_restored": bool(guard.get("cron_restored", False)),
+            "scheduler_resumed": bool(guard.get("scheduler_resumed", False)),
+        },
+    }
+    if status == "success" and not (
+        upgrade_receipt["maintenance_guard"]["cron_restored"]
+        and upgrade_receipt["maintenance_guard"]["scheduler_resumed"]
+    ):
+        print("WARN MCD upgrade success evidence withheld: maintenance guard was not fully restored")
+        return False
     evidence = {
         "schema": "mcd-mautic-patch-evidence-v1",
         "host_id": (resolution or {}).get("host_id", ""),
@@ -1305,7 +1377,7 @@ def _report_upgrade_patch_evidence(config: AgentConfig, install: MauticInstall, 
         "catalog_sha256": (resolution or {}).get("catalog_sha256", ""),
         "registry_commit": plan.get("registry_commit", ""),
         "registry_sha256": plan.get("registry_sha256", ""),
-        "plan_sha256": (resolution or {}).get("plan_sha256", ""),
+        "plan_sha256": resolved_plan_sha,
         "trigger": plan.get("trigger", ""),
         "phase": plan.get("phase", ""),
         "run_id": plan.get("run_id", ""),
@@ -1316,22 +1388,76 @@ def _report_upgrade_patch_evidence(config: AgentConfig, install: MauticInstall, 
         "selected": [str(record.get("id", "") or "") for record in plan.get("patches", [])],
         "records": records,
         "rollback": rollback or {"available": False, "attempted": False, "succeeded": False},
+        "upgrade_receipt": upgrade_receipt,
     }
     from mcd_agent import __version__
     evidence["agent_version"] = __version__
     print("MCD_PATCH_PLAN_EVIDENCE=" + json.dumps(evidence, ensure_ascii=True, sort_keys=True,
                                                    separators=(",", ":")), flush=True)
     if resolution is None:
-        return False
+        # Standalone MCD has no MCC endpoint to acknowledge against. MCC-bound
+        # upgrades, however, must fail closed when their immutable envelope
+        # cannot be recovered.
+        return not bool(getattr(config, "mcc_url", None))
     try:
         from mcd_agent.mautic_patch_resolution import _host_identity, report_evidence
         host_name, hostname = _host_identity(config)
-        report_evidence(
-            config, instance_uid=install.instance_uid, mcc_host_name=host_name, hostname=hostname,
-            host_id=str(resolution["host_id"]), catalog_revision=str(resolution["catalog_revision"]),
-            catalog_sha256=str(resolution["catalog_sha256"]), plan_sha256=str(resolution["plan_sha256"]),
-            trigger="upgrade_lifecycle", phase="dependency_update_preflight",
-            run_id=str(plan["run_id"]), evidence=evidence,
+        request = {
+            "schema": "mcd-mautic-patch-evidence-v1",
+            "mcc_host_name": host_name,
+            "hostname": hostname,
+            "host_id": str(resolution["host_id"]),
+            "instance_uid": str(install.instance_uid),
+            "catalog_revision": str(resolution["catalog_revision"]),
+            "catalog_sha256": str(resolution["catalog_sha256"]),
+            "plan_sha256": str(resolution["plan_sha256"]),
+            "trigger": "upgrade_lifecycle",
+            "phase": "dependency_update_preflight",
+            "run_id": str(plan["run_id"]),
+            "source_version": str(source_version or plan.get("source_version") or ""),
+            "target_version": str(target_version or plan.get("target_version") or ""),
+            "evidence": evidence,
+        }
+        state_db_path = str(getattr(config, "state_db_path", "") or "").strip()
+        if state_db_path:
+            from mcd_agent.mautic_upgrade_evidence import deliver_upgrade_evidence
+            accepted = deliver_upgrade_evidence(config, request)
+        else:
+            # Narrow unit/standalone callers may not expose a state DB. The
+            # production AgentConfig always has one and therefore uses the
+            # durable outbox above.
+            accepted = report_evidence(
+                config,
+                instance_uid=request["instance_uid"],
+                mcc_host_name=request["mcc_host_name"],
+                hostname=request["hostname"],
+                host_id=request["host_id"],
+                catalog_revision=request["catalog_revision"],
+                catalog_sha256=request["catalog_sha256"],
+                plan_sha256=request["plan_sha256"],
+                trigger=request["trigger"],
+                phase=request["phase"],
+                run_id=request["run_id"],
+                evidence=evidence,
+            )
+        if accepted is None:
+            print("WARN MCD v3 evidence remains durably pending; terminal upgrade success is withheld")
+            return False
+        print(
+            "MCD_UPGRADE_EVIDENCE_ACK="
+            + json.dumps(
+                {
+                    "schema": "mcd-mautic-upgrade-evidence-ack-v1",
+                    "status": "accepted",
+                    "evidence_id": accepted.get("evidence_id", ""),
+                    "run_id": plan.get("run_id", ""),
+                    "plan_sha256": resolved_plan_sha,
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            flush=True,
         )
         return True
     except Exception as exc:
@@ -2269,6 +2395,9 @@ def run_upgrade_apply(
     patch_evidence_outcomes: list[dict[str, Any]] = []
     patch_evidence_failure: dict[str, Any] | None = None
     patch_evidence_reported = False
+    maintenance_receipt: dict[str, Any] | None = None
+    guard: UpgradeMaintenanceGuard | None = None
+    upgrade_committed = False
     target = _clean_target_version(target_override)
     if mcc_preflighted_single_instance and not allow_release_transition:
         from mcd_agent.mautic_manual_upgrade import ManualUpgradePreflightError, validate_preflighted_single_instance
@@ -2700,19 +2829,12 @@ def run_upgrade_apply(
                 ),
                 flush=True,
             )
+        verification: dict[str, Any] | None = None
         if target_stage is not None:
             from mcd_agent.mautic_patch_stage import application_root
             from mcd_agent.mautic_patch_plan_v3 import verify_applied
             verification = verify_applied(str(application_root(install_root)), validated_patch_plan,
                                           accepted_facts=getattr(target_stage, "facts_receipt", None))
-            if not patch_evidence_reported:
-                _report_upgrade_patch_evidence(
-                    config, inst, patch_resolution, validated_patch_plan,
-                    started_at=patch_evidence_started, status="success",
-                    outcomes=verification.get("patches", []) if isinstance(verification, dict) else [],
-                    rollback={"available": bool(patch_evidence_outcomes), "attempted": False, "succeeded": False},
-                )
-                patch_evidence_reported = True
         import_patch = {"status": "already", "reason": "runtime_reconciliation_uses_catalog_plan"}
         if import_patch.get("status") == "error":
             raise RuntimeError("Import tag patch after upgrade failed: " + str(import_patch.get("reason")))
@@ -2765,11 +2887,33 @@ def run_upgrade_apply(
             )
         except Exception as exc:
             logging.warning("Mautic version audit event enqueue failed: %s", exc)
+        # The application mutation is complete. Restore the scheduler before
+        # submitting the terminal receipt so the receipt contains observed
+        # restoration, not an intention to restore later.
+        upgrade_committed = True
+        if guard is not None:
+            maintenance_receipt = _exit_upgrade_maintenance(config, guard)
+            guard = None
+        if target_stage is not None and not patch_evidence_reported:
+            accepted = _report_upgrade_patch_evidence(
+                config, inst, patch_resolution, validated_patch_plan,
+                started_at=patch_evidence_started, status="success",
+                outcomes=verification.get("patches", []) if isinstance(verification, dict) else [],
+                rollback={"available": bool(patch_evidence_outcomes), "attempted": False, "succeeded": False},
+                source_version=current,
+                target_version=target,
+                maintenance_guard=maintenance_receipt,
+            )
+            patch_evidence_reported = True
+            if not accepted:
+                raise RuntimeError(
+                    "MCC upgrade evidence was not accepted; upgrade is complete but terminal success is withheld"
+                )
         print(f"Mautic version cache refreshed: {final_version} ({cache_count} path(s))")
         print(f"Upgrade completed: {current} -> {final_version}")
     except Exception:
         rollback_state = {"available": bool(patch_evidence_outcomes), "attempted": False, "succeeded": False}
-        if target_stage is not None:
+        if not upgrade_committed and target_stage is not None:
             from mcd_agent.mautic_patch_plan_v3 import rollback as rollback_v3
             try:
                 from mcd_agent.mautic_patch_stage import application_root
@@ -2799,6 +2943,12 @@ def run_upgrade_apply(
                     "reason": type(prepared_rollback_error).__name__,
                 }, ensure_ascii=True, sort_keys=True, separators=(",", ":")), flush=True)
                 raise
+        if guard is not None:
+            try:
+                maintenance_receipt = _exit_upgrade_maintenance(config, guard)
+                guard = None
+            except Exception as cleanup_error:
+                print(f"WARN maintenance cleanup failed after upgrade error: {cleanup_error}")
         if validated_patch_plan is not None and validated_patch_plan.get("schema") == "mcd-mautic-patch-plan-v3" and not patch_evidence_reported:
             failure = patch_evidence_failure.get("failure") if isinstance(patch_evidence_failure, dict) else None
             completed = patch_evidence_failure.get("completed") if isinstance(patch_evidence_failure, dict) else None
@@ -2808,12 +2958,11 @@ def run_upgrade_apply(
                 outcomes=completed if isinstance(completed, list) else patch_evidence_outcomes,
                 failure=failure if isinstance(failure, dict) else None,
                 rollback=rollback_state,
+                source_version=current,
+                target_version=target,
+                maintenance_guard=maintenance_receipt,
             )
             patch_evidence_reported = True
-        try:
-            _exit_upgrade_maintenance(config, guard)
-        except Exception as cleanup_error:
-            print(f"WARN maintenance cleanup failed after upgrade error: {cleanup_error}")
         raise
     finally:
         if target_stage is not None:
@@ -2821,7 +2970,6 @@ def run_upgrade_apply(
         if prepared_target is not None:
             prepared_target.close()
 
-    _exit_upgrade_maintenance(config, guard)
     return 0
 
 

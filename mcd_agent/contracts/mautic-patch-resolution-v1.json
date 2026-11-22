@@ -1,6 +1,6 @@
 {
   "schema": "mcd-mautic-patch-resolution-v1",
-  "minimum_agent_version": "1.6.126",
+  "minimum_agent_version": "1.6.127",
   "features": {"typed_execution_context_v1": true, "facts_receipt_binding_v1": true, "typed_context_preflight_v1": true, "release_transition_authorization_v3": true, "prepared_target_input_v1": true},
   "prepared_target_input": {
     "schema": "mcd-mautic-prepared-target-input-v1",
@@ -377,7 +377,15 @@
   "rollback_semantics": "bound to run_id and the persisted immutable plan/hash; restore original bytes, mode, uid, and gid or remove a created file only if its current SHA-256 equals the recorded after SHA-256; database rows restore only when their current value equals the recorded replacement; drift is never overwritten",
   "phase_atomicity": "runtime invocation is atomic per phase; upgrade preflight remains atomic across its declared internal phases; lifecycle phases are invoked separately by their owning workflow",
   "evidence_schema": "mcd-mautic-patch-evidence-v1",
-  "evidence_optional_fields": ["facts_receipt"],
+  "evidence_optional_fields": ["facts_receipt", "upgrade_receipt"],
+  "upgrade_receipt_contract": {
+    "schema": "mcd-mautic-upgrade-terminal-receipt-v1",
+    "required_keys": ["schema", "status", "source_version", "target_version", "run_id", "plan_sha256", "evidence_identity", "maintenance_guard"],
+    "evidence_identity_keys": ["host_id", "instance_uid", "catalog_revision", "catalog_sha256", "registry_commit", "registry_sha256", "trigger", "phase", "operation"],
+    "maintenance_guard_keys": ["cron_restored", "scheduler_resumed"],
+    "terminal_success": "status=success requires both maintenance_guard.cron_restored and maintenance_guard.scheduler_resumed to be true; MCC ACK must be received before MCD returns terminal success",
+    "binding": "source_version, target_version, run_id, plan_sha256 and every evidence_identity value must match the immutable v3 plan/evidence envelope exactly"
+  },
   "facts_receipt_evidence": "required whenever the selected plan declares typed preconditions or rollback_preconditions; includes independent instance/database binding, ordered observations and canonical digests. Conditional skips retain their recorded decisions and facts; a successful phase does not imply its skipped patches were applied.",
   "evidence_fields": [
     "schema",

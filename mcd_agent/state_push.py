@@ -3078,6 +3078,20 @@ class MCCStatePusher:
     ) -> tuple[bool, str]:
         if not self.enabled():
             return False, "push disabled"
+        # Upgrade evidence has its own immutable FIFO.  Heartbeat delivery is
+        # the retry clock for a delayed MCC ACK; it never re-runs the upgrade.
+        try:
+            from mcd_agent.mautic_upgrade_evidence import drain_pending_upgrade_evidence
+
+            drained = drain_pending_upgrade_evidence(self.cfg, max_items=1)
+            for item in drained:
+                if item.get("status") in {"blocked", "pending"}:
+                    logging.warning(
+                        "MCD upgrade evidence delivery %s: %s",
+                        item.get("status"), item.get("reason", ""),
+                    )
+        except Exception as exc:
+            logging.warning("MCD upgrade evidence outbox drain failed: %s", exc)
         payload_hash = _hash_payload(payload)
         base = str(self.cfg.mcc_url).rstrip("/")
         url = base + "/api/v1/agent/state"

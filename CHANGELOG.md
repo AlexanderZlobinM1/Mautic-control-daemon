@@ -1,3 +1,14 @@
+## 1.6.127 - 2026-11-23
+
+- Make Mautic v3 upgrade evidence delivery durable and plan-bound. MCD writes
+  the exact evidence envelope before transport, retries only temporary or
+  delayed ACK failures in FIFO order, and blocks immutable-plan mismatches
+  without replaying the upgrade.
+- Require MCC acceptance before terminal upgrade success. The terminal receipt
+  carries source/target versions, run and plan identity, v3 evidence identity,
+  and observed cron/scheduler restoration; a missing ACK no longer becomes
+  `rc=0`.
+
 ## 1.6.126 - 2026-11-21
 
 - Return target certificate success evidence as a real instance list bound to
