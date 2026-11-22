@@ -186,9 +186,17 @@ def wire_upgrade(invocation, monkeypatch, kind="composer"):
 
     monkeypatch.setattr(upgrade.urllib.request, "urlopen", deny)
     monkeypatch.setattr(upgrade, "_enter_upgrade_maintenance", lambda *a: events.append("maintenance") or object())
-    monkeypatch.setattr(upgrade, "_exit_upgrade_maintenance", lambda *a: events.append("cleanup"))
+    monkeypatch.setattr(
+        upgrade,
+        "_exit_upgrade_maintenance",
+        lambda *a: events.append("cleanup") or {"cron_restored": True, "scheduler_resumed": True},
+    )
     monkeypatch.setattr(upgrade, "_pre_upgrade_permissions_check", lambda *a: events.append("permissions"))
     monkeypatch.setattr(upgrade, "revert_mautic713_import_tag_patch", lambda *a: events.append("revert") or {"status": "clean"})
+    # These flow tests exercise upgrade ordering and callbacks.  Terminal
+    # evidence acceptance is covered by the dedicated outbox/receipt tests;
+    # model the MCC ACK here so the fixture does not perform network I/O.
+    monkeypatch.setattr(upgrade, "_report_upgrade_patch_evidence", lambda *a, **kw: True)
 
     def install(*args):
         events.append("install")

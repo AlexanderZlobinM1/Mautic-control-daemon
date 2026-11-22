@@ -102,6 +102,22 @@ gates должны совпасть, каждый оставшийся vulnerabl
 records и canonical plan binding, чтобы evidence-проверка могла отличить
 допустимое перекрытие от `patch_fixed_gate_failed`.
 
+Для Mautic-upgrade terminal evidence является отдельным неизменяемым
+сообщением, а не побочным выводом команды обновления. MCD сначала сохраняет
+точный запрос evidence в локальной FIFO-очереди с ключом
+`instance_uid + run_id + plan_sha256`, затем отправляет его в MCC. Временная
+ошибка транспорта или отложенный ACK оставляет тот же запрос в очереди и
+повторяется heartbeat-циклом; новый upgrade и новый plan при этом не
+создаются. Несовпадение identity, версии или SHA immutable plan блокирует
+запись без повтора.
+
+Перед terminal `success` MCD завершает обновление maintenance guard и только
+после фактического восстановления cron и scheduler добавляет в receipt
+`source_version`, `target_version`, `run_id`, `plan_sha256`, полную v3
+`evidence_identity` и два флага `maintenance_guard`. Terminal `success` и
+`rc=0` разрешены только после ответа MCC `status=accepted`; stdout-marker
+является диагностическим представлением того же receipt и не заменяет ACK.
+
 Разрешение Mautic application root для Composer split-layout проверяет сначала
 project root с `composer.json` и `bin/console`, затем `docroot/` или `public/` с
 валидированными `app/` и `plugins/`. Если в project root остался только

@@ -56,6 +56,10 @@ class MauticPatchResolutionError(RuntimeError):
     """The MCC catalog could not safely resolve or record a patch operation."""
 
 
+class MauticPatchEvidencePending(MauticPatchResolutionError):
+    """MCC accepted the request for later processing but has not ACKed it."""
+
+
 def _contract() -> dict[str, Any]:
     path = importlib.resources.files("mcd_agent").joinpath(
         "contracts/mautic-patch-resolution-v1.json"
@@ -591,7 +595,11 @@ def report_evidence(
     if str(host_id or "").strip():
         payload["host_id"] = _resolved_host_id(host_id)
     result = _post_json(config, "/agent/mautic-patches/evidence", payload)
-    if result.get("schema") != EVIDENCE_ACCEPTED_SCHEMA or result.get("status") != "accepted":
+    if result.get("schema") != EVIDENCE_ACCEPTED_SCHEMA:
+        raise MauticPatchResolutionError("mcc_patch_evidence_response_schema_invalid")
+    if result.get("status") in {"pending", "queued"}:
+        raise MauticPatchEvidencePending("mcc_patch_evidence_pending")
+    if result.get("status") != "accepted":
         raise MauticPatchResolutionError("mcc_patch_evidence_not_accepted")
     if not str(result.get("evidence_id", "") or "").strip():
         raise MauticPatchResolutionError("mcc_patch_evidence_id_missing")

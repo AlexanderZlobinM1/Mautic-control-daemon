@@ -64,7 +64,11 @@ def wire(root, plan, monkeypatch, *, drift=False):
     monkeypatch.setattr(upgrade, "_read_current_version", lambda *a: "7.2.1" if installed[0] else "7.2.0")
     monkeypatch.setattr(upgrade, "_resolve_composer_project_root", lambda root: root)
     monkeypatch.setattr(upgrade, "_enter_upgrade_maintenance", lambda *a: events.append("maintenance") or object())
-    monkeypatch.setattr(upgrade, "_exit_upgrade_maintenance", lambda *a: events.append("resume"))
+    monkeypatch.setattr(
+        upgrade,
+        "_exit_upgrade_maintenance",
+        lambda *a: events.append("resume") or {"cron_restored": True, "scheduler_resumed": True},
+    )
     for name in ("_verify_assetmapper_upgrade", "ensure_mailer_packages_for_sender_config",
                  "ensure_amazon_mailer_for_bundles", "_post_upgrade_verify"):
         monkeypatch.setattr(upgrade, name, lambda *a, **kw: None)
@@ -139,6 +143,16 @@ def test_v3_upgrade_failure_evidence_is_submitted_against_the_issued_plan(capsys
     assert evidence["selected"] == [plan["patches"][0]["id"]]
     assert [row["id"] for row in evidence["records"]] == evidence["selected"]
     assert "MCD_PATCH_PLAN_EVIDENCE=" in capsys.readouterr().out
+
+
+def test_upgrade_does_not_return_success_when_terminal_evidence_is_not_acked(tmp_path, monkeypatch):
+    plan = six_record_plan(tmp_path, "zip")
+    args, events = wire(tmp_path, plan, monkeypatch)
+    args["config"].mcc_url = "https://mcc.example"
+    monkeypatch.setattr(upgrade, "_report_upgrade_patch_evidence", lambda *a, **kw: False)
+    with pytest.raises(RuntimeError, match="terminal success is withheld"):
+        upgrade.run_upgrade_apply(**args)
+    assert "resume" in events
 
 
 @pytest.mark.parametrize("mode", ["zip", "composer"])
