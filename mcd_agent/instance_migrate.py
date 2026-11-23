@@ -2100,11 +2100,29 @@ def _target_db_blocker_ids(db_name: str) -> list[int]:
     return blocker_ids
 
 
-def _cleanup_target_database(db_name: str) -> None:
-    """Drop only the prepared target DB, retrying after scoped blockers are killed."""
+def _drop_target_database_user(db_user: str) -> list[str]:
+    errors: list[str] = []
+    for host in ("localhost", "127.0.0.1"):
+        try:
+            _mysql_exec(
+                "DROP USER IF EXISTS " + _quote_sql(db_user) + f"@'{host}'",
+                timeout_sec=_TARGET_DB_BLOCKER_KILL_TIMEOUT_SEC,
+            )
+        except Exception as exc:
+            errors.append(f"drop_user_{host}={_safe_runtime_detail(exc)}")
+    return errors
+
+
+def _cleanup_target_database(db_name: str, *, db_user: str | None = None) -> None:
+    """Drop only the prepared target DB/user, retrying after scoped blockers."""
     drop_sql = f"DROP DATABASE IF EXISTS {_quote_ident(db_name)}"
+    user_errors: list[str] = []
     try:
         _mysql_exec(drop_sql, timeout_sec=_TARGET_DB_CLEANUP_TIMEOUT_SEC)
+        if db_user:
+            user_errors = _drop_target_database_user(db_user)
+            if user_errors:
+                raise RuntimeError("; ".join(user_errors))
         return
     except Exception as initial_error:
         details = [f"initial={_safe_runtime_detail(initial_error)}"]
@@ -2121,14 +2139,31 @@ def _cleanup_target_database(db_name: str) -> None:
         except Exception as blocker_error:
             details.append(f"kill_{blocker_id}={_safe_runtime_detail(blocker_error)}")
 
+    if db_user:
+        user_errors = _drop_target_database_user(db_user)
+        details.extend(user_errors)
+
     try:
         _mysql_exec(drop_sql, timeout_sec=_TARGET_DB_CLEANUP_TIMEOUT_SEC)
+        if db_user:
+            user_errors = _drop_target_database_user(db_user)
+            if user_errors:
+                details.extend(user_errors)
+                raise RuntimeError("target database user cleanup failed")
+        if user_errors:
+            raise RuntimeError("target database user cleanup failed")
         return
     except Exception as retry_error:
         details.append(f"retry={_safe_runtime_detail(retry_error)}")
         if blocker_ids:
             details.append("blockers=" + ",".join(str(value) for value in blocker_ids))
         raise RuntimeError("target database cleanup failed: " + "; ".join(details)) from retry_error
+
+
+def _drain_gzip_stream(gz: Any) -> None:
+    """Consume the remaining relay without retaining SQL or forwarding it."""
+    while gz.read(_DB_STREAM_COPY_BUFFER_BYTES):
+        pass
 
 
 @stable_source_operation
@@ -2318,14 +2353,39 @@ def import_target_db_stream(*, target_db_name: str, target_db_user: str, target_
                     except Exception:
                         pass
                     proc.stdin = None
+                try:
+                    consumer_rc = proc.poll()
+                except (AttributeError, TypeError):
+                    consumer_rc = getattr(proc, "returncode", None)
                 out_b, err_b = _collect_stream_process_output(proc, terminate=True)
                 detail = _safe_runtime_detail(((out_b or b"") + (err_b or b"")).decode("utf-8", errors="replace"))
                 if detail:
                     primary = _safe_runtime_detail(exc)
                     if primary.startswith("source database stream failed"):
-                        raise RuntimeError(primary + "; target mysql consumer stderr: " + detail)
-                    raise RuntimeError("target mysql consumer failed: " + detail)
-                raise
+                        consumer_error = RuntimeError(
+                            primary
+                            + f"; target mysql consumer rc={consumer_rc}: stderr={detail}"
+                        )
+                    else:
+                        consumer_error = RuntimeError(
+                            f"target mysql consumer failed rc={consumer_rc}: {detail}"
+                        )
+                else:
+                    consumer_error = RuntimeError(
+                        f"target mysql consumer failed rc={consumer_rc}: {_safe_runtime_detail(exc)}"
+                    )
+                # Keep the source producer reading until it can emit its own
+                # terminal marker.  Closing the relay immediately after a
+                # target SQL error makes the source report a secondary 2013.
+                try:
+                    _drain_gzip_stream(gz)
+                except Exception as drain_error:
+                    raise RuntimeError(
+                        _safe_runtime_detail(consumer_error)
+                        + "; relay drain failed: "
+                        + _safe_runtime_detail(drain_error)
+                    ) from consumer_error
+                raise consumer_error from exc
 
         if proc.returncode != 0:
             out = ((out_b or b"") + (err_b or b"")).decode("utf-8", errors="replace").strip()
@@ -2335,7 +2395,7 @@ def import_target_db_stream(*, target_db_name: str, target_db_user: str, target_
         cleanup_error: Exception | None = None
         if target_prepare_started:
             try:
-                _cleanup_target_database(target_db.name)
+                _cleanup_target_database(target_db.name, db_user=target_db.user)
             except Exception as cleanup_exc:
                 cleanup_error = cleanup_exc
         if isinstance(exc, (KeyboardInterrupt, SystemExit)):

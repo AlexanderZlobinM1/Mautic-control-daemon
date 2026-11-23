@@ -1693,7 +1693,9 @@ class InstanceMigrateProbeTests(unittest.TestCase):
 
         prepare.assert_called_once()
         popen.assert_called_once()
-        mysql_exec.assert_called_once_with("DROP DATABASE IF EXISTS `baza_target`", timeout_sec=20)
+        mysql_exec.assert_any_call("DROP DATABASE IF EXISTS `baza_target`", timeout_sec=20)
+        mysql_exec.assert_any_call("DROP USER IF EXISTS 'korisnik_target'@'localhost'", timeout_sec=3)
+        mysql_exec.assert_any_call("DROP USER IF EXISTS 'korisnik_target'@'127.0.0.1'", timeout_sec=3)
 
     def test_target_db_preserves_source_stream_error_and_cleans_partial_db(self) -> None:
         source = io.BytesIO()
@@ -1739,7 +1741,9 @@ class InstanceMigrateProbeTests(unittest.TestCase):
                     input_stream=source,
                 )
 
-        mysql_exec.assert_called_once_with("DROP DATABASE IF EXISTS `baza_target`", timeout_sec=20)
+        mysql_exec.assert_any_call("DROP DATABASE IF EXISTS `baza_target`", timeout_sec=20)
+        mysql_exec.assert_any_call("DROP USER IF EXISTS 'korisnik_target'@'localhost'", timeout_sec=3)
+        mysql_exec.assert_any_call("DROP USER IF EXISTS 'korisnik_target'@'127.0.0.1'", timeout_sec=3)
 
     def test_target_db_cleanup_retries_after_scoped_blockers(self) -> None:
         calls: list[tuple[str, int]] = []
@@ -1923,7 +1927,163 @@ class InstanceMigrateProbeTests(unittest.TestCase):
                     input_stream=source,
                 )
 
-        mysql_exec.assert_called_once_with("DROP DATABASE IF EXISTS `baza_target`", timeout_sec=20)
+        mysql_exec.assert_any_call("DROP DATABASE IF EXISTS `baza_target`", timeout_sec=20)
+        mysql_exec.assert_any_call("DROP USER IF EXISTS 'korisnik_target'@'localhost'", timeout_sec=3)
+        mysql_exec.assert_any_call("DROP USER IF EXISTS 'korisnik_target'@'127.0.0.1'", timeout_sec=3)
+
+    def test_target_db_drains_relay_after_consumer_failure(self) -> None:
+        source = _complete_db_stream(b"INSERT INTO `ss_contacts` VALUES (1);\n" * 50000)
+
+        class FailingStdin(io.BytesIO):
+            def write(self, _value):
+                raise BrokenPipeError("mysql stdin closed")
+
+            def close(self) -> None:
+                pass
+
+        class FakeProc:
+            def __init__(self) -> None:
+                self.stdin = FailingStdin()
+                self.returncode = 1
+
+            def communicate(self):
+                return b"", b"ERROR 1064 (42000): target SQL rejected\n"
+
+            def kill(self):
+                self.returncode = -9
+
+        proc = FakeProc()
+        with (
+            patch.object(instance_migrate, "_prepare_target_db", return_value=None),
+            patch.object(instance_migrate, "_mysql_admin_base", return_value=["mysql"]),
+            patch.object(instance_migrate.subprocess, "Popen", return_value=proc),
+            patch.object(instance_migrate, "_mysql_exec"),
+            patch.object(instance_migrate, "_drain_gzip_stream", wraps=instance_migrate._drain_gzip_stream) as drain,
+        ):
+            with self.assertRaisesRegex(RuntimeError, r"target mysql consumer failed.*ERROR 1064"):
+                instance_migrate.import_target_db_stream(
+                    target_db_name="baza_target",
+                    target_db_user="korisnik_target",
+                    target_db_password="target_password",
+                    input_stream=source,
+                )
+
+        drain.assert_called_once()
+
+    def test_source_to_target_stream_completes_with_mysql_shape(self) -> None:
+        source_sql = b"CREATE TABLE `ss_contacts` (`id` int);\nINSERT INTO `ss_contacts` VALUES (1);\n"
+        source_output = io.BytesIO()
+
+        class FakeInventory:
+            def __init__(self, _path: str) -> None:
+                pass
+
+            def list_instances(self):
+                return [
+                    MauticInstall(
+                        instance_uid="uid-e2e",
+                        name="e2e",
+                        root="/var/www/e2e",
+                        console_path="/var/www/e2e/bin/console",
+                    )
+                ]
+
+        class SourceProc:
+            def __init__(self) -> None:
+                self.stdout = io.BytesIO(source_sql)
+
+            def wait(self):
+                return 0
+
+        source_db = DBConfig(
+            host="localhost",
+            port=3306,
+            name="baza_source",
+            user="source_user",
+            password="source_password",
+            table_prefix="ss_",
+        )
+        cfg = type("Cfg", (), {"state_db_path": "/tmp/mcd-state.sqlite"})()
+        with (
+            patch.object(instance_migrate, "InstanceInventory", FakeInventory),
+            patch.object(instance_migrate, "ensure_seeded", return_value=None),
+            patch.object(instance_migrate, "_db_from_local_php", return_value=source_db),
+            patch.object(instance_migrate.shutil, "which", return_value="/usr/bin/mariadb-dump"),
+            patch.object(instance_migrate, "_dump_supports_network_timeout", return_value=False),
+            patch.object(instance_migrate.subprocess, "Popen", return_value=SourceProc()),
+        ):
+            self.assertEqual(instance_migrate.stream_source_db(cfg, selector="/var/www/e2e", output=source_output), 0)
+
+        class CapturingStdin(io.BytesIO):
+            def close(self) -> None:
+                pass
+
+        captured = CapturingStdin()
+
+        class TargetProc:
+            def __init__(self) -> None:
+                self.stdin = captured
+                self.returncode = 0
+
+            def communicate(self):
+                return b"", b""
+
+            def kill(self):
+                self.returncode = -9
+
+        with (
+            patch.object(instance_migrate, "_prepare_target_db", return_value=None),
+            patch.object(instance_migrate, "_mysql_admin_base", return_value=["mysql"]),
+            patch.object(instance_migrate.subprocess, "Popen", return_value=TargetProc()),
+        ):
+            result = instance_migrate.import_target_db_stream(
+                target_db_name="baza_target",
+                target_db_user="korisnik_target",
+                target_db_password="target_password",
+                input_stream=io.BytesIO(source_output.getvalue()),
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertIn(source_sql.decode("utf-8"), captured.getvalue().decode("utf-8"))
+
+    def test_target_db_stream_completes_with_slow_consumer_backpressure(self) -> None:
+        source = _complete_db_stream(b"INSERT INTO `ss_contacts` VALUES (1);\n" * 50000)
+
+        class SlowStdin(io.BytesIO):
+            def close(self) -> None:
+                pass
+
+            def write(self, value):
+                time.sleep(0.00005)
+                return super().write(value)
+
+        captured = SlowStdin()
+
+        class FakeProc:
+            def __init__(self) -> None:
+                self.stdin = captured
+                self.returncode = 0
+
+            def communicate(self):
+                return b"", b""
+
+            def kill(self):
+                self.returncode = -9
+
+        with (
+            patch.object(instance_migrate, "_prepare_target_db", return_value=None),
+            patch.object(instance_migrate, "_mysql_admin_base", return_value=["mysql"]),
+            patch.object(instance_migrate.subprocess, "Popen", return_value=FakeProc()),
+        ):
+            result = instance_migrate.import_target_db_stream(
+                target_db_name="baza_target",
+                target_db_user="korisnik_target",
+                target_db_password="target_password",
+                input_stream=source,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertGreater(len(captured.getvalue()), 1_000_000)
 
     def test_target_db_stream_rewrites_mysql8_date_format_generated_columns(self) -> None:
         sql = (
