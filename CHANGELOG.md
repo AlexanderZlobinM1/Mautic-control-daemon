@@ -1,3 +1,10 @@
+## 1.6.135 - 2026-11-23
+
+- Make the per-instance filesystem/database size cache refresh interval
+  operator-configurable via `runtime.instance_size_refresh_interval_sec`.
+  The default remains 86400 seconds and the safe minimum is 60 seconds, so
+  changing the interval no longer requires rebuilding MCD.
+
 ## 1.6.134 - 2026-11-23
 
 - Cache per-instance filesystem and database size observations for 24 hours.
