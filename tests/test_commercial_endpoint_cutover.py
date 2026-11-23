@@ -37,7 +37,7 @@ def state_at(tmp_path: Path, *, endpoint: str = OLD) -> CommercialState:
     snapshot = {
         "schema": "portal-mcd-inventory-snapshot-v1",
         "snapshot_revision": "2",
-        "host": {"mcd_version": "1.7.0.dev0", "profile": "passive"},
+        "host": {"mcd_version": "1.7.0", "profile": "passive"},
         "instances": [
             {
                 "installation_id": INSTALLATION,
@@ -372,9 +372,9 @@ def test_dev46_rev6_projection_parity_produces_portal_accepted_hash():
     )
     raw = path.read_bytes()
     fixture = json.loads(raw)
-    assert hashlib.sha256(raw).hexdigest() == "868fb8a8678b873aed9677dee2a6634c0ce89f72fa634eee26c53f0972624c9b"
+    assert hashlib.sha256(raw).hexdigest() == "ea9b31a51398e42c171eb9523aca4e251e57e15857acf539a0163b118437a387"
     assert portal_inventory_semantic_hash(fixture) == (
-        "sha256:8236335f85c8f0ccb85af057f46cf5b1833fdba0e68f4ebbfd9b72f9f3027083"
+        "sha256:598fd8b8f00e947c7eeb65fffe599d1193d81fa7cf93b319d2bf68902a4e17c0"
     )
 
 
