@@ -213,8 +213,10 @@ Preset rules:
 
 The per-instance filesystem/database size cache is controlled by
 `[runtime].instance_size_refresh_interval_sec` (seconds, minimum `60`, default
-`86400`). The value is read from the operator configuration at daemon start;
-changing it does not require rebuilding the MCD package.
+`86400`). The sequential `du` measurement timeout is controlled by
+`[runtime].instance_size_du_timeout_sec` (seconds, minimum `1`, default `45`).
+Both values are read from the operator configuration at daemon start; changing
+them does not require rebuilding the MCD package.
 
 Scheduler host/instance capacity presets are literal MCD values: `passive=0/0`,
 `tiny=1/1`, `mini=4/1`, `midi=4/2`, `maxi=8/4`, `hiload=12/6`,

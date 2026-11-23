@@ -42,7 +42,7 @@ from mcd_agent.docker_image_inventory import capability as docker_image_inventor
 from mcd_agent.docker_image_inventory import collect_signed_inventory
 from mcd_agent.commercial_portal import _host_fingerprint
 from mcd_agent.install_readiness import collect_mautic_install_readiness
-from mcd_agent.instance_size import INSTANCE_SIZE_REFRESH_SEC, InstanceSizeCache
+from mcd_agent.instance_size import DU_TIMEOUT_SEC, INSTANCE_SIZE_REFRESH_SEC, InstanceSizeCache
 from mcd_agent.install_type import detect_install_type, is_complete_plugin_bundle, plugin_dir_candidates
 from mcd_agent.instance_identity import (
     INSTANCE_STATE_SCHEMA,
@@ -2402,6 +2402,7 @@ class MCCStatePusher:
         self._instance_size_cache = InstanceSizeCache(
             runtime_store,
             refresh_after_sec=getattr(self.cfg, "instance_size_refresh_interval_sec", INSTANCE_SIZE_REFRESH_SEC),
+            du_timeout_sec=getattr(self.cfg, "instance_size_du_timeout_sec", DU_TIMEOUT_SEC),
         )
 
     def enabled(self) -> bool:

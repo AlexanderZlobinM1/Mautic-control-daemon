@@ -99,7 +99,7 @@ def _db_size_bytes(inst: MauticInstall) -> tuple[int | None, str | None]:
         return None, str(exc)[:240]
 
 
-def _subdir_breakdown(root: Path) -> dict[str, int]:
+def _subdir_breakdown(root: Path, *, timeout_sec: int = DU_TIMEOUT_SEC) -> dict[str, int]:
     candidates = {
         "media": [root / "media", root / "app" / "media"],
         "var": [root / "var"],
@@ -118,7 +118,7 @@ def _subdir_breakdown(root: Path) -> dict[str, int]:
             if resolved in seen or not path.exists():
                 continue
             seen.add(resolved)
-            value, _err = _du_bytes(path, timeout_sec=15)
+            value, _err = _du_bytes(path, timeout_sec=timeout_sec)
             if value is not None:
                 total += value
         if total > 0:
@@ -135,9 +135,16 @@ class InstanceSizeCache:
     including when a second MCD command tries to publish state in parallel.
     """
 
-    def __init__(self, runtime_store: Any | None = None, *, refresh_after_sec: int = INSTANCE_SIZE_REFRESH_SEC) -> None:
+    def __init__(
+        self,
+        runtime_store: Any | None = None,
+        *,
+        refresh_after_sec: int = INSTANCE_SIZE_REFRESH_SEC,
+        du_timeout_sec: int = DU_TIMEOUT_SEC,
+    ) -> None:
         self.runtime_store = runtime_store
         self.refresh_after_sec = max(1, int(refresh_after_sec or INSTANCE_SIZE_REFRESH_SEC))
+        self.du_timeout_sec = max(1, int(du_timeout_sec or DU_TIMEOUT_SEC))
         self._rows: dict[str, dict[str, Any]] = {}
         self._loaded = False
 
@@ -228,7 +235,7 @@ class InstanceSizeCache:
     def _measure(self, inst: MauticInstall, previous: dict[str, Any] | None, now_ts: float) -> dict[str, Any]:
         root = Path(str(inst.root or "").strip() or "/")
         errors: list[str] = []
-        root_bytes, root_error = _du_bytes(root)
+        root_bytes, root_error = _du_bytes(root, timeout_sec=self.du_timeout_sec)
         if root_error:
             errors.append(f"root:{root_error}")
         db_bytes, db_error = _db_size_bytes(inst)
@@ -263,7 +270,7 @@ class InstanceSizeCache:
             "db_bytes": db_bytes,
             "total_bytes": total if total > 0 else None,
             "breakdown": (
-                _subdir_breakdown(root)
+                _subdir_breakdown(root, timeout_sec=self.du_timeout_sec)
                 if root_bytes is not None and root_error is None
                 else dict(previous.get("breakdown") or {}) if previous else {}
             ),
@@ -303,5 +310,6 @@ def collect_instance_sizes(
     *,
     runtime_store: Any | None = None,
     now_ts: float | None = None,
+    du_timeout_sec: int = DU_TIMEOUT_SEC,
 ) -> list[dict[str, Any]]:
-    return InstanceSizeCache(runtime_store).collect(installs, now_ts=now_ts)
+    return InstanceSizeCache(runtime_store, du_timeout_sec=du_timeout_sec).collect(installs, now_ts=now_ts)

@@ -1,3 +1,9 @@
+## 1.6.140 - 2026-11-23
+
+- Make the sequential instance-size `du` timeout operator-configurable via
+  `runtime.instance_size_du_timeout_sec` so slow measurements can be adjusted
+  without rebuilding MCD. The default remains 45 seconds.
+
 ## 1.6.139 - 2026-11-23
 
 - Include the immutable patch-plan binding in every external Composer executor
