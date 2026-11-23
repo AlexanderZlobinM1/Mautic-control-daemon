@@ -5,6 +5,7 @@ import io
 import json
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 from importlib import resources
@@ -1510,6 +1511,7 @@ class InstanceMigrateProbeTests(unittest.TestCase):
             ),
             patch.object(instance_migrate.subprocess, "Popen", side_effect=fake_popen),
             patch.object(instance_migrate, "_dump_supports_network_timeout", return_value=True),
+            patch.object(instance_migrate, "_dump_supports_option", return_value=True),
         ):
             output = io.BytesIO()
             instance_migrate.stream_source_db(cfg, selector="/var/www/example", output=output)
@@ -1520,6 +1522,10 @@ class InstanceMigrateProbeTests(unittest.TestCase):
         self.assertIn("--triggers", argv)
         self.assertIn("--max-allowed-packet=1073741824", argv)
         self.assertIn("--network-timeout", argv)
+        self.assertIn(
+            "--init-command=SET SESSION net_write_timeout=31536000, net_read_timeout=31536000",
+            argv,
+        )
         self.assertNotIn("--events", argv)
 
     def test_source_db_stream_emits_complete_large_table_only_after_dump_success(self) -> None:
@@ -1565,7 +1571,12 @@ class InstanceMigrateProbeTests(unittest.TestCase):
             patch.object(instance_migrate.subprocess, "Popen", return_value=FakeProc()),
             patch.object(instance_migrate.secrets, "token_hex", return_value="b" * 32),
         ):
-            output = io.BytesIO()
+            class SlowOutput(io.BytesIO):
+                def write(self, value):
+                    time.sleep(0.001)
+                    return super().write(value)
+
+            output = SlowOutput()
             result = instance_migrate.stream_source_db(cfg, selector="/var/www/large", output=output)
 
         with gzip.GzipFile(fileobj=io.BytesIO(output.getvalue()), mode="rb") as gz:
@@ -1778,6 +1789,44 @@ class InstanceMigrateProbeTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertTrue(source.read_after_popen)
+
+    def test_target_db_surfaces_mysql_consumer_error_and_cleans_partial_db(self) -> None:
+        source = _complete_db_stream(b"CREATE TABLE `ss_contacts` (`id` int);\n")
+
+        class FailingStdin(io.BytesIO):
+            def write(self, _value):
+                raise BrokenPipeError("mysql stdin closed")
+
+            def close(self) -> None:
+                pass
+
+        class FakeProc:
+            def __init__(self) -> None:
+                self.stdin = FailingStdin()
+                self.returncode = 1
+
+            def communicate(self):
+                return b"", b"ERROR 1146 (42S02): target consumer failed\n"
+
+            def kill(self):
+                self.returncode = -9
+
+        proc = FakeProc()
+        with (
+            patch.object(instance_migrate, "_prepare_target_db", return_value=None),
+            patch.object(instance_migrate, "_mysql_admin_base", return_value=["mysql"]),
+            patch.object(instance_migrate.subprocess, "Popen", return_value=proc),
+            patch.object(instance_migrate, "_mysql_exec") as mysql_exec,
+        ):
+            with self.assertRaisesRegex(RuntimeError, r"target mysql consumer failed.*ERROR 1146"):
+                instance_migrate.import_target_db_stream(
+                    target_db_name="baza_target",
+                    target_db_user="korisnik_target",
+                    target_db_password="target_password",
+                    input_stream=source,
+                )
+
+        mysql_exec.assert_called_once_with("DROP DATABASE IF EXISTS `baza_target`")
 
     def test_target_db_stream_rewrites_mysql8_date_format_generated_columns(self) -> None:
         sql = (

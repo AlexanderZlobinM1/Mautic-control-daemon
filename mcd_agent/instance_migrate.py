@@ -1901,6 +1901,11 @@ def receive_target_files(
 
 def _dump_supports_network_timeout(dump_bin: str) -> bool:
     """Return whether this dump client exposes MySQL's large-table timeout switch."""
+    return _dump_supports_option(dump_bin, "--network-timeout")
+
+
+def _dump_supports_option(dump_bin: str, option: str) -> bool:
+    """Return whether a dump client exposes a named client option."""
     try:
         proc = subprocess.run(
             [dump_bin, "--help"],
@@ -1912,7 +1917,7 @@ def _dump_supports_network_timeout(dump_bin: str) -> bool:
     except Exception:
         return False
     help_text = (proc.stdout or b"").decode("utf-8", errors="replace")
-    return "--network-timeout" in help_text
+    return str(option) in help_text
 
 
 def _db_stream_marker(phase: str, stream_id: str) -> bytes:
@@ -2041,6 +2046,14 @@ def stream_source_db(config: AgentConfig, *, selector: str | None, output: Any) 
         ]
         if _dump_supports_network_timeout(dump_bin):
             dump_argv.append("--network-timeout")
+        if _dump_supports_option(dump_bin, "--init-command"):
+            # A direct relay is intentionally backpressured by the target.
+            # Keep the source MariaDB session alive while a slow target
+            # consumer catches up; this is session-scoped and does not alter
+            # the source server or other clients.
+            dump_argv.append(
+                "--init-command=SET SESSION net_write_timeout=31536000, net_read_timeout=31536000"
+            )
         dump_argv.append(source_db.name)
 
         with stderr_path.open("wb") as stderr_file:
@@ -2174,9 +2187,12 @@ def import_target_db_stream(*, target_db_name: str, target_db_user: str, target_
                 except Exception:
                     pass
                 try:
-                    proc.communicate()
+                    out_b, err_b = proc.communicate()
                 except Exception:
-                    pass
+                    out_b, err_b = b"", b""
+                detail = _safe_runtime_detail(((out_b or b"") + (err_b or b"")).decode("utf-8", errors="replace"))
+                if detail:
+                    raise RuntimeError("target mysql consumer failed: " + detail)
                 raise
 
         if proc.returncode != 0:
