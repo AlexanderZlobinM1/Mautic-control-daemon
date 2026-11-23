@@ -13618,6 +13618,94 @@ class TaskStore:
         )
 
     @_task_store_serialized
+    def pending_manual_requests_for_type(self, task_type: str, limit: int = 64) -> list[dict[str, object]]:
+        """Return pending manual requests in host FIFO order.
+
+        Plugin jobs are host-local, but the normal instance dispatcher is
+        root-local.  A host-wide read is therefore required by the dedicated
+        plugin queue so an idle instance cannot strand an older request behind
+        the scheduler's unrelated segment/campaign pending-root projection.
+        """
+
+        task_type_value = str(task_type or "").strip()
+        if not task_type_value:
+            return []
+        lim = max(1, int(limit))
+        if self._mysql_mode:
+            table = self._mysql_tables.get("manual_requests", "")
+            if table and self._mysql_available():
+                try:
+                    placeholders, aliases = self._mysql_alias_where()
+                    return self._mysql_query(
+                        f"""
+                        SELECT *
+                        FROM `{table}`
+                        WHERE host_name IN ({placeholders})
+                          AND status='pending'
+                          AND task_type=%s
+                        ORDER BY requested_at ASC, id ASC
+                        LIMIT {lim}
+                        """,
+                        (*aliases, task_type_value),
+                    )
+                except Exception:
+                    pass
+
+        return self._sqlite_fetchall_dicts(
+            """
+            SELECT *
+            FROM manual_requests
+            WHERE status='pending' AND task_type=?
+            ORDER BY requested_at ASC, id ASC
+            LIMIT ?
+            """,
+            (task_type_value, lim),
+        )
+
+    @_task_store_serialized
+    def rebind_pending_manual_request_root(self, req_id: int, root: str) -> bool:
+        """Move one still-pending local request to its current instance root.
+
+        The durable plugin intent contains the stable bare instance UID while
+        the legacy queue row also has the root observed at enqueue time.  A
+        migrated instance can therefore leave a valid request attached to its
+        former root forever.  Rebinding is limited to ``pending`` rows and
+        never changes a launched or terminal request.
+        """
+
+        target_root = str(root or "").strip()
+        if not target_root:
+            return False
+        if self._mysql_mode:
+            table = self._mysql_tables.get("manual_requests", "")
+            if table and self._mysql_available():
+                try:
+                    placeholders, aliases = self._mysql_alias_where()
+                    _, count = self._mysql_exec(
+                        f"""
+                        UPDATE `{table}`
+                        SET root=%s
+                        WHERE id=%s AND host_name IN ({placeholders}) AND status='pending'
+                        """,
+                        (target_root, int(req_id), *aliases),
+                    )
+                    self.conn.execute(
+                        "UPDATE manual_requests SET root=? WHERE id=? AND status='pending'",
+                        (target_root, int(req_id)),
+                    )
+                    self.conn.commit()
+                    return int(count or 0) > 0
+                except Exception:
+                    pass
+
+        cur = self.conn.execute(
+            "UPDATE manual_requests SET root=? WHERE id=? AND status='pending'",
+            (target_root, int(req_id)),
+        )
+        self.conn.commit()
+        return int(cur.rowcount or 0) > 0
+
+    @_task_store_serialized
     def get_manual_request_status(self, req_id: int) -> str | None:
         return self.get_manual_request_status_for_host(req_id, None)
 
@@ -18821,8 +18909,16 @@ def _dispatch_manual_requests_for_root(
     mautic_major: int = 0,
     segment_super_priority_ids: set[int] | None = None,
     segment_priority_ids: set[int] | None = None,
+    include_plugins: bool = True,
+    plugin_only: bool = False,
 ) -> None:
     pending = store.pending_manual_requests(root, limit=64)
+    if not include_plugins or plugin_only:
+        pending = [
+            row
+            for row in pending
+            if (str(row.get("task_type") or "").strip().lower() == "plugins_apply") == bool(plugin_only)
+        ]
     if not pending:
         return
     passive_profile = str(getattr(config, "profile_name", "") or "").strip().lower() == "passive"
@@ -19030,6 +19126,103 @@ def _dispatch_manual_requests_for_root(
             task_type,
             entity_id,
         )
+
+
+def _plugin_request_instance_uid(row: Mapping[str, object]) -> str:
+    """Extract the stable bare instance UID from a queued plugin intent."""
+
+    args = [value for value in str(row.get("command_str") or "").split(_CMD_SEP) if value]
+    try:
+        index = args.index("--instance-uid")
+        value = str(args[index + 1] or "").strip()
+    except (ValueError, IndexError):
+        return ""
+    if not value or "@" in value:
+        return ""
+    return value
+
+
+def _dispatch_plugin_manual_requests(
+    *,
+    config: AgentConfig,
+    store: TaskStore,
+    installs: Iterable[object],
+    running: dict[str, RunningTask],
+    popens: dict[str, subprocess.Popen[bytes]],
+) -> int:
+    """Dispatch the oldest durable plugin request independently of planning.
+
+    The ordinary scheduler's ``dispatch_installs`` list is intentionally
+    derived from segment/campaign work.  Plugin management is an explicit
+    durable lane and must not depend on that projection being non-empty.  One
+    host-wide oldest request is selected per tick, preserving the existing
+    host FIFO and admission fence while allowing idle instances to progress.
+    """
+
+    current_installs = [
+        inst
+        for inst in installs
+        if str(getattr(inst, "root", "") or "").strip()
+    ]
+    if not current_installs:
+        return 0
+    by_uid = {
+        str(getattr(inst, "instance_uid", "") or "").strip(): inst
+        for inst in current_installs
+        if str(getattr(inst, "instance_uid", "") or "").strip()
+    }
+    by_root = {
+        str(getattr(inst, "root", "") or "").strip(): inst
+        for inst in current_installs
+    }
+    pending = store.pending_manual_requests_for_type("plugins_apply", limit=64)
+    for row in pending:
+        req_id = int(row.get("id") or 0)
+        if req_id <= 0:
+            continue
+        instance_uid = _plugin_request_instance_uid(row)
+        inst = by_uid.get(instance_uid)
+        if inst is None:
+            # Do not invent a terminal result for a missing inventory entry;
+            # the request remains durable until the instance is observed
+            # again.  This also keeps deletion/migration ownership explicit.
+            continue
+        root = str(getattr(inst, "root", "") or "").strip()
+        if not root:
+            continue
+        stored_root = str(row.get("root") or "").strip()
+        if stored_root != root:
+            # Instance roots are movable. Rebind only the still-pending row;
+            # launched work keeps its original root and supervisor lease.
+            if not store.rebind_pending_manual_request_root(req_id, root):
+                # A concurrent dispatcher may have launched or terminalized
+                # the row after the host-wide snapshot. Never launch against
+                # a root association that was not durably updated.
+                continue
+            row = {**row, "root": root}
+        if root not in by_root:
+            continue
+        rings = {name: deque() for name in (
+            "seg_sql_ring",
+            "seg_prio_ring",
+            "seg_reg_ring",
+            "trg_prio_ring",
+            "trg_reg_ring",
+            "reb_prio_ring",
+            "reb_reg_ring",
+        )}
+        _dispatch_manual_requests_for_root(
+            config=config,
+            store=store,
+            running=running,
+            popens=popens,
+            root=root,
+            **rings,
+            include_plugins=True,
+            plugin_only=True,
+        )
+        return 1
+    return 0
 
 
 def _refresh_instance_db_maps(
@@ -22196,6 +22389,43 @@ def run_loop(
             else:
                 time.sleep(1.0)
 
+    def _plugin_manual_job_worker() -> None:
+        """Run the explicit plugin queue without waiting for scheduler work."""
+
+        last_error_log = 0.0
+        while _test_stop_event is None or not _test_stop_event.is_set():
+            try:
+                pause_path = str(getattr(config, "scheduler_pause_flag_path", "") or "").strip()
+                if pause_path and Path(pause_path).exists():
+                    pass
+                else:
+                    backup_running = False
+                    if config.backup_enabled:
+                        backup_running = bool(
+                            backup_thread is not None and backup_thread.is_alive()
+                        ) or backup_lock_active(config)
+                    backup_paused, _backup_reason = _backup_dispatch_pause_state(
+                        config,
+                        backup_running=backup_running,
+                    )
+                    if not backup_paused:
+                        _dispatch_plugin_manual_requests(
+                            config=config,
+                            store=store,
+                            installs=inventory.list_instances(),
+                            running=running,
+                            popens=popens,
+                        )
+            except Exception as exc:
+                now_error = time.time()
+                if now_error - last_error_log >= 30.0:
+                    last_error_log = now_error
+                    logging.warning("plugin manual job dispatch failed: %s", exc)
+            if _test_stop_event is not None:
+                _test_stop_event.wait(1.0)
+            else:
+                time.sleep(1.0)
+
     def _state_push_worker() -> None:
         """Publish MCC state/signals without waiting for scheduler planning."""
         monitor_error = ""
@@ -22254,6 +22484,11 @@ def run_loop(
             name="mcd-host-manual-jobs",
             daemon=True,
         ).start()
+        threading.Thread(
+            target=_plugin_manual_job_worker,
+            name="mcd-plugin-manual-jobs",
+            daemon=True,
+        ).start()
         state_push_thread = threading.Thread(
             target=_state_push_worker,
             name="mcd-independent-state-push",
@@ -22264,6 +22499,13 @@ def run_loop(
         _dispatch_host_manual_requests(
             config=config,
             store=store,
+            running=running,
+            popens=popens,
+        )
+        _dispatch_plugin_manual_requests(
+            config=config,
+            store=store,
+            installs=inventory.list_instances(),
             running=running,
             popens=popens,
         )
@@ -23659,6 +23901,7 @@ def run_loop(
                         reb_prio_ring=campaign_rebuild_prio_rings.setdefault(root, deque()),
                         reb_reg_ring=campaign_rebuild_reg_rings.setdefault(root, deque()),
                         monitor_cycle_done=monitor_cycle_done,
+                        include_plugins=False,
                     )
                 if now >= next_passive_notice_at:
                     logging.info(
@@ -25236,6 +25479,7 @@ def run_loop(
                     reb_prio_ring=campaign_rebuild_prio_rings.setdefault(root, deque()),
                     reb_reg_ring=campaign_rebuild_reg_rings.setdefault(root, deque()),
                     monitor_cycle_done=monitor_cycle_done,
+                    include_plugins=False,
                 )
             if now >= next_passive_notice_at:
                 logging.info(
@@ -26169,6 +26413,7 @@ def run_loop(
                 mautic_major=int(getattr(inst, "mautic_major", 0) or 0),
                 segment_super_priority_ids=segment_super_priority_for_inst,
                 segment_priority_ids=segment_priority_for_inst,
+                include_plugins=False,
             )
 
             if not (cluster_cron_allowed or cluster_import_allowed or cluster_cache_allowed):

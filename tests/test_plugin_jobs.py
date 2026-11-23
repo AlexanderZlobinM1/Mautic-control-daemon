@@ -339,3 +339,117 @@ def test_plugin_jobs_are_host_fifo_across_instance_roots(monkeypatch, tmp_path) 
 
     assert store.finished == []
     assert store.launched == [(43, "/srv/instance-b|plugins_apply|-")]
+
+
+def test_plugin_queue_dispatches_when_scheduler_has_no_pending_roots(monkeypatch, tmp_path) -> None:
+    class QueueStore:
+        def __init__(self) -> None:
+            self.launched: list[tuple[int, str]] = []
+
+        def pending_manual_requests_for_type(self, task_type: str, limit: int = 64):
+            assert task_type == "plugins_apply"
+            return [{
+                "id": 44,
+                "root": "/srv/instance-a",
+                "task_type": "plugins_apply",
+                "entity_id": None,
+                "command_str": (
+                    "mcd-cli\x1fplugins\x1f--instance-uid\x1finstance-a\x1f"
+                    "--operation-id\x1fplugin-job-idle-root"
+                ),
+                "timeout_sec": 21600,
+            }]
+
+        def pending_manual_requests(self, root: str, limit: int = 64):
+            assert root == "/srv/instance-a"
+            return [{
+                "id": 44,
+                "root": root,
+                "task_type": "plugins_apply",
+                "entity_id": None,
+                "command_str": (
+                    "mcd-cli\x1fplugins\x1f--instance-uid\x1finstance-a\x1f"
+                    "--operation-id\x1fplugin-job-idle-root"
+                ),
+                "timeout_sec": 21600,
+            }]
+
+        def rebind_pending_manual_request_root(self, request_id: int, root: str) -> bool:
+            return False
+
+        def mark_manual_request_launched(self, request_id: int, task_key: str) -> None:
+            self.launched.append((request_id, task_key))
+
+    store = QueueStore()
+    monkeypatch.setattr(daemon, "_submit_if_slot", lambda **_kwargs: True)
+    launched = daemon._dispatch_plugin_manual_requests(
+        config=SimpleNamespace(
+            profile_name="custom",
+            command_timeout_sec=0,
+            state_db_path=str(tmp_path / "mcd-state.db"),
+        ),
+        store=store,
+        installs=[SimpleNamespace(instance_uid="instance-a", root="/srv/instance-a")],
+        running={},
+        popens={},
+    )
+
+    assert launched == 1
+    assert store.launched == [(44, "/srv/instance-a|plugins_apply|-")]
+
+
+def test_plugin_queue_rebinds_pending_request_after_instance_root_move(monkeypatch, tmp_path) -> None:
+    class QueueStore:
+        def __init__(self) -> None:
+            self.rebound: list[tuple[int, str]] = []
+            self.launched: list[tuple[int, str]] = []
+
+        def pending_manual_requests_for_type(self, task_type: str, limit: int = 64):
+            return [{
+                "id": 45,
+                "root": "/srv/old-instance-root",
+                "task_type": "plugins_apply",
+                "entity_id": None,
+                "command_str": chr(31).join(
+                    ["mcd-cli", "plugins", "--instance-uid", "instance-a", "--operation-id", "plugin-job-moved"]
+                ),
+                "timeout_sec": 21600,
+            }]
+
+        def pending_manual_requests(self, root: str, limit: int = 64):
+            assert root == "/srv/new-instance-root"
+            return [{
+                "id": 45,
+                "root": root,
+                "task_type": "plugins_apply",
+                "entity_id": None,
+                "command_str": chr(31).join(
+                    ["mcd-cli", "plugins", "--instance-uid", "instance-a", "--operation-id", "plugin-job-moved"]
+                ),
+                "timeout_sec": 21600,
+            }]
+
+        def rebind_pending_manual_request_root(self, request_id: int, root: str) -> bool:
+            self.rebound.append((request_id, root))
+            return True
+
+        def mark_manual_request_launched(self, request_id: int, task_key: str) -> None:
+            self.launched.append((request_id, task_key))
+
+    store = QueueStore()
+    monkeypatch.setattr(daemon, "_submit_if_slot", lambda **_kwargs: True)
+    launched = daemon._dispatch_plugin_manual_requests(
+        config=SimpleNamespace(
+            profile_name="custom",
+            command_timeout_sec=0,
+            state_db_path=str(tmp_path / "mcd-state.db"),
+        ),
+        store=store,
+        installs=[SimpleNamespace(instance_uid="instance-a", root="/srv/new-instance-root")],
+        running={},
+        popens={},
+    )
+
+    assert launched == 1
+    assert store.rebound == [(45, "/srv/new-instance-root")]
+    assert store.launched == [(45, "/srv/new-instance-root|plugins_apply|-")]
