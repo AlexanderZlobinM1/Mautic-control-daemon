@@ -1,3 +1,15 @@
+## 1.6.128 - 2026-11-23
+
+- Replace instance-migration database disk spooling with a bounded, backpressured
+  source-dump to MCC-relay to target-`mysql` stream. The source emits the
+  completion fence only after a successful dump; the target imports while the
+  relay is live, verifies the fence and stream identity, and drops only the
+  prepared target database on source, relay or import failure. Existing source
+  quiescence, maintenance-vhost, file-sync, target-preflight, health-check and
+  rollback stages remain unchanged. No SQL archive is written to disk.
+- Add large-database, live-relay, incomplete-stream cleanup and compatibility
+  regressions for the migration path.
+
 ## 1.6.127 - 2026-11-23
 
 - Make Mautic v3 upgrade evidence delivery durable and plan-bound. MCD writes
