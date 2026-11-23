@@ -1,3 +1,11 @@
+## 1.6.134 - 2026-11-23
+
+- Cache per-instance filesystem and database size observations for 24 hours.
+  Refresh stale instances through one serialized `du` pass, persist each
+  completed result, and keep the cached value in MCC state payloads between
+  measurements. Failed observations are cooled down instead of retrying on
+  every heartbeat.
+
 ## 1.6.133 - 2026-11-23
 
 - Wait for a failed target mysql consumer and collect its real exit code and
