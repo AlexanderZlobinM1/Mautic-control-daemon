@@ -19,7 +19,7 @@
       "local_identity": "mautic.example.com",
       "display_name": "mautic.example.com"
     },
-    "host": {"mcd_version": "1.7.0.dev0", "profile": "passive"},
+    "host": {"mcd_version": "1.7.0", "profile": "passive"},
     "applicability_facts": {"os_id": "ubuntu", "architecture": "amd64"},
     "instances": [
       {
@@ -47,7 +47,7 @@
       "identity_kind": "dns",
       "local_identity": "mautic.example.com"
     },
-    "host": {"mcd_version": "1.7.0.dev0", "profile": "passive"},
+    "host": {"mcd_version": "1.7.0", "profile": "passive"},
     "applicability_facts": {"os_id": "ubuntu", "architecture": "amd64"},
     "instances": [
       {
