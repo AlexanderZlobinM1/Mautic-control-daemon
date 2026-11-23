@@ -13,7 +13,7 @@
   "observed_at": "2026-11-03T04:35:56Z",
   "complete": true,
   "host": {
-    "mcd_version": "1.7.0",
+    "mcd_version": "1.7.1",
     "profile": "passive",
     "service_status": "active",
     "scheduler_paused": false,

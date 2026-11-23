@@ -6,6 +6,7 @@ import tempfile
 import threading
 import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from mcd_agent.instance_size import INSTANCE_SIZE_REFRESH_SEC, InstanceSizeCache, collect_instance_sizes
@@ -132,3 +133,12 @@ class InstanceSizeTests(unittest.TestCase):
                     thread.join()
 
             self.assertEqual(max_active, 1)
+
+    def test_state_pusher_passes_operator_interval_to_cache(self) -> None:
+        from mcd_agent.state_push import MCCStatePusher
+
+        cfg = SimpleNamespace(instance_size_refresh_interval_sec=7200)
+        with patch("mcd_agent.state_push.InstanceSizeCache") as cache_cls:
+            MCCStatePusher(cfg)
+
+        cache_cls.assert_called_once_with(None, refresh_after_sec=7200)

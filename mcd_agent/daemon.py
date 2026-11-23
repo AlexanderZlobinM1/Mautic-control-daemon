@@ -5158,6 +5158,11 @@ def _segment_cycle_reconcile_orphans(
 ) -> tuple[dict[str, object], list[int]]:
     """Release only proven stale ordinary claims before pending projection."""
 
+    _segment_cycle_reconcile_successful_native_coverage(
+        store,
+        root=root,
+        now_ts=float(now_ts),
+    )
     key = _segment_cycle_key(root)
     with _SEGMENT_CYCLE_LOCK:
         raw_state = store.get_runtime_sync(key)
@@ -5180,6 +5185,61 @@ def _segment_cycle_reconcile_orphans(
     if released:
         _refresh_scheduler_important_root(store, root)
     return state, released
+
+
+def _segment_cycle_reconcile_successful_native_coverage(
+    store: "TaskStore",
+    *,
+    root: str,
+    now_ts: float,
+) -> tuple[dict[str, object], list[int]]:
+    """Repair a missed cycle terminal write from same-cycle M7 success evidence.
+
+    The command supervisor writes the native-coverage receipt only after a
+    successful Mautic 7 command. If the worker receipt and runtime marker are
+    durable but the enclosing cycle transition was lost, that same-generation
+    receipt is authoritative: close only its covered, unfinished members.
+    Failed work never enters native coverage and cannot be promoted here.
+    """
+
+    key = _segment_cycle_key(root)
+    with _SEGMENT_CYCLE_LOCK:
+        raw_state = store.get_runtime_sync(key)
+        if not isinstance(raw_state, Mapping):
+            return {}, []
+        state = dict(raw_state)
+        if str(state.get("status") or "").strip().lower() != "active":
+            return state, []
+        members = set(
+            _normalize_segment_ids(
+                [*(state.get("items") or []), *(state.get("follow_up") or [])]
+            )
+        )
+        finished = set(_normalize_segment_ids(state.get("done"))) | set(
+            _normalize_segment_ids(state.get("errors"))
+        )
+        recovered = sorted(
+            (members - finished) & _segment_native_covered_ids(store, root)
+        )
+        for entity_id in recovered:
+            state = _segment_cycle_mark_terminal(
+                state,
+                entity_id=int(entity_id),
+                success=True,
+                note="reconciled_native_coverage",
+                now_ts=float(now_ts),
+            )
+        if recovered:
+            store.put_runtime_sync(key, state)
+    if recovered:
+        _refresh_scheduler_important_root(store, root)
+        _scheduler_notify_refill_priority(root)
+        logging.warning(
+            "[%s] reconciled successful native segment coverage into durable cycle ids=%s",
+            root,
+            ",".join(str(entity_id) for entity_id in recovered),
+        )
+    return state, recovered
 
 
 def _segment_cycle_pending_ids(state: Mapping[str, object] | None) -> set[int]:

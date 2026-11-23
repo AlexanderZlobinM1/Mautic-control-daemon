@@ -45,9 +45,9 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             "configured_host_name": "MauticFarm-02",
         }
         versions = {
-            "agent_version": "1.7.0",
-            "agent_running_version": "1.7.0",
-            "agent_installed_version": "1.7.0",
+            "agent_version": "1.7.1",
+            "agent_running_version": "1.7.1",
+            "agent_installed_version": "1.7.1",
         }
         with patch.object(runtime_overrides, "resolve_agent_identity", return_value=identity), patch.object(
             runtime_overrides, "agent_version_payload", return_value=versions
@@ -57,9 +57,9 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
 
         for call in post.call_args_list:
             payload = call.args[1]
-            self.assertEqual(payload["agent_version"], "1.7.0")
-            self.assertEqual(payload["agent_running_version"], "1.7.0")
-            self.assertEqual(payload["agent_installed_version"], "1.7.0")
+            self.assertEqual(payload["agent_version"], "1.7.1")
+            self.assertEqual(payload["agent_running_version"], "1.7.1")
+            self.assertEqual(payload["agent_installed_version"], "1.7.1")
 
     def test_179_key_runtime_observation_is_deterministically_chunked(self) -> None:
         keys = {f"runtime_key_{index}": index for index in range(179)}

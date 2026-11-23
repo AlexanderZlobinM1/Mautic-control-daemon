@@ -1081,7 +1081,13 @@ config на его profile baseline и только после этого при
    одноразовый fair hand-off; rotating cursor отдаёт следующий slot другому
    root после этого хода, поэтому повторные terminal events одного root не
    создают hot-root loop/starvation. Slow probe одного root не может
-   удерживать terminal/adoption/refill другого. Если static dependency graph
+   удерживать terminal/adoption/refill другого. Если успешный Mautic 7 worker
+   уже записал native-coverage receipt текущего cycle, но его cycle terminal
+   transition был потерян между supervisor receipt и durable cursor, следующий
+   reconcile закрывает только покрытые unfinished IDs как `done`. Receipt
+   другого generation и failed/timeout work для этого не используются, поэтому
+   восстановление не повторяет успешную команду и не превращает ошибку в успех.
+   Если static dependency graph
    конкретного root недоступен, сохраняются его static queues/claims, но
    static admission этого root получает `0` launch; ordinary work этого root
    и независимые roots продолжают dispatch.
@@ -3835,8 +3841,11 @@ heartbeat. Для каждого `instance_uid` MCD хранит последн�
 локальном runtime-кеше и отправляет это значение в MCC вместе с обычным
 `instance_sizes` payload.
 
-Каждый конкретный инстанс измеряется не чаще одного раза за 24 часа. Время
-последней попытки также сохраняется, поэтому ошибка `du` или DB-query не
+Каждый конкретный инстанс измеряется не чаще заданного оператором интервала.
+Настройка находится в `[runtime]` под именем
+`instance_size_refresh_interval_sec`; значение по умолчанию — `86400` секунд
+(24 часа), минимально разрешено `60` секунд. Время последней попытки также
+сохраняется, поэтому ошибка `du` или DB-query не
 превращается в повторный цикл на каждом heartbeat. Если предыдущий результат
 есть, он остаётся доступен вместе с ошибкой последней попытки; если результата
 ещё не было, публикуется явная ошибка и пустой размер.
