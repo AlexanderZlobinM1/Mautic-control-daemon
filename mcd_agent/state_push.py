@@ -42,7 +42,7 @@ from mcd_agent.docker_image_inventory import capability as docker_image_inventor
 from mcd_agent.docker_image_inventory import collect_signed_inventory
 from mcd_agent.commercial_portal import _host_fingerprint
 from mcd_agent.install_readiness import collect_mautic_install_readiness
-from mcd_agent.instance_size import collect_instance_sizes
+from mcd_agent.instance_size import InstanceSizeCache
 from mcd_agent.install_type import detect_install_type, is_complete_plugin_bundle, plugin_dir_candidates
 from mcd_agent.plugin_inventory import (
     PLUGIN_INVENTORY_PENDING_KEY,
@@ -2051,6 +2051,7 @@ class MCCStatePusher:
         self._campaign_native_fallback_events_pending: list[dict[str, Any]] = []
         self._campaign_native_fallback_runtime: dict[str, dict[str, Any]] = {}
         self._campaign_scheduler_liveness_runtime: dict[str, dict[str, Any]] = {}
+        self._instance_size_cache = InstanceSizeCache(runtime_store)
 
     def enabled(self) -> bool:
         return bool(self.cfg.mcc_push_enabled and self.cfg.mcc_url and self.cfg.mcc_token)
@@ -2694,7 +2695,7 @@ class MCCStatePusher:
             "cluster_assets": self._cluster_assets_payload(now_ts, installs),
             "instances": instances,
             "instances_snapshot_complete": bool(instances_snapshot_complete),
-            "instance_sizes": collect_instance_sizes(installs),
+            "instance_sizes": self._instance_size_cache.collect(installs, now_ts=now_ts),
             "sent_at_utc": datetime.fromtimestamp(now_ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
         _advertise_image_compatibility(payload)
