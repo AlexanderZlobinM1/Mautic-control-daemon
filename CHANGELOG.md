@@ -1,3 +1,10 @@
+## 1.6.141 - 2026-11-23
+
+- Reconcile a successful same-cycle Mautic 7 native-coverage receipt into a
+  persisted ordinary segment cycle when its terminal cursor write was lost.
+  Covered follow-up work becomes `done` without rerunning the command; stale
+  generations and failed work remain ineligible for success recovery.
+
 ## 1.6.140 - 2026-11-23
 
 - Make the sequential instance-size `du` timeout operator-configurable via

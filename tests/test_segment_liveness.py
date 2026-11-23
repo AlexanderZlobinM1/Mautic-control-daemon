@@ -828,6 +828,91 @@ class SegmentLivenessTests(unittest.TestCase):
         self.assertEqual(_active_persisted_segment_cycle_roots(store, [root, other_root]), set())
         store.close()
 
+    def test_successful_native_receipt_closes_follow_up_after_terminal_callback_gap(self) -> None:
+        root = "/var/www/alex-personal/public_html"
+        store = TaskStore(":memory:")
+        state, _added, _started = sync_cycle(
+            None,
+            planned_ids=[101, 139],
+            never_built=[],
+            running_ids=[],
+            now_ts=100.0,
+        )
+        state, added, started = sync_cycle(
+            state,
+            planned_ids=[101, 139, 204],
+            never_built=[204],
+            running_ids=[],
+            now_ts=101.0,
+        )
+        self.assertEqual(added, [204])
+        self.assertFalse(started)
+        state = mark_terminal(state, entity_id=101, success=True, now_ts=102.0)
+        state = mark_terminal(
+            state,
+            entity_id=139,
+            success=False,
+            note="scheduler_error",
+            now_ts=103.0,
+        )
+        store.put_runtime_sync(cycle_key(root), state)
+        store.put_runtime_sync(
+            daemon._segment_native_coverage_key(root),
+            {
+                "schema": "mcd-segment-native-coverage-v1",
+                "root": root,
+                "cycle_id": state["cycle_id"],
+                "covered_ids": [101, 204],
+                "receipts": {
+                    "204": {
+                        "covered_ids": [204],
+                        "success": True,
+                        "updated_at": 104.0,
+                    }
+                },
+                "updated_at": 104.0,
+            },
+        )
+
+        self.assertEqual(_active_persisted_segment_cycle_roots(store, [root]), {root})
+        repaired, released = daemon._segment_cycle_reconcile_orphans(
+            store,
+            root=root,
+            running={},
+            now_ts=105.0,
+            orphan_grace_sec=60,
+        )
+
+        self.assertEqual(released, [])
+        self.assertEqual(repaired["status"], "terminal")
+        self.assertEqual(repaired["follow_up"], [204])
+        self.assertEqual(repaired["done"], [101, 204])
+        self.assertEqual(repaired["errors"], [139])
+        self.assertEqual(_active_persisted_segment_cycle_roots(store, [root]), set())
+
+        next_cycle, _added, started = sync_cycle(
+            repaired,
+            planned_ids=[204],
+            never_built=[],
+            running_ids=[],
+            now_ts=106.0,
+        )
+        self.assertTrue(started)
+        self.assertNotEqual(next_cycle["cycle_id"], state["cycle_id"])
+        store.put_runtime_sync(cycle_key(root), next_cycle)
+        untouched, released = daemon._segment_cycle_reconcile_orphans(
+            store,
+            root=root,
+            running={},
+            now_ts=107.0,
+            orphan_grace_sec=60,
+        )
+        self.assertEqual(released, [])
+        self.assertEqual(untouched["status"], "active")
+        self.assertEqual(untouched["done"], [])
+        self.assertEqual(_segment_cycle_pending_order(untouched), [204])
+        store.close()
+
     def test_fairness_ignores_claimed_only_and_blocked_persisted_cycles(self) -> None:
         root = "/var/www/persisted-fairness/public_html"
         store = TaskStore(":memory:")
