@@ -1,3 +1,15 @@
+## 1.6.132 - 2026-11-23
+
+- Keep a failed target SQL consumer's primary `rc/stderr`, then drain the
+  remaining source relay without forwarding SQL so the source dump can finish
+  and cannot be replaced by a secondary connection-lost error caused by an
+  early target close.
+- Remove the prepared target database user during failure cleanup, while
+  preserving bounded database DROP, scoped blocker termination, and explicit
+  cleanup evidence.
+- Add live-shape regressions for target failure drain, successful
+  source-to-target streaming, slow consumer backpressure, and exact cleanup.
+
 ## 1.6.131 - 2026-11-23
 
 - Preserve the primary source-dump return code and sanitized stderr in the
