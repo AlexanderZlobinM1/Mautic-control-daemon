@@ -72,6 +72,22 @@ patch-фазы и штатные команды Mautic, затем провер�
 неизменяемый MCC evidence. ZIP и явно переданный prepared-target сохраняют
 свою отдельную проверку подготовленного целевого дерева.
 
+Для внешнего редактируемого сценария Composer используется отдельный
+типизированный executor `mcd-mautic-composer-executor-v1`. Сценарий передаёт
+только immutable JSON-план и SHA файла; shell, argv, sudo, произвольный SQL,
+секреты и `instance@host` запрещены. MCD одним процессом удерживает
+эксклюзивный dispatch fence на весь план, ставит scheduler на паузу, дренирует
+задачи и выполняет только фиксированные примитивы: правка `composer.json`, один
+Composer update, patch-фазы, cache clear, `mautic:update:apply --finish`,
+Doctrine migration/reconciliation и минимальные проверки. System cron этим
+маршрутом не управляется.
+
+До первой мутации MCD создаёт собственный immutable backup. При ошибке MCD
+восстанавливает его и пишет terminal receipt со статусом rollback; при успехе
+сначала наблюдает восстановление scheduler и только затем пишет success receipt.
+Повторный `run_id` возвращает тот же terminal receipt без повторного запуска.
+Контракт опубликован в `mcd_agent/contracts/mautic-composer-executor-v1.json`.
+
 Этот документ является рабочим каноном для MCD scheduler. Он описывает
 фактическую схему после исправления admission и должен обновляться вместе с
 кодом, тестами и runtime receipt. Документ не является разрешением на

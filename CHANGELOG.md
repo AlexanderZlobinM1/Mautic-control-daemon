@@ -1,3 +1,11 @@
+## 1.6.137 - 2026-11-23
+
+- Add the typed `mcd-mautic-composer-executor-v1` boundary for MCC-owned
+  external Composer scenarios. MCD now owns the full maintenance fence,
+  backup, fixed Composer/Mautic/Doctrine primitives, terminal receipt and
+  fail-closed rollback without accepting shell/argv or changing the MCD 1.7
+  route.
+
 ## 1.6.136 - 2026-11-23
 
 - Simplify the Mautic Composer upgrade path: run one live dependency update,

@@ -2506,6 +2506,16 @@ def _build_parser() -> argparse.ArgumentParser:
     up.add_argument("--json", action="store_true", help="Emit the machine-readable preflight contract")
     up.add_argument("--mcc-preflighted-single-instance", action="store_true", help="Root-only, explicitly acknowledged single-instance manual upgrade after MCC preflight; permits forward same-major targets while preserving selected patch-plan validation")
 
+    composer_executor = sub.add_parser(
+        "mautic-composer-executor",
+        help="Execute an MCC-owned typed Composer upgrade scenario through the MCD fence",
+    )
+    composer_executor.add_argument("op", choices=["contract", "apply"], nargs="?", default="contract")
+    composer_executor.add_argument("--config", default=default_cfg)
+    composer_executor.add_argument("--request-file", default="", help="Root-owned immutable executor request JSON")
+    composer_executor.add_argument("--request-sha256", default="", help="SHA-256 of the exact request file bytes")
+    composer_executor.add_argument("--json", action="store_true")
+
     img = sub.add_parser("mautic-image", help="Install a Mautic instance from an MCC image")
     img.add_argument("--config", default=default_cfg)
     img.add_argument("op", choices=["install"], nargs="?", default="install")
@@ -4111,6 +4121,37 @@ def main() -> int:
         )
         if rc == 0:
             _push_state_after_change(cfg, "mautic-upgrade-apply")
+        return rc
+
+    if args.cmd == "mautic-composer-executor":
+        from mcd_agent.mautic_composer_executor import (
+            ComposerExecutorError,
+            contract as composer_executor_contract,
+            execute_request as execute_composer_request,
+            load_request_file as load_composer_request_file,
+        )
+
+        if args.op == "contract":
+            print(json.dumps(composer_executor_contract(), ensure_ascii=True, indent=2, sort_keys=True))
+            return 0
+        if not args.request_file or not args.request_sha256:
+            print("mautic-composer-executor apply requires --request-file and --request-sha256")
+            return 2
+        try:
+            request = load_composer_request_file(args.request_file, args.request_sha256)
+            cfg = load_config(args.config)
+            rc, receipt = execute_composer_request(cfg, request, request_sha256=args.request_sha256)
+        except ComposerExecutorError as exc:
+            receipt = {
+                "schema": "mcd-mautic-composer-executor-receipt-v1",
+                "status": "error",
+                "error": {"type": type(exc).__name__, "code": str(exc)},
+            }
+            rc = 2
+        if args.json:
+            print(json.dumps(receipt, ensure_ascii=True, indent=2, sort_keys=True))
+        else:
+            print(json.dumps(receipt, ensure_ascii=True, sort_keys=True))
         return rc
 
     if args.cmd == "interactive":
