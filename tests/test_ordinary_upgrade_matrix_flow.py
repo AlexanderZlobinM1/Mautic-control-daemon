@@ -13,7 +13,10 @@ def test_normal_same_line_has_no_special_exclusion_admission(invocation, monkeyp
     def unexpected(*args, **kwargs): raise AssertionError("global patch DB admission invoked")
     monkeypatch.setattr("mcd_agent.mautic_patch_fact_binding.bound_provider", unexpected)
     assert upgrade.run_upgrade_apply(**args, mcc_preflighted_single_instance=True) == 0
-    assert events == ["stage", "maintenance", "permissions", "install", "cleanup"]
+    expected = ["maintenance", "permissions", "install", "cleanup"]
+    if mode == "zip":
+        expected.insert(0, "stage")
+    assert events == expected
 
 
 def test_special_exclusion_public_surface_is_removed():

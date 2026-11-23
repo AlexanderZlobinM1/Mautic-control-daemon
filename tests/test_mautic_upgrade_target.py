@@ -143,6 +143,34 @@ class MauticUpgradeTargetTests(unittest.TestCase):
                 self.assertFalse(pause_flag.exists())
                 restore_cron.assert_called_once_with(cfg)
 
+    def test_composer_maintenance_uses_mcd_fence_without_system_cron(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            pause_flag = Path(td) / "scheduler.pause"
+            cfg = SimpleNamespace(scheduler_pause_flag_path=str(pause_flag))
+            with (
+                patch("mcd_agent.mautic_upgrade.stop_cron_service") as stop_cron,
+                patch("mcd_agent.mautic_upgrade.restore_cron_service_if_needed") as restore_cron,
+                patch(
+                    "mcd_agent.mautic_upgrade.stop_running_tasks_for_maintenance",
+                    return_value={
+                        "ok": True,
+                        "stopped": 1,
+                        "stop_failed": 0,
+                        "managed_running": 0,
+                        "mautic_console_total": 0,
+                    },
+                ),
+            ):
+                guard = _enter_upgrade_maintenance(cfg, False)
+                self.assertTrue(guard.owned_pause_flag)
+                self.assertFalse(guard.owned_cron_stop)
+                stop_cron.assert_not_called()
+
+                receipt = _exit_upgrade_maintenance(cfg, guard)
+                self.assertTrue(receipt["scheduler_resumed"])
+                self.assertTrue(receipt["cron_restored"])
+                restore_cron.assert_not_called()
+
     def test_upgrade_maintenance_guard_preserves_existing_maintenance(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             pause_flag = Path(td) / "scheduler.pause"
@@ -381,9 +409,8 @@ $parameters = array(
         self.assertEqual(changes, 0)
         self.assertEqual(updated, text)
 
-    def test_composer_update_uses_full_dependency_resolution_and_dry_run(self) -> None:
-        self.assertEqual(_composer_update_args(), ["update", "--with-all-dependencies"])
-        self.assertEqual(_composer_update_args(dry_run=True), ["update", "--with-all-dependencies", "--dry-run"])
+    def test_composer_update_uses_one_dependency_resolution_pass(self) -> None:
+        self.assertEqual(_composer_update_args(), ["update", "--with-dependencies"])
 
     def test_php_custom_ini_migration_copies_only_custom_files(self) -> None:
         with tempfile.TemporaryDirectory() as td:

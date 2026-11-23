@@ -1,3 +1,10 @@
+## 1.6.136 - 2026-11-23
+
+- Simplify the Mautic Composer upgrade path: run one live dependency update,
+  retain MCD maintenance, required patch phases, migration/version checks and
+  immutable MCC evidence, and remove the duplicate target staging, dry-run and
+  full live-tree hash comparison from the standard Composer route.
+
 ## 1.6.135 - 2026-11-23
 
 - Make the per-instance filesystem/database size cache refresh interval

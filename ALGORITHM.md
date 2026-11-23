@@ -63,10 +63,14 @@ Descriptor задаёт способ установки явно; два кон�
 для одного web root дают unknown и требуют уточнения до обновления.
 
 При обновлении сначала проверяется точная версия исходного приложения.
-Неполная версия ветки в Composer lock не подменяет эту проверку.
-Подготовленное целевое дерево проверяется отдельно по версии целевого пакета.
-Перед изменением приложения повторно проверяются исходная версия и хэши
-исходных файлов; изменение любого из них останавливает обновление.
+Неполная версия ветки в Composer lock не подменяет эту проверку. Для обычной
+Composer-установки MCD редактирует `composer.json` в maintenance-окне и
+выполняет один `composer update --with-dependencies`; отдельное полное временное
+дерево, второй Composer-проход и сравнение хэшей всего live-дерева не нужны.
+После обновления зависимостей MCD очищает production-cache, выполняет нужные
+patch-фазы и штатные команды Mautic, затем проверяет версию, миграции, HTTP и
+неизменяемый MCC evidence. ZIP и явно переданный prepared-target сохраняют
+свою отдельную проверку подготовленного целевого дерева.
 
 Этот документ является рабочим каноном для MCD scheduler. Он описывает
 фактическую схему после исправления admission и должен обновляться вместе с
@@ -112,9 +116,11 @@ records и canonical plan binding, чтобы evidence-проверка могл
 запись без повтора.
 
 Перед terminal `success` MCD завершает обновление maintenance guard и только
-после фактического восстановления cron и scheduler добавляет в receipt
+после фактического восстановления scheduler добавляет в receipt
 `source_version`, `target_version`, `run_id`, `plan_sha256`, полную v3
-`evidence_identity` и два флага `maintenance_guard`. Terminal `success` и
+`evidence_identity` и флаги `maintenance_guard`. В Composer-маршруте system
+cron не является механизмом MCD и остаётся без изменений: admission и drain
+выполняются MCD dispatch fence и scheduler pause. Terminal `success` и
 `rc=0` разрешены только после ответа MCC `status=accepted`; stdout-marker
 является диагностическим представлением того же receipt и не заменяет ACK.
 
