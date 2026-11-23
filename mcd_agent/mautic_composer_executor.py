@@ -57,6 +57,28 @@ FORBIDDEN_WORDS = (
     "credential",
     "arbitrary_sql",
 )
+TOP_LEVEL_FIELDS = frozenset(
+    {
+        "schema",
+        "contract_version",
+        "run_id",
+        "instance_uid",
+        "root",
+        "source_version",
+        "target_version",
+        "steps",
+        "patch_plan",
+        "backup",
+        "cron_policy",
+        "evidence",
+    }
+)
+PATCH_FIELDS = frozenset({"plan_file", "plan_sha256", "run_id", "phases"})
+BACKUP_FIELDS = frozenset({"required"})
+EVIDENCE_FIELDS = frozenset(
+    {"job_id", "operation_id", "scenario_id", "scenario_revision", "catalog_revision", "catalog_sha256"}
+)
+STEP_FIELDS = frozenset({"kind", "phase"})
 
 
 class ComposerExecutorError(RuntimeError):
@@ -70,6 +92,7 @@ def contract() -> dict[str, Any]:
         "command": "mcd-cli mautic-composer-executor apply --request-file REQUEST --request-sha256 SHA256 --json",
         "execution": "one MCD process holds the exclusive dispatch fence for the complete request",
         "request": {
+            "unknown_fields": "rejected at top level and in patch_plan, backup, evidence and step objects",
             "required": [
                 "schema",
                 "contract_version",
@@ -139,6 +162,12 @@ def _reject_forbidden(value: Any, path: str = "request") -> None:
             _reject_forbidden(item, f"{path}[{index}]")
 
 
+def _reject_unknown(value: Mapping[str, Any], allowed: frozenset[str], path: str) -> None:
+    unknown = sorted(str(key) for key in value if str(key) not in allowed)
+    if unknown:
+        raise ComposerExecutorError(f"unknown_request_field:{path}.{unknown[0]}")
+
+
 def _require_string(value: Any, name: str, *, safe_id: bool = False) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ComposerExecutorError(f"request_field_invalid:{name}")
@@ -166,6 +195,7 @@ def _validate_steps(steps: Any, patch: Mapping[str, Any]) -> None:
             kind = row
             item: Mapping[str, Any] = {}
         elif isinstance(row, Mapping):
+            _reject_unknown(row, STEP_FIELDS, f"steps[{index}]")
             kind = _require_string(row.get("kind"), f"steps[{index}].kind")
             item = row
         else:
@@ -210,6 +240,7 @@ def validate_request(raw: Mapping[str, Any]) -> dict[str, Any]:
         raise ComposerExecutorError("request_not_object")
     request = dict(raw)
     _reject_forbidden(request)
+    _reject_unknown(request, TOP_LEVEL_FIELDS, "request")
     if request.get("schema") != SCHEMA or request.get("contract_version") != CONTRACT_VERSION:
         raise ComposerExecutorError("contract_invalid")
     run_id = _require_string(request.get("run_id"), "run_id", safe_id=True)
@@ -224,6 +255,7 @@ def validate_request(raw: Mapping[str, Any]) -> dict[str, Any]:
     patch = request.get("patch_plan")
     if not isinstance(patch, Mapping):
         raise ComposerExecutorError("patch_plan_invalid")
+    _reject_unknown(patch, PATCH_FIELDS, "patch_plan")
     phases = patch.get("phases")
     if not isinstance(phases, list) or any(not isinstance(item, str) for item in phases):
         raise ComposerExecutorError("patch_plan.phases_invalid")
@@ -242,6 +274,7 @@ def validate_request(raw: Mapping[str, Any]) -> dict[str, Any]:
     backup = request.get("backup")
     if not isinstance(backup, Mapping) or backup.get("required") is not True:
         raise ComposerExecutorError("backup_required")
+    _reject_unknown(backup, BACKUP_FIELDS, "backup")
     if request.get("cron_policy") != "unchanged":
         raise ComposerExecutorError("cron_policy_invalid")
     _validate_steps(request.get("steps"), patch)
@@ -267,6 +300,7 @@ def validate_request(raw: Mapping[str, Any]) -> dict[str, Any]:
     if evidence is not None:
         if not isinstance(evidence, Mapping):
             raise ComposerExecutorError("evidence_invalid")
+        _reject_unknown(evidence, EVIDENCE_FIELDS, "evidence")
         normalized["evidence"] = {
             str(key): _require_string(value, f"evidence.{key}", safe_id=True)
             for key, value in evidence.items()

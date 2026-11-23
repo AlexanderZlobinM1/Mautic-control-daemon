@@ -4,6 +4,7 @@
   "purpose": "MCC-owned external Composer scenarios submit a typed step plan; MCD owns admission, command construction, backup, receipt and rollback.",
   "invocation": "mcd-cli mautic-composer-executor apply --request-file REQUEST --request-sha256 SHA256 --json",
   "request": {
+    "unknown_fields": "rejected at top level and in patch_plan, backup, evidence and step objects; no forward-compatible silent dropping",
     "required": [
       "schema",
       "contract_version",

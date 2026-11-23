@@ -66,6 +66,17 @@ def test_contract_rejects_shell_and_argv_fields(tmp_path: Path) -> None:
         executor.validate_request(request)
 
 
+def test_contract_rejects_unknown_fields_at_every_boundary(tmp_path: Path) -> None:
+    request = _request(tmp_path)
+    request["unexpected"] = "must-fail"
+    with pytest.raises(executor.ComposerExecutorError, match="unknown_request_field:request.unexpected"):
+        executor.validate_request(request)
+    request = _request(tmp_path)
+    request["patch_plan"]["unexpected"] = "must-fail"  # type: ignore[index]
+    with pytest.raises(executor.ComposerExecutorError, match="unknown_request_field:patch_plan.unexpected"):
+        executor.validate_request(request)
+
+
 def test_contract_binds_patch_phase_order_and_allows_empty_patch_plan(tmp_path: Path) -> None:
     request = _request(tmp_path, phases=["post_source_install", "before_cache_warmup"])
     normalized = executor.validate_request(request)

@@ -1,3 +1,9 @@
+## 1.6.138 - 2026-11-23
+
+- Make the external Composer executor request fail closed on unknown fields at
+  every typed boundary. The request SHA, step objects, patch plan, backup and
+  evidence envelope are now strictly schema-bound.
+
 ## 1.6.137 - 2026-11-23
 
 - Add the typed `mcd-mautic-composer-executor-v1` boundary for MCC-owned
