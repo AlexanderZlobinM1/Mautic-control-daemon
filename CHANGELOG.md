@@ -1,4 +1,11 @@
-## 1.7.0 — Unreleased architecture candidate
+## 1.7.1 - 2026-11-23
+
+- Make the per-instance filesystem/database size cache refresh interval
+  operator-configurable via `runtime.instance_size_refresh_interval_sec`.
+  The default remains 86400 seconds and the safe minimum is 60 seconds, so
+  changing the interval no longer requires rebuilding MCD.
+
+## 1.7.0 - 2026-11-23
 
 - Cache per-instance filesystem and database size observations for 24 hours.
   Refresh stale instances through one serialized `du` pass, persist each
@@ -43,7 +50,7 @@
 
 - Make the package/patch-contract identity suite a mandatory release
   regression and validate the complete check-only `exact_count` observation,
-  including its immutable needle. The 1.7 identity remains `1.7.0.dev0`.
+  including its immutable needle. The 1.7 identity is `1.7.1`.
 
 - Complete the previously separate connected-host lifecycle, prerequisites,
   source-export and source-free runtime-profile closure in the canonical 1.7

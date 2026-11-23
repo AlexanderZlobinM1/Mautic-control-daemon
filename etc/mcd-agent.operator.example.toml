@@ -30,6 +30,10 @@ name = "passive"
 # Effective precedence:
 #   MCC host-runtime override > local [runtime] > profile defaults
 
+# Per-instance filesystem/database size cache refresh interval, in seconds.
+# Minimum is 60; the default is 86400 (once per day per instance).
+instance_size_refresh_interval_sec = 86400
+
 # Ring layout: dual|single.
 ring_mode = "single"
 

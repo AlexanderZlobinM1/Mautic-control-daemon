@@ -111,11 +111,11 @@ def test_same_version_runtime_rebuild_requires_explicit_exact_pins(tmp_path: Pat
     runtime.mkdir()
     current = runtime / bridge.MANIFEST_NAME
     staged = tmp_path / "staged-manifest.json"
-    current.write_text('{"version":"1.7.0.dev0","payload_sha256":{"wheel":"a"}}\n', encoding="utf-8")
-    staged.write_text('{"version":"1.7.0.dev0","payload_sha256":{"wheel":"b"}}\n', encoding="utf-8")
+    current.write_text('{"version":"1.7.1","payload_sha256":{"wheel":"a"}}\n', encoding="utf-8")
+    staged.write_text('{"version":"1.7.1","payload_sha256":{"wheel":"b"}}\n', encoding="utf-8")
     args = SimpleNamespace(
         allow_same_version_rebuild=True,
-        expected_target="1.7.0.dev0",
+        expected_target="1.7.1",
         expected_archive_sha256="a" * 64,
         expected_manifest_sha256=bridge._sha256(staged),
     )
@@ -126,8 +126,8 @@ def test_same_version_runtime_rebuild_requires_explicit_exact_pins(tmp_path: Pat
         runtime_dir=runtime,
         current_manifest=current,
         staged_manifest=staged,
-        current_version="1.7.0.dev0",
-        target_version="1.7.0.dev0",
+        current_version="1.7.1",
+        target_version="1.7.1",
     ) is True
 
     args.expected_archive_sha256 = ""
@@ -138,8 +138,8 @@ def test_same_version_runtime_rebuild_requires_explicit_exact_pins(tmp_path: Pat
             runtime_dir=runtime,
             current_manifest=current,
             staged_manifest=staged,
-            current_version="1.7.0.dev0",
-            target_version="1.7.0.dev0",
+            current_version="1.7.1",
+            target_version="1.7.1",
         )
     except bridge.BridgeError as exc:
         assert str(exc) == "same-version rebuild requires exact target and archive pins"
@@ -153,12 +153,12 @@ def test_same_version_runtime_rebuild_rejects_identical_active_manifest(tmp_path
     runtime.mkdir()
     current = runtime / bridge.MANIFEST_NAME
     staged = tmp_path / "staged-manifest.json"
-    payload = '{"version":"1.7.0.dev0","payload_sha256":{"wheel":"a"}}\n'
+    payload = '{"version":"1.7.1","payload_sha256":{"wheel":"a"}}\n'
     current.write_text(payload, encoding="utf-8")
     staged.write_text(payload, encoding="utf-8")
     args = SimpleNamespace(
         allow_same_version_rebuild=True,
-        expected_target="1.7.0.dev0",
+        expected_target="1.7.1",
         expected_archive_sha256="a" * 64,
         expected_manifest_sha256=bridge._sha256(staged),
     )
@@ -170,8 +170,8 @@ def test_same_version_runtime_rebuild_rejects_identical_active_manifest(tmp_path
             runtime_dir=runtime,
             current_manifest=current,
             staged_manifest=staged,
-            current_version="1.7.0.dev0",
-            target_version="1.7.0.dev0",
+            current_version="1.7.1",
+            target_version="1.7.1",
         )
     except bridge.BridgeError as exc:
         assert str(exc) == "same-version rebuild is already active but has no matching success receipt"

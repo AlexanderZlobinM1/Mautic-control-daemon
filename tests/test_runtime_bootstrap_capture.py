@@ -139,7 +139,7 @@ def test_named_profile_rejects_runtime_package_without_universal_resource(tmp_pa
     config.write_text('[profile]\nname = "passive"\n', encoding="utf-8")
 
     try:
-        bridge._require_runtime_profile_closure(config, {"version": "1.7.0.dev0"})
+        bridge._require_runtime_profile_closure(config, {"version": "1.7.1"})
     except bridge.BridgeError as exc:
         assert "universal_workload_resource_ref" in str(exc)
     else:
