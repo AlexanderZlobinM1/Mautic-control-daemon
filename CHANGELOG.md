@@ -1,3 +1,13 @@
+## 1.6.130 - 2026-11-23
+
+- Dispatch explicit durable `plugins_apply` jobs from an independent host-local
+  worker instead of waiting for the ordinary segment/campaign pending-root
+  projection. Queued plugin work now progresses on idle instances while
+  preserving the shared admission fence and host FIFO.
+- Rebind still-pending plugin requests to the current root of their bare
+  instance UID after an instance move. Launched or terminal requests are never
+  rewritten, cancelled, or replayed.
+
 ## 1.6.129 - 2026-11-23
 
 - Keep the source MariaDB dump session alive while a direct MCC relay is

@@ -184,6 +184,18 @@ receipt and status record. Different hosts have independent MCD daemons and
 may execute their local plugin queues concurrently. A single request carrying
 several plugin selections still uses the existing ordered MCD transaction.
 
+The plugin queue has its own one-second durable dispatch worker. It reads the
+oldest pending `plugins_apply` request for the host and uses the same admission
+fence, supervisor and terminal-result path as the ordinary dispatcher. It does
+not depend on a segment, campaign or import ring being non-empty, so an idle
+instance cannot leave a valid plugin request queued indefinitely. The worker
+resolves the bare instance UID against the current local inventory; if the
+instance root moved while the request was still pending, only the pending row's
+root association is rebound before dispatch. Launched and terminal rows are
+never rewritten, cancelled or replayed. Scheduler maintenance and backup
+pauses still prevent a new plugin launch, while the durable request remains
+queued for the next tick.
+
 Для внешнего запуска установки существует один машинный путь MCD. Вызывающая
 система передаёт только bare `instance_uid`, стабильный логический `plugin_uid`,
 при необходимости конкретный `package_uid`, действие и свой `operation_id`.
