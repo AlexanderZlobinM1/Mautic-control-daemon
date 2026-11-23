@@ -1,3 +1,10 @@
+## 1.7.2 - 2026-11-23
+
+- Reconcile a successful same-cycle Mautic 7 native-coverage receipt into a
+  persisted ordinary segment cycle when its terminal cursor write was lost.
+  Covered follow-up work becomes `done` without rerunning the command; stale
+  generations and failed work remain ineligible for success recovery.
+
 ## 1.7.1 - 2026-11-23
 
 - Make the per-instance filesystem/database size cache refresh interval
