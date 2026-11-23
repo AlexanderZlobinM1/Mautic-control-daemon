@@ -95,6 +95,7 @@
       "source_version",
       "target_version",
       "steps",
+      "patch_plan",
       "maintenance_guard",
       "rollback"
     ],

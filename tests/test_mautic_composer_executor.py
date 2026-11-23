@@ -148,5 +148,6 @@ def test_executor_holds_and_restores_maintenance_before_success(tmp_path: Path, 
     rc, receipt = executor.execute_request(cfg, request)
     assert rc == 0
     assert receipt["status"] == "success"
+    assert receipt["patch_plan"]["phases"] == []
     assert receipt["maintenance_guard"] == {"cron_restored": True, "scheduler_resumed": True}
     assert len(exited) == 1

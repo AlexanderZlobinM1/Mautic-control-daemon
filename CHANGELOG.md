@@ -1,3 +1,9 @@
+## 1.6.139 - 2026-11-23
+
+- Include the immutable patch-plan binding in every external Composer executor
+  terminal receipt so MCC can verify run, plan SHA and rollback evidence from
+  the receipt alone.
+
 ## 1.6.138 - 2026-11-23
 
 - Make the external Composer executor request fail closed on unknown fields at
