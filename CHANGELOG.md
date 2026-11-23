@@ -1,5 +1,11 @@
 ## 1.7.0 — Unreleased architecture candidate
 
+- Cache per-instance filesystem and database size observations for 24 hours.
+  Refresh stale instances through one serialized `du` pass, persist each
+  completed result, and keep the cached value in MCC state payloads between
+  measurements. Failed observations are cooled down instead of retrying on
+  every heartbeat.
+
 - Reject plugin package projections whose declared Mautic minor compatibility
   does not match authoritative static release metadata; cached or missing
   minor evidence fails closed for installation while removal remains allowed.
