@@ -1944,13 +1944,17 @@ class InstanceMigrateProbeTests(unittest.TestCase):
         class FakeProc:
             def __init__(self) -> None:
                 self.stdin = FailingStdin()
-                self.returncode = 1
+                self.returncode = None
 
             def communicate(self):
+                self.returncode = 7
                 return b"", b"ERROR 1064 (42000): target SQL rejected\n"
 
             def kill(self):
                 self.returncode = -9
+
+            def poll(self):
+                return self.returncode
 
         proc = FakeProc()
         with (
@@ -1960,7 +1964,7 @@ class InstanceMigrateProbeTests(unittest.TestCase):
             patch.object(instance_migrate, "_mysql_exec"),
             patch.object(instance_migrate, "_drain_gzip_stream", wraps=instance_migrate._drain_gzip_stream) as drain,
         ):
-            with self.assertRaisesRegex(RuntimeError, r"target mysql consumer failed.*ERROR 1064"):
+            with self.assertRaisesRegex(RuntimeError, r"target mysql consumer failed rc=7.*ERROR 1064"):
                 instance_migrate.import_target_db_stream(
                     target_db_name="baza_target",
                     target_db_user="korisnik_target",

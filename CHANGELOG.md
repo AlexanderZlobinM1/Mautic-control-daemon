@@ -1,3 +1,11 @@
+## 1.6.133 - 2026-11-23
+
+- Wait for a failed target mysql consumer and collect its real exit code and
+  sanitized stderr before applying the bounded kill fallback. Producer-side
+  exceptions no longer report `consumer rc=None` or hide the target failure.
+- Add regression coverage for a consumer whose `poll()` is initially empty
+  but whose final `communicate()` returns a concrete failure code.
+
 ## 1.6.132 - 2026-11-23
 
 - Keep a failed target SQL consumer's primary `rc/stderr`, then drain the

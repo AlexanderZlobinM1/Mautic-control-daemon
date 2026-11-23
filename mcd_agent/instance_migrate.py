@@ -2353,11 +2353,14 @@ def import_target_db_stream(*, target_db_name: str, target_db_user: str, target_
                     except Exception:
                         pass
                     proc.stdin = None
+                # First let mysql exit and collect its real return code/stderr.
+                # Kill is only the fallback inside the bounded collector when
+                # the consumer does not terminate on its own.
+                out_b, err_b = _collect_stream_process_output(proc, terminate=False)
                 try:
                     consumer_rc = proc.poll()
                 except (AttributeError, TypeError):
                     consumer_rc = getattr(proc, "returncode", None)
-                out_b, err_b = _collect_stream_process_output(proc, terminate=True)
                 detail = _safe_runtime_detail(((out_b or b"") + (err_b or b"")).decode("utf-8", errors="replace"))
                 if detail:
                     primary = _safe_runtime_detail(exc)
