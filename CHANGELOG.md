@@ -1,3 +1,13 @@
+## 1.6.129 - 2026-11-23
+
+- Keep the source MariaDB dump session alive while a direct MCC relay is
+  backpressured by a slow target consumer. MCD passes a session-scoped
+  `net_write_timeout`/`net_read_timeout` init command when the dump client
+  supports it; no source-server or persistent host configuration is changed.
+- Preserve the first target-consumer error, including safe mysql stderr, instead
+  of reducing it to a secondary missing completion marker. Add large-table slow
+  consumer and target consumer-failure regressions.
+
 ## 1.6.128 - 2026-11-23
 
 - Replace instance-migration database disk spooling with a bounded, backpressured

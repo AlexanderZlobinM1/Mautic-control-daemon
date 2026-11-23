@@ -2499,6 +2499,12 @@ Source DB stream работает как backpressured relay: MCD одновре
 `mysql` и передаёт SQL ему по мере получения relay-байтов. Последняя строка
 COMPLETE удерживается до EOF и не отправляется в mysql; gzip integrity,
 совпадение stream id и наличие COMPLETE проверяются до успешного receipt.
+Так как прямой relay может законно замедлиться на target, source dump при
+поддержке client option получает только для своей сессии высокий
+`net_write_timeout` и `net_read_timeout`; глобальная конфигурация MariaDB не
+меняется. Если target mysql завершился раньше конца потока, MCD закрывает
+relay, собирает его безопасный stderr и возвращает эту первичную ошибку, а не
+маскирует её вторичным `completion marker missing`.
 Если source, relay или target завершаются ошибкой после начала импорта, target
 закрывает/убивает mysql и удаляет только подготовленную целевую базу. Поэтому
 частичный импорт не считается подготовленным target и не оставляет SQL-архив.
