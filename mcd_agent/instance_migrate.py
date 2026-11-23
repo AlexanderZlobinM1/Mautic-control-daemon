@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from datetime import datetime, timezone
 import gzip
 import hashlib
@@ -80,7 +81,14 @@ _MYSQL_DATE_FORMAT_GENERATED_RE = re.compile(
 _DB_STREAM_MARKER_RE = re.compile(
     rb"^-- MCD-DB-STREAM-V1 (?P<phase>BEGIN|COMPLETE) (?P<stream_id>[0-9a-f]{32})\n$"
 )
+_DB_STREAM_ERROR_MARKER_RE = re.compile(
+    rb"^-- MCD-DB-STREAM-V1 ERROR (?P<stream_id>[0-9a-f]{32}) (?P<detail>[A-Za-z0-9_-]+)\n$"
+)
 _DB_STREAM_COPY_BUFFER_BYTES = 1024 * 1024
+_TARGET_DB_CLEANUP_TIMEOUT_SEC = 20
+_TARGET_DB_BLOCKER_QUERY_TIMEOUT_SEC = 5
+_TARGET_DB_BLOCKER_KILL_TIMEOUT_SEC = 3
+_TARGET_DB_MAX_BLOCKERS = 16
 NGINX_SITES_AVAILABLE = Path("/etc/nginx/sites-available")
 NGINX_SITES_ENABLED = Path("/etc/nginx/sites-enabled")
 LETSENCRYPT_ROOT = Path("/etc/letsencrypt")
@@ -1924,6 +1932,39 @@ def _db_stream_marker(phase: str, stream_id: str) -> bytes:
     return f"-- MCD-DB-STREAM-V1 {phase} {stream_id}\n".encode("ascii")
 
 
+def _db_stream_error_marker(stream_id: str, *, rc: int, detail: str) -> bytes:
+    payload = json.dumps(
+        {
+            "rc": int(rc),
+            "detail": _safe_runtime_detail(detail, limit=1500),
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    token = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+    return f"-- MCD-DB-STREAM-V1 ERROR {stream_id} {token}\n".encode("ascii")
+
+
+def _parse_db_stream_error(line: bytes, *, stream_id: str) -> dict[str, Any] | None:
+    match = _DB_STREAM_ERROR_MARKER_RE.fullmatch(line)
+    if match is None:
+        return None
+    marker_stream_id = match.group("stream_id").decode("ascii")
+    if marker_stream_id != stream_id:
+        raise RuntimeError("database stream error marker does not match begin marker")
+    token = match.group("detail").decode("ascii")
+    try:
+        payload = json.loads(base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("database stream error marker is invalid") from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("rc"), int):
+        raise RuntimeError("database stream error marker is invalid")
+    return {
+        "rc": int(payload["rc"]),
+        "detail": _safe_runtime_detail(payload.get("detail"), limit=1500),
+    }
+
+
 def _verify_db_stream_file(path: Path) -> str:
     """Verify gzip integrity and the source completion fence before DB mutation."""
     first_line = b""
@@ -1942,15 +1983,19 @@ def _verify_db_stream_file(path: Path) -> str:
         raise RuntimeError(f"database stream gzip is incomplete or corrupt: {exc}") from exc
 
     begin = _DB_STREAM_MARKER_RE.fullmatch(first_line)
-    complete = _DB_STREAM_MARKER_RE.fullmatch(last_nonempty)
     if begin is None or begin.group("phase") != b"BEGIN":
         raise RuntimeError("database stream begin marker is missing")
+    stream_id = begin.group("stream_id").decode("ascii")
+    source_error = _parse_db_stream_error(last_nonempty, stream_id=stream_id)
+    if source_error is not None:
+        detail = source_error["detail"] or "source dump exited without diagnostics"
+        raise RuntimeError(f"source database stream failed rc={source_error['rc']}: {detail}")
+    complete = _DB_STREAM_MARKER_RE.fullmatch(last_nonempty)
     if complete is None or complete.group("phase") != b"COMPLETE":
         raise RuntimeError("database stream completion marker is missing")
-    stream_id = begin.group("stream_id")
-    if complete.group("stream_id") != stream_id:
+    if complete.group("stream_id").decode("ascii") != stream_id:
         raise RuntimeError("database stream completion marker does not match begin marker")
-    return stream_id.decode("ascii")
+    return stream_id
 
 
 def _wait_stream_process(proc: subprocess.Popen[Any], *, terminate: bool = False) -> int:
@@ -1996,13 +2041,94 @@ def _iter_verified_db_stream_payload(lines: Any, *, stream_id: str) -> Any:
 
     if not tail:
         raise RuntimeError("database stream completion marker is missing")
+    if any(line.strip() for line in tail[1:]):
+        raise RuntimeError("database stream has data after terminal marker")
+    source_error = _parse_db_stream_error(tail[0], stream_id=stream_id)
+    if source_error is not None:
+        detail = source_error["detail"] or "source dump exited without diagnostics"
+        raise RuntimeError(f"source database stream failed rc={source_error['rc']}: {detail}")
     complete = _DB_STREAM_MARKER_RE.fullmatch(tail[0])
     if complete is None or complete.group("phase") != b"COMPLETE":
         raise RuntimeError("database stream completion marker is missing")
     if complete.group("stream_id").decode("ascii") != stream_id:
         raise RuntimeError("database stream completion marker does not match begin marker")
-    if any(line.strip() for line in tail[1:]):
-        raise RuntimeError("database stream has data after completion marker")
+
+
+def _collect_stream_process_output(proc: subprocess.Popen[Any], *, terminate: bool = False) -> tuple[bytes, bytes]:
+    """Collect a relay child with a bounded abort path.
+
+    Normal completion is deliberately unbounded because a large target import
+    may legitimately commit for a long time.  This helper is used only after
+    the stream has failed and therefore must not leave a mysql child behind.
+    """
+    if terminate:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+    try:
+        return proc.communicate(timeout=30)
+    except TypeError:
+        # Small test doubles and older wrappers may not accept timeout=.
+        return proc.communicate()
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        try:
+            return proc.communicate(timeout=30)
+        except TypeError:
+            return proc.communicate()
+        except subprocess.TimeoutExpired:
+            return b"", b"mysql consumer did not exit after kill"
+
+
+def _target_db_blocker_ids(db_name: str) -> list[int]:
+    query = (
+        "SELECT ID FROM INFORMATION_SCHEMA.PROCESSLIST "
+        f"WHERE DB={_quote_sql(db_name)} AND ID <> CONNECTION_ID() ORDER BY ID"
+    )
+    raw = _mysql_exec(query, timeout_sec=_TARGET_DB_BLOCKER_QUERY_TIMEOUT_SEC)
+    blocker_ids: list[int] = []
+    for line in str(raw or "").splitlines():
+        value = line.strip()
+        if value.isdigit() and int(value) > 0:
+            blocker_ids.append(int(value))
+        if len(blocker_ids) >= _TARGET_DB_MAX_BLOCKERS:
+            break
+    return blocker_ids
+
+
+def _cleanup_target_database(db_name: str) -> None:
+    """Drop only the prepared target DB, retrying after scoped blockers are killed."""
+    drop_sql = f"DROP DATABASE IF EXISTS {_quote_ident(db_name)}"
+    try:
+        _mysql_exec(drop_sql, timeout_sec=_TARGET_DB_CLEANUP_TIMEOUT_SEC)
+        return
+    except Exception as initial_error:
+        details = [f"initial={_safe_runtime_detail(initial_error)}"]
+
+    try:
+        blocker_ids = _target_db_blocker_ids(db_name)
+    except Exception as blocker_error:
+        blocker_ids = []
+        details.append(f"blocker_query={_safe_runtime_detail(blocker_error)}")
+
+    for blocker_id in blocker_ids:
+        try:
+            _mysql_exec(f"KILL {blocker_id}", timeout_sec=_TARGET_DB_BLOCKER_KILL_TIMEOUT_SEC)
+        except Exception as blocker_error:
+            details.append(f"kill_{blocker_id}={_safe_runtime_detail(blocker_error)}")
+
+    try:
+        _mysql_exec(drop_sql, timeout_sec=_TARGET_DB_CLEANUP_TIMEOUT_SEC)
+        return
+    except Exception as retry_error:
+        details.append(f"retry={_safe_runtime_detail(retry_error)}")
+        if blocker_ids:
+            details.append("blockers=" + ",".join(str(value) for value in blocker_ids))
+        raise RuntimeError("target database cleanup failed: " + "; ".join(details)) from retry_error
 
 
 @stable_source_operation
@@ -2065,6 +2191,7 @@ def stream_source_db(config: AgentConfig, *, selector: str | None, output: Any) 
             assert proc.stdout is not None
             relay_error: BaseException | None = None
             rc = 0
+            err = ""
             try:
                 with gzip.GzipFile(fileobj=output, mode="wb", compresslevel=1) as gz:
                     try:
@@ -2076,9 +2203,17 @@ def stream_source_db(config: AgentConfig, *, selector: str | None, output: Any) 
                         rc = _wait_stream_process(proc, terminate=True)
                     else:
                         rc = _wait_stream_process(proc)
+                        stderr_file.flush()
+                        err = stderr_path.read_text(encoding="utf-8", errors="replace").strip()
                         if rc == 0:
                             gz.write(b"\n")
                             gz.write(_db_stream_marker("COMPLETE", stream_id))
+                        else:
+                            # Keep the primary producer failure in-band so a
+                            # target never reduces it to a generic missing
+                            # completion fence.
+                            gz.write(b"\n")
+                            gz.write(_db_stream_error_marker(stream_id, rc=rc, detail=err))
             except BaseException as exc:
                 if relay_error is None:
                     relay_error = exc
@@ -2090,7 +2225,8 @@ def stream_source_db(config: AgentConfig, *, selector: str | None, output: Any) 
                 except Exception:
                     pass
 
-        err = stderr_path.read_text(encoding="utf-8", errors="replace").strip()
+        if not err:
+            err = stderr_path.read_text(encoding="utf-8", errors="replace").strip()
         if relay_error is not None:
             if isinstance(relay_error, (KeyboardInterrupt, SystemExit)):
                 raise relay_error
@@ -2175,34 +2311,31 @@ def import_target_db_stream(*, target_db_name: str, target_db_user: str, target_
                 proc.stdin.close()
                 proc.stdin = None
                 out_b, err_b = proc.communicate()
-            except BaseException:
+            except BaseException as exc:
                 if proc.stdin is not None:
                     try:
                         proc.stdin.close()
                     except Exception:
                         pass
                     proc.stdin = None
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-                try:
-                    out_b, err_b = proc.communicate()
-                except Exception:
-                    out_b, err_b = b"", b""
+                out_b, err_b = _collect_stream_process_output(proc, terminate=True)
                 detail = _safe_runtime_detail(((out_b or b"") + (err_b or b"")).decode("utf-8", errors="replace"))
                 if detail:
+                    primary = _safe_runtime_detail(exc)
+                    if primary.startswith("source database stream failed"):
+                        raise RuntimeError(primary + "; target mysql consumer stderr: " + detail)
                     raise RuntimeError("target mysql consumer failed: " + detail)
                 raise
 
         if proc.returncode != 0:
             out = ((out_b or b"") + (err_b or b"")).decode("utf-8", errors="replace").strip()
-            raise RuntimeError("target database import failed: " + _safe_runtime_detail(out))
+            detail = _safe_runtime_detail(out) or "mysql exited without diagnostics"
+            raise RuntimeError(f"target database import failed rc={proc.returncode}: {detail}")
     except BaseException as exc:
         cleanup_error: Exception | None = None
         if target_prepare_started:
             try:
-                _mysql_exec(f"DROP DATABASE IF EXISTS {_quote_ident(target_db.name)}")
+                _cleanup_target_database(target_db.name)
             except Exception as cleanup_exc:
                 cleanup_error = cleanup_exc
         if isinstance(exc, (KeyboardInterrupt, SystemExit)):
