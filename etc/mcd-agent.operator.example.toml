@@ -30,6 +30,16 @@ name = "passive"
 # Effective precedence:
 #   MCC host-runtime override > local [runtime] > profile defaults
 
+# Per-instance filesystem/database size cache refresh interval, in seconds.
+# Minimum is 60; the default is 86400 (once per day per instance).
+instance_size_refresh_interval_sec = 86400
+
+# Maximum runtime of each sequential `du` measurement, in seconds.
+# The same value applies to the instance total and its optional breakdown.
+# Minimum is 1; the default is 45. A timeout keeps one slow instance from
+# holding the serialized size scan indefinitely.
+instance_size_du_timeout_sec = 45
+
 # Ring layout: dual|single.
 ring_mode = "single"
 

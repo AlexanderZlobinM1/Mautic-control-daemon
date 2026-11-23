@@ -237,17 +237,22 @@ def _scheduler_pause_flag(config: AgentConfig) -> Path:
     return path
 
 
-def _enter_upgrade_maintenance(config: AgentConfig) -> UpgradeMaintenanceGuard:
+def _enter_upgrade_maintenance(config: AgentConfig, manage_system_cron: bool = True) -> UpgradeMaintenanceGuard:
     fence = scheduler_dispatch_fence(config, exclusive=True, blocking=True)
     fence.__enter__()
     try:
-        return _enter_upgrade_maintenance_locked(config, fence)
+        return _enter_upgrade_maintenance_locked(config, fence, manage_system_cron=manage_system_cron)
     except BaseException:
         fence.__exit__(*sys.exc_info())
         raise
 
 
-def _enter_upgrade_maintenance_locked(config: AgentConfig, fence: Any) -> UpgradeMaintenanceGuard:
+def _enter_upgrade_maintenance_locked(
+    config: AgentConfig,
+    fence: Any,
+    *,
+    manage_system_cron: bool = True,
+) -> UpgradeMaintenanceGuard:
     pause_flag = _scheduler_pause_flag(config)
     owned_pause_flag = not pause_flag.exists()
     if owned_pause_flag:
@@ -257,35 +262,38 @@ def _enter_upgrade_maintenance_locked(config: AgentConfig, fence: Any) -> Upgrad
         print(f"Maintenance guard: scheduler already paused ({pause_flag})")
 
     owned_cron_stop = False
-    marker = cron_marker_path(config)
-    if marker.exists():
-        print(f"Maintenance guard: cron stop marker already present ({marker}); leaving ownership unchanged")
-    else:
-        cron_stop = stop_cron_service(config)
-        if not bool(cron_stop.get("ok", False)):
-            pause_removed = False
-            if owned_pause_flag and pause_flag.exists():
-                try:
-                    pause_flag.unlink()
-                    pause_removed = not pause_flag.exists()
-                except OSError:
-                    pause_removed = False
-            message = str(cron_stop.get("message", "") or "").strip() or "cron service stop failed"
+    if manage_system_cron:
+        marker = cron_marker_path(config)
+        if marker.exists():
+            print(f"Maintenance guard: cron stop marker already present ({marker}); leaving ownership unchanged")
+        else:
+            cron_stop = stop_cron_service(config)
+            if not bool(cron_stop.get("ok", False)):
+                pause_removed = False
+                if owned_pause_flag and pause_flag.exists():
+                    try:
+                        pause_flag.unlink()
+                        pause_removed = not pause_flag.exists()
+                    except OSError:
+                        pause_removed = False
+                message = str(cron_stop.get("message", "") or "").strip() or "cron service stop failed"
+                unit = str(cron_stop.get("unit", "") or "").strip() or "-"
+                _emit_maintenance_guard_failure(
+                    reason="cron_stop_failed",
+                    cleanup={
+                        "cron_restore": {"requested": False, "reason": "cron_was_not_stopped"},
+                        "pause_owned": bool(owned_pause_flag),
+                        "pause_removed": bool(pause_removed),
+                        "dispatch_fence": "held_until_failure_evidence_emitted",
+                    },
+                )
+                raise RuntimeError(f"Maintenance guard failed: unable to stop cron unit {unit}: {message}")
+            owned_cron_stop = True
             unit = str(cron_stop.get("unit", "") or "").strip() or "-"
-            _emit_maintenance_guard_failure(
-                reason="cron_stop_failed",
-                cleanup={
-                    "cron_restore": {"requested": False, "reason": "cron_was_not_stopped"},
-                    "pause_owned": bool(owned_pause_flag),
-                    "pause_removed": bool(pause_removed),
-                    "dispatch_fence": "held_until_failure_evidence_emitted",
-                },
-            )
-            raise RuntimeError(f"Maintenance guard failed: unable to stop cron unit {unit}: {message}")
-        owned_cron_stop = True
-        unit = str(cron_stop.get("unit", "") or "").strip() or "-"
-        was_active = str(bool(cron_stop.get("was_active", False))).lower()
-        print(f"Maintenance guard: cron stopped unit={unit} was_active={was_active}")
+            was_active = str(bool(cron_stop.get("was_active", False))).lower()
+            print(f"Maintenance guard: cron stopped unit={unit} was_active={was_active}")
+    else:
+        print("Maintenance guard: system cron unchanged; MCD dispatch fence owns maintenance")
 
     try:
         stop_result = stop_running_tasks_for_maintenance(config, grace_sec=30, kill_orphans=True)
@@ -326,7 +334,7 @@ def _enter_upgrade_maintenance_locked(config: AgentConfig, fence: Any) -> Upgrad
     console_remaining = int(stop_result.get("mautic_console_total") or 0)
     if managed_remaining > 0 or console_remaining > 0:
         cron_restore: dict[str, Any] = {"ok": True, "requested": False, "started": False}
-        if owned_cron_stop:
+        if manage_system_cron and owned_cron_stop:
             try:
                 cron_restore = restore_cron_service_if_needed(config)
             except Exception as exc:
@@ -883,11 +891,8 @@ def _normalize_mautic7_composer_constraints(text: str, target: str) -> tuple[str
     return json.dumps(data, ensure_ascii=False, indent=2) + "\n", changes
 
 
-def _composer_update_args(*, dry_run: bool = False) -> list[str]:
-    args = ["update", "--with-all-dependencies"]
-    if dry_run:
-        args.append("--dry-run")
-    return args
+def _composer_update_args() -> list[str]:
+    return ["update", "--with-dependencies"]
 
 
 def _command_version_line(cmd: list[str], *, cwd: str, as_www_data: bool = False) -> str:
@@ -1222,15 +1227,6 @@ def _prepare_patch_target_stage(config, root: str, current: str, target: str, mo
             from mcd_agent.prepared_target import merge_into_live
             merge_into_live(prepared_target.root, application_root(stage_root))
             package_identity["sha256"] = prepared_target.artifact_sha256.removeprefix("sha256:")
-        elif mode == "composer":
-            cjson = stage_root / "composer.json"
-            text = cjson.read_text(encoding="utf-8")
-            updated, _count = _replace_version_tokens(text, current, target)
-            updated, _count = _normalize_mautic7_composer_constraints(updated, target)
-            cjson.write_text(updated, encoding="utf-8")
-            composer = _resolve_composer_bin(config.php_bin)
-            _run([composer, *_composer_update_args(), "--no-scripts"], cwd=str(stage_root), as_www_data=False)
-            package_identity["sha256"] = hashlib.sha256((stage_root / "composer.lock").read_bytes()).hexdigest()
         elif mode == "zip":
             import zipfile
             package = _resolve_update_package(config, target)
@@ -1853,11 +1849,8 @@ def _apply_composer(root: str, console_path: str, php_bin: str, current: str, ta
     print(f"Composer preflight ok: {composer_version} ({composer_bin})")
     print(f"Node.js preflight ok: {node_version}")
     print(f"npm preflight ok: {npm_version}")
-    stage = getattr(after_source_install, "target_stage", None)
     from mcd_agent.composer_permissions import prepare_composer_paths
-    staged_root = getattr(stage, "root", None)
-    permissions = prepare_composer_paths(project_root,
-        target_project_root=str(staged_root) if isinstance(staged_root, (str, Path)) else None)
+    permissions = prepare_composer_paths(project_root)
     print("Composer permissions prepared: " + json.dumps(permissions, sort_keys=True))
     text = cjson.read_text(encoding="utf-8")
     updated, changes = _replace_version_tokens(text, current, target)
@@ -1865,18 +1858,11 @@ def _apply_composer(root: str, console_path: str, php_bin: str, current: str, ta
     changes += constraint_changes
     if changes > 0 and updated != text:
         cjson.write_text(updated, encoding="utf-8")
-    if stage is not None:
-        if set(stage.composer_files) != {"composer.json", "composer.lock"}:
-            raise RuntimeError("Staged Composer target lacks exact dependency lock")
-        for name, content in stage.composer_files.items():
-            (Path(project_root) / name).write_bytes(content)
-    _run([composer_bin, *_composer_update_args(dry_run=True), "--no-scripts"], cwd=project_root, as_www_data=True)
-    print("Composer dependency dry-run ok")
     # Post-update scripts boot Mautic. They must never load the previous core's
     # compiled container after Composer has replaced its classes and services.
     deferred_events = ("post-autoload-dump", "post-update-cmd")
     _run(
-        ["env", "COMPOSER_SKIP_SCRIPTS=" + ",".join(deferred_events), composer_bin, *(["install", "--no-interaction", "--no-scripts"] if stage is not None else _composer_update_args())],
+        ["env", "COMPOSER_SKIP_SCRIPTS=" + ",".join(deferred_events), composer_bin, *_composer_update_args()],
         cwd=project_root,
         as_www_data=True,
     )
@@ -2395,6 +2381,8 @@ def run_upgrade_apply(
     patch_evidence_outcomes: list[dict[str, Any]] = []
     patch_evidence_failure: dict[str, Any] | None = None
     patch_evidence_reported = False
+    patch_facts_receipt: dict[str, Any] | None = None
+    patch_execution_started = False
     maintenance_receipt: dict[str, Any] | None = None
     guard: UpgradeMaintenanceGuard | None = None
     upgrade_committed = False
@@ -2579,10 +2567,10 @@ def run_upgrade_apply(
             )
 
         def patch_hook(source_root: str) -> None:
-            nonlocal patch_evidence_failure
+            nonlocal patch_evidence_failure, patch_facts_receipt
+            staged_evidence: dict[str, Any] | None = None
             try:
                 if target_stage is not None:
-                    from mcd_agent.mautic_patch_plan import _target_version
                     from mcd_agent.mautic_patch_stage import application_root
                     staged_evidence = target_stage.verify_live(source_root, validated_patch_plan, target_stage.read_version)
                     print("MCD_PATCH_TARGET_EVIDENCE=" + json.dumps(staged_evidence, sort_keys=True))
@@ -2590,7 +2578,18 @@ def run_upgrade_apply(
                 if validated_patch_plan.get("schema") == "mcd-mautic-patch-plan-v3":
                     # Runtime execution evaluates each selected patch's own
                     # condition; the executor has no global DB admission.
-                    evidence = staged_evidence
+                    if staged_evidence is None:
+                        from mcd_agent.mautic_patch_stage import application_root
+                        source_root = str(application_root(source_root)) if chosen_mode == "composer" else source_root
+                        evidence = atomic_preflight(
+                            source_root,
+                            patch_plan_json,
+                            patch_run_id,
+                            facts_provider=patch_facts_provider,
+                        )
+                        patch_facts_receipt = evidence.get("facts_receipt")
+                    else:
+                        evidence = staged_evidence
                 else:
                     evidence = atomic_preflight(source_root, patch_plan_json, patch_run_id, facts_provider=patch_facts_provider)
             except PatchPlanError as exc:
@@ -2611,19 +2610,24 @@ def run_upgrade_apply(
                 apply_patch_phase(source_root, "before_background_imports")
 
         def apply_patch_phase(source_root: str, phase: str) -> None:
-            nonlocal patch_evidence_failure
+            nonlocal patch_evidence_failure, patch_facts_receipt, patch_execution_started
             from mcd_agent.mautic_patch_plan import execute
             from mcd_agent.mautic_patch_stage import application_root
             source_root = str(application_root(source_root))
+            accepted_facts = patch_facts_receipt
             if patch_facts_provider is not None:
                 from mcd_agent.mautic_patch_plan_v3 import _observe_facts
                 # Admission belongs to runtime, after the standard updater
                 # installed the target. Execution still checks fresh drift.
-                target_stage.facts_receipt = _observe_facts(
+                accepted_facts = _observe_facts(
                     validated_patch_plan, patch_facts_provider, "apply", phase)
+                patch_facts_receipt = accepted_facts
+                if target_stage is not None:
+                    target_stage.facts_receipt = accepted_facts
+            patch_execution_started = True
             try:
                 result = execute(source_root, patch_plan_json, phase, patch_run_id, facts_provider=patch_facts_provider,
-                                 accepted_facts=getattr(target_stage, "facts_receipt", None))
+                                 accepted_facts=accepted_facts)
             except Exception as exc:
                 patch_evidence_failure = getattr(exc, "evidence", None) or {
                     "failure": {"id": "", "gates": []}, "completed": list(patch_evidence_outcomes),
@@ -2642,24 +2646,32 @@ def run_upgrade_apply(
             supported_phases = {"post_source_install", "before_campaign_trigger", "before_cache_warmup", "before_asset_generation", "preflight_frontend_assets", "before_doctrine_migrations", "before_campaign_execution", "before_background_imports"}
             if any(set(record["phases"]) - supported_phases for record in validated_patch_plan["patches"]):
                 raise RuntimeError("Selected upgrade plan contains a phase unavailable in this upgrade workflow")
-            try:
-                target_stage = _prepare_patch_target_stage(config, _resolve_composer_project_root(install_root) if chosen_mode == "composer" else install_root,
-                                                           current, target, chosen_mode, validated_patch_plan, facts_provider=patch_facts_provider,
-                                                           prepared_target=prepared_target)
-            except Exception as exc:
-                patch_evidence_failure = getattr(exc, "evidence", None) or {
-                    "failure": {"id": "", "gates": []}, "completed": list(patch_evidence_outcomes),
-                }
-                if not patch_evidence_reported:
-                    _report_upgrade_patch_evidence(
-                        config, inst, patch_resolution, validated_patch_plan,
-                        started_at=patch_evidence_started, status="error",
-                        outcomes=patch_evidence_failure.get("completed", patch_evidence_outcomes)
-                        if isinstance(patch_evidence_failure, dict) else patch_evidence_outcomes,
-                        failure=patch_evidence_failure.get("failure") if isinstance(patch_evidence_failure, dict) else None,
+            if not (chosen_mode == "composer" and prepared_target is None):
+                try:
+                    target_stage = _prepare_patch_target_stage(
+                        config,
+                        _resolve_composer_project_root(install_root) if chosen_mode == "composer" else install_root,
+                        current,
+                        target,
+                        chosen_mode,
+                        validated_patch_plan,
+                        facts_provider=patch_facts_provider,
+                        prepared_target=prepared_target,
                     )
-                    patch_evidence_reported = True
-                raise
+                except Exception as exc:
+                    patch_evidence_failure = getattr(exc, "evidence", None) or {
+                        "failure": {"id": "", "gates": []}, "completed": list(patch_evidence_outcomes),
+                    }
+                    if not patch_evidence_reported:
+                        _report_upgrade_patch_evidence(
+                            config, inst, patch_resolution, validated_patch_plan,
+                            started_at=patch_evidence_started, status="error",
+                            outcomes=patch_evidence_failure.get("completed", patch_evidence_outcomes)
+                            if isinstance(patch_evidence_failure, dict) else patch_evidence_outcomes,
+                            failure=patch_evidence_failure.get("failure") if isinstance(patch_evidence_failure, dict) else None,
+                        )
+                        patch_evidence_reported = True
+                    raise
             patch_hook.target_stage = target_stage
             patch_hook.apply_phase = apply_patch_phase
     if not yes:
@@ -2673,14 +2685,13 @@ def run_upgrade_apply(
     try:
         if cross_line:
             require_live_release_authorization()
-        guard = _enter_upgrade_maintenance(config)
+        guard = _enter_upgrade_maintenance(config, chosen_mode != "composer")
     except Exception:
         if target_stage is not None:
             target_stage.close()
         raise
     try:
         if target_stage is not None:
-            from mcd_agent.mautic_patch_plan import _target_version
             target_stage.verify_original(_resolve_composer_project_root(install_root) if chosen_mode == "composer" else install_root,
                                          validated_patch_plan, target_stage.read_version)
         if cross_line:
@@ -2830,11 +2841,11 @@ def run_upgrade_apply(
                 flush=True,
             )
         verification: dict[str, Any] | None = None
-        if target_stage is not None:
+        if validated_patch_plan is not None and validated_patch_plan.get("schema") == "mcd-mautic-patch-plan-v3":
             from mcd_agent.mautic_patch_stage import application_root
             from mcd_agent.mautic_patch_plan_v3 import verify_applied
             verification = verify_applied(str(application_root(install_root)), validated_patch_plan,
-                                          accepted_facts=getattr(target_stage, "facts_receipt", None))
+                                          accepted_facts=getattr(target_stage, "facts_receipt", None) or patch_facts_receipt)
         import_patch = {"status": "already", "reason": "runtime_reconciliation_uses_catalog_plan"}
         if import_patch.get("status") == "error":
             raise RuntimeError("Import tag patch after upgrade failed: " + str(import_patch.get("reason")))
@@ -2894,7 +2905,7 @@ def run_upgrade_apply(
         if guard is not None:
             maintenance_receipt = _exit_upgrade_maintenance(config, guard)
             guard = None
-        if target_stage is not None and not patch_evidence_reported:
+        if validated_patch_plan is not None and validated_patch_plan.get("schema") == "mcd-mautic-patch-plan-v3" and not patch_evidence_reported:
             accepted = _report_upgrade_patch_evidence(
                 config, inst, patch_resolution, validated_patch_plan,
                 started_at=patch_evidence_started, status="success",
@@ -2913,7 +2924,7 @@ def run_upgrade_apply(
         print(f"Upgrade completed: {current} -> {final_version}")
     except Exception:
         rollback_state = {"available": bool(patch_evidence_outcomes), "attempted": False, "succeeded": False}
-        if not upgrade_committed and target_stage is not None:
+        if not upgrade_committed and (target_stage is not None or patch_execution_started):
             from mcd_agent.mautic_patch_plan_v3 import rollback as rollback_v3
             try:
                 from mcd_agent.mautic_patch_stage import application_root

@@ -15,6 +15,7 @@ from typing import Any, cast, get_args, get_origin, get_type_hints
 from urllib import request
 from urllib.error import HTTPError, URLError
 from mcd_agent.fs_permissions import default_guard_paths, normalize_guard_paths
+from mcd_agent.instance_size import DU_TIMEOUT_SEC, INSTANCE_SIZE_REFRESH_SEC
 
 try:
     import tomllib  # type: ignore[attr-defined]
@@ -516,6 +517,8 @@ class AgentConfig:
     tasks_archive_keep_days: int
     scheduler_pause_flag_path: str
     weights_recalc_interval_sec: int
+    instance_size_refresh_interval_sec: int
+    instance_size_du_timeout_sec: int
     task_retry_max: int
     task_retry_delay_sec: int
     worker_watchdog_sec: int
@@ -1216,6 +1219,26 @@ def _normalize_runtime_limit(value: object, *, default: int) -> int:
         return max(0, int(text))
     except (TypeError, ValueError):
         return int(default)
+
+
+def _normalize_instance_size_refresh_interval(value: object) -> int:
+    """Return a safe operator-controlled instance-size refresh interval."""
+
+    try:
+        return max(60, int(value or INSTANCE_SIZE_REFRESH_SEC))
+    except (TypeError, ValueError):
+        return INSTANCE_SIZE_REFRESH_SEC
+
+
+def _normalize_instance_size_du_timeout(value: object) -> int:
+    """Return a safe operator-controlled ``du`` timeout."""
+
+    if value is None or str(value).strip().lower() in {"", "none", "null"}:
+        return DU_TIMEOUT_SEC
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return DU_TIMEOUT_SEC
 
 
 def _normalize_campaign_limit(value: object) -> int:
@@ -2354,6 +2377,8 @@ _RUNTIME_TO_ATTR: dict[str, str] = {
     "tasks_archive_keep_days": "tasks_archive_keep_days",
     "scheduler_pause_flag_path": "scheduler_pause_flag_path",
     "weights_recalc_interval_sec": "weights_recalc_interval_sec",
+    "instance_size_refresh_interval_sec": "instance_size_refresh_interval_sec",
+    "instance_size_du_timeout_sec": "instance_size_du_timeout_sec",
     "task_retry_max": "task_retry_max",
     "task_retry_delay_sec": "task_retry_delay_sec",
     "segment_retry_count": "segment_retry_count",
@@ -2688,7 +2713,11 @@ def _reapply_manual_runtime_overrides(cfg: AgentConfig, runtime: dict[str, Any])
         if isinstance(current, bool):
             updates[attr] = bool(raw_value)
         elif isinstance(current, int):
-            if attr == "campaign_limit":
+            if attr == "instance_size_refresh_interval_sec":
+                updates[attr] = _normalize_instance_size_refresh_interval(raw_value)
+            elif attr == "instance_size_du_timeout_sec":
+                updates[attr] = _normalize_instance_size_du_timeout(raw_value)
+            elif attr == "campaign_limit":
                 updates[attr] = _normalize_campaign_limit(raw_value)
             elif attr == "campaign_native_fallback_interval_sec":
                 updates[attr] = max(300, int(raw_value or 3600))
@@ -3191,6 +3220,12 @@ def _load_config_inner(path: str) -> AgentConfig:
         tasks_archive_keep_days=int(runtime.get("tasks_archive_keep_days", 14)),
         scheduler_pause_flag_path=str(runtime.get("scheduler_pause_flag_path", "/opt/mcd/var/scheduler.pause")),
         weights_recalc_interval_sec=int(runtime.get("weights_recalc_interval_sec", 86_400)),
+        instance_size_refresh_interval_sec=_normalize_instance_size_refresh_interval(
+            runtime.get("instance_size_refresh_interval_sec", INSTANCE_SIZE_REFRESH_SEC)
+        ),
+        instance_size_du_timeout_sec=_normalize_instance_size_du_timeout(
+            runtime.get("instance_size_du_timeout_sec", DU_TIMEOUT_SEC)
+        ),
         task_retry_max=int(runtime.get("task_retry_max", 1)),
         task_retry_delay_sec=int(runtime.get("task_retry_delay_sec", 2)),
         segment_retry_count=max(0, int(runtime.get("segment_retry_count", 2) or 0)),

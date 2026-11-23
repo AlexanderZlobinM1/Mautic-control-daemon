@@ -6,9 +6,10 @@ import tempfile
 import threading
 import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
-from mcd_agent.instance_size import INSTANCE_SIZE_REFRESH_SEC, InstanceSizeCache, collect_instance_sizes
+from mcd_agent.instance_size import DU_TIMEOUT_SEC, INSTANCE_SIZE_REFRESH_SEC, InstanceSizeCache, collect_instance_sizes
 from mcd_agent.models import DBConfig, MauticInstall
 
 
@@ -132,3 +133,29 @@ class InstanceSizeTests(unittest.TestCase):
                     thread.join()
 
             self.assertEqual(max_active, 1)
+
+    def test_state_pusher_passes_operator_interval_to_cache(self) -> None:
+        from mcd_agent.state_push import MCCStatePusher
+
+        cfg = SimpleNamespace(instance_size_refresh_interval_sec=7200, instance_size_du_timeout_sec=90)
+        with patch("mcd_agent.state_push.InstanceSizeCache") as cache_cls:
+            MCCStatePusher(cfg)
+
+        cache_cls.assert_called_once_with(None, refresh_after_sec=7200, du_timeout_sec=90)
+
+    def test_operator_du_timeout_is_used_for_root_and_breakdown(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "mautic"
+            (root / "media").mkdir(parents=True)
+            inst = MauticInstall("uid-timeout", "timeout.test", str(root), str(root / "bin" / "console"))
+            timeout_values: list[int] = []
+
+            def fake_du(_path: Path, *, timeout_sec: int = DU_TIMEOUT_SEC):
+                timeout_values.append(timeout_sec)
+                return 1024, None
+
+            with patch("mcd_agent.instance_size._du_bytes", side_effect=fake_du):
+                InstanceSizeCache(du_timeout_sec=90).collect([inst], now_ts=1000)
+
+        self.assertTrue(timeout_values)
+        self.assertEqual(set(timeout_values), {90})

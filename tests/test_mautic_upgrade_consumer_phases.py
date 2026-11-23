@@ -57,10 +57,12 @@ def wire(root, plan, monkeypatch, *, drift=False):
         verify_live=lambda *a: events.append("target_bound") or {"status": "success"},
         read_version=lambda *a: "7.2.1")
     for name, value in [("_pick_install_record", inst), ("_ensure_upgrade_target_allowed", True),
-            ("_require_release_approval", None), ("_prepare_patch_target_stage", stage),
+            ("_require_release_approval", None),
             ("_pre_upgrade_permissions_check", None), ("installed_required_bundles", []),
             ("_write_upgrade_version_cache", 0)]:
         monkeypatch.setattr(upgrade, name, lambda *a, _value=value, **kw: _value)
+    if plan["install_type"] == "zip":
+        monkeypatch.setattr(upgrade, "_prepare_patch_target_stage", lambda *a, **kw: stage)
     monkeypatch.setattr(upgrade, "_read_current_version", lambda *a: "7.2.1" if installed[0] else "7.2.0")
     monkeypatch.setattr(upgrade, "_resolve_composer_project_root", lambda root: root)
     monkeypatch.setattr(upgrade, "_enter_upgrade_maintenance", lambda *a: events.append("maintenance") or object())
@@ -107,7 +109,11 @@ def test_upgrade_entrypoint_executes_all_six_record_phases_before_consumers(tmp_
     args, events = wire(tmp_path, plan, monkeypatch)
     assert upgrade.run_upgrade_apply(**args) == 0
     assert plan == before
-    assert events.index("target_bound") < events.index("post_source_install")
+    if mode == "zip":
+        assert events.index("target_bound") < events.index("post_source_install")
+    else:
+        assert "target_bound" not in events
+        assert "stage_close" not in events
     assert events.index("post_source_install") < events.index("before_campaign_trigger") < events.index("before_campaign_execution") < events.index("before_background_imports")
     assert events.index("before_background_imports") < events.index("before_cache_warmup") < events.index("before_asset_generation") < events.index("scripts") < events.index("resume")
     assert all((tmp_path / row["source_paths"][0]).read_bytes() == b"after\n" for row in plan["patches"])

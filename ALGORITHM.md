@@ -63,10 +63,30 @@ Descriptor задаёт способ установки явно; два кон�
 для одного web root дают unknown и требуют уточнения до обновления.
 
 При обновлении сначала проверяется точная версия исходного приложения.
-Неполная версия ветки в Composer lock не подменяет эту проверку.
-Подготовленное целевое дерево проверяется отдельно по версии целевого пакета.
-Перед изменением приложения повторно проверяются исходная версия и хэши
-исходных файлов; изменение любого из них останавливает обновление.
+Неполная версия ветки в Composer lock не подменяет эту проверку. Для обычной
+Composer-установки MCD редактирует `composer.json` в maintenance-окне и
+выполняет один `composer update --with-dependencies`; отдельное полное временное
+дерево, второй Composer-проход и сравнение хэшей всего live-дерева не нужны.
+После обновления зависимостей MCD очищает production-cache, выполняет нужные
+patch-фазы и штатные команды Mautic, затем проверяет версию, миграции, HTTP и
+неизменяемый MCC evidence. ZIP и явно переданный prepared-target сохраняют
+свою отдельную проверку подготовленного целевого дерева.
+
+Для внешнего редактируемого сценария Composer используется отдельный
+типизированный executor `mcd-mautic-composer-executor-v1`. Сценарий передаёт
+только immutable JSON-план и SHA файла; shell, argv, sudo, произвольный SQL,
+секреты и `instance@host` запрещены. MCD одним процессом удерживает
+эксклюзивный dispatch fence на весь план, ставит scheduler на паузу, дренирует
+задачи и выполняет только фиксированные примитивы: правка `composer.json`, один
+Composer update, patch-фазы, cache clear, `mautic:update:apply --finish`,
+Doctrine migration/reconciliation и минимальные проверки. System cron этим
+маршрутом не управляется.
+
+До первой мутации MCD создаёт собственный immutable backup. При ошибке MCD
+восстанавливает его и пишет terminal receipt со статусом rollback; при успехе
+сначала наблюдает восстановление scheduler и только затем пишет success receipt.
+Повторный `run_id` возвращает тот же terminal receipt без повторного запуска.
+Контракт опубликован в `mcd_agent/contracts/mautic-composer-executor-v1.json`.
 
 Этот документ является рабочим каноном для MCD scheduler. Он описывает
 фактическую схему после исправления admission и должен обновляться вместе с
@@ -112,9 +132,11 @@ records и canonical plan binding, чтобы evidence-проверка могл
 запись без повтора.
 
 Перед terminal `success` MCD завершает обновление maintenance guard и только
-после фактического восстановления cron и scheduler добавляет в receipt
+после фактического восстановления scheduler добавляет в receipt
 `source_version`, `target_version`, `run_id`, `plan_sha256`, полную v3
-`evidence_identity` и два флага `maintenance_guard`. Terminal `success` и
+`evidence_identity` и флаги `maintenance_guard`. В Composer-маршруте system
+cron не является механизмом MCD и остаётся без изменений: admission и drain
+выполняются MCD dispatch fence и scheduler pause. Terminal `success` и
 `rc=0` разрешены только после ответа MCC `status=accepted`; stdout-marker
 является диагностическим представлением того же receipt и не заменяет ACK.
 
@@ -992,7 +1014,13 @@ config на его profile baseline и только после этого при
    одноразовый fair hand-off; rotating cursor отдаёт следующий slot другому
    root после этого хода, поэтому повторные terminal events одного root не
    создают hot-root loop/starvation. Slow probe одного root не может
-   удерживать terminal/adoption/refill другого. Если static dependency graph
+   удерживать terminal/adoption/refill другого. Если успешный Mautic 7 worker
+   уже записал native-coverage receipt текущего cycle, но его cycle terminal
+   transition был потерян между supervisor receipt и durable cursor, следующий
+   reconcile закрывает только покрытые unfinished IDs как `done`. Receipt
+   другого generation и failed/timeout work для этого не используются, поэтому
+   восстановление не повторяет успешную команду и не превращает ошибку в успех.
+   Если static dependency graph
    конкретного root недоступен, сохраняются его static queues/claims, но
    static admission этого root получает `0` launch; ordinary work этого root
    и независимые roots продолжают dispatch.
@@ -2787,8 +2815,11 @@ heartbeat. Для каждого `instance_uid` MCD хранит последн�
 локальном runtime-кеше и отправляет это значение в MCC вместе с обычным
 `instance_sizes` payload.
 
-Каждый конкретный инстанс измеряется не чаще одного раза за 24 часа. Время
-последней попытки также сохраняется, поэтому ошибка `du` или DB-query не
+Каждый конкретный инстанс измеряется не чаще заданного оператором интервала.
+Настройка находится в `[runtime]` под именем
+`instance_size_refresh_interval_sec`; значение по умолчанию — `86400` секунд
+(24 часа), минимально разрешено `60` секунд. Время последней попытки также
+сохраняется, поэтому ошибка `du` или DB-query не
 превращается в повторный цикл на каждом heartbeat. Если предыдущий результат
 есть, он остаётся доступен вместе с ошибкой последней попытки; если результата
 ещё не было, публикуется явная ошибка и пустой размер.
@@ -2800,6 +2831,11 @@ heartbeat. Для каждого `instance_uid` MCD хранит последн�
 существует не более одного процесса `du`. Изменение UID, application root или
 идентичности базы немедленно делает запись просроченной; обычные неизменившиеся
 инстансы используют кеш до следующего суточного прогона.
+
+Предельное время отдельного вызова `du` задаётся оператором в
+`[runtime].instance_size_du_timeout_sec` (по умолчанию `45`, минимум `1`). Оно
+одинаково применяется к измерению размера инстанса и его детализации; это
+защитный предел одной операции и не меняет суточный интервал кеша.
 
 Zabbix остаётся источником точного контроля аномального роста на уровне хоста.
 MCD не пытается превращать приблизительную суточную оценку размера в

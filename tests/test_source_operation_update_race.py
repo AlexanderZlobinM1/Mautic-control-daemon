@@ -109,13 +109,16 @@ def test_upgrade_entrypoint_holds_lease_during_stage_install_and_verification(in
         ok, message = self_update.apply_update(args["config"], _plan())
         assert not ok and "deferred" in message
         probes.append(True)
-    for name in ("_prepare_patch_target_stage", "_apply_zip" if mode == "zip" else "_apply_composer", "_post_upgrade_verify"):
+    wrapped_names = ("_apply_zip" if mode == "zip" else "_apply_composer", "_post_upgrade_verify")
+    if mode == "zip":
+        wrapped_names = ("_prepare_patch_target_stage",) + wrapped_names
+    for name in wrapped_names:
         original = getattr(upgrade, name)
         def wrapped(*a, _original=original, **kw):
             probe()
             return _original(*a, **kw)
         monkeypatch.setattr(upgrade, name, wrapped)
     assert upgrade.run_upgrade_apply(**args, mcc_preflighted_single_instance=True) == 0
-    assert len(probes) == 3
+    assert len(probes) == (3 if mode == "zip" else 2)
     monkeypatch.setattr(self_update, "_apply_update_locked", lambda *a: (True, "updated"))
     assert self_update.apply_update(args["config"], _plan())[0]

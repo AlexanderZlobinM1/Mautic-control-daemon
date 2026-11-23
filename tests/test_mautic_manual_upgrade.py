@@ -219,7 +219,10 @@ def wire_upgrade(invocation, monkeypatch, kind="composer"):
 def test_explicit_manual_flow_skips_both_callbacks(invocation, monkeypatch, kind):
     args, events = wire_upgrade(invocation, monkeypatch, kind)
     assert upgrade.run_upgrade_apply(**args, mcc_preflighted_single_instance=True) == 0
-    assert events == ["stage", "maintenance", "permissions", "install", "cleanup"]
+    expected = ["maintenance", "permissions", "install", "cleanup"]
+    if kind == "zip":
+        expected.insert(0, "stage")
+    assert events == expected
 
 
 def test_manual_latest_without_patch_plan_uses_regular_upgrade_path(invocation, monkeypatch):
@@ -248,7 +251,7 @@ def test_manual_php84_runs_after_verified_mautic_update(invocation, monkeypatch,
     monkeypatch.setattr(upgrade, "replace", lambda config, **kw: config)
     monkeypatch.setattr(upgrade, "_php84_runtime_observation", lambda: {"cli_version": "8.4.1", "fpm_version": "8.4", "nginx_socket": ["/run/php/php8.4-fpm.sock"]})
     assert upgrade.run_upgrade_apply(**args, mcc_preflighted_single_instance=True) == 0
-    assert events == ["host_preflight", "stage", "maintenance", "permissions", "baseline_backup", "install", "system", "cleanup"]
+    assert events == ["host_preflight", "maintenance", "permissions", "baseline_backup", "install", "system", "cleanup"]
     evidence = [
         json.loads(line.split("=", 1)[1])
         for line in capsys.readouterr().out.splitlines()
@@ -347,7 +350,7 @@ def test_source_change_during_maintenance_aborts_before_first_mutation(invocatio
     monkeypatch.setattr(upgrade, "_enter_upgrade_maintenance", changed)
     with pytest.raises(RuntimeError):
         upgrade.run_upgrade_apply(**args, mcc_preflighted_single_instance=True)
-    assert events == ["stage", "maintenance", "cleanup"]
+    assert events == ["maintenance", "cleanup"]
 
 
 @pytest.mark.parametrize("operation", ["check", "interactive"])

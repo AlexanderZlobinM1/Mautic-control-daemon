@@ -1,0 +1,109 @@
+{
+  "schema": "mcd-mautic-composer-executor-v1",
+  "contract_version": "1.0",
+  "purpose": "MCC-owned external Composer scenarios submit a typed step plan; MCD owns admission, command construction, backup, receipt and rollback.",
+  "invocation": "mcd-cli mautic-composer-executor apply --request-file REQUEST --request-sha256 SHA256 --json",
+  "request": {
+    "unknown_fields": "rejected at top level and in patch_plan, backup, evidence and step objects; no forward-compatible silent dropping",
+    "required": [
+      "schema",
+      "contract_version",
+      "run_id",
+      "instance_uid",
+      "root",
+      "source_version",
+      "target_version",
+      "steps",
+      "patch_plan",
+      "backup",
+      "cron_policy"
+    ],
+    "binding": {
+      "root": "absolute canonical Mautic root; never instance@host",
+      "instance_uid": "bare MCD/MCC instance UID",
+      "run_id": "immutable idempotency key"
+    },
+    "steps": {
+      "required_once": [
+        "composer_json_update",
+        "composer_update",
+        "cache_clear",
+        "mautic_finish",
+        "doctrine_migrate",
+        "verify"
+      ],
+      "optional": "patch_phase",
+      "order": "composer_json_update -> composer_update -> pre-cache patch phases -> cache_clear -> post-cache patch phases -> mautic_finish -> doctrine_migrate -> verify",
+      "patch_phase_values": [
+        "post_source_install",
+        "before_campaign_trigger",
+        "before_campaign_execution",
+        "before_background_imports",
+        "before_cache_warmup",
+        "before_asset_generation",
+        "preflight_frontend_assets",
+        "before_doctrine_migrations"
+      ]
+    },
+    "patch_plan": {
+      "phases": "must exactly equal the patch_phase entries in steps; when empty, plan_file/plan_sha256/run_id are empty",
+      "plan_file": "absolute private root-owned MCD plan file, only required when phases are non-empty",
+      "plan_sha256": "lowercase SHA-256 of the canonical immutable patch plan",
+      "run_id": "patch-plan run binding"
+    },
+    "backup": {
+      "required": true,
+      "owner": "MCD",
+      "policy": "MCD creates the immutable pre-mutation archive; caller cannot select its path or bytes"
+    },
+    "cron_policy": "must be unchanged; the MCD scheduler fence/pause/drain owns maintenance"
+  },
+  "fixed_primitives": {
+    "composer_json_update": "MCD performs the bounded source_version -> target_version replacement and target constraint normalization",
+    "composer_update": "www-data Composer update --with-dependencies with MCD-deferred Composer scripts",
+    "cache_clear": "MCD production-cache clear with its existing fallback",
+    "mautic_finish": "www-data bin/console mautic:update:apply --finish",
+    "doctrine_migrate": "MCD-discovered Doctrine migration command with --no-interaction and reconciliation",
+    "verify": "exact target version plus required MCD post-upgrade HTTP/permission checks"
+  },
+  "forbidden": [
+    "shell",
+    "script",
+    "argv",
+    "executable",
+    "sudo",
+    "password",
+    "token",
+    "secret",
+    "private_key",
+    "credential",
+    "arbitrary_sql",
+    "instance@host"
+  ],
+  "maintenance": {
+    "before": "exclusive MCD dispatch fence, scheduler pause and task drain",
+    "during": "the same fence remains held by the single executor process",
+    "after": "scheduler restoration is observed before success receipt; system cron is unchanged"
+  },
+  "receipt": {
+    "schema": "mcd-mautic-composer-executor-receipt-v1",
+    "terminal_status": ["success", "error", "rolled_back", "rollback_failed"],
+    "required": [
+      "run_id",
+      "instance_uid",
+      "root",
+      "source_version",
+      "target_version",
+      "steps",
+      "patch_plan",
+      "maintenance_guard",
+      "rollback"
+    ],
+    "durability": "MCD writes the terminal receipt atomically before returning; repeated run_id returns the same terminal receipt without re-executing"
+  },
+  "failure": {
+    "policy": "fail closed",
+    "mutation_started": "restore the MCD-owned archive and report rollback state",
+    "unknown_state": "never report success; rollback_failed or error remains terminal"
+  }
+}

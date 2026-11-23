@@ -1,3 +1,50 @@
+## 1.6.141 - 2026-11-23
+
+- Reconcile a successful same-cycle Mautic 7 native-coverage receipt into a
+  persisted ordinary segment cycle when its terminal cursor write was lost.
+  Covered follow-up work becomes `done` without rerunning the command; stale
+  generations and failed work remain ineligible for success recovery.
+
+## 1.6.140 - 2026-11-23
+
+- Make the sequential instance-size `du` timeout operator-configurable via
+  `runtime.instance_size_du_timeout_sec` so slow measurements can be adjusted
+  without rebuilding MCD. The default remains 45 seconds.
+
+## 1.6.139 - 2026-11-23
+
+- Include the immutable patch-plan binding in every external Composer executor
+  terminal receipt so MCC can verify run, plan SHA and rollback evidence from
+  the receipt alone.
+
+## 1.6.138 - 2026-11-23
+
+- Make the external Composer executor request fail closed on unknown fields at
+  every typed boundary. The request SHA, step objects, patch plan, backup and
+  evidence envelope are now strictly schema-bound.
+
+## 1.6.137 - 2026-11-23
+
+- Add the typed `mcd-mautic-composer-executor-v1` boundary for MCC-owned
+  external Composer scenarios. MCD now owns the full maintenance fence,
+  backup, fixed Composer/Mautic/Doctrine primitives, terminal receipt and
+  fail-closed rollback without accepting shell/argv or changing the MCD 1.7
+  route.
+
+## 1.6.136 - 2026-11-23
+
+- Simplify the Mautic Composer upgrade path: run one live dependency update,
+  retain MCD maintenance, required patch phases, migration/version checks and
+  immutable MCC evidence, and remove the duplicate target staging, dry-run and
+  full live-tree hash comparison from the standard Composer route.
+
+## 1.6.135 - 2026-11-23
+
+- Make the per-instance filesystem/database size cache refresh interval
+  operator-configurable via `runtime.instance_size_refresh_interval_sec`.
+  The default remains 86400 seconds and the safe minimum is 60 seconds, so
+  changing the interval no longer requires rebuilding MCD.
+
 ## 1.6.134 - 2026-11-23
 
 - Cache per-instance filesystem and database size observations for 24 hours.

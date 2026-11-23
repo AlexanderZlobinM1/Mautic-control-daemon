@@ -117,6 +117,52 @@ class CampaignRuntimeConfigTests(unittest.TestCase):
         self.assertEqual(cfg.scheduler_instance_max_parallel, 0)
         self.assertEqual(cfg.scheduler_fairness_watchdog_sec, 300)
 
+    def test_instance_size_refresh_interval_is_runtime_configurable(self) -> None:
+        path = Path(tempfile.mkdtemp()) / "mcd.toml"
+        path.write_text(
+            '[profile]\nname = "custom"\n[runtime]\ninstance_size_refresh_interval_sec = 7200\n',
+            encoding="utf-8",
+        )
+
+        cfg = load_config(str(path), allow_recover_from_mcc=False)
+
+        self.assertEqual(cfg.instance_size_refresh_interval_sec, 7200)
+
+    def test_instance_size_refresh_interval_has_safe_minimum_and_default(self) -> None:
+        path = Path(tempfile.mkdtemp()) / "mcd.toml"
+        path.write_text("[runtime]\ninstance_size_refresh_interval_sec = 30\n", encoding="utf-8")
+
+        cfg = load_config(str(path), allow_recover_from_mcc=False)
+
+        self.assertEqual(cfg.instance_size_refresh_interval_sec, 60)
+
+        path.write_text("[runtime]\ninstance_size_refresh_interval_sec = \"invalid\"\n", encoding="utf-8")
+        cfg = load_config(str(path), allow_recover_from_mcc=False)
+        self.assertEqual(cfg.instance_size_refresh_interval_sec, 86400)
+
+    def test_instance_size_du_timeout_is_runtime_configurable(self) -> None:
+        path = Path(tempfile.mkdtemp()) / "mcd.toml"
+        path.write_text(
+            '[profile]\nname = "custom"\n[runtime]\ninstance_size_du_timeout_sec = 90\n',
+            encoding="utf-8",
+        )
+
+        cfg = load_config(str(path), allow_recover_from_mcc=False)
+
+        self.assertEqual(cfg.instance_size_du_timeout_sec, 90)
+
+    def test_instance_size_du_timeout_has_safe_minimum_and_default(self) -> None:
+        path = Path(tempfile.mkdtemp()) / "mcd.toml"
+        path.write_text("[runtime]\ninstance_size_du_timeout_sec = 0\n", encoding="utf-8")
+
+        cfg = load_config(str(path), allow_recover_from_mcc=False)
+
+        self.assertEqual(cfg.instance_size_du_timeout_sec, 1)
+
+        path.write_text("[runtime]\ninstance_size_du_timeout_sec = \"invalid\"\n", encoding="utf-8")
+        cfg = load_config(str(path), allow_recover_from_mcc=False)
+        self.assertEqual(cfg.instance_size_du_timeout_sec, 45)
+
     def test_custom_profile_runs_without_mcc_and_reports_observed_state_when_available(self) -> None:
         path = Path(tempfile.mkdtemp()) / "mcd.toml"
         path.write_text(
