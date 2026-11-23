@@ -1,3 +1,11 @@
+## 1.7.3 - 2026-11-24
+
+- Keep daemon state push alive when the optional external Upgrade OS binding is
+  not configured. Local maintenance state remains authoritative and the
+  external observation is reported as unavailable; typed commercial status
+  commands still fail closed unless they receive a successful read-only
+  external receipt.
+
 ## 1.7.2 - 2026-11-23
 
 - Reconcile a successful same-cycle Mautic 7 native-coverage receipt into a

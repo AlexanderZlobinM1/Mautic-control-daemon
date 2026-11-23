@@ -11,7 +11,7 @@ import time
 from typing import Any
 from uuid import uuid4
 
-from mcd_agent.upgrade_os_external import run_upgrade_os_operation
+from mcd_agent.upgrade_os_external import UpgradeOSExternalError, run_upgrade_os_operation
 
 try:
     import fcntl
@@ -233,18 +233,34 @@ def collect_maintenance_state(cfg: Any) -> dict[str, Any]:
     pause_flag = _scheduler_pause_flag(cfg)
     paused = pause_flag.exists()
     marker = _read_cron_marker(cfg)
-    receipt = run_upgrade_os_operation(
-        cfg,
-        component="service",
-        operation="upgrade_service_transition",
-        operation_input={
+    try:
+        receipt = run_upgrade_os_operation(
+            cfg,
+            component="service",
+            operation="upgrade_service_transition",
+            operation_input={
+                "operation_id": "",
+                "target_php_version": "",
+                "action": "status",
+                "owned_stop": "false",
+                "dry_run": "false",
+            },
+        )
+    except UpgradeOSExternalError as exc:
+        # Maintenance status is part of every daemon state push, including
+        # standalone hosts where the optional Upgrade OS binding is absent.
+        # Preserve the authoritative local pause/marker state and expose the
+        # external observation as unavailable instead of terminating MCD.
+        receipt = {
+            "component": "service",
+            "status": "unavailable",
+            "reason": str(exc) or "upgrade_os_external_observation_failed",
             "operation_id": "",
-            "target_php_version": "",
             "action": "status",
-            "owned_stop": "false",
-            "dry_run": "false",
-        },
-    )
+            "mutation_started": False,
+            "active": {},
+            "command_attempts": [],
+        }
     unit = str(receipt.get("cron_service") or marker.get("unit") or "")
     active = receipt.get("active")
     cron_active = active.get(unit) if isinstance(active, dict) and unit else None

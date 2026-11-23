@@ -267,6 +267,10 @@ def _execute_maintenance_service_status(
         or external.get("component") != "service"
         or external.get("action") != "status"
         or external.get("mutation_started") is not False
+        or str(external.get("status") or "").strip().lower() not in {
+            "already_present", "applied", "noop", "ok", "planned",
+            "rolled_back", "success",
+        }
     ):
         return {"status": "failed", "reason": "commercial_maintenance_status_receipt_invalid"}
     public_maintenance = {
