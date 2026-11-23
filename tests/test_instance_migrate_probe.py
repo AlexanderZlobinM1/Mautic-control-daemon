@@ -1575,7 +1575,7 @@ class InstanceMigrateProbeTests(unittest.TestCase):
         self.assertIn(audit_rows, emitted)
         self.assertTrue(emitted.rstrip().endswith(instance_migrate._db_stream_marker("COMPLETE", "b" * 32).rstrip()))
 
-    def test_source_db_stream_propagates_dump_failure_without_emitting_partial_output(self) -> None:
+    def test_source_db_stream_propagates_dump_failure_with_incomplete_relay(self) -> None:
         class FakeInventory:
             def __init__(self, _path: str) -> None:
                 pass
@@ -1625,9 +1625,15 @@ class InstanceMigrateProbeTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, r"rc=3.*Lost connection.*ss_audit_log"):
                 instance_migrate.stream_source_db(cfg, selector="/var/www/failed", output=output)
 
-        self.assertEqual(output.getvalue(), b"")
+        # The source is now a backpressured relay: partial gzip bytes may have
+        # crossed the transport, but the completion fence must never appear.
+        self.assertNotEqual(output.getvalue(), b"")
+        with gzip.GzipFile(fileobj=io.BytesIO(output.getvalue()), mode="rb") as gz:
+            emitted = gz.read()
+        self.assertIn(b"MCD-DB-STREAM-V1 BEGIN", emitted)
+        self.assertNotIn(b" MCD-DB-STREAM-V1 COMPLETE ", emitted)
 
-    def test_target_db_rejects_truncated_source_before_preparing_database(self) -> None:
+    def test_target_db_cleans_partial_import_after_truncated_source(self) -> None:
         truncated = io.BytesIO()
         with gzip.GzipFile(fileobj=truncated, mode="wb") as gz:
             gz.write(instance_migrate._db_stream_marker("BEGIN", "c" * 32))
@@ -1635,9 +1641,27 @@ class InstanceMigrateProbeTests(unittest.TestCase):
             gz.write(b"INSERT INTO `ss_audit_log` VALUES (1);\n")
         truncated.seek(0)
 
+        class FakeStdin(io.BytesIO):
+            def close(self) -> None:
+                pass
+
+        class FakeProc:
+            def __init__(self) -> None:
+                self.stdin = FakeStdin()
+                self.returncode = 0
+
+            def communicate(self):
+                return b"", b""
+
+            def kill(self):
+                self.returncode = -9
+
+        proc = FakeProc()
         with (
             patch.object(instance_migrate, "_prepare_target_db") as prepare,
-            patch.object(instance_migrate.subprocess, "Popen") as popen,
+            patch.object(instance_migrate, "_mysql_admin_base", return_value=["mysql"]),
+            patch.object(instance_migrate.subprocess, "Popen", return_value=proc) as popen,
+            patch.object(instance_migrate, "_mysql_exec") as mysql_exec,
         ):
             with self.assertRaisesRegex(RuntimeError, "completion marker is missing"):
                 instance_migrate.import_target_db_stream(
@@ -1647,8 +1671,113 @@ class InstanceMigrateProbeTests(unittest.TestCase):
                     input_stream=truncated,
                 )
 
-        prepare.assert_not_called()
-        popen.assert_not_called()
+        prepare.assert_called_once()
+        popen.assert_called_once()
+        mysql_exec.assert_called_once_with("DROP DATABASE IF EXISTS `baza_target`")
+
+    def test_source_db_stream_relays_before_dump_process_exits(self) -> None:
+        class FakeInventory:
+            def __init__(self, _path: str) -> None:
+                pass
+
+            def list_instances(self):
+                return [
+                    MauticInstall(
+                        instance_uid="uid-relay",
+                        name="relay",
+                        root="/var/www/relay",
+                        console_path="/var/www/relay/bin/console",
+                    )
+                ]
+
+        output = io.BytesIO()
+
+        class FakeProc:
+            def __init__(self) -> None:
+                self.stdout = io.BytesIO(b"CREATE TABLE `ss_contacts` (`id` int);\n")
+                self.wait_saw_relay = False
+
+            def wait(self, *_args, **_kwargs):
+                self.wait_saw_relay = bool(output.getvalue())
+                return 0
+
+        proc = FakeProc()
+        cfg = type("Cfg", (), {"state_db_path": "/tmp/mcd-state.sqlite"})()
+        db = DBConfig(
+            host="localhost",
+            port=3306,
+            name="baza_relay",
+            user="source_user",
+            password="source_password",
+            table_prefix="ss_",
+        )
+
+        with (
+            patch.object(instance_migrate, "InstanceInventory", FakeInventory),
+            patch.object(instance_migrate, "ensure_seeded", return_value=None),
+            patch.object(instance_migrate, "_db_from_local_php", return_value=db),
+            patch.object(instance_migrate.shutil, "which", return_value="/usr/bin/mariadb-dump"),
+            patch.object(instance_migrate, "_dump_supports_network_timeout", return_value=False),
+            patch.object(instance_migrate.subprocess, "Popen", return_value=proc),
+        ):
+            result = instance_migrate.stream_source_db(cfg, selector="/var/www/relay", output=output)
+
+        self.assertEqual(result, 0)
+        self.assertTrue(proc.wait_saw_relay)
+
+    def test_target_db_starts_mysql_before_large_relay_is_consumed(self) -> None:
+        sql = b"INSERT INTO `ss_contacts` VALUES (1);\n" * 40000
+        compressed = _complete_db_stream(sql).getvalue()
+
+        class ChunkedInput(io.BytesIO):
+            def __init__(self, value: bytes) -> None:
+                super().__init__(value)
+                self.popen_started = False
+                self.read_after_popen = False
+
+            def read(self, size: int = -1):
+                if self.popen_started:
+                    self.read_after_popen = True
+                if size < 0:
+                    size = 64
+                return super().read(min(size, 64))
+
+        class FakeStdin(io.BytesIO):
+            def close(self) -> None:
+                pass
+
+        class FakeProc:
+            def __init__(self) -> None:
+                self.stdin = FakeStdin()
+                self.returncode = 0
+
+            def communicate(self):
+                return b"", b""
+
+            def kill(self):
+                self.returncode = -9
+
+        source = ChunkedInput(compressed)
+        proc = FakeProc()
+
+        def fake_popen(*_args, **_kwargs):
+            source.popen_started = True
+            return proc
+
+        with (
+            patch.object(instance_migrate, "_prepare_target_db", return_value=None),
+            patch.object(instance_migrate, "_mysql_admin_base", return_value=["mysql"]),
+            patch.object(instance_migrate.subprocess, "Popen", side_effect=fake_popen),
+        ):
+            result = instance_migrate.import_target_db_stream(
+                target_db_name="baza_target",
+                target_db_user="korisnik_target",
+                target_db_password="target_password",
+                input_stream=source,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(source.read_after_popen)
 
     def test_target_db_stream_rewrites_mysql8_date_format_generated_columns(self) -> None:
         sql = (
