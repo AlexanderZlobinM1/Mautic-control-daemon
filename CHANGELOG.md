@@ -1,3 +1,14 @@
+## 1.6.131 - 2026-11-23
+
+- Preserve the primary source-dump return code and sanitized stderr in the
+  database relay stream when `mariadb-dump` fails, so target MCD reports the
+  producer failure instead of a secondary missing completion marker.
+- Bound target database cleanup after a failed relay, retrying after killing
+  only sessions whose current database is the prepared target; cleanup failure
+  remains explicit and includes both attempts and blocker evidence.
+- Add regressions for large/slow relays, producer error fences, source-error
+  propagation, scoped cleanup retry, and exact cleanup-failure reporting.
+
 ## 1.6.130 - 2026-11-23
 
 - Dispatch explicit durable `plugins_apply` jobs from an independent host-local

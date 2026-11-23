@@ -1586,7 +1586,7 @@ class InstanceMigrateProbeTests(unittest.TestCase):
         self.assertIn(audit_rows, emitted)
         self.assertTrue(emitted.rstrip().endswith(instance_migrate._db_stream_marker("COMPLETE", "b" * 32).rstrip()))
 
-    def test_source_db_stream_propagates_dump_failure_with_incomplete_relay(self) -> None:
+    def test_source_db_stream_propagates_dump_failure_with_error_fence(self) -> None:
         class FakeInventory:
             def __init__(self, _path: str) -> None:
                 pass
@@ -1637,12 +1637,21 @@ class InstanceMigrateProbeTests(unittest.TestCase):
                 instance_migrate.stream_source_db(cfg, selector="/var/www/failed", output=output)
 
         # The source is now a backpressured relay: partial gzip bytes may have
-        # crossed the transport, but the completion fence must never appear.
+        # crossed the transport, but the producer's primary rc/stderr is still
+        # carried in-band and the completion fence never appears.
         self.assertNotEqual(output.getvalue(), b"")
         with gzip.GzipFile(fileobj=io.BytesIO(output.getvalue()), mode="rb") as gz:
             emitted = gz.read()
         self.assertIn(b"MCD-DB-STREAM-V1 BEGIN", emitted)
         self.assertNotIn(b" MCD-DB-STREAM-V1 COMPLETE ", emitted)
+        error_lines = [line for line in emitted.splitlines() if b" MCD-DB-STREAM-V1 ERROR " in line]
+        self.assertEqual(len(error_lines), 1)
+        stream_id = instance_migrate._stream_begin_id(emitted.splitlines(keepends=True)[0])
+        error = instance_migrate._parse_db_stream_error(error_lines[0] + b"\n", stream_id=stream_id)
+        self.assertIsNotNone(error)
+        assert error is not None
+        self.assertEqual(error["rc"], 3)
+        self.assertIn("ss_audit_log", error["detail"])
 
     def test_target_db_cleans_partial_import_after_truncated_source(self) -> None:
         truncated = io.BytesIO()
@@ -1684,7 +1693,95 @@ class InstanceMigrateProbeTests(unittest.TestCase):
 
         prepare.assert_called_once()
         popen.assert_called_once()
-        mysql_exec.assert_called_once_with("DROP DATABASE IF EXISTS `baza_target`")
+        mysql_exec.assert_called_once_with("DROP DATABASE IF EXISTS `baza_target`", timeout_sec=20)
+
+    def test_target_db_preserves_source_stream_error_and_cleans_partial_db(self) -> None:
+        source = io.BytesIO()
+        with gzip.GzipFile(fileobj=source, mode="wb") as gz:
+            gz.write(instance_migrate._db_stream_marker("BEGIN", "d" * 32))
+            gz.write(b"CREATE TABLE `ss_audit_log` (`id` int);\n")
+            gz.write(
+                instance_migrate._db_stream_error_marker(
+                    "d" * 32,
+                    rc=3,
+                    detail="mariadb-dump: Lost connection while dumping ss_audit_log",
+                )
+            )
+        source.seek(0)
+
+        class FakeStdin(io.BytesIO):
+            def close(self) -> None:
+                pass
+
+        class FakeProc:
+            def __init__(self) -> None:
+                self.stdin = FakeStdin()
+                self.returncode = 0
+
+            def communicate(self):
+                return b"", b""
+
+            def kill(self):
+                self.returncode = -9
+
+        proc = FakeProc()
+        with (
+            patch.object(instance_migrate, "_prepare_target_db", return_value=None),
+            patch.object(instance_migrate, "_mysql_admin_base", return_value=["mysql"]),
+            patch.object(instance_migrate.subprocess, "Popen", return_value=proc),
+            patch.object(instance_migrate, "_mysql_exec") as mysql_exec,
+        ):
+            with self.assertRaisesRegex(RuntimeError, r"source database stream failed rc=3.*ss_audit_log"):
+                instance_migrate.import_target_db_stream(
+                    target_db_name="baza_target",
+                    target_db_user="korisnik_target",
+                    target_db_password="target_password",
+                    input_stream=source,
+                )
+
+        mysql_exec.assert_called_once_with("DROP DATABASE IF EXISTS `baza_target`", timeout_sec=20)
+
+    def test_target_db_cleanup_retries_after_scoped_blockers(self) -> None:
+        calls: list[tuple[str, int]] = []
+
+        def fake_mysql_exec(sql: str, *, timeout_sec: int = 120) -> str:
+            calls.append((sql, timeout_sec))
+            if sql == "DROP DATABASE IF EXISTS `baza_target`" and sum(
+                1 for item, _timeout in calls if item == sql
+            ) == 1:
+                raise RuntimeError("drop timed out")
+            if sql.startswith("SELECT ID FROM INFORMATION_SCHEMA.PROCESSLIST"):
+                return "101\n102\n"
+            return ""
+
+        with patch.object(instance_migrate, "_mysql_exec", side_effect=fake_mysql_exec):
+            instance_migrate._cleanup_target_database("baza_target")
+
+        self.assertEqual(calls[0], ("DROP DATABASE IF EXISTS `baza_target`", 20))
+        self.assertIn(("KILL 101", 3), calls)
+        self.assertIn(("KILL 102", 3), calls)
+        self.assertEqual(calls[-1], ("DROP DATABASE IF EXISTS `baza_target`", 20))
+
+    def test_target_db_cleanup_reports_retry_failure_without_masking_details(self) -> None:
+        calls: list[str] = []
+
+        def fake_mysql_exec(sql: str, *, timeout_sec: int = 120) -> str:
+            del timeout_sec
+            calls.append(sql)
+            if sql.startswith("DROP DATABASE"):
+                if calls.count(sql) == 1:
+                    raise RuntimeError("initial drop timed out")
+                raise RuntimeError("retry drop failed")
+            if sql.startswith("SELECT ID FROM INFORMATION_SCHEMA.PROCESSLIST"):
+                return "201\n"
+            return ""
+
+        with patch.object(instance_migrate, "_mysql_exec", side_effect=fake_mysql_exec):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"target database cleanup failed.*initial=.*initial drop timed out.*retry=.*retry drop failed.*blockers=201",
+            ):
+                instance_migrate._cleanup_target_database("baza_target")
 
     def test_source_db_stream_relays_before_dump_process_exits(self) -> None:
         class FakeInventory:
@@ -1826,7 +1923,7 @@ class InstanceMigrateProbeTests(unittest.TestCase):
                     input_stream=source,
                 )
 
-        mysql_exec.assert_called_once_with("DROP DATABASE IF EXISTS `baza_target`")
+        mysql_exec.assert_called_once_with("DROP DATABASE IF EXISTS `baza_target`", timeout_sec=20)
 
     def test_target_db_stream_rewrites_mysql8_date_format_generated_columns(self) -> None:
         sql = (
