@@ -19,6 +19,7 @@ from typing import Any
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from pathlib import PurePosixPath
 
 from mcd_agent import __version__
@@ -739,6 +740,114 @@ def _activate_bundle(archive_path: Path, cache_dir: Path, digest: str, entrypoin
             shutil.rmtree(staged)
 
 
+_VERSIONED_COMPONENT_KEY = re.compile(
+    r"^(?P<identity>[A-Za-z0-9][A-Za-z0-9_.-]*-component)-(?P<version>[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9_.-]+)?)$"
+)
+
+
+def _component_coordinates(key: str) -> tuple[str, str] | None:
+    match = _VERSIONED_COMPONENT_KEY.fullmatch(str(key or "").strip())
+    return (match.group("identity"), match.group("version")) if match else None
+
+
+def _component_entrypoint(component_root: Path, entrypoint: str) -> Path | None:
+    current = component_root / "current"
+    try:
+        target = current.resolve(strict=True)
+        revisions = (component_root / "revisions").resolve(strict=True)
+        selected = target / entrypoint
+        if revisions not in target.parents or not selected.is_file() or selected.is_symlink():
+            return None
+        return selected
+    except (OSError, RuntimeError):
+        return None
+
+
+def _activate_versioned_component(
+    config: AgentConfig,
+    *,
+    archive_path: Path,
+    key: str,
+    digest: str,
+    size_bytes: int,
+    entrypoint: str,
+) -> Path:
+    coordinates = _component_coordinates(key)
+    if coordinates is None:
+        raise RuntimeError("custom component identity is invalid")
+    identity, version = coordinates
+    root = Path(config.custom_cache_dir) / "components" / identity
+    revisions = root / "revisions"
+    revisions.mkdir(parents=True, mode=0o700, exist_ok=True)
+    revision = revisions / digest
+    staged: Path | None = None
+    if not revision.exists():
+        staged = Path(tempfile.mkdtemp(prefix=".stage-", dir=revisions))
+        try:
+            with tarfile.open(archive_path, "r:gz") as archive:
+                safe_extract_tar(archive, staged)
+            selected = staged / entrypoint
+            if not selected.is_file() or selected.is_symlink():
+                raise RuntimeError("custom bundle entrypoint is missing or not a regular file")
+            selected.chmod(selected.stat().st_mode | 0o500)
+            os.replace(staged, revision)
+            staged = None
+        finally:
+            if staged is not None and staged.exists():
+                shutil.rmtree(staged)
+
+    lock_fd = os.open(root, os.O_RDONLY)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        previous_digest = ""
+        current = root / "current"
+        try:
+            previous = current.resolve(strict=True)
+            if previous.parent == revisions.resolve(strict=True):
+                previous_digest = previous.name
+        except (OSError, RuntimeError):
+            pass
+        temporary_link = root / (".current-" + uuid.uuid4().hex)
+        temporary_link.symlink_to(Path("revisions") / digest)
+        os.replace(temporary_link, current)
+        rollback = root / "rollback"
+        if previous_digest and previous_digest != digest:
+            temporary_rollback = root / (".rollback-" + uuid.uuid4().hex)
+            temporary_rollback.symlink_to(Path("revisions") / previous_digest)
+            os.replace(temporary_rollback, rollback)
+        elif rollback.exists() or rollback.is_symlink():
+            rollback.unlink(missing_ok=True)
+        metadata = {
+            "schema": "mcd-external-component-state-v1",
+            "identity": identity,
+            "key": key,
+            "version": version,
+            "sha256": digest,
+            "size_bytes": int(size_bytes),
+            "entrypoint": entrypoint,
+            "rollback_sha256": previous_digest if previous_digest and previous_digest != digest else None,
+        }
+        with tempfile.NamedTemporaryFile(mode="w", dir=root, prefix=".metadata-", delete=False) as stream:
+            metadata_tmp = Path(stream.name)
+            json.dump(metadata, stream, sort_keys=True, separators=(",", ":"))
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(metadata_tmp, root / "metadata.json")
+        keep = {digest}
+        if metadata["rollback_sha256"]:
+            keep.add(str(metadata["rollback_sha256"]))
+        for child in revisions.iterdir():
+            if child.name not in keep:
+                shutil.rmtree(child, ignore_errors=True)
+    finally:
+        os.close(lock_fd)
+    selected = _component_entrypoint(root, entrypoint)
+    if selected is None:
+        raise RuntimeError("custom component activation failed")
+    return selected
+
+
 def _fetch_script_to_cache(config: AgentConfig, script: dict[str, Any], *, offline_only: bool = False,
                            data_only: bool = False, preseed_bytes: bytes | None = None) -> Path:
     file_rel = str(script.get("file", "")).strip()
@@ -765,21 +874,53 @@ def _fetch_script_to_cache(config: AgentConfig, script: dict[str, Any], *, offli
         if not file_rel.endswith(".tar.gz") or re.fullmatch(r"[0-9a-f]{64}", expected_sha) is None:
             raise RuntimeError("custom bundle requires tar.gz and a manifest SHA-256")
 
+    component = _component_coordinates(key) if entrypoint is not None else None
+    expected_size = script.get("size_bytes")
+    if component is not None and (type(expected_size) is not int or expected_size < 0):
+        raise RuntimeError("custom component requires an expected size")
+    component_root = Path(config.custom_cache_dir) / "components" / component[0] if component else None
+    if component_root is not None:
+        metadata_path = component_root / "metadata.json"
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            metadata = {}
+        active = _component_entrypoint(component_root, str(entrypoint))
+        if (active is not None and metadata.get("schema") == "mcd-external-component-state-v1"
+                and metadata.get("key") == key and metadata.get("sha256") == expected_sha
+                and metadata.get("size_bytes") == expected_size):
+            return active
     dl_dir = Path(config.custom_cache_dir) / "downloads" / key
     suffix = ".tar.gz" if entrypoint is not None or (data_only and file_rel.endswith(".tar.gz")) else (Path(file_rel).suffix or ".sh")
     cached = dl_dir / f"{key}-{expected_sha}{suffix}"
-    if cached.is_file() and not cached.is_symlink() and hashlib.sha256(cached.read_bytes()).hexdigest() == expected_sha:
+    if (cached.is_file() and not cached.is_symlink()
+            and (component is None or cached.stat().st_size == expected_size)
+            and hashlib.sha256(cached.read_bytes()).hexdigest() == expected_sha):
         if entrypoint is not None:
+            if component is not None:
+                return _activate_versioned_component(
+                    config,
+                    archive_path=cached,
+                    key=key,
+                    digest=expected_sha,
+                    size_bytes=cached.stat().st_size,
+                    entrypoint=str(entrypoint),
+                )
             return _activate_bundle(cached, dl_dir, expected_sha, entrypoint)
         if not data_only:
             cached.chmod(cached.stat().st_mode | 0o500)
         return cached
     if offline_only and preseed_bytes is None:
+        if component is not None:
+            raise CustomSelectedTaskError(
+                f"custom_selected_component_artifact_missing_or_corrupt:{component[0]}:{key}:{expected_sha}"
+            )
         raise CustomSelectedTaskError("custom_selected_task_artifact_missing_or_corrupt")
-    dl_dir.mkdir(parents=True, exist_ok=True)
+    target_dir = component_root if component_root is not None else dl_dir
+    target_dir.mkdir(parents=True, exist_ok=True)
     staged: Path | None = None
     try:
-        with tempfile.NamedTemporaryFile(dir=dl_dir, prefix=".download-", delete=False) as temporary:
+        with tempfile.NamedTemporaryFile(dir=target_dir, prefix=".download-", delete=False) as temporary:
             staged = Path(temporary.name)
             if preseed_bytes is not None:
                 temporary.write(preseed_bytes)
@@ -792,9 +933,22 @@ def _fetch_script_to_cache(config: AgentConfig, script: dict[str, Any], *, offli
             temporary.flush()
             os.fsync(temporary.fileno())
         got_sha = hashlib.sha256(staged.read_bytes()).hexdigest().lower()
+        if component is not None and staged.stat().st_size != expected_size:
+            raise RuntimeError(
+                f"custom component size mismatch for {key}: expected={expected_size} got={staged.stat().st_size}"
+            )
         if expected_sha and got_sha != expected_sha:
             raise RuntimeError(
                 f"custom script checksum mismatch for {key}: expected={expected_sha} got={got_sha}"
+            )
+        if component is not None:
+            return _activate_versioned_component(
+                config,
+                archive_path=staged,
+                key=key,
+                digest=got_sha,
+                size_bytes=staged.stat().st_size,
+                entrypoint=str(entrypoint),
             )
         # A revision cannot overwrite the pathname of a different running script.
         dst = dl_dir / f"{key}-{got_sha}{suffix}"

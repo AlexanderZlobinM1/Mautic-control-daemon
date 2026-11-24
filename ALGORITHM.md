@@ -203,6 +203,15 @@ traversal, absolute paths and archive links, constrains `plugins_root`, restores
 the previous bundle on partial failure, recreates cache directories with the
 declared mode and owner semantics, and preserves unrelated paths.
 
+Versioned external components use one stable local identity directory at
+`<custom_cache>/components/<component-identity>/`. Delivery verifies declared
+size and SHA-256 in a temporary file, extracts an isolated revision, and
+atomically switches `current`. Only the immediately previous verified revision
+is retained as rollback; older revisions are removed. Failed or interrupted
+delivery never changes `current`, and an offline miss names the exact selected
+identity, versioned key and digest. A newer catalog candidate never substitutes
+for the explicitly selected coordinates.
+
 The immutable component v1.0.2 was accepted with the same ProductTour 1.1 package
 on clean Composer and ZIP layouts for Mautic 5, 6 and 7. The proof covers initial
 installation, exact Mautic inventory confirmation, repeatable terminal receipts,
