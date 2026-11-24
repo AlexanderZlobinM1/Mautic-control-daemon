@@ -4282,14 +4282,23 @@ def _segment_dispatch_context_needs_dependency_refresh(
         refreshed_at = float(context.get("dependency_snapshot_updated_at") or 0.0)
     except (TypeError, ValueError):
         refreshed_at = 0.0
-    if refreshed_at <= 0.0:
-        return True
-    interval = max(0, int(getattr(config, "segment_full_scan_interval_sec", 0) or 0))
-    return bool(interval > 0 and float(now_ts) - refreshed_at >= float(interval))
+    # Age alone is not a definition change. Rehydrate only an unproven or
+    # generation-mismatched context; a new admitted cycle/planner snapshot is
+    # the authoritative phase boundary that refreshes definitions.
+    return refreshed_at <= 0.0
 
 
 class _SegmentDispatchContextGenerationChanged(RuntimeError):
     """A root's active cycle changed while its read-only refresh was running."""
+
+
+def _dependency_refresh_retry_delay(config: object) -> float:
+    """Bound failed/stale context retries to at most one attempt per minute."""
+
+    return max(
+        60.0,
+        float(getattr(config, "segment_full_scan_interval_sec", 0) or 0),
+    )
 
 
 def _rehydrate_segment_dispatch_context(
@@ -4349,16 +4358,20 @@ def _rehydrate_segment_dispatch_context(
             else ""
         )
         if captured_cycle_id and current_cycle_id != captured_cycle_id:
-            raise _SegmentDispatchContextGenerationChanged(
-                f"active cycle changed during dependency refresh: {captured_cycle_id} -> {current_cycle_id}"
-            )
+            return {
+                "status": "discarded_generation_change",
+                "captured_cycle_id": captured_cycle_id,
+                "current_cycle_id": current_cycle_id,
+            }
         current_context = store.get_runtime_sync(_segment_dispatch_context_key(str(root))) or {}
         if isinstance(current_context, Mapping):
             current_context_cycle_id = str(current_context.get("cycle_id") or "").strip()
             if current_context_cycle_id and captured_cycle_id and current_context_cycle_id != captured_cycle_id:
-                raise _SegmentDispatchContextGenerationChanged(
-                    f"dispatch context changed during dependency refresh: {captured_cycle_id} -> {current_context_cycle_id}"
-                )
+                return {
+                    "status": "discarded_generation_change",
+                    "captured_cycle_id": captured_cycle_id,
+                    "current_cycle_id": current_context_cycle_id,
+                }
         # Merge into the latest context, not the snapshot captured before the
         # DB/help reads.  Only graph/capability metadata is replaced below;
         # current policy values are retained exactly, including explicit None
@@ -5314,6 +5327,20 @@ def _segment_cycle_planner_executor() -> ThreadPoolExecutor:
     """Create the single serial DB planner shared by all instance roots."""
 
     return ThreadPoolExecutor(max_workers=1, thread_name_prefix="mcd-root-plan-serial")
+
+
+_CONTROL_EXECUTOR_MAX_WORKERS = 4
+_CONTROL_EXECUTOR_LIFECYCLE_WORKERS = 2
+_CONTROL_EXECUTOR_IO_WORKERS = 2
+
+
+def _control_executor(*, max_workers: int = _CONTROL_EXECUTOR_MAX_WORKERS, prefix: str = "mcd-control") -> ThreadPoolExecutor:
+    """Create one bounded host-wide control lane shared by every root."""
+
+    return ThreadPoolExecutor(
+        max_workers=max(1, int(max_workers)),
+        thread_name_prefix=prefix,
+    )
 
 
 def _segment_plan_tick_transition(
@@ -13983,6 +14010,26 @@ def _pid_cmdline_args(pid: int) -> list[str]:
     return args
 
 
+def _pid_mcd_ownership(pid: int) -> dict[str, str]:
+    """Read the immutable ownership marker inherited by an MCD child."""
+
+    try:
+        raw = Path(f"/proc/{int(pid)}/environ").read_bytes()
+    except (OSError, ValueError):
+        return {}
+    values: dict[str, str] = {}
+    for item in raw.split(b"\0"):
+        if b"=" not in item:
+            continue
+        key, value = item.split(b"=", 1)
+        name = key.decode("utf-8", errors="ignore")
+        if name == "MCD_TASK_OWNER" or name.startswith("MCD_TASK_"):
+            values[name] = value.decode("utf-8", errors="ignore")
+    if values.get("MCD_TASK_OWNER") != "mcd":
+        return {}
+    return values
+
+
 def _task_signature_tokens(command_str: str) -> list[str]:
     args = [x for x in str(command_str or "").split(_CMD_SEP) if x]
     signature = [x for x in args if x.startswith("mautic:") or x.endswith("/bin/console") or x == "bin/console"]
@@ -14174,6 +14221,7 @@ def list_external_runtime_task_summaries(
             "started_at": float(now_ts - max(0, elapsed_sec)),
             "command_str": _CMD_SEP.join(str(x) for x in cmdline_args if str(x or "").strip()),
             "external": True,
+            "mcd_ownership": _pid_mcd_ownership(pid),
         }
         previous = rows_by_logical_key.get(logical_key)
         # A sudo/flock/php tree can expose multiple matching console processes.
@@ -14202,6 +14250,7 @@ def _sync_external_running_tasks(
     installs: list[object],
     running: dict[str, RunningTask],
     popens: dict[str, subprocess.Popen[bytes]],
+    store: "TaskStore | None" = None,
 ) -> dict[str, int]:
     """Adopt external work only while the shared admission fence is held."""
     with scheduler_dispatch_fence(config, exclusive=False, blocking=False) as admitted:
@@ -14217,6 +14266,7 @@ def _sync_external_running_tasks(
             installs=installs,
             running=running,
             popens=popens,
+            store=store,
         )
 
 
@@ -14225,6 +14275,7 @@ def _sync_external_running_tasks_unfenced(
     installs: list[object],
     running: dict[str, RunningTask],
     popens: dict[str, subprocess.Popen[bytes]],
+    store: "TaskStore | None" = None,
 ) -> dict[str, int]:
     stats = {"observed": 0, "adopted": 0, "updated": 0, "released": 0}
     roots = [str(getattr(inst, "root", "") or "").strip() for inst in installs]
@@ -14246,7 +14297,18 @@ def _sync_external_running_tasks_unfenced(
         root = str(row.get("root") or "").strip()
         task_type = str(row.get("task_type") or "").strip()
         entity_id = int(row["entity_id"]) if row.get("entity_id") is not None else None
-        key = _external_task_key(root, task_type, entity_id, pid)
+        ownership = row.get("mcd_ownership") if isinstance(row.get("mcd_ownership"), Mapping) else {}
+        mcd_owned = bool(ownership) and str(ownership.get("MCD_TASK_ROOT") or "") == root and str(
+            ownership.get("MCD_TASK_TYPE") or ""
+        ) == task_type
+        owned_key = str(ownership.get("MCD_TASK_KEY") or "").strip() if mcd_owned else ""
+        key = owned_key or _external_task_key(root, task_type, entity_id, pid)
+        timeout_sec = 0
+        if mcd_owned:
+            try:
+                timeout_sec = max(0, int(str(ownership.get("MCD_TASK_TIMEOUT_SEC") or "0")))
+            except ValueError:
+                timeout_sec = 0
         observed_by_key[key] = RunningTask(
             row_id=0,
             root=root,
@@ -14254,12 +14316,12 @@ def _sync_external_running_tasks_unfenced(
             task_type=task_type,
             entity_id=entity_id,
             command_str=str(row.get("command_str") or ""),
-            timeout_sec=0,
+            timeout_sec=timeout_sec,
             attempts=1,
             started_at=float(row.get("started_at") or time.time()),
             pid=pid,
             manual_request_id=None,
-            external=True,
+            external=not mcd_owned,
         )
 
     for key, task in list(running.items()):
@@ -14273,6 +14335,8 @@ def _sync_external_running_tasks_unfenced(
     for key, task in observed_by_key.items():
         cur = running.get(key)
         if cur is None:
+            if not task.external and store is not None:
+                task.row_id = store.add_running(task)
             running[key] = task
             stats["adopted"] += 1
             continue
@@ -14339,13 +14403,20 @@ def _spawn_command(
     args: list[str],
     stdout_path: str = "",
     stderr_path: str = "",
+    ownership: Mapping[str, object] | None = None,
 ) -> subprocess.Popen[bytes]:
     stdout_handle = open(stdout_path, "wb") if stdout_path else None
     stderr_handle = open(stderr_path, "wb") if stderr_path else None
     try:
+        child_env = os.environ.copy()
+        if ownership:
+            child_env["MCD_TASK_OWNER"] = "mcd"
+            for key, value in ownership.items():
+                child_env[f"MCD_TASK_{str(key).upper()}"] = str(value)
         return subprocess.Popen(
             args,
             cwd=root,
+            env=child_env,
             stdin=subprocess.DEVNULL,
             stdout=stdout_handle or subprocess.DEVNULL,
             stderr=stderr_handle or subprocess.DEVNULL,
@@ -14361,6 +14432,18 @@ def _spawn_command(
 def _task_key(root: str, task_type: str, entity_id: int | None) -> str:
     eid = "-" if entity_id is None else str(entity_id)
     return f"{root}|{task_type}|{eid}"
+
+
+def _task_ownership_env(
+    *, root: str, task_key: str, task_type: str, entity_id: int | None, timeout_sec: int
+) -> dict[str, object]:
+    return {
+        "key": task_key,
+        "root": root,
+        "type": task_type,
+        "entity_id": "" if entity_id is None else int(entity_id),
+        "timeout_sec": max(0, int(timeout_sec or 0)),
+    }
 
 
 def _campaign_dispatch_begin(root: str, task_type: str) -> bool:
@@ -14753,7 +14836,17 @@ class _PriorityTaskExecutor:
                 with scheduler_admission_lock(config):
                     if scheduler_pause_path(config).exists():
                         return
-                    proc = _spawn_command(root=root, args=locked_args)
+                    proc = _spawn_command(
+                        root=root,
+                        args=locked_args,
+                        ownership=_task_ownership_env(
+                            root=root,
+                            task_key=key,
+                            task_type=task_type,
+                            entity_id=entity_id,
+                            timeout_sec=timeout,
+                        ),
+                    )
                 if on_start is not None:
                     on_start(int(proc.pid))
                 rc = int(proc.wait(timeout=timeout if timeout > 0 else None) or 0)
@@ -17480,7 +17573,19 @@ def _submit_if_slot_uncoordinated(
     with scheduler_admission_lock(config):
         if scheduler_pause_path(config).exists():
             return False
-        proc = _spawn_command(root=root, args=args, stdout_path=stdout_path, stderr_path=stderr_path)
+        proc = _spawn_command(
+            root=root,
+            args=args,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            ownership=_task_ownership_env(
+                root=root,
+                task_key=key,
+                task_type=task_type,
+                entity_id=entity_id,
+                timeout_sec=timeout_sec,
+            ),
+        )
     if task_type == "segment" and _SEGMENT_DISPATCH_WAKEUP is not None:
         threading.Thread(
             target=_wait_for_segment_process_exit,
@@ -17579,6 +17684,13 @@ def _respawn_task(
                     args=args,
                     stdout_path=task.stdout_path,
                     stderr_path=task.stderr_path,
+                    ownership=_task_ownership_env(
+                        root=task.root,
+                        task_key=task.task_key,
+                        task_type=task.task_type,
+                        entity_id=task.entity_id,
+                        timeout_sec=task.timeout_sec,
+                    ),
                 )
         except Exception as e:  # pragma: no cover - defensive
             logging.warning("[%s] respawn failed %s: %s", task.root, task.task_type, e)
@@ -19901,7 +20013,15 @@ def run_loop(
     main_dispatch_busy_roots: set[str] = set()
     lifecycle_monitor_busy_roots: set[str] = set()
     lifecycle_monitor_futures: dict[str, Future[object]] = {}
-    lifecycle_monitor_executors: dict[str, ThreadPoolExecutor] = {}
+    lifecycle_control_executor = _control_executor(
+        max_workers=_CONTROL_EXECUTOR_LIFECYCLE_WORKERS,
+        prefix="mcd-control-lifecycle",
+    )
+    io_control_executor = _control_executor(
+        max_workers=_CONTROL_EXECUTOR_IO_WORKERS,
+        prefix="mcd-control-io",
+    )
+    control_stop_event = threading.Event()
     lifecycle_monitor_wakeup = threading.Event()
     _SEGMENT_DISPATCH_WAKEUP = segment_dispatch_wakeup
     _ORDINARY_REFILL_WAKEUP = ordinary_refill_wakeup
@@ -19963,12 +20083,15 @@ def run_loop(
             )
             return
 
-        roots = {
-            str(getattr(inst, "root", "") or "").strip()
-            for inst in installs
-            if str(getattr(inst, "root", "") or "").strip()
-        }
-        roots.update(str(task.root).strip() for task in running.values() if str(task.root).strip())
+        # Idle inventory roots require no lifecycle poll.  Durable running rows
+        # and adopted external work are the complete ownership set after a
+        # restart, so thread/work growth is independent of inventory size.
+        roots = {str(task.root).strip() for task in running.values() if str(task.root).strip()}
+        roots.update(
+            str(row.get("root") or "").strip()
+            for row in store.running_rows()
+            if str(row.get("root") or "").strip()
+        )
         for root, future in list(lifecycle_monitor_futures.items()):
             if not future.done():
                 continue
@@ -19985,15 +20108,8 @@ def run_loop(
                 if root in main_dispatch_busy_roots or root in lifecycle_monitor_busy_roots:
                     continue
                 lifecycle_monitor_busy_roots.add(root)
-            executor = lifecycle_monitor_executors.setdefault(
-                root,
-                ThreadPoolExecutor(
-                    max_workers=1,
-                    thread_name_prefix="mcd-root-lifecycle-" + hashlib.sha1(root.encode("utf-8")).hexdigest()[:8],
-                ),
-            )
             try:
-                lifecycle_monitor_futures[root] = executor.submit(_monitor_one_root, root)
+                lifecycle_monitor_futures[root] = lifecycle_control_executor.submit(_monitor_one_root, root)
             except Exception:
                 with _SCHEDULER_RUNTIME_LOCK:
                     lifecycle_monitor_busy_roots.discard(root)
@@ -20002,7 +20118,7 @@ def run_loop(
     def _lifecycle_monitor_scheduler() -> None:
         """Continuously tick the canonical root-local lifecycle monitors."""
 
-        while _test_stop_event is None or not _test_stop_event.is_set():
+        while not control_stop_event.is_set() and (_test_stop_event is None or not _test_stop_event.is_set()):
             try:
                 _monitor_authoritative_runtime()
             except Exception as exc:
@@ -20016,8 +20132,7 @@ def run_loop(
         """Observe late admissions/imports in independent root-local jobs."""
 
         futures: dict[str, Future[dict[str, object]]] = {}
-        executors: dict[str, ThreadPoolExecutor] = {}
-        last_submitted: dict[str, float] = {}
+        observed_tick = int(time.time() // 60.0) * 60.0
         plan_futures: dict[str, Future[dict[str, object]]] = {}
         plan_executor = _segment_cycle_planner_executor()
         plan_last_submitted: dict[str, float] = {}
@@ -20384,7 +20499,7 @@ def run_loop(
                 "added": added_ids,
             }
 
-        while True:
+        while not control_stop_event.is_set() and (_test_stop_event is None or not _test_stop_event.is_set()):
             now_observer = time.time()
             for root, future in list(futures.items()):
                 if not future.done():
@@ -20538,6 +20653,10 @@ def run_loop(
             )
             current_plan_tick = observed_plan_tick
 
+            current_observer_tick = int(now_observer // 60.0) * 60.0
+            open_observer_tick = current_observer_tick > observed_tick
+            if open_observer_tick:
+                observed_tick = current_observer_tick
             for inst in list(installs):
                 root = str(getattr(inst, "root", "") or "").strip()
                 if not root or not getattr(inst, "db", None) or root in futures:
@@ -20553,27 +20672,15 @@ def run_loop(
                     ):
                         plan_last_submitted[root] = current_plan_tick
                         plan_futures[root] = plan_executor.submit(_plan_terminal_root, inst)
-                observe_interval = max(
-                    5.0,
-                    min(30.0, float(getattr(config, "dispatch_interval_sec", 1) or 1) * 5.0),
-                )
-                if now_observer - float(last_submitted.get(root, 0.0) or 0.0) < observe_interval:
+                if not open_observer_tick:
                     continue
                 if not active and not cluster_route_allows(config, "import"):
                     continue
-                last_submitted[root] = now_observer
-                root_executor = executors.setdefault(
-                    root,
-                    ThreadPoolExecutor(
-                        max_workers=1,
-                        thread_name_prefix=(
-                            "mcd-root-observe-"
-                            + hashlib.sha1(root.encode("utf-8")).hexdigest()[:8]
-                        ),
-                    ),
-                )
-                futures[root] = root_executor.submit(_observe_root, inst, admitted_at)
-            time.sleep(0.2)
+                futures[root] = io_control_executor.submit(_observe_root, inst, admitted_at)
+            if _test_stop_event is not None:
+                _test_stop_event.wait(1.0)
+            else:
+                time.sleep(1.0)
 
     def _ordinary_persisted_refill_worker() -> None:
         """Keep admitted ordinary cycles moving while DB planning is slow.
@@ -20598,7 +20705,6 @@ def run_loop(
         # root so a slow or unavailable Mautic database cannot turn context
         # recovery into a host-wide scheduler barrier.
         dependency_refresh_futures: dict[str, Future[dict[str, object]]] = {}
-        dependency_refresh_executors: dict[str, ThreadPoolExecutor] = {}
         dependency_refresh_retry_at: dict[str, float] = {}
         refill_priority_lock = threading.Lock()
         refill_priority_roots: deque[str] = deque()
@@ -20847,19 +20953,31 @@ def run_loop(
                     return True
             return False
 
-        while _test_stop_event is None or not _test_stop_event.is_set():
+        while not control_stop_event.is_set() and (_test_stop_event is None or not _test_stop_event.is_set()):
             try:
                 for refresh_root, refresh_future in list(dependency_refresh_futures.items()):
                     if not refresh_future.done():
                         continue
                     dependency_refresh_futures.pop(refresh_root, None)
                     try:
-                        refresh_future.result()
-                        dependency_refresh_retry_at.pop(refresh_root, None)
-                        logging.info(
-                            "[%s] persisted segment dispatch context rehydrated from live Mautic definitions",
-                            refresh_root,
-                        )
+                        refresh_result = refresh_future.result()
+                        if (
+                            isinstance(refresh_result, Mapping)
+                            and str(refresh_result.get("status") or "") == "discarded_generation_change"
+                        ):
+                            dependency_refresh_retry_at[refresh_root] = time.time() + 60.0
+                            logging.info(
+                                "[%s] stale dependency refresh discarded captured=%s current=%s",
+                                refresh_root,
+                                refresh_result.get("captured_cycle_id", "-"),
+                                refresh_result.get("current_cycle_id", "-"),
+                            )
+                        else:
+                            dependency_refresh_retry_at.pop(refresh_root, None)
+                            logging.info(
+                                "[%s] persisted segment dispatch context rehydrated from live Mautic definitions",
+                                refresh_root,
+                            )
                     except Exception as exc:
                         # Keep the stale context non-dispatchable.  The next
                         # root-local future may retry, but an unavailable or
@@ -20869,13 +20987,7 @@ def run_loop(
                             refresh_root,
                             exc,
                         )
-                        if isinstance(exc, _SegmentDispatchContextGenerationChanged):
-                            retry_interval = max(0.2, float(getattr(config, "dispatch_interval_sec", 1) or 1))
-                        else:
-                            retry_interval = max(
-                                float(getattr(config, "dispatch_interval_sec", 1) or 1),
-                                float(getattr(config, "segment_full_scan_interval_sec", 0) or 0),
-                            )
+                        retry_interval = _dependency_refresh_retry_delay(config)
                         dependency_refresh_retry_at[refresh_root] = time.time() + retry_interval
                 # Root-local reads and dependency work must not hold the
                 # shared registry lock. The canonical submit/claim boundary
@@ -21079,17 +21191,7 @@ def run_loop(
                                         inst,
                                     ),
                                 }
-                                dependency_refresh_executors.setdefault(
-                                    root,
-                                    ThreadPoolExecutor(
-                                        max_workers=1,
-                                        thread_name_prefix=(
-                                            "mcd-root-context-"
-                                            + hashlib.sha1(root.encode("utf-8")).hexdigest()[:8]
-                                        ),
-                                    ),
-                                )
-                                dependency_refresh_futures[root] = dependency_refresh_executors[root].submit(
+                                dependency_refresh_futures[root] = io_control_executor.submit(
                                     _rehydrate_segment_dispatch_context,
                                     store,
                                     root=root,
@@ -22697,7 +22799,13 @@ def run_loop(
                 logging.warning("inventory auto-rescan failed: %s", e)
             next_inventory_auto_rescan_at = now + interval
 
-        ext = _sync_external_running_tasks(config=config, installs=installs, running=running, popens=popens)
+        ext = _sync_external_running_tasks(
+            config=config,
+            installs=installs,
+            running=running,
+            popens=popens,
+            store=store,
+        )
         if any(int(ext.get(k, 0) or 0) > 0 for k in ("adopted", "updated", "released")):
             logging.info(
                 "external task sync: observed=%s adopted=%s updated=%s released=%s",
@@ -28342,6 +28450,9 @@ def run_loop(
                     last_monitor_signals_push_error = reason
 
         if single_cycle:
+            control_stop_event.set()
+            lifecycle_control_executor.shutdown(wait=False, cancel_futures=True)
+            io_control_executor.shutdown(wait=False, cancel_futures=True)
             commercial_stop_event.set()
             if commercial_thread is not None:
                 commercial_thread.join(timeout=2.0)
@@ -28352,6 +28463,11 @@ def run_loop(
         segment_dispatch_wakeup.wait(timeout=max(0.1, float(config.dispatch_interval_sec)))
         segment_dispatch_wakeup.clear()
 
+    control_stop_event.set()
+    lifecycle_monitor_wakeup.set()
+    ordinary_refill_wakeup.set()
+    lifecycle_control_executor.shutdown(wait=False, cancel_futures=True)
+    io_control_executor.shutdown(wait=False, cancel_futures=True)
     state_push_stop_event.set()
     if state_push_thread is not None and state_push_thread.ident is not None:
         state_push_thread.join(timeout=2.0)

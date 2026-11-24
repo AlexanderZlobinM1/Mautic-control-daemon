@@ -708,6 +708,28 @@ host-level planner формирует их DB snapshots строго после�
 открывается; после завершения старого следующие претенденты ждут очередной
 минутной границы.
 
+Control plane не масштабирует число Linux threads по числу instances. Lifecycle
+monitor использует bounded shared lane только для roots с реально running или
+durable задачами; minute observer и dependency recovery используют отдельную
+bounded shared I/O lane. Добавление/удаление root не создаёт и не удерживает
+персональный executor. При завершении daemon обе lane закрываются, queued
+control futures отменяются.
+
+Late-discovery observer читает roots только на минутной границе. Dependency
+context перечитывается только когда текущая generation не имеет подтверждённого
+snapshot, cycle/context generation расходятся либо отсутствует обязательная
+capability. Возраст корректного snapshot сам по себе не запускает rehydrate.
+Один root не имеет больше одного незавершённого refresh; неудача или
+generation-race получает backoff не менее минуты. Результат старой generation
+атомарно отбрасывается и никогда не перезаписывает новый context.
+
+Каждая команда, запущенная MCD, наследует ownership marker с task key, root,
+типом, entity ID и timeout. После restart MCD сопоставляет marker с фактической
+Mautic-командой и execution lock, восстанавливает durable running receipt и
+продолжает наблюдение без повторного запуска. Процесс без marker считается
+внешним/ручным: он учитывается для защиты от overlap, но MCD не присваивает
+себе владение и не завершает его как собственный.
+
 1. По умолчанию (`segment_lazy_update_enabled = false`) планировщик получает
    bounded full snapshot опубликованных сегментов; он удаляет union статических
    `priority`/`super-priority` IDs и строит полный текущий ordinary cycle.

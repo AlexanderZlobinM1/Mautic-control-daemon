@@ -1,3 +1,11 @@
+## 1.6.144 - 2026-11-24
+
+- Replace three retained thread-per-root control families with four bounded
+  shared control workers, minute-boundary observation and active-root-only
+  lifecycle monitoring. Dependency refresh is generation-driven with a
+  one-minute failure/race backoff. MCD child ownership markers allow safe
+  durable re-adoption after restart without taking ownership of manual tasks.
+
 ## 1.6.143 - 2026-11-24
 
 - Admit each instance's next ordinary segment generation only on the first
