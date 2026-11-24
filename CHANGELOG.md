@@ -1,3 +1,12 @@
+## 1.7.6 - 2026-11-24
+
+- Added stable external-component storage under `custom/components/<identity>`.
+  Versioned components activate from a size- and SHA-256-verified staging file
+  through an atomic `current` pointer and retain at most one rollback revision.
+  Interrupted or corrupt downloads preserve the active component, repeat
+  delivery is idempotent, and an offline miss identifies the exact expected
+  component, versioned key and digest.
+
 ## 1.7.5 - 2026-11-24
 
 - Fixed the interactive and machine plugin entry points for discovered Composer
