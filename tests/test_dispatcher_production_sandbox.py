@@ -889,7 +889,7 @@ class ProductionDispatcherSandboxTests(unittest.TestCase):
                 def start(self) -> None:
                     if (
                         self.name in {"mcd-ordinary-persisted-refill", "mcd-canonical-lifecycle-scheduler"}
-                        or self.name.startswith("mcd-root-lifecycle-")
+                        or self.name.startswith("mcd-control-lifecycle")
                     ):
                         super().start()
 

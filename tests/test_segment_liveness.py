@@ -2091,6 +2091,17 @@ class SegmentLivenessTests(unittest.TestCase):
                 now_ts=200.0,
             )
         )
+        self.assertGreaterEqual(daemon._dependency_refresh_retry_delay(self._config()), 60.0)
+        self.assertFalse(
+            daemon._segment_dispatch_context_needs_dependency_refresh(
+                live_context,
+                cycle,
+                config=self._config(),
+                mautic_major=7,
+                now_ts=10_000.0,
+            ),
+            "age without a generation/definition change must not create a refresh loop",
+        )
 
         preserved_context = dict(context)
         preserved_context["dependency_snapshot_mode"] = "preserved_previous"
@@ -2261,10 +2272,11 @@ class SegmentLivenessTests(unittest.TestCase):
                 return True
 
             errors: list[BaseException] = []
+            outcomes: list[dict[str, object]] = []
 
             def refresh() -> None:
                 try:
-                    daemon._rehydrate_segment_dispatch_context(
+                    outcomes.append(daemon._rehydrate_segment_dispatch_context(
                         store,
                         root=root,
                         db_config=object(),
@@ -2272,7 +2284,7 @@ class SegmentLivenessTests(unittest.TestCase):
                         context=context,
                         config=config,
                         mautic_major=7,
-                    )
+                    ))
                 except BaseException as exc:
                     errors.append(exc)
 
@@ -2295,8 +2307,8 @@ class SegmentLivenessTests(unittest.TestCase):
                 thread.join(timeout=2.0)
 
             self.assertFalse(thread.is_alive())
-            self.assertEqual(len(errors), 1)
-            self.assertIsInstance(errors[0], daemon._SegmentDispatchContextGenerationChanged)
+            self.assertEqual(errors, [])
+            self.assertEqual(outcomes[0]["status"], "discarded_generation_change")
             self.assertEqual(
                 store.get_runtime_sync(cycle_key(root))["cycle_id"],
                 "cycle-new",
@@ -2306,6 +2318,46 @@ class SegmentLivenessTests(unittest.TestCase):
             self.assertEqual(preserved["segment_slot_limit"], 5)
             self.assertNotIn("dependency_snapshot_authoritative", preserved)
             store.close()
+
+    def test_shared_control_executor_is_bounded_across_many_roots_and_reuses_threads(self) -> None:
+        executor = daemon._control_executor()
+        release = threading.Event()
+        started = 0
+        guard = threading.Lock()
+
+        def work() -> None:
+            nonlocal started
+            with guard:
+                started += 1
+            release.wait(timeout=2.0)
+
+        try:
+            first = [executor.submit(work) for _ in range(35 * 3)]
+            deadline = time.time() + 1.0
+            while time.time() < deadline:
+                with guard:
+                    if started >= daemon._CONTROL_EXECUTOR_MAX_WORKERS:
+                        break
+                time.sleep(0.01)
+            with guard:
+                self.assertEqual(started, daemon._CONTROL_EXECUTOR_MAX_WORKERS)
+            control_threads = [
+                thread for thread in threading.enumerate() if thread.name.startswith("mcd-control")
+            ]
+            self.assertLessEqual(len(control_threads), daemon._CONTROL_EXECUTOR_MAX_WORKERS)
+            release.set()
+            for future in first:
+                future.result(timeout=3.0)
+            second = [executor.submit(lambda: None) for _ in range(35)]
+            for future in second:
+                future.result(timeout=3.0)
+            control_threads_after = [
+                thread for thread in threading.enumerate() if thread.name.startswith("mcd-control")
+            ]
+            self.assertLessEqual(len(control_threads_after), daemon._CONTROL_EXECUTOR_MAX_WORKERS)
+        finally:
+            release.set()
+            executor.shutdown(wait=True, cancel_futures=True)
 
     def test_restart_rehydrates_frozen_full_cycle_without_resetting_claims_or_closure(self) -> None:
         """A stale context must recover the live graph before one M7 worker starts."""
