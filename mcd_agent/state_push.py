@@ -90,6 +90,18 @@ _CAMPAIGN_NATIVE_FALLBACK_RETENTION_SEC = 30 * 86400
 _CAMPAIGN_NATIVE_FALLBACK_MAX_EVENTS = 5000
 
 
+def plugin_component_capability_projection(config: AgentConfig) -> dict[str, Any]:
+    """Expose plugin machine commands only while their component is usable."""
+
+    from mcd_agent.plugins import plugin_filesystem_component_preflight
+
+    status = plugin_filesystem_component_preflight(config, refresh=True)
+    return {
+        "status": status,
+        "capability": plugin_job_capability() if status.get("status") == "ready" else None,
+    }
+
+
 def _galera_routing_eligibility(galera: dict[str, Any]) -> tuple[bool, str]:
     """Return whether this Galera node is safe for new DB traffic/source use."""
     ready = _to_bool(galera.get("ready"))
@@ -2658,6 +2670,7 @@ class MCCStatePusher:
             )
         instances.sort(key=lambda x: str(x["instance_uid"]))
 
+        plugin_projection = plugin_component_capability_projection(self.cfg)
         payload: dict[str, Any] = {
             "schema": "mcd-state-v1",
             "apt_capabilities": apt_job_capability(),
@@ -2665,7 +2678,7 @@ class MCCStatePusher:
                 self.runtime_store,
                 mcc_enabled=bool(getattr(self.cfg, "mcc_url", None)),
             ),
-            "plugin_capabilities": plugin_job_capability(),
+            "plugin_component_status": plugin_projection["status"],
             "plugin_jobs": recent_plugin_job_statuses(
                 self.runtime_store,
                 mcc_enabled=bool(getattr(self.cfg, "mcc_url", None)),
@@ -2721,6 +2734,8 @@ class MCCStatePusher:
             "instance_sizes": self._instance_size_cache.collect(installs, now_ts=now_ts),
             "sent_at_utc": datetime.fromtimestamp(now_ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
+        if plugin_projection["capability"] is not None:
+            payload["plugin_capabilities"] = plugin_projection["capability"]
         _advertise_image_compatibility(payload)
         runtime_dir = Path(str(getattr(self.cfg, "mcd_install_dir", "/opt/mcd") or "/opt/mcd")) / "runtime"
         if runtime_dir.is_dir():

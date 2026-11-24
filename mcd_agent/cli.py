@@ -165,7 +165,11 @@ from mcd_agent.nginx_external import (
     default_stub_operation, ensure_nginx_baseline, ensure_cloudflare_real_ip,
     cloudflare_real_ip_state, nginx_baseline_satisfied, nginx_vhost_operation,
 )
-from mcd_agent.plugins import run_plugins_interactive, run_plugins_machine
+from mcd_agent.plugins import (
+    plugin_filesystem_component_preflight,
+    run_plugins_interactive,
+    run_plugins_machine,
+)
 from mcd_agent.plugin_operations import (
     effective_values,
     operation_command_tokens,
@@ -876,6 +880,11 @@ def _plugin_job_cli(cfg, args) -> int:
     key = plugin_job_runtime_key(operation_id)
     try:
         if command == "enqueue":
+            component_status = plugin_filesystem_component_preflight(cfg, refresh=True)
+            if component_status.get("status") != "ready":
+                raise PluginJobError(
+                    str(component_status.get("reason") or "plugin_filesystem_component_unavailable")
+                )
             request = canonical_plugin_job_request(
                 instance_uid=str(args.instance_uid or ""),
                 plugin_uids=list(args.plugin_uid or []),
@@ -1818,10 +1827,15 @@ def _run_interactive_hub(cfg, root: str | None, no_color: bool) -> int:
                 print("Active instance is required.")
                 continue
         active_label = active_root or "-"
+        plugin_status = plugin_filesystem_component_preflight(cfg, refresh=True)
+        plugins_ready = plugin_status.get("status") == "ready"
         print("")
         print(f"MCD Interactive (v{__version__})")
         print(f"Active instance: {active_label}")
-        print("1. Plugins")
+        if plugins_ready:
+            print("1. Plugins")
+        else:
+            print(f"Plugins unavailable: {plugin_status.get('reason') or 'component preflight failed'}")
         print("2. Mautic Upgrade")
         print("3. Instances")
         print("4. Cache")
@@ -1833,6 +1847,9 @@ def _run_interactive_hub(cfg, root: str | None, no_color: bool) -> int:
         print("0. Exit")
         choice = _ask("Select option: ").strip()
         if choice == "1":
+            if not plugins_ready:
+                print(f"Plugins unavailable: {plugin_status.get('reason') or 'component preflight failed'}")
+                continue
             if not active_root:
                 print("Select active instance first")
                 continue

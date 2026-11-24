@@ -17,6 +17,25 @@ from mcd_agent.plugin_jobs import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _ready_plugin_component(monkeypatch):
+    monkeypatch.setattr(
+        cli,
+        "plugin_filesystem_component_preflight",
+        lambda _cfg, refresh=True: {
+            "status": "ready",
+            "reason": "",
+            "capabilities": [
+                "plugin_filesystem_status",
+                "plugin_filesystem_apply",
+                "plugin_filesystem_cleanup",
+                "plugin_alias_cleanup",
+                "plugin_cache_reset",
+            ],
+        },
+    )
+
+
 def test_plugin_job_capability_is_stable() -> None:
     advertised = capability()
     assert CAPABILITY == "mcd-plugin-job-v1"
@@ -164,6 +183,32 @@ def test_enqueue_is_durable_and_idempotent_and_status_returns_terminal(tmp_path,
     assert status["status"] == "succeeded"
     assert status["terminal_result"] == terminal
     assert status["notification_delivery_status"] == "disabled"
+
+
+def test_enqueue_is_not_exposed_when_component_preflight_fails(tmp_path, monkeypatch, capsys) -> None:
+    store = MemoryStore()
+    cfg = SimpleNamespace(
+        state_db_path=str(tmp_path / "mcd-state.db"),
+        config_file_path=str(tmp_path / "mcd.toml"),
+        command_timeout_sec=0,
+        mcc_url=None,
+    )
+    monkeypatch.setattr(cli, "TaskStore", lambda *_args, **_kwargs: store)
+    monkeypatch.setattr(
+        cli,
+        "plugin_filesystem_component_preflight",
+        lambda _cfg, refresh=True: {
+            "status": "unavailable",
+            "reason": "external_component_activation_failed",
+            "capabilities": [],
+        },
+    )
+
+    assert cli._plugin_job_cli(cfg, _job_args("enqueue")) == 1
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "error"
+    assert result["reason"] == "external_component_activation_failed"
+    assert store.enqueued == []
 
 
 def test_operation_id_conflict_and_pending_cancel_are_typed(tmp_path, monkeypatch, capsys) -> None:

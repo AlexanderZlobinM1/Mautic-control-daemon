@@ -1,3 +1,14 @@
+## 1.7.10 - 2026-11-24
+
+- Resolve the selected plugin-filesystem component through the authenticated
+  MCC component catalog before exposing plugin operations. A verified local
+  component remains usable offline, while a selected newer revision is
+  size/SHA validated and atomically activated before use.
+- Hide interactive and machine plugin capabilities and reject new plugin jobs
+  when the component or its complete operation closure is missing, corrupt or
+  failed activation. The explicit preflight status remains visible and a valid
+  restoration re-enables the same commands automatically.
+
 ## 1.7.9 - 2026-11-24
 
 - Replace three retained thread-per-root control families with four bounded

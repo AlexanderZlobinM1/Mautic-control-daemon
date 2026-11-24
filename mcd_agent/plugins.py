@@ -29,7 +29,7 @@ from mcd_agent import __version__, plugin_registration
 from mcd_agent.amazon_mailer_dep import ensure_composer_runtime_packages, ensure_mailer_packages_for_bundles
 from mcd_agent.cluster_routing import cluster_local_identity_values, cluster_route_targets
 from mcd_agent.config import AgentConfig
-from mcd_agent.custom_scripts import run_configured_external_operation
+from mcd_agent.custom_scripts import external_component_preflight, run_configured_external_operation
 from mcd_agent.db import MauticDB
 from mcd_agent.discovery import discover_mautic
 from mcd_agent.executor import build_mautic_exec_args, execute_mautic_command_template
@@ -76,6 +76,7 @@ _PLUGIN_FILESYSTEM_REQUIRED_OPERATIONS = (
     "plugin_alias_cleanup",
     "plugin_cache_reset",
 )
+_PLUGIN_FILESYSTEM_COMPONENT_IDENTITY = "plugin-filesystem-component"
 _PLUGIN_FILESYSTEM_STATUS_SCHEMA = "mcd-plugin-filesystem-status-v1"
 _GALERA_DANGEROUS_SQL_RE = re.compile(
     r"^\s*(ALTER|CREATE|DROP|RENAME|TRUNCATE|OPTIMIZE|ANALYZE|CHECK|REPAIR|LOCK|UNLOCK)\b",
@@ -984,13 +985,12 @@ def _configured_plugin_filesystem_operation(
         "plugin_alias_cleanup",
         "plugin_cache_reset",
     }:
-        if _plugin_filesystem_binding_present(config, operation):
-            try:
-                operation_runtime["managed_root"] = _plugin_managed_root_from_config(config)
-                if operation in {"plugin_filesystem_apply", "plugin_cache_reset"}:
-                    operation_runtime.update(_plugin_filesystem_attributes_from_config(config))
-            except RuntimeError as exc:
-                return {"status": "error", "reason": str(exc)}
+        try:
+            operation_runtime["managed_root"] = _plugin_managed_root_from_config(config)
+            if operation in {"plugin_filesystem_apply", "plugin_cache_reset"}:
+                operation_runtime.update(_plugin_filesystem_attributes_from_config(config))
+        except RuntimeError as exc:
+            return {"status": "error", "reason": str(exc)}
     code, output = run_configured_external_operation(
         config,
         component="plugin",
@@ -1026,31 +1026,41 @@ def _configured_plugin_filesystem_operation(
 
 
 def _plugin_filesystem_binding_present(config: AgentConfig, operation: str) -> bool:
-    """Detect an existing plugin binding without creating or mutating cache."""
-    try:
-        path = Path(str(getattr(config, "custom_cache_dir"))) / "manifest.json"
-        if path.is_symlink() or not path.is_file() or path.stat().st_size > 256 * 1024:
-            return False
-        document = json.loads(path.read_text(encoding="utf-8"))
-        bindings = document.get("operation_bindings") if isinstance(document, dict) else None
-        return isinstance(bindings, list) and any(
-            isinstance(item, dict)
-            and item.get("component") == "plugin"
-            and item.get("operation") == operation
-            for item in bindings
-        )
-    except (AttributeError, OSError, UnicodeError, ValueError, TypeError):
+    """Project a binding only while the complete component is locally valid."""
+
+    if operation not in _PLUGIN_FILESYSTEM_REQUIRED_OPERATIONS:
         return False
+    return plugin_filesystem_component_preflight(config, refresh=False).get("status") == "ready"
+
+
+def plugin_filesystem_component_preflight(
+    config: AgentConfig,
+    *,
+    refresh: bool = True,
+) -> dict[str, Any]:
+    return external_component_preflight(
+        config,
+        identity=_PLUGIN_FILESYSTEM_COMPONENT_IDENTITY,
+        component="plugin",
+        operations=_PLUGIN_FILESYSTEM_REQUIRED_OPERATIONS,
+        refresh=refresh,
+    )
 
 
 def _require_plugin_filesystem_bindings(
     config: AgentConfig,
     operations: tuple[str, ...],
 ) -> None:
-    missing = [name for name in operations if not _plugin_filesystem_binding_present(config, name)]
-    if missing:
-        logging.error("required plugin filesystem bindings are missing: %s", ",".join(missing))
-        raise RuntimeError("plugin_filesystem_bindings_missing")
+    status = plugin_filesystem_component_preflight(config, refresh=True)
+    missing = [name for name in operations if name not in set(status.get("capabilities") or [])]
+    if status.get("status") != "ready" or missing:
+        reason = str(status.get("reason") or "plugin_filesystem_component_unavailable")
+        logging.error(
+            "plugin filesystem component unavailable reason=%s missing=%s",
+            reason,
+            ",".join(missing),
+        )
+        raise RuntimeError(reason)
 
 
 def _plugin_managed_root_from_config(config: AgentConfig) -> str:
@@ -3506,8 +3516,11 @@ def run_plugins_interactive(
     cluster_sync_check_key: str | None = None,
     cluster_sync_check_digest: str | None = None,
     operation_id: str | None = None,
+    _component_preflight_done: bool = False,
 ) -> int:
     if (list_available or list_installed) and root is None:
+        if not _component_preflight_done:
+            _require_plugin_filesystem_bindings(config, _PLUGIN_FILESYSTEM_REQUIRED_OPERATIONS)
         installs = discover_mautic(
             config.discovery_roots,
             config.exclude_path_contains,
@@ -3537,6 +3550,7 @@ def run_plugins_interactive(
                     cluster_sync_check_key=cluster_sync_check_key,
                     cluster_sync_check_digest=cluster_sync_check_digest,
                     operation_id=operation_id,
+                    _component_preflight_done=True,
                 )
             except Exception as e:
                 rc = 1
@@ -3560,12 +3574,8 @@ def run_plugins_interactive(
             expected_digest=digest,
             bundles=check_bundles,
         )
-    required_bindings = (
-        ("plugin_filesystem_status",)
-        if list_available or list_installed or catalog_json
-        else _PLUGIN_FILESYSTEM_REQUIRED_OPERATIONS
-    )
-    _require_plugin_filesystem_bindings(config, required_bindings)
+    if not _component_preflight_done:
+        _require_plugin_filesystem_bindings(config, _PLUGIN_FILESYSTEM_REQUIRED_OPERATIONS)
     major = install.mautic_major or 6
     if not catalog_json:
         print("Loading plugin manifest...")

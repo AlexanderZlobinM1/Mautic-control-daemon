@@ -374,11 +374,14 @@ def test_machine_contract_passes_package_projection_and_binds_it_to_receipt(monk
 
 
 def test_plugin_filesystem_closure_fails_before_transaction(monkeypatch):
-    present = {"plugin_filesystem_status"}
     monkeypatch.setattr(
         plugins,
-        "_plugin_filesystem_binding_present",
-        lambda _config, operation: operation in present,
+        "plugin_filesystem_component_preflight",
+        lambda _config, refresh=True: {
+            "status": "unavailable",
+            "reason": "plugin_filesystem_bindings_missing",
+            "capabilities": ["plugin_filesystem_status"],
+        },
     )
 
     with pytest.raises(RuntimeError, match="plugin_filesystem_bindings_missing"):

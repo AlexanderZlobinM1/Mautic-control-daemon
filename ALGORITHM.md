@@ -212,6 +212,18 @@ delivery never changes `current`, and an offline miss names the exact selected
 identity, versioned key and digest. A newer catalog candidate never substitutes
 for the explicitly selected coordinates.
 
+Перед показом или запуском управления плагинами MCD обновляет выбранные
+координаты компонента через authenticated MCC catalog и проверяет весь набор
+его операций. Если MCC выбрал более новую версию, сначала штатно скачивается,
+проверяется и атомарно активируется именно она; старая версия не продолжает
+обслуживать команды после неудачного обновления. При недоступном MCC разрешена
+работа уже установленного `current`, только если его metadata, entrypoint и
+локальные operation bindings согласованы между собой. Отсутствующий, неполный
+или повреждённый компонент, ошибка скачивания либо проверки убирают Plugins из
+интерактивного меню и plugin capability из машинного каталога и запрещают
+постановку новой plugin-задачи. Причина остаётся видимой в preflight status;
+после успешного восстановления capability появляется автоматически.
+
 The immutable component v1.0.2 was accepted with the same ProductTour 1.1 package
 on clean Composer and ZIP layouts for Mautic 5, 6 and 7. The proof covers initial
 installation, exact Mautic inventory confirmation, repeatable terminal receipts,
