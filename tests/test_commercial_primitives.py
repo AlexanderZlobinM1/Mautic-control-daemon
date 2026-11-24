@@ -210,6 +210,60 @@ def test_maintenance_state_status_dispatches_exact_read_only_external_operation(
     assert state["external_receipt"] is receipt
 
 
+def test_state_push_maintenance_state_survives_unconfigured_external_binding(monkeypatch, tmp_path):
+    from mcd_agent import maintenance_mode, state_push
+    from mcd_agent.upgrade_os_external import UpgradeOSExternalError
+
+    pause = tmp_path / "scheduler.pause"
+    pause.write_text("maintenance\n", encoding="utf-8")
+    cfg = type("Config", (), {"scheduler_pause_flag_path": str(pause)})()
+    monkeypatch.setattr(
+        maintenance_mode,
+        "run_upgrade_os_operation",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            UpgradeOSExternalError("upgrade_os_binding_not_configured")
+        ),
+    )
+
+    state = state_push.collect_maintenance_state(cfg)
+
+    assert state["mode"] == "on"
+    assert state["paused"] is True
+    assert state["active"] is True
+    assert state["cron_service_active"] is None
+    assert state["external_receipt"] == {
+        "component": "service",
+        "status": "unavailable",
+        "reason": "upgrade_os_binding_not_configured",
+        "operation_id": "",
+        "action": "status",
+        "mutation_started": False,
+        "active": {},
+        "command_attempts": [],
+    }
+
+
+def test_maintenance_service_status_generic_rejects_unavailable_external_receipt(monkeypatch):
+    from mcd_agent import commercial_primitives as primitives
+
+    binding = {"binding_schema": "mcd-upgrade-os-binding-v1", "binding_sha256": "sha256:" + "a" * 64}
+    monkeypatch.setattr(primitives, "upgrade_os_binding_identity", lambda _cfg: binding)
+    unavailable = _maintenance_state()
+    unavailable["external_receipt"] = {
+        "component": "service",
+        "status": "unavailable",
+        "reason": "upgrade_os_binding_not_configured",
+        "mutation_started": False,
+        "action": "status",
+    }
+    monkeypatch.setattr(primitives, "collect_maintenance_state", lambda _cfg: unavailable)
+
+    assert execute_generic_primitive(_maintenance_job(binding), config=object()) == {
+        "status": "failed",
+        "reason": "commercial_maintenance_status_receipt_invalid",
+    }
+
+
 def test_upgrade_generic_caller_normalizes_bare_or_legacy_uid_and_echoes_plan_binding(monkeypatch, tmp_path):
     from mcd_agent import commercial_primitives as primitives
     from mcd_agent import inventory as inventory_module

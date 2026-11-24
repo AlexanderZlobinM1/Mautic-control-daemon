@@ -2420,6 +2420,12 @@ Handler повторно вычисляет текущую binding identity, т�
 maintenance summary и bounded external receipt; `mutation_started` обязан быть
 `false`, иначе команда закрывается failed. Отсутствующая, изменившаяся или
 неполная binding closure не рекламируется и fail-closed до external dispatch.
+Обычный daemon state-push при этом не зависит от наличия Upgrade OS binding:
+он всегда публикует локальное состояние maintenance/pause/marker, а
+недоступный внешний read-only probe отмечает как `unavailable` с причиной.
+Это не останавливает scheduler и не перезапускает daemon. Явно вызванная
+Portal-команда статуса остаётся fail-closed и считается успешной только с
+валидным успешным external receipt.
 Host binding pins используют существующие generic `binding_schema`/
 `binding_sha256` поля; managed tenant jobs по-прежнему требуют instance scope и
 не получают host-scoped operation.
