@@ -1,9 +1,12 @@
-## 1.6.142 - 2026-11-24
+## 1.6.143 - 2026-11-24
 
 - Admit each instance's next ordinary segment generation only on the first
   system-minute boundary after its previous generation becomes terminal.
   Frequent runtime refreshes continue active durable cycles without rebuilding
   queues or duplicating work; super-priority remains outside this lifecycle.
+- Serialize DB snapshot planning across instances that become eligible on the
+  same minute tick; the next instance starts immediately after the previous
+  planner finishes, while admitted execution keeps its existing parallelism.
 
 ## 1.6.141 - 2026-11-23
 

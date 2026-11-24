@@ -5310,6 +5310,26 @@ def _segment_next_cycle_due_at(state: Mapping[str, object] | None) -> float:
     return (int(completed_at // 60.0) + 1) * 60.0
 
 
+def _segment_cycle_planner_executor() -> ThreadPoolExecutor:
+    """Create the single serial DB planner shared by all instance roots."""
+
+    return ThreadPoolExecutor(max_workers=1, thread_name_prefix="mcd-root-plan-serial")
+
+
+def _segment_plan_tick_transition(
+    observed_tick: float,
+    now_ts: float,
+    *,
+    pending_plans: bool,
+) -> tuple[float, bool]:
+    """Consume one minute boundary and open it only after the prior batch."""
+
+    current_tick = int(float(now_ts) // 60.0) * 60.0
+    if current_tick <= float(observed_tick):
+        return float(observed_tick), False
+    return current_tick, not pending_plans
+
+
 def _segment_dependency_blocked_ids_for_cycle(
     *,
     root: str,
@@ -19999,8 +20019,9 @@ def run_loop(
         executors: dict[str, ThreadPoolExecutor] = {}
         last_submitted: dict[str, float] = {}
         plan_futures: dict[str, Future[dict[str, object]]] = {}
-        plan_executors: dict[str, ThreadPoolExecutor] = {}
+        plan_executor = _segment_cycle_planner_executor()
         plan_last_submitted: dict[str, float] = {}
+        observed_plan_tick = int(time.time() // 60.0) * 60.0
         last_error_log = 0.0
 
         def _observe_root(inst: object, admitted_at: float | None) -> dict[str, object]:
@@ -20510,6 +20531,13 @@ def run_loop(
                     )
                 ordinary_refill_wakeup.set()
 
+            observed_plan_tick, open_plan_tick = _segment_plan_tick_transition(
+                observed_plan_tick,
+                now_observer,
+                pending_plans=bool(plan_futures),
+            )
+            current_plan_tick = observed_plan_tick
+
             for inst in list(installs):
                 root = str(getattr(inst, "root", "") or "").strip()
                 if not root or not getattr(inst, "db", None) or root in futures:
@@ -20517,26 +20545,14 @@ def run_loop(
                 state = store.get_runtime_sync(_segment_cycle_key(root)) or {}
                 active = isinstance(state, Mapping) and str(state.get("status") or "").lower() == "active"
                 admitted_at = float(state.get("admitted_at") or 0.0) if active else None
-                if not active and root not in plan_futures:
+                if open_plan_tick and not active and root not in plan_futures:
                     next_cycle_due_at = _segment_next_cycle_due_at(state)
-                    if next_cycle_due_at <= 0:
-                        next_cycle_due_at = int(now_observer // 60.0) * 60.0
                     if (
-                        now_observer >= next_cycle_due_at
-                        and float(plan_last_submitted.get(root, 0.0) or 0.0) < next_cycle_due_at
+                        current_plan_tick >= next_cycle_due_at
+                        and float(plan_last_submitted.get(root, 0.0) or 0.0) < current_plan_tick
                     ):
-                        plan_last_submitted[root] = now_observer
-                        planner_executor = plan_executors.setdefault(
-                            root,
-                            ThreadPoolExecutor(
-                                max_workers=1,
-                                thread_name_prefix=(
-                                    "mcd-root-plan-"
-                                    + hashlib.sha1(root.encode("utf-8")).hexdigest()[:8]
-                                ),
-                            ),
-                        )
-                        plan_futures[root] = planner_executor.submit(_plan_terminal_root, inst)
+                        plan_last_submitted[root] = current_plan_tick
+                        plan_futures[root] = plan_executor.submit(_plan_terminal_root, inst)
                 observe_interval = max(
                     5.0,
                     min(30.0, float(getattr(config, "dispatch_interval_sec", 1) or 1) * 5.0),
