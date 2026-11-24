@@ -49,8 +49,39 @@ def test_machine_capability_catalog_tracks_component_validity(monkeypatch) -> No
         "components": [_status(True)],
         "capabilities": _status(True)["capabilities"],
     }
-    state_push._advertise_external_component_capabilities(payload, restored)
-    assert payload["plugin_capabilities"]["operations"] == [
+    state_push._advertise_external_component_capabilities(
+        payload,
+        restored,
+        transport_capabilities={"plugin": {
+            "schema": "mcd-plugin-capabilities-v1",
+            "version": "1.0",
+            "features": ["mcd-plugin-job-v1"],
+        }},
+    )
+    assert payload["plugin_capabilities"] == {
+        "schema": "mcd-plugin-capabilities-v1",
+        "version": "1.0",
+        "features": ["mcd-plugin-job-v1"],
+    }
+    assert payload["external_component_capabilities"]["capabilities"][0]["operations"] == [
         {"operation": "manifest-owned-operation"}
     ]
+
+
+def test_native_transport_capability_is_not_advertised_without_ready_component() -> None:
+    payload = {}
+    unavailable = {
+        "schema": "mcd-external-component-capability-catalog-v1",
+        "components": [_status(False)],
+        "capabilities": [],
+    }
+    state_push._advertise_external_component_capabilities(
+        payload,
+        unavailable,
+        transport_capabilities={"plugin": {
+            "schema": "mcd-plugin-capabilities-v1",
+            "features": ["mcd-plugin-job-v1"],
+        }},
+    )
+    assert "plugin_capabilities" not in payload
 

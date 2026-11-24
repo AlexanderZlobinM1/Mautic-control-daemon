@@ -191,12 +191,23 @@ result/receipt. Capability projection повторяет descriptor без ло�
 толкования. Отсутствующий или повреждённый component скрывает только свою
 capability; остальные функции MCD продолжают работать.
 
+Generic component capability и MCD-native transport capability — разные
+контракты. Операции plugin component остаются только в descriptor projection,
+но при ready-состоянии этого компонента MCD отдельно объявляет
+`mcd-plugin-job-v1`, чтобы MCC мог принять durable job status/result callback.
+При unavailable component transport capability не объявляется и новый plugin
+job не принимается.
+
 Если operation binding ссылается на immutable cached JSON resource (например,
 operator profile), MCD скачивает объявленный относительный файл из того же
 authenticated custom repository, проверяет отсутствие выхода из cache root и
 точный SHA-256, затем атомарно сохраняет его до активации нового manifest. MCD
 не интерпретирует содержимое profile. Missing, corrupt, conflicting или
 небезопасный resource блокирует только соответствующую внешнюю operation.
+Если обновление самого manifest временно получает HTTP/network error, MCD может
+использовать последний валидный локальный manifest, но всё равно проверяет и
+докачивает отсутствующие hash-pinned resources по объявленным относительным
+URL. Cache fallback не превращает missing profile в постоянное состояние.
 
 Versioned external components use one stable local identity directory at
 `<custom_cache>/components/<component-identity>/`. Delivery verifies declared

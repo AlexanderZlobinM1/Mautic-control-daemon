@@ -1,3 +1,14 @@
+## 1.7.12 - 2026-11-24
+
+- Restore the native `mcd-plugin-job-v1` transport capability whenever the
+  descriptor-selected plugin component is ready. Generic component operations
+  remain descriptor-driven under `external_component_capabilities`; the
+  transport capability only admits plugin job observation callbacks.
+- Hydrate immutable cached JSON resources from an already verified local
+  manifest even when the remote manifest endpoint falls back to that cache.
+  This preserves offline manifest use while repairing a missing declared
+  resource from its independently hash-pinned repository URL.
+
 ## 1.7.11 - 2026-11-24
 
 - Make external-component resolution and dispatch descriptor-driven. MCD now

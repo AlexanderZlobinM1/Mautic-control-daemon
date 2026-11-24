@@ -807,6 +807,7 @@ def fetch_custom_manifest(config: AgentConfig, *, use_cache_on_error: bool = Tru
             if not isinstance(payload, dict):
                 raise RuntimeError(f"custom manifest unavailable: {e}") from e
             rows = _parse_manifest(payload)
+            _hydrate_manifest_cached_json_resources(config, payload)
             return rows, "cache"
         raise RuntimeError(f"custom manifest fetch failed: {e}") from e
     except Exception as e:
@@ -816,6 +817,7 @@ def fetch_custom_manifest(config: AgentConfig, *, use_cache_on_error: bool = Tru
             if not isinstance(payload, dict):
                 raise RuntimeError(f"custom manifest unavailable: {e}") from e
             rows = _parse_manifest(payload)
+            _hydrate_manifest_cached_json_resources(config, payload)
             return rows, "cache"
         raise RuntimeError(f"custom manifest fetch failed: {e}") from e
 

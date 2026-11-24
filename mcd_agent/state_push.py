@@ -55,6 +55,7 @@ from mcd_agent.plugin_inventory import (
     utc_now,
 )
 from mcd_agent.custom_scripts import external_component_capability_projection
+from mcd_agent.plugin_jobs import capability as plugin_job_capability
 from mcd_agent.plugin_jobs import recent_statuses as recent_plugin_job_statuses
 from mcd_agent.apt_jobs import capability as apt_job_capability
 from mcd_agent.apt_jobs import recent_statuses as recent_apt_job_statuses
@@ -93,17 +94,27 @@ _CAMPAIGN_NATIVE_FALLBACK_MAX_EVENTS = 5000
 def _advertise_external_component_capabilities(
     payload: dict[str, Any],
     projection: dict[str, Any],
+    *,
+    transport_capabilities: Mapping[str, dict[str, Any]] | None = None,
 ) -> None:
-    """Pass manifest-owned capabilities through without component-specific policy."""
+    """Pass component descriptors through and gate native transport protocols.
+
+    Component operations remain opaque manifest data.  A native MCD job
+    protocol is a separate wire contract and is advertised only while the
+    descriptor-selected component for the same generic component name is ready.
+    """
 
     payload["external_component_capabilities"] = projection
+    transports = dict(transport_capabilities or {})
     for capability in projection.get("capabilities", []):
         if not isinstance(capability, dict):
             continue
         component = str(capability.get("component") or "").strip()
         if re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", component) is None:
             continue
-        payload[f"{component.replace('-', '_')}_capabilities"] = capability
+        alias = f"{component.replace('-', '_')}_capabilities"
+        transport = transports.get(component)
+        payload[alias] = dict(transport) if isinstance(transport, dict) else capability
 
 
 def _galera_routing_eligibility(galera: dict[str, Any]) -> tuple[bool, str]:
@@ -2737,7 +2748,11 @@ class MCCStatePusher:
             "instance_sizes": self._instance_size_cache.collect(installs, now_ts=now_ts),
             "sent_at_utc": datetime.fromtimestamp(now_ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
-        _advertise_external_component_capabilities(payload, component_projection)
+        _advertise_external_component_capabilities(
+            payload,
+            component_projection,
+            transport_capabilities={"plugin": plugin_job_capability()},
+        )
         _advertise_image_compatibility(payload)
         runtime_dir = Path(str(getattr(self.cfg, "mcd_install_dir", "/opt/mcd") or "/opt/mcd")) / "runtime"
         if runtime_dir.is_dir():
