@@ -1,3 +1,13 @@
+## 1.7.5 - 2026-11-24
+
+- Fixed the interactive and machine plugin entry points for discovered Composer
+  layouts when external `[plugins].managed_root` is not configured. The selected
+  instance project wrapper now becomes the scoped filesystem containment root,
+  while plugin observation and installation continue to target its canonical
+  `docroot/plugins` or `public/plugins` directory. Explicit external managed-root
+  configuration remains authoritative, and the external handler still enforces
+  containment independently.
+
 ## 1.7.4 - 2026-11-24
 
 - Keep periodic state push and the scheduler alive when the optional external

@@ -217,12 +217,13 @@ into the stable agent. The machine evidence is recorded in
 
 The nested public status result is exactly `mcd-plugin-filesystem-status-v1`.
 The framed `mcd_resolved_plugin_filesystem` input additionally requires
-`managed_root`, supplied from the effective external `[plugins].managed_root`
-configuration value. MCD rejects a missing, relative or traversal-containing
-managed root before invoking a configured binding; it never derives or copies
-this value from the operation override or local path resolution. The external
-recipe owns the containment decision and returns a typed failure when
-`plugins_root` is outside `managed_root`.
+`managed_root`. After MCD selects one discovered instance, the instance's
+canonical project root is the default containment boundary; for a Composer
+layout this is the stable project wrapper while `plugins_root` may be its
+`docroot/plugins` or `public/plugins` child. An explicit external
+`[plugins].managed_root` remains authoritative. MCD rejects relative or
+traversal-containing roots before invoking a configured binding, and the
+external recipe independently rejects `plugins_root` outside `managed_root`.
 For apply/noop and cache reset, `owner`, `group` and `mode` are likewise
 required from effective external `[plugins].filesystem_owner`,
 `[plugins].filesystem_group` and `[plugins].filesystem_mode`; missing or

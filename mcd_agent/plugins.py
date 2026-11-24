@@ -3,6 +3,8 @@ from __future__ import annotations
 from mcd_agent.mcc_transport import mcc_request
 
 from contextlib import contextmanager, redirect_stdout
+import copy
+from dataclasses import replace
 import hashlib
 import io
 import json
@@ -1060,6 +1062,30 @@ def _plugin_managed_root_from_config(config: AgentConfig) -> str:
     if not candidate.is_absolute() or any(part in {"", ".", ".."} for part in candidate.parts):
         raise RuntimeError("plugin_filesystem_managed_root_invalid")
     return value.strip()
+
+
+def _plugin_config_for_install_root(config: AgentConfig, install_root: str) -> AgentConfig:
+    """Bind plugin filesystem operations to the selected Mautic project root.
+
+    The interactive and machine entry points select one discovered instance
+    before any filesystem observation. A Composer instance may keep the
+    application under ``docroot/`` while the stable instance identity and
+    root remain the project wrapper. Use that wrapper as the operation's
+    containment boundary when no external override was configured.
+    """
+    configured = getattr(config, "plugins_managed_root", None)
+    if isinstance(configured, str) and configured.strip():
+        _plugin_managed_root_from_config(config)
+        return config
+    candidate = Path(str(install_root or "").strip())
+    if not candidate.is_absolute() or any(part in {"", ".", ".."} for part in candidate.parts):
+        raise RuntimeError("plugin_filesystem_managed_root_invalid")
+    try:
+        return replace(config, plugins_managed_root=str(candidate))
+    except TypeError:
+        scoped = copy.copy(config)
+        setattr(scoped, "plugins_managed_root", str(candidate))
+        return scoped
 
 
 def _plugin_filesystem_attributes_from_config(config: AgentConfig) -> dict[str, str]:
@@ -3518,6 +3544,7 @@ def run_plugins_interactive(
         return rc
 
     install = _select_install_with_db(config, root)
+    config = _plugin_config_for_install_root(config, install.root)
     if cluster_sync_check_key or cluster_sync_check_digest:
         key = str(cluster_sync_check_key or "").strip()
         digest = str(cluster_sync_check_digest or "").strip()
