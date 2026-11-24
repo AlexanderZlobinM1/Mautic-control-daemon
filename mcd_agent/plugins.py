@@ -11,7 +11,7 @@ import json
 import ipaddress
 import logging
 import os
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
 import shutil
 import socket
@@ -1108,6 +1108,29 @@ def _plugin_filesystem_attributes_from_config(config: AgentConfig) -> dict[str, 
     return {key: value.strip() for key, value in values.items()}
 
 
+def _plugin_cache_paths_from_config(config: AgentConfig) -> list[str]:
+    """Return the operator-declared cache paths required by plugin mutations."""
+    value = getattr(config, "plugins_cache_relative_paths", None)
+    if not isinstance(value, list) or not value:
+        raise RuntimeError("plugin_cache_paths_not_configured")
+    result: list[str] = []
+    for path in value:
+        if not isinstance(path, str) or not path or "\x00" in path or "\\" in path:
+            raise RuntimeError("plugin_cache_paths_not_configured")
+        posix = PurePosixPath(path)
+        windows = PureWindowsPath(path)
+        if (
+            posix.is_absolute()
+            or windows.is_absolute()
+            or bool(windows.drive)
+            or posix.as_posix() != path
+            or any(part.strip() != part or part in {"", ".", ".."} for part in posix.parts)
+        ):
+            raise RuntimeError("plugin_cache_paths_not_configured")
+        result.append(path)
+    return result
+
+
 def _plugin_filesystem_runtime(
     *,
     plugins_dir: Path,
@@ -1727,9 +1750,7 @@ def _run_plugin_template(config: AgentConfig, install, template: str) -> tuple[i
 def _reset_plugin_prod_cache(install, config: AgentConfig | None = None) -> dict[str, Any]:
     root = Path(install.root).resolve()
     resolved_config = config or getattr(install, "config", None) or getattr(install, "agent_config", None)
-    cache_relative = getattr(resolved_config, "plugins_cache_relative_paths", None) if resolved_config is not None else None
-    if not isinstance(cache_relative, list) or not cache_relative or any(not isinstance(p, str) or not p.strip() for p in cache_relative):
-        raise RuntimeError("plugin_cache_paths_not_configured")
+    cache_relative = _plugin_cache_paths_from_config(resolved_config)
     external = _plugin_cache_reset_external(resolved_config, relative_paths=list(cache_relative))
     if external is not None:
         if str(external.get("status") or "").strip().lower() == "error":
@@ -2543,7 +2564,14 @@ def _apply_plugin_file_changes(
     operation_id: str | None = None,
 ) -> bool:
     resolved_operation_id = str(operation_id or "").strip() or uuid.uuid4().hex
+    mutation_preflight_complete = False
     try:
+        if run_post_steps:
+            # Cache reset is a required post-step. Validate its operator-owned
+            # path contract before a bundle, registration row, or dependency
+            # can be changed, so a configuration error stays side-effect free.
+            _plugin_cache_paths_from_config(config)
+        mutation_preflight_complete = True
         return _apply_plugin_file_changes_impl(
             config=config,
             install=install,
@@ -2565,11 +2593,15 @@ def _apply_plugin_file_changes(
                 action=action,
                 selected=selected,
                 event="completed",
-                files_applied=_plugin_files_applied_observed(
-                    install_root,
-                    action,
-                    selected,
-                    config=config,
+                files_applied=(
+                    _plugin_files_applied_observed(
+                        install_root,
+                        action,
+                        selected,
+                        config=config,
+                    )
+                    if mutation_preflight_complete
+                    else False
                 ),
                 post_step_status="failed",
                 cache_inventory_confirmed=False,
@@ -3167,6 +3199,11 @@ def _run_cluster_plugin_operation(
     print(f"Cluster plugin operation reference={reference_host} local={local_host} nodes={','.join(expected_hosts)}")
     changed = False
     try:
+        # The reference node must prove the same cache-reset contract before
+        # it starts the cluster file phase. Otherwise a missing operator
+        # setting would be discovered only after the shared bundle changed.
+        if config.plugins_post_cache_clear or config.plugins_post_install:
+            _plugin_cache_paths_from_config(config)
         _cluster_plugin_set_phase(
             config,
             key,

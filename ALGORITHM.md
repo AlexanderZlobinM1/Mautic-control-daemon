@@ -253,6 +253,13 @@ required from effective external `[plugins].filesystem_owner`,
 `[plugins].filesystem_group` and `[plugins].filesystem_mode`; missing or
 invalid values fail before the configured runner. MCD supplies no ownership,
 group or mode default and does not accept these values from operation input.
+До изменения файлов плагина, записей регистрации или host dependencies MCD
+также обязан проверить операторский список cache paths. Пути задаются
+относительно managed root конкретного инстанса, а не зашиваются в код и не
+передаются в разовой команде. Если список отсутствует или невалиден, операция
+завершается fail-closed с `files_applied=false`: старый bundle, база и cache
+остаются без изменений. Только после этого preflight внешний обработчик может
+атомарно заменить bundle и сбросить ровно объявленные disposable cache paths.
 For a single bundle it contains `status`/`plugin_status`, a 64-hex `digest`,
 `installed_version`, `state` (object or null), and boolean
 `has_doctrine_entity_metadata` / `has_native_migrations`. Inventory uses

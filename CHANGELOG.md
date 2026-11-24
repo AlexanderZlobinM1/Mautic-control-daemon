@@ -1,3 +1,13 @@
+## 1.7.13 - 2026-11-24
+
+- Validate the operator-declared plugin cache path contract before changing a
+  bundle, registration row, or runtime dependency. Missing cache settings now
+  produce a terminal side-effect-free failure with `files_applied=false`
+  instead of failing only after plugin files have already been replaced.
+- Apply the same preflight before the cluster reference node starts its shared
+  file phase. Cache paths remain explicit managed-root-relative configuration;
+  MCD does not hardcode a host or Mautic layout path.
+
 ## 1.7.12 - 2026-11-24
 
 - Restore the native `mcd-plugin-job-v1` transport capability whenever the
