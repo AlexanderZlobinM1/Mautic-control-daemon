@@ -14,6 +14,7 @@ from mcd_agent.daemon import (
     _segment_cycle_claim,
     _segment_cycle_manual_prepare,
     _segment_cycle_manual_terminal,
+    _segment_next_cycle_due_at,
     _monitor_running,
     _segment_runtime_marker_write,
     _submit_if_slot_uncoordinated,
@@ -369,6 +370,48 @@ class SegmentAdmissionTests(unittest.TestCase):
         self.assertTrue(started)
         self.assertEqual(restarted["items"], planned)
         self.assertEqual(len(restarted["items"]), len(set(restarted["items"])))
+
+    def test_instances_keep_independent_generations_and_exclude_super_priority(self) -> None:
+        states: dict[str, dict[str, object] | None] = {"a": None, "b": None}
+        plans = {"a": [10, 11, 99], "b": [20, 21, 199]}
+        super_ids = {"a": [99], "b": [199]}
+
+        for root in ("a", "b"):
+            states[root], added, started = sync_cycle(
+                states[root],
+                planned_ids=plans[root],
+                never_built=[],
+                running_ids=[],
+                excluded_ids=super_ids[root],
+                now_ts=60.0,
+            )
+            self.assertTrue(started)
+            self.assertEqual(added, plans[root][:-1])
+            self.assertNotIn(super_ids[root][0], states[root]["items"])
+
+        first_ids = {root: states[root]["cycle_id"] for root in states}
+        states["a"] = mark_running(states["a"], entity_id=10, now_ts=61.0)
+        for refresh in (62.0, 65.0, 119.0, 120.0):
+            states["a"], added, started = sync_cycle(
+                states["a"],
+                planned_ids=plans["a"],
+                never_built=[],
+                running_ids=[10],
+                excluded_ids=super_ids["a"],
+                now_ts=refresh,
+            )
+            self.assertFalse(started)
+            self.assertEqual(added, [])
+            self.assertEqual(states["a"]["cycle_id"], first_ids["a"])
+
+        for entity_id in (20, 21):
+            states["b"] = mark_terminal(
+                states["b"], entity_id=entity_id, success=True, now_ts=121.0 + entity_id
+            )
+        self.assertEqual(states["b"]["status"], "terminal")
+        self.assertEqual(_segment_next_cycle_due_at(states["b"]), 180.0)
+        self.assertEqual(states["a"]["status"], "active")
+        self.assertEqual(states["a"]["cycle_id"], first_ids["a"])
 
     def test_mid_cycle_never_built_enters_follow_up_without_reordering_frozen_work(self) -> None:
         state, _added, _started = sync_cycle(

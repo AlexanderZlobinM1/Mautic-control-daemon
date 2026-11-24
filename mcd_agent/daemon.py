@@ -5266,6 +5266,24 @@ def _segment_cycle_pending_ids(state: Mapping[str, object] | None) -> set[int]:
     return items - finished - active
 
 
+def _segment_next_cycle_due_at(state: Mapping[str, object] | None) -> float:
+    """Return the first minute boundary allowed for a root's next cycle.
+
+    An active generation is never re-admitted. Once it is terminal, the root
+    waits for the next system-minute boundary instead of letting the frequent
+    runtime refresh loop create another generation every few seconds.
+    """
+
+    if not isinstance(state, Mapping) or not state:
+        return 0.0
+    if str(state.get("status") or "").strip().lower() != "terminal":
+        return float("inf")
+    completed_at = float(state.get("updated_at") or state.get("admitted_at") or 0.0)
+    if completed_at <= 0:
+        return 0.0
+    return (int(completed_at // 60.0) + 1) * 60.0
+
+
 def _segment_cycle_pending_order(
     state: Mapping[str, object] | None,
     *,
@@ -19703,11 +19721,13 @@ def run_loop(
                 active = isinstance(state, Mapping) and str(state.get("status") or "").lower() == "active"
                 admitted_at = float(state.get("admitted_at") or 0.0) if active else None
                 if not active and root not in plan_futures:
-                    plan_interval = max(
-                        5.0,
-                        min(30.0, float(getattr(config, "dispatch_interval_sec", 1) or 1) * 10.0),
-                    )
-                    if now_observer - float(plan_last_submitted.get(root, 0.0) or 0.0) >= plan_interval:
+                    next_cycle_due_at = _segment_next_cycle_due_at(state)
+                    if next_cycle_due_at <= 0:
+                        next_cycle_due_at = int(now_observer // 60.0) * 60.0
+                    if (
+                        now_observer >= next_cycle_due_at
+                        and float(plan_last_submitted.get(root, 0.0) or 0.0) < next_cycle_due_at
+                    ):
                         plan_last_submitted[root] = now_observer
                         planner_executor = plan_executors.setdefault(
                             root,
