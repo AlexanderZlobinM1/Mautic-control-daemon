@@ -33,6 +33,7 @@ from mcd_agent.daemon import (
     _segment_shared_slots_available,
     _segment_lazy_update_effective_setting,
     _segment_full_scan_admission_enabled,
+    _segment_next_cycle_due_at,
     _fill_from_ring,
     _iter_instances_with_root_dispatch_gate,
     _SchedulerRuntimeRegistry,
@@ -59,6 +60,17 @@ def _leadlist_filter(segment_id: int) -> str:
 
 class SegmentLivenessTests(unittest.TestCase):
     """M6/M7 dispatch invariants for persisted ordinary-cycle liveness."""
+
+    def test_next_cycle_waits_for_root_local_minute_tick(self) -> None:
+        terminal_a = {"status": "terminal", "updated_at": 121.25, "cycle_id": "a-1"}
+        terminal_b = {"status": "terminal", "updated_at": 179.99, "cycle_id": "b-1"}
+        active = {"status": "active", "updated_at": 1.0, "cycle_id": "a-2"}
+
+        self.assertEqual(_segment_next_cycle_due_at(terminal_a), 180.0)
+        self.assertEqual(_segment_next_cycle_due_at(terminal_b), 180.0)
+        self.assertEqual(_segment_next_cycle_due_at({}), 0.0)
+        self.assertEqual(_segment_next_cycle_due_at(None), 0.0)
+        self.assertEqual(_segment_next_cycle_due_at(active), float("inf"))
 
     @staticmethod
     def _config() -> SimpleNamespace:
