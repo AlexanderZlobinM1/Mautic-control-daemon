@@ -2264,7 +2264,10 @@ marker; для `apt_upgrade` воспроизводит captured stdout/stderr �
 порядке, печатает прежний payload и отправляет state только после успеха.
 Семантический `status=error` наблюдения APT остаётся валидным наблюдаемым
 состоянием и не превращается в transport failure. Отсутствующий binding даёт
-явную typed configuration error; concrete `apt_profile` closure и
+явную typed configuration error для явно вызванной операции. В обычном
+state-push отсутствие или ошибка read-only APT observer публикуется как
+`unavailable`/`error` и не останавливает scheduler или daemon. Concrete
+`apt_profile` closure и
 APT-specific MCD dispatcher удалены после bound proof. В affected MCD source
 не остаётся package-manager command/path implementation: её algorithm,
 ordering и system facts принадлежат доставленному MCC artifact.

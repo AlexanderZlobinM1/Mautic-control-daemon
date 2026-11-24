@@ -2355,7 +2355,24 @@ class MCCStatePusher:
 
     def _apt_state(self, now_ts: float) -> dict[str, Any]:
         interval = max(30, int(getattr(self.cfg, "mcc_push_apt_state_interval_sec", 120) or 120))
-        probe_key = self._apt_probe_key()
+        try:
+            probe_key = self._apt_probe_key()
+        except RuntimeError as exc:
+            reason = str(exc).strip()
+            if re.fullmatch(r"[a-z][a-z0-9_]{0,127}", reason) is None:
+                reason = "apt_state_observe_failed"
+            payload = {
+                "status": (
+                    "unavailable"
+                    if reason == "apt_state_observe_binding_not_configured"
+                    else "error"
+                ),
+                "reason": reason,
+            }
+            self.latest_apt_state = payload
+            self.latest_apt_state_ts = now_ts
+            self.latest_apt_probe_key = f"observation:{reason}"
+            return dict(payload)
         if (
             self.latest_apt_state
             and self.latest_apt_probe_key == probe_key
@@ -2376,7 +2393,10 @@ class MCCStatePusher:
             # established apt_state payload unchanged for MCC.
             payload = external
         else:
-            raise RuntimeError("apt_state_observe_binding_not_configured")
+            payload = {
+                "status": "unavailable",
+                "reason": "apt_state_observe_binding_not_configured",
+            }
         self.latest_apt_state = payload
         self.latest_apt_state_ts = now_ts
         self.latest_apt_probe_key = probe_key

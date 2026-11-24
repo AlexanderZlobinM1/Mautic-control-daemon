@@ -33,6 +33,37 @@ class AptExternalCallerTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "apt_state_observe_binding_not_configured"):
                 pusher._apt_probe_key()
 
+    def test_state_push_survives_missing_optional_apt_observer(self) -> None:
+        cfg = SimpleNamespace(mcc_push_apt_state_interval_sec=120)
+        pusher = state_push.MCCStatePusher(cfg)
+        with patch.object(state_push, "_configured_external_operation", return_value=None), \
+             patch.object(state_push.Path, "stat", side_effect=AssertionError("local APT probe forbidden")):
+            self.assertEqual(
+                pusher._apt_state(100.0),
+                {
+                    "status": "unavailable",
+                    "reason": "apt_state_observe_binding_not_configured",
+                },
+            )
+        self.assertEqual(pusher.latest_apt_state_ts, 100.0)
+        self.assertEqual(
+            pusher.latest_apt_probe_key,
+            "observation:apt_state_observe_binding_not_configured",
+        )
+
+    def test_state_push_survives_failed_optional_apt_probe(self) -> None:
+        cfg = SimpleNamespace(mcc_push_apt_state_interval_sec=120)
+        pusher = state_push.MCCStatePusher(cfg)
+        with patch.object(
+            state_push,
+            "_configured_external_operation",
+            return_value={"status": "error", "reason": "apt_cache_unavailable"},
+        ):
+            self.assertEqual(
+                pusher._apt_state(100.0),
+                {"status": "error", "reason": "apt_cache_unavailable"},
+            )
+
     def test_install_readiness_uses_external_zabbix_observer_when_bound(self) -> None:
         with patch.object(install_readiness, "_configured_external_operation", return_value={"status": "external"}), \
              patch.object(install_readiness, "reconcile_ipv6_runtime_from_intent"), \
