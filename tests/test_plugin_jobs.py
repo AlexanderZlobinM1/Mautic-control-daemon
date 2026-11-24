@@ -25,13 +25,8 @@ def _ready_plugin_component(monkeypatch):
         lambda _cfg, refresh=True: {
             "status": "ready",
             "reason": "",
-            "capabilities": [
-                "plugin_filesystem_status",
-                "plugin_filesystem_apply",
-                "plugin_filesystem_cleanup",
-                "plugin_alias_cleanup",
-                "plugin_cache_reset",
-            ],
+            "operations": [{"operation": "manifest-owned-operation"}],
+            "capabilities": [{"identity": "test-component"}],
         },
     )
 

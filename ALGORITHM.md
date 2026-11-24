@@ -177,31 +177,26 @@ error. The external result retains add-before-remove, allowlist unban, rollback,
 status and cleanup semantics, while daemon poll is clamped to 30..3600 seconds
 with a 300-second default.
 
-### Plugin filesystem boundary (MCC component v1.0.2)
+### Универсальный контур внешних компонентов
 
-MCD сохраняет retrieval/cache/integrity выбранного package, manifest retrieval и
-inventory comparison, canonical UID и bundle/install-bundle resolution, Mautic
-registration/bin-console commands, plugin cache semantics and cluster protocol/
-receipts. Core MCD does not invent filesystem ownership, group or mode defaults.
-Materialization, ownership, modes and concrete filesystem state belong to the
-MCC-owned recipe through the existing generic external operation seam:
+MCC выбирает совместимый с конкретным Mautic major manifest до публикации.
+MCD не повторяет compatibility matrix и не знает имён, параметров, UI-полей,
+порядка или бизнес-смысла операций компонента. Эти данные принадлежат
+versioned manifest/adapter и передаются MCD как декларативные descriptors.
 
-| Old MCD operation | MCC binding | Runtime contract |
-| --- | --- | --- |
-| archive extraction, bundle root discovery, replacement, state file, ownership/modes, backup/rollback | `plugin_filesystem_apply` | `archive_path`, `managed_root`, `plugins_root`, `bundle`, `state_filename`, `state_payload`, externally declared `owner`, `group`, `mode` |
-| bundle removal | `plugin_filesystem_cleanup` | `managed_root`, `plugins_root`, `bundle` |
-| canonical alias removal | `plugin_alias_cleanup` | `managed_root`, managed root-relative `paths` only |
-| retired `var/cache/prod` / `app/cache/prod` reset and cleanup | `plugin_cache_reset` | `managed_root`, managed root-relative `paths` only, externally declared `owner`, `group`, `mode` |
-| read-only filesystem observation | `plugin_filesystem_status` | `managed_root`, `plugins_root`, `bundle`, `state_filename` |
+MCD выполняет только общий runtime-путь: получает уже отфильтрованный manifest,
+проверяет точные version/size/SHA, атомарно активирует выбранный component,
+передаёт generic JSON input в объявленную operation и возвращает generic
+result/receipt. Capability projection повторяет descriptor без локального
+толкования. Отсутствующий или повреждённый component скрывает только свою
+capability; остальные функции MCD продолжают работать.
 
-The binding is selected by the exact cached MCC artifact and executed with framed
-`capture_result=true`, synchronous supervision and `offline_only=true`. Before a
-plugin transaction starts, MCD requires the complete five-operation filesystem
-closure. A missing binding, malformed result or terminal external failure stops
-the operation; there is no local filesystem fallback. The external recipe rejects
-traversal, absolute paths and archive links, constrains `plugins_root`, restores
-the previous bundle on partial failure, recreates cache directories with the
-declared mode and owner semantics, and preserves unrelated paths.
+Если operation binding ссылается на immutable cached JSON resource (например,
+operator profile), MCD скачивает объявленный относительный файл из того же
+authenticated custom repository, проверяет отсутствие выхода из cache root и
+точный SHA-256, затем атомарно сохраняет его до активации нового manifest. MCD
+не интерпретирует содержимое profile. Missing, corrupt, conflicting или
+небезопасный resource блокирует только соответствующую внешнюю operation.
 
 Versioned external components use one stable local identity directory at
 `<custom_cache>/components/<component-identity>/`. Delivery verifies declared
@@ -212,17 +207,11 @@ delivery never changes `current`, and an offline miss names the exact selected
 identity, versioned key and digest. A newer catalog candidate never substitutes
 for the explicitly selected coordinates.
 
-Перед показом или запуском управления плагинами MCD обновляет выбранные
-координаты компонента через authenticated MCC catalog и проверяет весь набор
-его операций. Если MCC выбрал более новую версию, сначала штатно скачивается,
-проверяется и атомарно активируется именно она; старая версия не продолжает
-обслуживать команды после неудачного обновления. При недоступном MCC разрешена
-работа уже установленного `current`, только если его metadata, entrypoint и
-локальные operation bindings согласованы между собой. Отсутствующий, неполный
-или повреждённый компонент, ошибка скачивания либо проверки убирают Plugins из
-интерактивного меню и plugin capability из машинного каталога и запрещают
-постановку новой plugin-задачи. Причина остаётся видимой в preflight status;
-после успешного восстановления capability появляется автоматически.
+Если MCC выбрал более новую версию, она сначала скачивается и проверяется;
+неудачное обновление не разрешает старой версии молча выполнять новую selection.
+При недоступном MCC уже установленный `current` работает offline только при
+согласованных metadata, entrypoint и bindings. После восстановления валидного
+component его capability автоматически возвращается.
 
 The immutable component v1.0.2 was accepted with the same ProductTour 1.1 package
 on clean Composer and ZIP layouts for Mautic 5, 6 and 7. The proof covers initial
@@ -230,7 +219,10 @@ installation, exact Mautic inventory confirmation, repeatable terminal receipts,
 removal and installation after removal. Mautic 7 dependency preparation uses the
 separate immutable host closure v1.0.4: it prepares a writable Composer runtime
 and, for ZIP layouts, the declared package prerequisite before MCD changes the
-plugin tree. MCD still owns Composer dependency selection and every Mautic
+plugin tree. Перед вызовом этой mutating preparation MCD читает локальный
+`composer.lock`: если все обязательные пакеты уже установлены, preparation не
+запускается; если lock отсутствует, повреждён или пакет отсутствует, внешний
+host closure остаётся обязательным и fail-closed. MCD still owns Composer dependency selection and every Mautic
 `bin/console` command. Stable MCD 1.6 keeps its legacy boundary and consumes the
 same host preparation as an explicit prerequisite; no OS path is hardcoded back
 into the stable agent. The machine evidence is recorded in

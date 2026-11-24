@@ -24,6 +24,24 @@ from mcd_agent.plugins import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _component_owned_plugin_operation_fields(monkeypatch):
+    fields = {
+        "plugin_filesystem_status": ("managed_root", "plugins_root", "bundle", "state_filename"),
+        "plugin_filesystem_apply": (
+            "managed_root", "archive_path", "plugins_root", "bundle", "state_filename",
+            "state_payload", "owner", "group", "mode",
+        ),
+        "plugin_filesystem_cleanup": ("managed_root", "plugins_root", "bundle"),
+        "plugin_alias_cleanup": ("managed_root", "paths"),
+        "plugin_cache_reset": ("managed_root", "paths", "owner", "group", "mode"),
+    }
+    monkeypatch.setattr(
+        "mcd_agent.plugins.external_component_operation_input_fields",
+        lambda _config, *, identity, operation: fields.get(operation, ()),
+    )
+
+
 def _cfg(cache_dir: Path) -> SimpleNamespace:
     return SimpleNamespace(custom_cache_dir=str(cache_dir), custom_manifest_path="manifest.json")
 
@@ -108,6 +126,69 @@ def test_plugin_binding_accepts_only_declared_resolved_runtime(tmp_path, monkeyp
         "bundle": "VendorBundle",
         "plugins_root": "/srv/app/plugins",
     }
+
+
+def test_plugin_component_binding_needs_no_operator_profile_cache(tmp_path, monkeypatch):
+    """The generic plugin adapter owns input mapping and has no profile file."""
+
+    binding = {
+        "component": "plugin",
+        "component_identity": "plugin-filesystem-component",
+        "operation": "plugin_filesystem_apply",
+        "artifact": {
+            "key": "plugin-filesystem-component-1.0.2",
+            "sha256": "d" * 64,
+            "size_bytes": 7046,
+            "entrypoint": "plugin_filesystem_component/runner.py",
+        },
+        "args": ["--operation", "plugin_filesystem_apply", "--input-stdin"],
+        "capture_result": True,
+        "detach": False,
+        "live_output": False,
+        "offline_only": True,
+        "runtime_input_schema": {"type": "string-map", "fields": ["plugin_runtime_json"]},
+        "runtime_input_mapping": {
+            "plugin_runtime_json": {
+                "encoding": "json",
+                "source": "caller_operation_input",
+                "fields": ["managed_root", "plugins_root", "bundle"],
+            }
+        },
+    }
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "manifest.json").write_text(
+        json.dumps({"manifest_version": 1, "items": [], "operation_bindings": [binding]}),
+        encoding="utf-8",
+    )
+    calls = []
+    monkeypatch.setattr(
+        custom_scripts,
+        "run_custom_script_by_key",
+        lambda _config, **kwargs: calls.append(kwargs) or (0, '{"status":"applied"}'),
+    )
+    monkeypatch.setattr(
+        custom_scripts,
+        "load_configured_profile_cache",
+        lambda *_args, **_kwargs: pytest.fail("plugin component must not load an operator profile"),
+    )
+
+    code, output = custom_scripts.run_configured_external_operation(
+        _cfg(cache),
+        component="plugin",
+        operation="plugin_filesystem_apply",
+        profile=None,
+        operation_input={
+            "managed_root": "/srv/app",
+            "plugins_root": "/srv/app/plugins",
+            "bundle": "VendorBundle",
+        },
+    )
+
+    assert code == 0
+    assert json.loads(output) == {"status": "applied"}
+    assert "profile_source" not in binding
+    assert json.loads(calls[0]["runtime_input"]["plugin_runtime_json"])["bundle"] == "VendorBundle"
 
 
 def test_bound_plugin_failure_does_not_fall_back_to_mcd_filesystem(tmp_path, monkeypatch):

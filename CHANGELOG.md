@@ -1,3 +1,17 @@
+## 1.7.11 - 2026-11-24
+
+- Make external-component resolution and dispatch descriptor-driven. MCD now
+  preserves MCC/component-owned operation, input/result, UI and capability
+  metadata without embedding a fixed operation list or sequencing policy.
+- Treat each Mautic-major plugin manifest as already filtered by MCC. MCD no
+  longer re-computes plugin compatibility from package metadata, while verified
+  local components remain available offline and invalid components fail closed.
+- Hydrate every manifest-declared immutable cached JSON operation resource from
+  the authenticated custom repository with path and SHA-256 validation before
+  activating the manifest. An already-satisfied Composer dependency is proven
+  from `composer.lock` before requesting external host preparation, so ordinary
+  Mautic 7 plugin install/update no longer fails on an unnecessary profile read.
+
 ## 1.7.10 - 2026-11-24
 
 - Resolve the selected plugin-filesystem component through the authenticated

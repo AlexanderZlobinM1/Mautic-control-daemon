@@ -110,7 +110,44 @@ def _catalog(row: dict[str, object]) -> dict[str, object]:
         "schema": "mcc-custom-component-catalog-v1",
         "contract_version": "1.0",
         "identity": "plugin-filesystem-component",
-        "operations": list(OPERATIONS),
+        "descriptor_schema": "mcc-selected-component-descriptor-v1",
+        "descriptor_version": "1.0.0",
+        "compatibility": {
+            "owner": "mcc",
+            "selection": "filtered_before_publication",
+            "mcd_must_not_compute": True,
+        },
+        "capability_projection": {
+            "opaque_to_mcd": True,
+            "operations_source": "operations",
+        },
+        "operations": [
+            {
+                "id": operation,
+                "name": operation.replace("_", " ").title(),
+                "input_schema": {
+                    "schema": "mcc-component-operation-input-v1",
+                    "type": "json-object",
+                    "opaque": True,
+                },
+                "result_schema": {
+                    "schema": "mcc-component-operation-result-v1",
+                    "type": "json-object",
+                    "opaque": True,
+                },
+                "capability": {
+                    "schema": "mcc-component-capability-v1",
+                    "id": operation,
+                    "opaque": True,
+                },
+                "sequencing": {
+                    "owner": "component_adapter",
+                    "scope": "instance",
+                    "mode": "serial",
+                },
+            }
+            for operation in OPERATIONS
+        ],
         "selected": {
             "identity": "plugin-filesystem-component",
             "version": version,
@@ -216,8 +253,6 @@ def test_valid_installed_component_repairs_stale_binding_sizes_offline(tmp_path,
     status = custom.external_component_preflight(
         config,
         identity="plugin-filesystem-component",
-        component="plugin",
-        operations=OPERATIONS,
         refresh=True,
     )
 
@@ -245,8 +280,6 @@ def test_selected_newer_component_replaces_lower_local_version(tmp_path, monkeyp
     status = custom.external_component_preflight(
         config,
         identity="plugin-filesystem-component",
-        component="plugin",
-        operations=OPERATIONS,
         refresh=True,
     )
 
@@ -262,8 +295,6 @@ def test_selected_newer_component_replaces_lower_local_version(tmp_path, monkeyp
     repeated = custom.external_component_preflight(
         config,
         identity="plugin-filesystem-component",
-        component="plugin",
-        operations=OPERATIONS,
         refresh=True,
     )
     assert repeated["status"] == "ready"
@@ -292,8 +323,6 @@ def test_missing_and_corrupt_components_are_unavailable(tmp_path, monkeypatch):
     missing = custom.external_component_preflight(
         config,
         identity="plugin-filesystem-component",
-        component="plugin",
-        operations=OPERATIONS,
         refresh=True,
     )
     assert missing["status"] == "unavailable"
@@ -304,8 +333,6 @@ def test_missing_and_corrupt_components_are_unavailable(tmp_path, monkeypatch):
     corrupt = custom.external_component_preflight(
         config,
         identity="plugin-filesystem-component",
-        component="plugin",
-        operations=OPERATIONS,
         refresh=False,
     )
     assert corrupt["status"] == "unavailable"
@@ -332,8 +359,6 @@ def test_non_entrypoint_component_corruption_is_unavailable(tmp_path, monkeypatc
     status = custom.external_component_preflight(
         config,
         identity="plugin-filesystem-component",
-        component="plugin",
-        operations=OPERATIONS,
         refresh=False,
     )
 
@@ -356,8 +381,6 @@ def test_failed_newer_download_hides_capability_until_valid_restoration(tmp_path
     failed = custom.external_component_preflight(
         config,
         identity="plugin-filesystem-component",
-        component="plugin",
-        operations=OPERATIONS,
         refresh=True,
     )
     assert failed["status"] == "unavailable"
@@ -365,8 +388,6 @@ def test_failed_newer_download_hides_capability_until_valid_restoration(tmp_path
     assert custom.external_component_preflight(
         config,
         identity="plugin-filesystem-component",
-        component="plugin",
-        operations=OPERATIONS,
         refresh=False,
     )["status"] == "unavailable"
 
@@ -374,8 +395,6 @@ def test_failed_newer_download_hides_capability_until_valid_restoration(tmp_path
     restored = custom.external_component_preflight(
         config,
         identity="plugin-filesystem-component",
-        component="plugin",
-        operations=OPERATIONS,
         refresh=True,
     )
     assert restored["status"] == "ready"
@@ -404,3 +423,77 @@ def test_authenticated_component_catalog_preserves_exact_selected_coordinates(tm
         "/api/v1/agent/custom-components/plugin-filesystem-component/catalog"
     )
     assert seen[0].headers["Authorization"] == "Bearer existing-key"
+
+
+def test_mcc_major_filtered_operation_descriptors_are_passed_through_unchanged(tmp_path, monkeypatch):
+    config = _config(tmp_path)
+    config.mcc_url = "https://mcc.example"
+    config.mcc_token = "existing-key"
+    raw = _archive("1.0.2")
+    row = _row("1.0.2", raw)
+    payload = _catalog(row)
+    payload["operations"] = [{
+        "operation": "vendor.catalog.refresh",
+        "applicable_mautic_majors": [7],
+        "ui": {"label": "Refresh catalog"},
+    }]
+    monkeypatch.setattr(
+        custom.urllib.request,
+        "urlopen",
+        lambda *_a, **_k: BytesIO(json.dumps(payload).encode()),
+    )
+
+    catalog = custom.fetch_external_component_catalog(config, "plugin-filesystem-component")
+
+    assert catalog["operations"] == payload["operations"]
+    assert catalog["descriptor"] == {
+        "descriptor_schema": payload["descriptor_schema"],
+        "descriptor_version": payload["descriptor_version"],
+        "compatibility": payload["compatibility"],
+        "capability_projection": payload["capability_projection"],
+    }
+
+
+def test_generic_dispatch_uses_manifest_component_and_operation(tmp_path, monkeypatch):
+    config = _config(tmp_path)
+    raw = _archive("1.0.2")
+    row = _row("1.0.2", raw)
+    _install(monkeypatch, config, row, raw)
+    operation = "vendor.catalog.refresh"
+    payload = {
+        "manifest_version": 1,
+        "items": [{"type": "script", **row}],
+        "operation_bindings": [_binding(operation, row, include_size=True)],
+    }
+    (Path(config.custom_cache_dir) / "manifest.json").write_text(
+        json.dumps(payload), encoding="utf-8"
+    )
+    monkeypatch.setattr(custom, "fetch_custom_manifest", lambda *_a, **_k: _cache_manifest(config))
+    monkeypatch.setattr(
+        custom,
+        "fetch_external_component_catalog",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            custom.ExternalComponentCatalogUnavailable("offline")
+        ),
+    )
+    calls = []
+    monkeypatch.setattr(
+        custom,
+        "run_configured_external_operation",
+        lambda _config, **kwargs: calls.append(kwargs) or (0, '{"status":"ok"}'),
+    )
+
+    rc, output = custom.run_external_component_operation(
+        config,
+        identity="plugin-filesystem-component",
+        operation=operation,
+        operation_input={"opaque": {"value": 1}},
+    )
+
+    assert (rc, json.loads(output)) == (0, {"status": "ok"})
+    assert calls == [{
+        "component": "plugin",
+        "operation": operation,
+        "profile": {},
+        "operation_input": {"opaque": {"value": 1}},
+    }]

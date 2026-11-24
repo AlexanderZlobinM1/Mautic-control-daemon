@@ -683,6 +683,103 @@ def cache_selected_task(config: AgentConfig, response: dict[str, Any]) -> None:
     _merge_cached_manifest(config, {}, selected=record)
 
 
+def _hydrate_manifest_cached_json_resources(config: AgentConfig, payload: dict[str, Any]) -> None:
+    """Cache immutable JSON resources referenced by operation bindings.
+
+    The public/custom manifest is authoritative for the relative file and its
+    SHA-256.  MCD does not interpret the profile contents; it only makes the
+    declared resource available to the generic offline operation dispatcher.
+    A manifest is never activated with a missing, corrupt, escaping or
+    ambiguous cached resource.
+    """
+
+    bindings = payload.get("operation_bindings", [])
+    if bindings is None:
+        return
+    if not isinstance(bindings, list) or any(not isinstance(row, dict) for row in bindings):
+        raise RuntimeError("custom manifest operation bindings are invalid")
+    declared: dict[str, str] = {}
+    for binding in bindings:
+        for source in binding.values():
+            if not isinstance(source, dict) or source.get("type") != "cached-json":
+                continue
+            relative = source.get("file")
+            digest = source.get("sha256")
+            if (
+                not isinstance(relative, str)
+                or not isinstance(digest, str)
+                or re.fullmatch(r"[0-9a-f]{64}", digest.strip().lower()) is None
+            ):
+                raise RuntimeError("custom manifest cached resource descriptor is invalid")
+            posix = PurePosixPath(relative)
+            if (
+                not relative
+                or posix.is_absolute()
+                or posix.as_posix() != relative
+                or any(part in {"", ".", ".."} for part in posix.parts)
+            ):
+                raise RuntimeError("custom manifest cached resource descriptor is invalid")
+            normalized_digest = digest.strip().lower()
+            prior = declared.get(relative)
+            if prior is not None and prior != normalized_digest:
+                raise RuntimeError("custom manifest cached resource descriptor is ambiguous")
+            declared[relative] = normalized_digest
+    if not declared:
+        return
+
+    root = _cache_root(config)
+    if root.exists() and root.is_symlink():
+        raise RuntimeError("custom cache root is invalid")
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    root_real = root.resolve(strict=True)
+    base = _manifest_url(config).rsplit("/", 1)[0] + "/"
+    for relative, expected in sorted(declared.items()):
+        posix = PurePosixPath(relative)
+        parent = root
+        for part in posix.parts[:-1]:
+            parent = parent / part
+            if parent.exists() and parent.is_symlink():
+                raise RuntimeError("custom manifest cached resource path is invalid")
+            parent.mkdir(mode=0o700, exist_ok=True)
+        if root_real != parent.resolve(strict=True) and root_real not in parent.resolve(strict=True).parents:
+            raise RuntimeError("custom manifest cached resource path is invalid")
+        target = parent / posix.name
+        if target.is_symlink():
+            raise RuntimeError("custom manifest cached resource path is invalid")
+        try:
+            if (
+                target.is_file()
+                and target.stat().st_size <= 256 * 1024
+                and hashlib.sha256(target.read_bytes()).hexdigest() == expected
+            ):
+                continue
+        except OSError:
+            pass
+
+        url = urllib.parse.urljoin(base, relative)
+        request = mcc_request(url, headers=_headers(config))
+        try:
+            with urllib.request.urlopen(request, timeout=12) as response:
+                body = response.read(256 * 1024 + 1)
+        except Exception as exc:
+            raise RuntimeError("custom manifest cached resource fetch failed") from exc
+        if len(body) > 256 * 1024 or hashlib.sha256(body).hexdigest() != expected:
+            raise RuntimeError("custom manifest cached resource integrity mismatch")
+        temporary: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=parent, prefix=".resource-", delete=False) as stream:
+                temporary = Path(stream.name)
+                stream.write(body)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, target)
+            temporary = None
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+
+
 def fetch_custom_manifest(config: AgentConfig, *, use_cache_on_error: bool = True) -> tuple[list[dict[str, Any]], str]:
     cache_path = _cache_manifest_path(config)
     try:
@@ -694,6 +791,7 @@ def fetch_custom_manifest(config: AgentConfig, *, use_cache_on_error: bool = Tru
         if not isinstance(payload, dict):
             raise RuntimeError("custom manifest is not a JSON object")
         rows = _parse_manifest(payload)
+        _hydrate_manifest_cached_json_resources(config, payload)
         merged = _merge_cached_manifest(config, payload)
         return _parse_manifest(merged), "remote"
     except urllib.error.HTTPError as e:
@@ -749,6 +847,7 @@ _COMPONENT_IDENTITY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*-component$")
 _COMPONENT_VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 _COMPONENT_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 _COMPONENT_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
+_COMPONENT_OPERATION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _COMPONENT_STATUS_SCHEMA = "mcd-external-component-preflight-v1"
 _COMPONENT_SELECTION_SCHEMA = "mcd-external-component-selection-v1"
 
@@ -824,6 +923,80 @@ def _validate_external_component_record(identity: str, raw: object) -> dict[str,
     }
 
 
+def _component_operation_descriptors(raw: object) -> list[dict[str, Any]]:
+    """Preserve MCC/component-owned operation metadata without interpreting it."""
+
+    if not isinstance(raw, list) or not raw:
+        raise ExternalComponentCatalogInvalid("external_component_catalog_invalid")
+    descriptors: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in raw:
+        if isinstance(item, str):
+            descriptor: dict[str, Any] = {"id": item.strip()}
+        elif isinstance(item, dict):
+            try:
+                descriptor = json.loads(
+                    json.dumps(
+                        item,
+                        ensure_ascii=True,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        allow_nan=False,
+                    )
+                )
+            except (TypeError, ValueError, UnicodeError) as exc:
+                raise ExternalComponentCatalogInvalid("external_component_catalog_invalid") from exc
+            operation = descriptor.get("operation", descriptor.get("id", descriptor.get("name")))
+            operation = str(operation or "").strip()
+        else:
+            raise ExternalComponentCatalogInvalid("external_component_catalog_invalid")
+        operation = str(
+            descriptor.get("operation", descriptor.get("id", descriptor.get("name"))) or ""
+        ).strip()
+        if _COMPONENT_OPERATION_RE.fullmatch(operation) is None or operation in seen:
+            raise ExternalComponentCatalogInvalid("external_component_catalog_invalid")
+        if len(json.dumps(descriptor, ensure_ascii=True, separators=(",", ":"))) > 64 * 1024:
+            raise ExternalComponentCatalogInvalid("external_component_catalog_invalid")
+        descriptors.append(descriptor)
+        seen.add(operation)
+    return descriptors
+
+
+def _component_operation_names(descriptors: object) -> tuple[str, ...]:
+    return tuple(
+        str(item.get("operation", item.get("id", item.get("name"))) or "").strip()
+        for item in descriptors
+        if isinstance(item, dict)
+        and str(item.get("operation", item.get("id", item.get("name"))) or "").strip()
+    ) if isinstance(descriptors, list) else ()
+
+
+def _component_descriptor_metadata(payload: dict[str, Any]) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    for field in ("descriptor_schema", "descriptor_version", "compatibility", "capability_projection"):
+        if field not in payload:
+            continue
+        value = payload[field]
+        if field in {"descriptor_schema", "descriptor_version"}:
+            if not isinstance(value, str) or not value.strip() or len(value) > 128:
+                raise ExternalComponentCatalogInvalid("external_component_catalog_invalid")
+            metadata[field] = value.strip()
+            continue
+        if not isinstance(value, dict):
+            raise ExternalComponentCatalogInvalid("external_component_catalog_invalid")
+        try:
+            copied = json.loads(json.dumps(
+                value, ensure_ascii=True, sort_keys=True,
+                separators=(",", ":"), allow_nan=False,
+            ))
+        except (TypeError, ValueError, UnicodeError) as exc:
+            raise ExternalComponentCatalogInvalid("external_component_catalog_invalid") from exc
+        if len(json.dumps(copied, ensure_ascii=True, separators=(",", ":"))) > 64 * 1024:
+            raise ExternalComponentCatalogInvalid("external_component_catalog_invalid")
+        metadata[field] = copied
+    return metadata
+
+
 def fetch_external_component_catalog(config: AgentConfig, identity: str) -> dict[str, Any]:
     """Fetch one authenticated component selection without using the public manifest."""
 
@@ -843,19 +1016,14 @@ def fetch_external_component_catalog(config: AgentConfig, identity: str) -> dict
         or payload.get("identity") != identity
     ):
         raise ExternalComponentCatalogInvalid("external_component_catalog_invalid")
-    operations = payload.get("operations")
-    if (
-        not isinstance(operations, list)
-        or any(not isinstance(item, str) or not item.strip() for item in operations)
-        or len(set(operations)) != len(operations)
-    ):
-        raise ExternalComponentCatalogInvalid("external_component_catalog_invalid")
+    operations = _component_operation_descriptors(payload.get("operations"))
     selected = payload.get("selected")
     return {
         "schema": payload["schema"],
         "contract_version": "1.0",
         "identity": identity,
-        "operations": list(operations),
+        "operations": operations,
+        "descriptor": _component_descriptor_metadata(payload),
         "selected": None if selected is None else _validate_external_component_record(identity, selected),
     }
 
@@ -986,6 +1154,8 @@ def _write_component_selection(
     *,
     status: str,
     selected: dict[str, Any] | None,
+    operations: list[dict[str, Any]] | None = None,
+    descriptor: dict[str, Any] | None = None,
     reason: str = "",
 ) -> None:
     cache_dir = str(getattr(config, "custom_cache_dir", "") or "").strip()
@@ -998,6 +1168,8 @@ def _write_component_selection(
         "status": status,
         "reason": str(reason or "")[:128],
         "selected": dict(selected) if isinstance(selected, dict) else None,
+        "operations": list(operations or []),
+        "descriptor": dict(descriptor or {}),
         "updated_at": int(time.time()),
     }
     _atomic_component_json(root, "selection.json", payload)
@@ -1022,7 +1194,21 @@ def _read_component_selection(config: AgentConfig, identity: str) -> dict[str, A
         selected = payload.get("selected")
         if selected is not None:
             selected = _validate_external_component_record(identity, selected)
-        return {**payload, "selected": selected}
+        operations = payload.get("operations", [])
+        if operations:
+            operations = _component_operation_descriptors(operations)
+        elif not isinstance(operations, list):
+            return None
+        descriptor = payload.get("descriptor", {})
+        if not isinstance(descriptor, dict):
+            return None
+        descriptor = _component_descriptor_metadata(descriptor)
+        return {
+            **payload,
+            "selected": selected,
+            "operations": operations,
+            "descriptor": descriptor,
+        }
     except (ExternalComponentCatalogInvalid, OSError, UnicodeError, ValueError, TypeError):
         return None
 
@@ -1276,7 +1462,9 @@ def _component_status(
     status: str,
     reason: str,
     source: str,
-    operations: tuple[str, ...],
+    operations: list[dict[str, Any]] | None = None,
+    descriptor: dict[str, Any] | None = None,
+    component: str = "",
     selected: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     public_selected = None
@@ -1286,13 +1474,28 @@ def _component_status(
             for field in ("version", "key", "sha256", "size_bytes", "entrypoint", "source_revision")
             if selected.get(field) not in {None, ""}
         }
+    descriptors = list(operations or []) if status == "ready" else []
+    descriptor_metadata = dict(descriptor or {})
+    capability = {
+        "schema": "mcd-external-component-capability-v1",
+        "identity": identity,
+        "component": str(component or ""),
+        "descriptor": descriptor_metadata,
+        "operations": descriptors,
+        "command": (
+            "mcd-cli external-component invoke --identity <identity> "
+            "--operation <operation> --input-json <file|-> --json"
+        ),
+    }
     return {
         "schema": _COMPONENT_STATUS_SCHEMA,
         "identity": identity,
         "status": status,
         "reason": reason,
         "source": source,
-        "capabilities": list(operations) if status == "ready" else [],
+        "operations": descriptors,
+        "descriptor": descriptor_metadata,
+        "capabilities": [capability] if status == "ready" else [],
         "selected": public_selected,
     }
 
@@ -1316,9 +1519,8 @@ def _cached_component_manifest(config: AgentConfig) -> dict[str, Any]:
 def _component_binding_templates(
     document: dict[str, Any],
     *,
-    component: str,
     identity: str,
-    operations: tuple[str, ...],
+    operations: tuple[str, ...] | None = None,
 ) -> dict[str, dict[str, Any]]:
     bindings = document.get("operation_bindings")
     if not isinstance(bindings, list):
@@ -1333,13 +1535,34 @@ def _component_binding_templates(
         "mcd_resolved_operation_context",
         "mcd_resolved_source_installation_context",
     }
-    for operation in operations:
-        matches = [
+    identity_rows = [
+        row for row in bindings
+        if isinstance(row, dict) and row.get("component_identity") == identity
+    ]
+    if not identity_rows:
+        identity_rows = [
             row for row in bindings
             if isinstance(row, dict)
-            and row.get("component") == component
-            and row.get("operation") == operation
-            and row.get("component_identity") in {None, identity}
+            and row.get("component_identity") is None
+            and isinstance(row.get("artifact"), dict)
+            and _component_coordinates(str(row["artifact"].get("key") or ""))
+            and _component_coordinates(str(row["artifact"].get("key") or ""))[0] == identity
+        ]
+    requested = tuple(operations or ())
+    if not requested:
+        requested = tuple(
+            dict.fromkeys(
+                str(row.get("operation") or "").strip()
+                for row in identity_rows
+                if _COMPONENT_OPERATION_RE.fullmatch(str(row.get("operation") or "").strip())
+            )
+        )
+    if not requested:
+        raise RuntimeError("external_component_bindings_missing")
+    for operation in requested:
+        matches = [
+            row for row in identity_rows
+            if row.get("operation") == operation
         ]
         if len(matches) != 1:
             raise RuntimeError("external_component_bindings_missing")
@@ -1350,7 +1573,10 @@ def _component_binding_templates(
         mapping = binding.get("runtime_input_mapping")
         fields = schema.get("fields") if isinstance(schema, dict) else None
         if (
-            not isinstance(artifact, dict)
+            not isinstance(binding.get("component"), str)
+            or not str(binding.get("component") or "").strip()
+            or _COMPONENT_OPERATION_RE.fullmatch(str(binding.get("operation") or "").strip()) is None
+            or not isinstance(artifact, dict)
             or _component_coordinates(str(artifact.get("key") or "")) is None
             or _component_coordinates(str(artifact.get("key") or ""))[0] != identity
             or _COMPONENT_SHA_RE.fullmatch(str(artifact.get("sha256") or "").strip().lower()) is None
@@ -1381,6 +1607,8 @@ def _component_binding_templates(
             ):
                 raise RuntimeError("external_component_bindings_invalid")
         selected[operation] = binding
+    if len({str(binding.get("component") or "").strip() for binding in selected.values()}) != 1:
+        raise RuntimeError("external_component_bindings_invalid")
     return selected
 
 
@@ -1388,18 +1616,20 @@ def _component_manifest_for_selection(
     config: AgentConfig,
     *,
     document: dict[str, Any],
-    component: str,
     identity: str,
-    operations: tuple[str, ...],
+    operation_descriptors: list[dict[str, Any]] | None,
     selected: dict[str, Any],
     require_existing_coordinates: bool,
 ) -> dict[str, Any]:
+    operation_names = _component_operation_names(operation_descriptors)
     templates = _component_binding_templates(
         document,
-        component=component,
         identity=identity,
-        operations=operations,
+        operations=operation_names or None,
     )
+    if not operation_names:
+        operation_names = tuple(templates)
+        operation_descriptors = [{"operation": name} for name in operation_names]
     patched = json.loads(json.dumps(document, ensure_ascii=True))
     patched_bindings = patched.get("operation_bindings")
     if not isinstance(patched_bindings, list):
@@ -1414,7 +1644,7 @@ def _component_manifest_for_selection(
         replacement = next(
             row for row in patched_bindings
             if isinstance(row, dict)
-            and row.get("component") == component
+            and row.get("component") == original.get("component")
             and row.get("operation") == operation
             and row.get("component_identity") in {None, identity}
         )
@@ -1453,6 +1683,7 @@ def _component_manifest_for_selection(
         "component_version": selected["version"],
         "source_revision": str(selected.get("source_revision") or ""),
         "selection_state": "selected",
+        "operations": list(operation_descriptors or []),
     }
     rows = _parse_manifest(patched, deduplicate=False)
     if not any(
@@ -1471,6 +1702,7 @@ def _component_manifest_for_selection(
         for field in ("identity", "version", "key", "sha256", "size_bytes", "source_revision", "artifact_file", "entrypoint", "target_root")
         if selected.get(field) not in {None, ""}
     }
+    component_selection[identity]["operations"] = list(operation_descriptors or [])
     patched["component_selection"] = component_selection
     return patched
 
@@ -1479,30 +1711,25 @@ def external_component_preflight(
     config: AgentConfig,
     *,
     identity: str,
-    component: str,
-    operations: tuple[str, ...],
     refresh: bool = True,
+    _manifest_refreshed: bool = False,
 ) -> dict[str, Any]:
-    """Resolve, activate and project one component capability fail-closed."""
+    """Resolve one MCC-selected component without interpreting its operations."""
 
     identity = str(identity or "").strip()
-    operations = tuple(dict.fromkeys(str(value or "").strip() for value in operations if str(value or "").strip()))
-    if _COMPONENT_IDENTITY_RE.fullmatch(identity) is None or not component or not operations:
+    if _COMPONENT_IDENTITY_RE.fullmatch(identity) is None:
         return _component_status(
             identity,
             status="unavailable",
             reason="external_component_request_invalid",
             source="none",
-            operations=operations,
         )
 
-    manifest_source = "cache"
-    if refresh:
+    if refresh and not _manifest_refreshed:
         try:
-            _rows, manifest_source = fetch_custom_manifest(config, use_cache_on_error=True)
+            fetch_custom_manifest(config, use_cache_on_error=True)
         except Exception as exc:
             logging.warning("external component manifest refresh failed identity=%s: %s", identity, exc)
-            manifest_source = "unavailable"
 
     if refresh:
         try:
@@ -1514,6 +1741,7 @@ def external_component_preflight(
                     identity,
                     status="blocked",
                     selected=None,
+                    operations=[],
                     reason=str(exc),
                 )
             except OSError:
@@ -1523,18 +1751,22 @@ def external_component_preflight(
                 status="unavailable",
                 reason="external_component_catalog_invalid",
                 source="mcc-catalog",
-                operations=operations,
             )
         except ExternalComponentCatalogUnavailable:
             catalog = None
         if catalog is not None:
             selected = catalog.get("selected")
+            operation_descriptors = list(catalog.get("operations") or [])
+            descriptor_metadata = dict(catalog.get("descriptor") or {})
+            operation_names = _component_operation_names(operation_descriptors)
             if not isinstance(selected, dict):
                 _write_component_selection(
                     config,
                     identity,
                     status="blocked",
                     selected=None,
+                    operations=operation_descriptors,
+                    descriptor=descriptor_metadata,
                     reason="external_component_not_selected",
                 )
                 return _component_status(
@@ -1542,14 +1774,15 @@ def external_component_preflight(
                     status="unavailable",
                     reason="external_component_not_selected",
                     source="mcc-catalog",
-                    operations=operations,
                 )
-            if not set(operations).issubset(set(catalog.get("operations") or [])):
+            if not operation_names:
                 _write_component_selection(
                     config,
                     identity,
                     status="blocked",
                     selected=selected,
+                    operations=operation_descriptors,
+                    descriptor=descriptor_metadata,
                     reason="external_component_capabilities_missing",
                 )
                 return _component_status(
@@ -1557,22 +1790,29 @@ def external_component_preflight(
                     status="unavailable",
                     reason="external_component_capabilities_missing",
                     source="mcc-catalog",
-                    operations=operations,
                     selected=selected,
                 )
             try:
                 document = _cached_component_manifest(config)
-                _component_binding_templates(
+                templates = _component_binding_templates(
                     document,
-                    component=component,
                     identity=identity,
-                    operations=operations,
+                    operations=operation_names,
                 )
+                component_names = {
+                    str(binding.get("component") or "").strip()
+                    for binding in templates.values()
+                }
+                if len(component_names) != 1:
+                    raise RuntimeError("external_component_bindings_invalid")
+                component = next(iter(component_names))
                 _write_component_selection(
                     config,
                     identity,
                     status="selected",
                     selected=selected,
+                    operations=operation_descriptors,
+                    descriptor=descriptor_metadata,
                 )
                 row = {
                     "key": selected["key"],
@@ -1588,9 +1828,8 @@ def external_component_preflight(
                 patched = _component_manifest_for_selection(
                     config,
                     document=document,
-                    component=component,
                     identity=identity,
-                    operations=operations,
+                    operation_descriptors=operation_descriptors,
                     selected=selected,
                     require_existing_coordinates=False,
                 )
@@ -1603,13 +1842,17 @@ def external_component_preflight(
                     identity,
                     status="ready",
                     selected=selected,
+                    operations=operation_descriptors,
+                    descriptor=descriptor_metadata,
                 )
                 return _component_status(
                     identity,
                     status="ready",
                     reason="",
                     source="mcc-catalog",
-                    operations=operations,
+                    operations=operation_descriptors,
+                    descriptor=descriptor_metadata,
+                    component=component,
                     selected=installed,
                 )
             except Exception as exc:
@@ -1620,6 +1863,8 @@ def external_component_preflight(
                         identity,
                         status="blocked",
                         selected=selected,
+                        operations=operation_descriptors,
+                        descriptor=descriptor_metadata,
                         reason="external_component_activation_failed",
                     )
                 except OSError:
@@ -1629,13 +1874,14 @@ def external_component_preflight(
                     status="unavailable",
                     reason="external_component_activation_failed",
                     source="mcc-catalog",
-                    operations=operations,
                     selected=selected,
                 )
 
     installed = _installed_external_component(config, identity)
     selection = _read_component_selection(config, identity)
     selected = selection.get("selected") if isinstance(selection, dict) else None
+    operation_descriptors = list(selection.get("operations") or []) if isinstance(selection, dict) else []
+    descriptor_metadata = dict(selection.get("descriptor") or {}) if isinstance(selection, dict) else {}
     if (
         isinstance(selection, dict)
         and selection.get("status") == "blocked"
@@ -1650,7 +1896,6 @@ def external_component_preflight(
             status="unavailable",
             reason=str(selection.get("reason") or "external_component_blocked"),
             source="local",
-            operations=operations,
             selected=selected if isinstance(selected, dict) else installed,
         )
     if installed is None:
@@ -1659,7 +1904,6 @@ def external_component_preflight(
             status="unavailable",
             reason="external_component_local_invalid",
             source="local",
-            operations=operations,
             selected=selected if isinstance(selected, dict) else None,
         )
     if isinstance(selected, dict) and not _component_record_matches(installed, selected):
@@ -1668,17 +1912,32 @@ def external_component_preflight(
             status="unavailable",
             reason="external_component_selection_not_active",
             source="local",
-            operations=operations,
             selected=selected,
         )
     try:
         document = _cached_component_manifest(config)
+        templates = _component_binding_templates(
+            document,
+            identity=identity,
+            operations=_component_operation_names(operation_descriptors) or None,
+        )
+        if not operation_descriptors:
+            operation_descriptors = [
+                {"id": operation}
+                for operation in templates
+            ]
+        component_names = {
+            str(binding.get("component") or "").strip()
+            for binding in templates.values()
+        }
+        if len(component_names) != 1:
+            raise RuntimeError("external_component_bindings_invalid")
+        component = next(iter(component_names))
         patched = _component_manifest_for_selection(
             config,
             document=document,
-            component=component,
             identity=identity,
-            operations=operations,
+            operation_descriptors=operation_descriptors,
             selected=installed,
             require_existing_coordinates=True,
         )
@@ -1690,7 +1949,6 @@ def external_component_preflight(
             status="unavailable",
             reason=str(exc) if re.fullmatch(r"[a-z][a-z0-9_]{0,127}", str(exc)) else "external_component_bindings_invalid",
             source="local",
-            operations=operations,
             selected=installed,
         )
     return _component_status(
@@ -1698,9 +1956,143 @@ def external_component_preflight(
         status="ready",
         reason="",
         source="local-offline" if refresh else "local",
-        operations=operations,
+        operations=operation_descriptors,
+        descriptor=descriptor_metadata,
+        component=component,
         selected=installed,
     )
+
+
+def external_component_identities(config: AgentConfig) -> tuple[str, ...]:
+    """Discover component identities declared by the cached MCC manifest."""
+
+    try:
+        document = _cached_component_manifest(config)
+    except RuntimeError:
+        return ()
+    candidates: set[str] = set()
+    selection = document.get("component_selection")
+    if isinstance(selection, dict):
+        candidates.update(str(value or "").strip() for value in selection)
+    for collection, field in ((document.get("items"), "component_identity"),
+                              (document.get("components"), "identity"),
+                              (document.get("operation_bindings"), "component_identity")):
+        if isinstance(collection, list):
+            candidates.update(
+                str(row.get(field) or "").strip()
+                for row in collection
+                if isinstance(row, dict)
+            )
+    delivery = document.get("component_delivery")
+    if isinstance(delivery, dict):
+        candidates.add(str(delivery.get("identity") or "").strip())
+    return tuple(sorted(
+        value for value in candidates
+        if _COMPONENT_IDENTITY_RE.fullmatch(value) is not None
+    ))
+
+
+def external_component_capability_projection(
+    config: AgentConfig,
+    *,
+    refresh: bool = True,
+) -> dict[str, Any]:
+    """Project every declared component without deriving compatibility policy."""
+
+    if refresh:
+        try:
+            fetch_custom_manifest(config, use_cache_on_error=True)
+        except Exception as exc:
+            logging.warning("external component projection manifest refresh failed: %s", exc)
+    statuses = [
+        external_component_preflight(
+            config,
+            identity=identity,
+            refresh=refresh,
+            _manifest_refreshed=refresh,
+        )
+        for identity in external_component_identities(config)
+    ]
+    capabilities = [
+        capability
+        for status in statuses if status.get("status") == "ready"
+        for capability in status.get("capabilities", []) if isinstance(capability, dict)
+    ]
+    return {
+        "schema": "mcd-external-component-capability-catalog-v1",
+        "components": statuses,
+        "capabilities": capabilities,
+    }
+
+
+def run_external_component_operation(
+    config: AgentConfig,
+    *,
+    identity: str,
+    operation: str,
+    operation_input: dict[str, Any],
+) -> tuple[int, str]:
+    """Invoke one manifest-declared operation through the generic dispatcher."""
+
+    identity = str(identity or "").strip()
+    operation = str(operation or "").strip()
+    if (
+        _COMPONENT_IDENTITY_RE.fullmatch(identity) is None
+        or _COMPONENT_OPERATION_RE.fullmatch(operation) is None
+        or not isinstance(operation_input, dict)
+    ):
+        return 2, "external_component_request_invalid"
+    status = external_component_preflight(config, identity=identity, refresh=True)
+    if status.get("status") != "ready":
+        return 2, str(status.get("reason") or "external_component_unavailable")
+    operation_names = set(_component_operation_names(status.get("operations")))
+    if operation not in operation_names:
+        return 2, "external_component_operation_unavailable"
+    try:
+        templates = _component_binding_templates(
+            _cached_component_manifest(config),
+            identity=identity,
+            operations=(operation,),
+        )
+    except RuntimeError as exc:
+        return 2, str(exc)
+    component = str(templates[operation].get("component") or "").strip()
+    return run_configured_external_operation(
+        config,
+        component=component,
+        operation=operation,
+        profile={},
+        operation_input=operation_input,
+    )
+
+
+def external_component_operation_input_fields(
+    config: AgentConfig,
+    *,
+    identity: str,
+    operation: str,
+) -> tuple[str, ...]:
+    """Return only descriptor-declared caller fields for an adapter operation."""
+
+    templates = _component_binding_templates(
+        _cached_component_manifest(config),
+        identity=str(identity or "").strip(),
+        operations=(str(operation or "").strip(),),
+    )
+    binding = templates[str(operation or "").strip()]
+    fields: list[str] = []
+    mapping = binding.get("runtime_input_mapping")
+    for spec in mapping.values() if isinstance(mapping, dict) else ():
+        if not isinstance(spec, dict) or spec.get("source") not in {
+            "caller_operation_input",
+            "mcd_resolved_mail_runtime",
+            "mcd_resolved_plugin_filesystem",
+        }:
+            continue
+        declared = spec.get("fields")
+        if isinstance(declared, list):
+            fields.extend(str(value or "").strip() for value in declared)
+    return tuple(dict.fromkeys(value for value in fields if value))
 
 
 
@@ -2005,8 +2397,9 @@ def run_configured_external_operation(
             if (not isinstance(declared_fields, list)
                     or any(not isinstance(field, str) for field in declared_fields)):
                 return None
-            if not isinstance(value, dict) or set(value) != set(declared_fields):
+            if not isinstance(value, dict) or any(field not in value for field in declared_fields):
                 return None
+            value = {field: value[field] for field in declared_fields}
         try:
             return json.dumps(value, ensure_ascii=False, sort_keys=True,
                               separators=(",", ":"), allow_nan=False)

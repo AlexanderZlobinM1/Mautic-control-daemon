@@ -29,7 +29,11 @@ from mcd_agent import __version__, plugin_registration
 from mcd_agent.amazon_mailer_dep import ensure_composer_runtime_packages, ensure_mailer_packages_for_bundles
 from mcd_agent.cluster_routing import cluster_local_identity_values, cluster_route_targets
 from mcd_agent.config import AgentConfig
-from mcd_agent.custom_scripts import external_component_preflight, run_configured_external_operation
+from mcd_agent.custom_scripts import (
+    external_component_operation_input_fields,
+    external_component_preflight,
+    run_configured_external_operation,
+)
 from mcd_agent.db import MauticDB
 from mcd_agent.discovery import discover_mautic
 from mcd_agent.executor import build_mautic_exec_args, execute_mautic_command_template
@@ -69,13 +73,6 @@ _PLUGIN_APPLY_RESULT_SCHEMA = "mcd-plugin-apply-result-v1"
 _PLUGIN_OPERATION_RESULT_SCHEMA = "mcd-plugin-operation-result-v2"
 _PLUGIN_OPERATION_RESULT_PREFIX = "MCD_PLUGIN_OPERATION_RESULT="
 _PLUGIN_OPERATION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
-_PLUGIN_FILESYSTEM_REQUIRED_OPERATIONS = (
-    "plugin_filesystem_status",
-    "plugin_filesystem_apply",
-    "plugin_filesystem_cleanup",
-    "plugin_alias_cleanup",
-    "plugin_cache_reset",
-)
 _PLUGIN_FILESYSTEM_COMPONENT_IDENTITY = "plugin-filesystem-component"
 _PLUGIN_FILESYSTEM_STATUS_SCHEMA = "mcd-plugin-filesystem-status-v1"
 _GALERA_DANGEROUS_SQL_RE = re.compile(
@@ -978,19 +975,18 @@ def _configured_plugin_filesystem_operation(
     Every required operation is fail-closed when its MCC binding is absent.
     """
     operation_runtime = dict(runtime)
-    if operation in {
-        "plugin_filesystem_status",
-        "plugin_filesystem_apply",
-        "plugin_filesystem_cleanup",
-        "plugin_alias_cleanup",
-        "plugin_cache_reset",
-    }:
-        try:
+    try:
+        declared_fields = set(external_component_operation_input_fields(
+            config,
+            identity=_PLUGIN_FILESYSTEM_COMPONENT_IDENTITY,
+            operation=operation,
+        ))
+        if "managed_root" in declared_fields:
             operation_runtime["managed_root"] = _plugin_managed_root_from_config(config)
-            if operation in {"plugin_filesystem_apply", "plugin_cache_reset"}:
-                operation_runtime.update(_plugin_filesystem_attributes_from_config(config))
-        except RuntimeError as exc:
-            return {"status": "error", "reason": str(exc)}
+        if declared_fields.intersection({"owner", "group", "mode"}):
+            operation_runtime.update(_plugin_filesystem_attributes_from_config(config))
+    except RuntimeError as exc:
+        return {"status": "error", "reason": str(exc)}
     code, output = run_configured_external_operation(
         config,
         component="plugin",
@@ -1028,9 +1024,12 @@ def _configured_plugin_filesystem_operation(
 def _plugin_filesystem_binding_present(config: AgentConfig, operation: str) -> bool:
     """Project a binding only while the complete component is locally valid."""
 
-    if operation not in _PLUGIN_FILESYSTEM_REQUIRED_OPERATIONS:
-        return False
-    return plugin_filesystem_component_preflight(config, refresh=False).get("status") == "ready"
+    status = plugin_filesystem_component_preflight(config, refresh=False)
+    return status.get("status") == "ready" and operation in {
+        str(row.get("operation") or "").strip()
+        for row in status.get("operations", [])
+        if isinstance(row, dict)
+    }
 
 
 def plugin_filesystem_component_preflight(
@@ -1041,24 +1040,19 @@ def plugin_filesystem_component_preflight(
     return external_component_preflight(
         config,
         identity=_PLUGIN_FILESYSTEM_COMPONENT_IDENTITY,
-        component="plugin",
-        operations=_PLUGIN_FILESYSTEM_REQUIRED_OPERATIONS,
         refresh=refresh,
     )
 
 
 def _require_plugin_filesystem_bindings(
     config: AgentConfig,
-    operations: tuple[str, ...],
 ) -> None:
     status = plugin_filesystem_component_preflight(config, refresh=True)
-    missing = [name for name in operations if name not in set(status.get("capabilities") or [])]
-    if status.get("status") != "ready" or missing:
+    if status.get("status") != "ready":
         reason = str(status.get("reason") or "plugin_filesystem_component_unavailable")
         logging.error(
-            "plugin filesystem component unavailable reason=%s missing=%s",
+            "plugin filesystem component unavailable reason=%s",
             reason,
-            ",".join(missing),
         )
         raise RuntimeError(reason)
 
@@ -1473,55 +1467,6 @@ def _ensure_plugin_reload_runtime_packages(config: AgentConfig, install) -> bool
     )
 
 
-def _manifest_mautic_constraints(item: dict[str, Any]) -> tuple[str, list[str]]:
-    for field in ("mautic_versions", "mautic_majors", "mautic_major"):
-        if field not in item or item.get(field) is None:
-            continue
-        raw = item.get(field)
-        values = raw if isinstance(raw, (list, tuple, set)) else [raw]
-        normalized = [str(value or "").strip().lower().removeprefix("v") for value in values]
-        return field, [value for value in normalized if value]
-    return "", []
-
-
-def _plugin_mautic_compatibility(
-    item: dict[str, Any],
-    *,
-    mautic_major: int,
-    exact_version: str | None,
-) -> tuple[bool, str]:
-    field, constraints = _manifest_mautic_constraints(item)
-    if not constraints:
-        return True, "unconstrained"
-
-    parsed: list[tuple[int, ...]] = []
-    for value in constraints:
-        if not re.fullmatch(r"\d+(?:\.\d+){0,2}", value):
-            return False, f"invalid {field} constraint: {value}"
-        parsed.append(tuple(int(part) for part in value.split(".")))
-
-    if field in {"mautic_majors", "mautic_major"}:
-        allowed_majors = {parts[0] for parts in parsed}
-        compatible = int(mautic_major) in allowed_majors
-        return compatible, (
-            f"Mautic major {mautic_major} allowed"
-            if compatible
-            else f"Mautic major {mautic_major} not in {sorted(allowed_majors)}"
-        )
-
-    match = re.search(r"(\d+)\.(\d+)\.(\d+)", str(exact_version or ""))
-    if match is None:
-        return False, "exact Mautic version unavailable for mautic_versions admission"
-    actual = tuple(int(value) for value in match.groups())
-    compatible = any(actual[: len(parts)] == parts for parts in parsed)
-    allowed = ",".join(constraints)
-    return compatible, (
-        f"Mautic {actual[0]}.{actual[1]}.{actual[2]} allowed by {allowed}"
-        if compatible
-        else f"Mautic {actual[0]}.{actual[1]}.{actual[2]} not allowed by {allowed}"
-    )
-
-
 def _build_plugin_rows(
     *,
     config: AgentConfig,
@@ -1622,11 +1567,6 @@ def _build_plugin_rows(
             continue
 
         install_bundle = _install_bundle_for_manifest_bundle(bundle, item)
-        mautic_compatible, mautic_compatibility_reason = _plugin_mautic_compatibility(
-            item,
-            mautic_major=int(major),
-            exact_version=exact_mautic_version,
-        )
         status, reason, installed_version = _plugin_status(
             plugins_dir,
             item,
@@ -1655,9 +1595,9 @@ def _build_plugin_rows(
                 "server_version": str(item.get("version", "")).strip() or "-",
                 "package": str(item.get("package", "")).strip(),
                 "item": item,
-                "selectable": mautic_compatible,
-                "mautic_compatible": mautic_compatible,
-                "mautic_compatibility_reason": mautic_compatibility_reason,
+                "selectable": True,
+                "mautic_compatible": True,
+                "mautic_compatibility_reason": "mcc_manifest_filtered",
                 "mautic_version": exact_mautic_version or f"{major}.x",
                 "exclusive_with": exclusive_with,
                 "catalog_sha256": manifest_sha256,
@@ -2300,7 +2240,6 @@ def _apply_plugin_file_changes_impl(
     run_post_steps: bool,
     operation_id: str,
 ) -> bool:
-    _validate_selected_mautic_compatibility(selected, action=action)
     plugins_dir = _resolve_plugins_dir(install_root, create=False)
     changed = False
     if action in {"remove", "purge"} and install.db:
@@ -3094,7 +3033,6 @@ def _run_cluster_plugin_operation(
     rows_by_bundle: dict[str, dict[str, Any]],
     operation_id: str | None = None,
 ) -> int:
-    _validate_selected_mautic_compatibility(selected, action=action)
     if not mysql_state_enabled(config):
         raise RuntimeError("cluster plugin operation requires mysql_hybrid state backend")
     reference_host = _cluster_plugin_reference_host(config)
@@ -3418,12 +3356,6 @@ def _select_plugin_rows_by_identity(
                 if str(row.get("package_uid", "") or "").strip() == package_uid
             ]
             if not matches:
-                if any(
-                    str(row.get("package_uid", "") or "").strip() == package_uid
-                    and row.get("mautic_compatible") is False
-                    for row in rows
-                ):
-                    raise RuntimeError("plugin_package_incompatible_with_mautic_version")
                 raise RuntimeError(
                     f"package uid(s) not found in manifest for this instance: {package_uid}"
                 )
@@ -3471,12 +3403,6 @@ def _select_plugin_rows_by_identity(
             if str(row.get("plugin_uid", "") or "").strip() == plugin_uid
         ]
         if not matches:
-            if any(
-                str(row.get("plugin_uid", "") or "").strip() == plugin_uid
-                and row.get("mautic_compatible") is False
-                for row in rows
-            ):
-                raise RuntimeError("plugin_package_incompatible_with_mautic_version")
             raise RuntimeError(f"plugin uid(s) not found in manifest for this instance: {plugin_uid}")
         if len(matches) > 1:
             projections = sorted(str(row.get("package_uid", "") or "").strip() for row in matches)
@@ -3486,17 +3412,6 @@ def _select_plugin_rows_by_identity(
             )
         selected.extend(matches)
     return selected
-
-
-def _validate_selected_mautic_compatibility(
-    selected: list[dict[str, Any]],
-    *,
-    action: str,
-) -> None:
-    if action in {"remove", "purge"}:
-        return
-    if any(row.get("mautic_compatible") is False for row in selected):
-        raise RuntimeError("plugin_package_incompatible_with_mautic_version")
 
 
 def run_plugins_interactive(
@@ -3520,7 +3435,7 @@ def run_plugins_interactive(
 ) -> int:
     if (list_available or list_installed) and root is None:
         if not _component_preflight_done:
-            _require_plugin_filesystem_bindings(config, _PLUGIN_FILESYSTEM_REQUIRED_OPERATIONS)
+            _require_plugin_filesystem_bindings(config)
         installs = discover_mautic(
             config.discovery_roots,
             config.exclude_path_contains,
@@ -3575,7 +3490,7 @@ def run_plugins_interactive(
             bundles=check_bundles,
         )
     if not _component_preflight_done:
-        _require_plugin_filesystem_bindings(config, _PLUGIN_FILESYSTEM_REQUIRED_OPERATIONS)
+        _require_plugin_filesystem_bindings(config)
     major = install.mautic_major or 6
     if not catalog_json:
         print("Loading plugin manifest...")
@@ -3754,12 +3669,6 @@ def run_plugins_interactive(
             found = {str(row.get("bundle", "")).strip() for row in selected}
             missing = sorted(requested - found)
             if missing:
-                if any(
-                    str(row.get("bundle", "")).strip() in missing
-                    and row.get("mautic_compatible") is False
-                    for row in rows
-                ):
-                    raise RuntimeError("plugin_package_incompatible_with_mautic_version")
                 raise RuntimeError(f"plugin bundle(s) not found in manifest for this instance: {', '.join(missing)}")
         else:
             indexes = _parse_selection(selection_in, max(idx_map.keys()) if idx_map else 0)
@@ -3770,8 +3679,6 @@ def run_plugins_interactive(
         if not selected:
             print("Selected indexes are not actionable, try again")
             continue
-
-        _validate_selected_mautic_compatibility(selected, action=chosen_action)
 
         if chosen_action == "auto":
             selected, policy_skipped = _filter_auto_update_policy(config, install, selected)

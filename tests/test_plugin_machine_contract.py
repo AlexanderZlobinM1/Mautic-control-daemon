@@ -380,15 +380,13 @@ def test_plugin_filesystem_closure_fails_before_transaction(monkeypatch):
         lambda _config, refresh=True: {
             "status": "unavailable",
             "reason": "plugin_filesystem_bindings_missing",
-            "capabilities": ["plugin_filesystem_status"],
+            "operations": [{"operation": "manifest-owned-operation"}],
+            "capabilities": [],
         },
     )
 
     with pytest.raises(RuntimeError, match="plugin_filesystem_bindings_missing"):
-        plugins._require_plugin_filesystem_bindings(
-            SimpleNamespace(),
-            plugins._PLUGIN_FILESYSTEM_REQUIRED_OPERATIONS,
-        )
+        plugins._require_plugin_filesystem_bindings(SimpleNamespace())
 
 
 def test_machine_contract_same_operation_replays_deterministic_terminal_receipt(monkeypatch, capsys):

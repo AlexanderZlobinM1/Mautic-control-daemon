@@ -161,6 +161,38 @@ def _composer_has_package(project_root: str, composer_bin: str, package_name: st
     return proc.returncode == 0
 
 
+def _composer_lock_packages(project_root: str) -> set[str] | None:
+    """Return the installed package names recorded by Composer.
+
+    ``composer.lock`` is the local installed-set authority for the ordinary
+    Composer layout.  Reading it first keeps an already-satisfied dependency
+    check read-only: the external host-preparation operation is needed only
+    when a package may actually have to be installed.  Missing or malformed
+    metadata returns ``None`` and therefore retains the existing fail-closed
+    external preparation path.
+    """
+
+    path = Path(project_root) / "composer.lock"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8", errors="strict"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    sections = (payload.get("packages"), payload.get("packages-dev", []))
+    if not isinstance(sections[0], list) or not isinstance(sections[1], list):
+        return None
+    names: set[str] = set()
+    for section in sections:
+        for row in section:
+            if not isinstance(row, dict):
+                return None
+            name = str(row.get("name") or "").strip().lower()
+            if name:
+                names.add(name)
+    return names
+
+
 def _resolve_mailer_bridge_requirement(
     *,
     project_root: str,
@@ -455,6 +487,20 @@ def _ensure_composer_packages(
         return False
     if not _mautic_console_healthy(project_root=project_root, console_path=console_path, php_bin=config.php_bin):
         raise RuntimeError(f"Mautic console is not healthy before composer package preflight: {project_root}")
+    required_names = {
+        _composer_show_name(package).lower()
+        for package in required
+        if _composer_show_name(package)
+    }
+    locked_packages = _composer_lock_packages(project_root)
+    if locked_packages is not None and required_names.issubset(locked_packages):
+        logging.info(
+            "[%s] composer.lock already contains required packages=%s (%s)",
+            root,
+            ",".join(sorted(required_names)),
+            reason,
+        )
+        return False
     host_receipt = run_upgrade_os_operation(
         config,
         component="composer",

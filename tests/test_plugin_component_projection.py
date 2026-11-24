@@ -2,14 +2,21 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from mcd_agent import cli, plugins, state_push
+from mcd_agent import cli, state_push
 
 
 def _status(ready: bool) -> dict[str, object]:
+    capability = {
+        "schema": "mcd-external-component-capability-v1",
+        "identity": "example-component",
+        "component": "plugin",
+        "operations": [{"operation": "manifest-owned-operation"}],
+    }
     return {
         "status": "ready" if ready else "unavailable",
         "reason": "" if ready else "external_component_local_invalid",
-        "capabilities": list(plugins._PLUGIN_FILESYSTEM_REQUIRED_OPERATIONS) if ready else [],
+        "operations": capability["operations"] if ready else [],
+        "capabilities": [capability] if ready else [],
     }
 
 
@@ -26,17 +33,24 @@ def test_interactive_menu_hides_plugins_when_component_is_unavailable(monkeypatc
 
 
 def test_machine_capability_catalog_tracks_component_validity(monkeypatch) -> None:
-    monkeypatch.setattr(plugins, "plugin_filesystem_component_preflight", lambda *_a, **_k: _status(False))
-    unavailable = state_push.plugin_component_capability_projection(SimpleNamespace())
-    assert unavailable["capability"] is None
-    assert unavailable["status"]["capabilities"] == []
+    payload = {}
+    unavailable = {
+        "schema": "mcd-external-component-capability-catalog-v1",
+        "components": [_status(False)],
+        "capabilities": [],
+    }
+    state_push._advertise_external_component_capabilities(payload, unavailable)
+    assert payload["external_component_capabilities"] == unavailable
+    assert "plugin_capabilities" not in payload
 
-    monkeypatch.setattr(plugins, "plugin_filesystem_component_preflight", lambda *_a, **_k: _status(True))
-    restored = state_push.plugin_component_capability_projection(SimpleNamespace())
-    assert restored["capability"]["features"] == [
-        "mcd-plugin-job-v1",
-        "mcd-plugin-auto-update-policy-v1",
-        "mcd-plugin-catalog-digest-v1",
+    payload = {}
+    restored = {
+        "schema": "mcd-external-component-capability-catalog-v1",
+        "components": [_status(True)],
+        "capabilities": _status(True)["capabilities"],
+    }
+    state_push._advertise_external_component_capabilities(payload, restored)
+    assert payload["plugin_capabilities"]["operations"] == [
+        {"operation": "manifest-owned-operation"}
     ]
-    assert restored["status"]["status"] == "ready"
 
