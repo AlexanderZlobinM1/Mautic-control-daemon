@@ -1,3 +1,10 @@
+## 1.7.7 - 2026-11-24
+
+- Admit each instance's next ordinary segment generation only on the first
+  system-minute boundary after its previous generation becomes terminal.
+  Frequent runtime refreshes continue active durable cycles without rebuilding
+  queues or duplicating work; super-priority remains outside this lifecycle.
+
 ## 1.7.6 - 2026-11-24
 
 - Added stable external-component storage under `custom/components/<identity>`.
