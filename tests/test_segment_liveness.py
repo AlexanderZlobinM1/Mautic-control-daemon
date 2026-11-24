@@ -32,6 +32,9 @@ from mcd_agent.daemon import (
     _segment_shared_slots_available,
     _segment_lazy_update_effective_setting,
     _segment_full_scan_admission_enabled,
+    _segment_next_cycle_due_at,
+    _segment_cycle_planner_executor,
+    _segment_plan_tick_transition,
     _fill_from_ring,
     _iter_instances_with_root_dispatch_gate,
     _SchedulerRuntimeRegistry,
@@ -58,6 +61,61 @@ def _leadlist_filter(segment_id: int) -> str:
 
 class SegmentLivenessTests(unittest.TestCase):
     """M6/M7 dispatch invariants for persisted ordinary-cycle liveness."""
+
+    def test_next_cycle_waits_for_root_local_minute_tick(self) -> None:
+        terminal_a = {"status": "terminal", "updated_at": 121.25, "cycle_id": "a-1"}
+        terminal_b = {"status": "terminal", "updated_at": 179.99, "cycle_id": "b-1"}
+        active = {"status": "active", "updated_at": 1.0, "cycle_id": "a-2"}
+
+        self.assertEqual(_segment_next_cycle_due_at(terminal_a), 180.0)
+        self.assertEqual(_segment_next_cycle_due_at(terminal_b), 180.0)
+        self.assertEqual(_segment_next_cycle_due_at({}), 0.0)
+        self.assertEqual(_segment_next_cycle_due_at(None), 0.0)
+        self.assertEqual(_segment_next_cycle_due_at(active), float("inf"))
+
+    def test_instance_cycle_planning_is_serial_but_advances_without_another_tick(self) -> None:
+        executor = _segment_cycle_planner_executor()
+        first_started = threading.Event()
+        release_first = threading.Event()
+        second_started = threading.Event()
+        order: list[str] = []
+
+        def first() -> str:
+            first_started.set()
+            self.assertTrue(release_first.wait(timeout=2.0))
+            order.append("first")
+            return "first"
+
+        def second() -> str:
+            second_started.set()
+            order.append("second")
+            return "second"
+
+        try:
+            first_future = executor.submit(first)
+            second_future = executor.submit(second)
+            self.assertTrue(first_started.wait(timeout=1.0))
+            self.assertFalse(second_started.wait(timeout=0.05))
+            release_first.set()
+            self.assertEqual(first_future.result(timeout=2.0), "first")
+            self.assertEqual(second_future.result(timeout=2.0), "second")
+            self.assertEqual(order, ["first", "second"])
+        finally:
+            release_first.set()
+            executor.shutdown(wait=True, cancel_futures=True)
+
+    def test_busy_previous_tick_defers_new_arrivals_to_the_following_tick(self) -> None:
+        observed, opened = _segment_plan_tick_transition(60.0, 120.1, pending_plans=True)
+        self.assertEqual(observed, 120.0)
+        self.assertFalse(opened)
+
+        observed, opened = _segment_plan_tick_transition(observed, 150.0, pending_plans=False)
+        self.assertEqual(observed, 120.0)
+        self.assertFalse(opened)
+
+        observed, opened = _segment_plan_tick_transition(observed, 180.0, pending_plans=False)
+        self.assertEqual(observed, 180.0)
+        self.assertTrue(opened)
 
     @staticmethod
     def _config() -> SimpleNamespace:

@@ -1,3 +1,13 @@
+## 1.7.8 - 2026-11-24
+
+- Admit each instance's next ordinary segment generation only on the first
+  system-minute boundary after its previous generation becomes terminal.
+  Frequent runtime refreshes continue active durable cycles without rebuilding
+  queues or duplicating work; super-priority remains outside this lifecycle.
+- Serialize DB snapshot planning across instances that become eligible on the
+  same minute tick; the next instance starts immediately after the previous
+  planner finishes, while admitted execution keeps its existing parallelism.
+
 ## 1.7.6 - 2026-11-24
 
 - Added stable external-component storage under `custom/components/<identity>`.

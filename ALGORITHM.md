@@ -763,6 +763,36 @@ config на его profile baseline и только после этого при
 
 ## 3. Построение ordinary cycle и порядок
 
+Каждый Mautic instance владеет собственной durable generation ordinary cycle.
+На минутном системном тике terminal instance получает актуальный список,
+исключает весь свой `super-priority` набор и распределяет оставшиеся задачи по
+существующим ordinary и priority/business классам. Эти per-instance наборы
+пополняют общие очереди соответствующего класса, которые потребляются общими
+воркерами строго в существующих profile budget/slot limits. Идентичность одной
+работы внутри generation — `instance + task type + entity ID + cycle_id`.
+
+Цикл instance считается terminal только после terminal receipt всех
+распределённых им ordinary/priority задач; отдельный super-priority worker в
+этот barrier не входит. Пока generation active, частый runtime refresh только
+наблюдает и продолжает её: он не перечитывает её как новый набор, не создаёт
+новые очереди/потоки и не дублирует работу. После terminal instance ждёт
+ближайшую следующую границу системной минуты и только на ней допускает новую
+generation. Начало и завершение каждой generation сохраняются per instance в
+durable cycle state (`cycle_id`, `admitted_at`, `updated_at`, `status` и
+terminal receipts), поэтому restart не превращает текущий цикл в новый.
+Если на одной минутной границе eligible несколько instances, один общий
+host-level planner формирует их DB snapshots строго последовательно в
+стабильном порядке: завершает первый root и сразу начинает следующий, не ждёт
+ещё одного тика и не выполняет параллельные planning reads. Это ограничение
+касается только формирования очередей; уже admitted работа продолжает
+исполняться параллельно в существующих profile slots.
+Набор претендентов фиксируется на самой минутной границе. Instance, чей
+предыдущий cycle стал terminal уже после неё, не вклинивается в текущую
+последовательность и ждёт следующего тика. Если serial planning batch прошлого
+тика ещё не завершён на новой границе, новый batch на этой границе не
+открывается; после завершения старого следующие претенденты ждут очередной
+минутной границы.
+
 1. По умолчанию (`segment_lazy_update_enabled = false`) планировщик получает
    bounded full snapshot опубликованных сегментов; он удаляет union статических
    `priority`/`super-priority` IDs и строит полный текущий ordinary cycle.
