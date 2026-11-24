@@ -1,3 +1,10 @@
+## 1.7.4 - 2026-11-24
+
+- Keep periodic state push and the scheduler alive when the optional external
+  APT observer is absent or reports a probe error. The payload reports the
+  observation as unavailable/error; explicit APT operations remain bound and
+  fail closed.
+
 ## 1.7.3 - 2026-11-24
 
 - Keep daemon state push alive when the optional external Upgrade OS binding is
