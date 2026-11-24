@@ -309,6 +309,44 @@ def test_bound_transaction_passes_config_managed_root(monkeypatch, operation, ru
     assert calls == [("plugin", operation, {}, expected_runtime)]
 
 
+@pytest.mark.parametrize("plugin_path", ["docroot/plugins", "public/plugins", "plugins"])
+def test_discovered_layout_binds_missing_managed_root_to_project_root(tmp_path, plugin_path):
+    from dataclasses import replace
+
+    from mcd_agent.config import load_config
+    from mcd_agent.plugins import _plugin_config_for_install_root, _plugin_managed_root_from_config
+
+    project = tmp_path / "mautic-project"
+    plugins = project / plugin_path
+    plugins.mkdir(parents=True)
+    config_path = tmp_path / "mcd.toml"
+    config_path.write_text('[profile]\nname = "custom"\n', encoding="utf-8")
+    config = load_config(str(config_path), allow_recover_from_mcc=False)
+    config = replace(config, plugins_managed_root=None)
+
+    scoped = _plugin_config_for_install_root(config, str(project))
+
+    assert _plugin_managed_root_from_config(scoped) == str(project)
+    assert plugins.is_relative_to(Path(scoped.plugins_managed_root))
+
+
+def test_explicit_plugin_managed_root_remains_authoritative(tmp_path):
+    from dataclasses import replace
+
+    from mcd_agent.config import load_config
+    from mcd_agent.plugins import _plugin_config_for_install_root
+
+    config_path = tmp_path / "mcd.toml"
+    config_path.write_text('[profile]\nname = "custom"\n', encoding="utf-8")
+    configured_root = tmp_path / "managed"
+    config = replace(
+        load_config(str(config_path), allow_recover_from_mcc=False),
+        plugins_managed_root=str(configured_root),
+    )
+
+    assert _plugin_config_for_install_root(config, str(tmp_path / "instance")) is config
+
+
 @pytest.mark.parametrize(
     ("operation", "runtime"),
     [
