@@ -1,3 +1,10 @@
+## 1.6.142 - 2026-11-24
+
+- Admit each instance's next ordinary segment generation only on the first
+  system-minute boundary after its previous generation becomes terminal.
+  Frequent runtime refreshes continue active durable cycles without rebuilding
+  queues or duplicating work; super-priority remains outside this lifecycle.
+
 ## 1.6.141 - 2026-11-23
 
 - Reconcile a successful same-cycle Mautic 7 native-coverage receipt into a
