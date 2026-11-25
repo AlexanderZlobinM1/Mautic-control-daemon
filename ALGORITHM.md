@@ -846,6 +846,10 @@ segment, campaign, import, plugin-operation и остальных scheduler lane
 при существующих root или console и независимо от runtime descriptor. Запись
 остаётся видимой в inventory/state для диагностики; исключение из scheduler не
 удаляет и не изменяет файлы, БД, vhost или DNS.
+Gate повторяется на общей границе root-dispatch: сохранённый durable cycle,
+pending/fairness state или уже построенный в памяти список не могут вернуть
+artifact-root в очередь. Durable state при этом не удаляется и может быть
+продолжен только если inventory снова подтвердит реальный executable instance.
 
 Late-discovery observer читает roots только на минутной границе. Dependency
 context перечитывается только когда текущая generation не имеет подтверждённого

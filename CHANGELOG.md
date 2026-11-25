@@ -1,3 +1,10 @@
+## 1.7.16 - 2026-11-25
+
+- Recheck inventory authority at the common root-dispatch and pending/fairness
+  boundaries. A durable segment cycle or cached dispatch list can no longer
+  re-admit a `source=artifact` root after planning excluded it; durable state is
+  preserved without command rendering or pending-guard churn.
+
 ## 1.7.15 - 2026-11-25
 
 - Exclude inventory-only `source=artifact` rows from every scheduler lane even
