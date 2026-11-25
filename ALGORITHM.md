@@ -177,31 +177,37 @@ error. The external result retains add-before-remove, allowlist unban, rollback,
 status and cleanup semantics, while daemon poll is clamped to 30..3600 seconds
 with a 300-second default.
 
-### Plugin filesystem boundary (MCC component v1.0.2)
+### Универсальный контур внешних компонентов
 
-MCD сохраняет retrieval/cache/integrity выбранного package, manifest retrieval и
-inventory comparison, canonical UID и bundle/install-bundle resolution, Mautic
-registration/bin-console commands, plugin cache semantics and cluster protocol/
-receipts. Core MCD does not invent filesystem ownership, group or mode defaults.
-Materialization, ownership, modes and concrete filesystem state belong to the
-MCC-owned recipe through the existing generic external operation seam:
+MCC выбирает совместимый с конкретным Mautic major manifest до публикации.
+MCD не повторяет compatibility matrix и не знает имён, параметров, UI-полей,
+порядка или бизнес-смысла операций компонента. Эти данные принадлежат
+versioned manifest/adapter и передаются MCD как декларативные descriptors.
 
-| Old MCD operation | MCC binding | Runtime contract |
-| --- | --- | --- |
-| archive extraction, bundle root discovery, replacement, state file, ownership/modes, backup/rollback | `plugin_filesystem_apply` | `archive_path`, `managed_root`, `plugins_root`, `bundle`, `state_filename`, `state_payload`, externally declared `owner`, `group`, `mode` |
-| bundle removal | `plugin_filesystem_cleanup` | `managed_root`, `plugins_root`, `bundle` |
-| canonical alias removal | `plugin_alias_cleanup` | `managed_root`, managed root-relative `paths` only |
-| retired `var/cache/prod` / `app/cache/prod` reset and cleanup | `plugin_cache_reset` | `managed_root`, managed root-relative `paths` only, externally declared `owner`, `group`, `mode` |
-| read-only filesystem observation | `plugin_filesystem_status` | `managed_root`, `plugins_root`, `bundle`, `state_filename` |
+MCD выполняет только общий runtime-путь: получает уже отфильтрованный manifest,
+проверяет точные version/size/SHA, атомарно активирует выбранный component,
+передаёт generic JSON input в объявленную operation и возвращает generic
+result/receipt. Capability projection повторяет descriptor без локального
+толкования. Отсутствующий или повреждённый component скрывает только свою
+capability; остальные функции MCD продолжают работать.
 
-The binding is selected by the exact cached MCC artifact and executed with framed
-`capture_result=true`, synchronous supervision and `offline_only=true`. Before a
-plugin transaction starts, MCD requires the complete five-operation filesystem
-closure. A missing binding, malformed result or terminal external failure stops
-the operation; there is no local filesystem fallback. The external recipe rejects
-traversal, absolute paths and archive links, constrains `plugins_root`, restores
-the previous bundle on partial failure, recreates cache directories with the
-declared mode and owner semantics, and preserves unrelated paths.
+Generic component capability и MCD-native transport capability — разные
+контракты. Операции plugin component остаются только в descriptor projection,
+но при ready-состоянии этого компонента MCD отдельно объявляет
+`mcd-plugin-job-v1`, чтобы MCC мог принять durable job status/result callback.
+При unavailable component transport capability не объявляется и новый plugin
+job не принимается.
+
+Если operation binding ссылается на immutable cached JSON resource (например,
+operator profile), MCD скачивает объявленный относительный файл из того же
+authenticated custom repository, проверяет отсутствие выхода из cache root и
+точный SHA-256, затем атомарно сохраняет его до активации нового manifest. MCD
+не интерпретирует содержимое profile. Missing, corrupt, conflicting или
+небезопасный resource блокирует только соответствующую внешнюю operation.
+Если обновление самого manifest временно получает HTTP/network error, MCD может
+использовать последний валидный локальный manifest, но всё равно проверяет и
+докачивает отсутствующие hash-pinned resources по объявленным относительным
+URL. Cache fallback не превращает missing profile в постоянное состояние.
 
 Versioned external components use one stable local identity directory at
 `<custom_cache>/components/<component-identity>/`. Delivery verifies declared
@@ -212,13 +218,22 @@ delivery never changes `current`, and an offline miss names the exact selected
 identity, versioned key and digest. A newer catalog candidate never substitutes
 for the explicitly selected coordinates.
 
+Если MCC выбрал более новую версию, она сначала скачивается и проверяется;
+неудачное обновление не разрешает старой версии молча выполнять новую selection.
+При недоступном MCC уже установленный `current` работает offline только при
+согласованных metadata, entrypoint и bindings. После восстановления валидного
+component его capability автоматически возвращается.
+
 The immutable component v1.0.2 was accepted with the same ProductTour 1.1 package
 on clean Composer and ZIP layouts for Mautic 5, 6 and 7. The proof covers initial
 installation, exact Mautic inventory confirmation, repeatable terminal receipts,
 removal and installation after removal. Mautic 7 dependency preparation uses the
 separate immutable host closure v1.0.4: it prepares a writable Composer runtime
 and, for ZIP layouts, the declared package prerequisite before MCD changes the
-plugin tree. MCD still owns Composer dependency selection and every Mautic
+plugin tree. Перед вызовом этой mutating preparation MCD читает локальный
+`composer.lock`: если все обязательные пакеты уже установлены, preparation не
+запускается; если lock отсутствует, повреждён или пакет отсутствует, внешний
+host closure остаётся обязательным и fail-closed. MCD still owns Composer dependency selection and every Mautic
 `bin/console` command. Stable MCD 1.6 keeps its legacy boundary and consumes the
 same host preparation as an explicit prerequisite; no OS path is hardcoded back
 into the stable agent. The machine evidence is recorded in
@@ -238,6 +253,13 @@ required from effective external `[plugins].filesystem_owner`,
 `[plugins].filesystem_group` and `[plugins].filesystem_mode`; missing or
 invalid values fail before the configured runner. MCD supplies no ownership,
 group or mode default and does not accept these values from operation input.
+До изменения файлов плагина, записей регистрации или host dependencies MCD
+также обязан проверить операторский список cache paths. Пути задаются
+относительно managed root конкретного инстанса, а не зашиваются в код и не
+передаются в разовой команде. Если список отсутствует или невалиден, операция
+завершается fail-closed с `files_applied=false`: старый bundle, база и cache
+остаются без изменений. Только после этого preflight внешний обработчик может
+атомарно заменить bundle и сбросить ровно объявленные disposable cache paths.
 For a single bundle it contains `status`/`plugin_status`, a 64-hex `digest`,
 `installed_version`, `state` (object or null), and boolean
 `has_doctrine_entity_metadata` / `has_native_migrations`. Inventory uses
@@ -638,6 +660,13 @@ MCC. После MCD update этот режим включается всегда
 из остальных файлов и продолжает штатное восстановление из MCC. Само повреждение
 не отправляется в MCC как операторская правка. Явные `0`, `false`, пустые списки
 и карты, а также очистка действительно необязательных полей сохраняют свой смысл.
+Отдельный случай — явный JSON `null` в canonical MCC desired state для
+обязательного host-поля: это transport-сигнал «очистить override и наследовать»,
+а не значение TOML. Он участвует в обычном сравнении времени/revision как
+tombstone; если он новее локальной правки, MCD удаляет только соответствующую
+строку из mutable runtime include и использует значение профиля или default.
+Пустая строка `""` этим сигналом не является и никогда не записывается вместо
+`null`.
 Ошибочное поле отклоняется отдельно: оно не отменяет применение и сохранение
 остальных корректных настроек из того же snapshot.
 
@@ -799,6 +828,17 @@ durable задачами; minute observer и dependency recovery использ�
 bounded shared I/O lane. Добавление/удаление root не создаёт и не удерживает
 персональный executor. При завершении daemon обе lane закрываются, queued
 control futures отменяются.
+
+Запись локального inventory не является доказательством существования host
+instance. Перед admission MCD проверяет фактические root и Mautic console; если
+они исчезли после миграции или удаления, этот instance исключается из всех
+scheduler lane, его durable ring не считается выполненным, а остальные roots
+продолжают работу. Исчезновение между проверкой и построением команды также
+завершается локальным skip, а не падением daemon. Полный inventory rescan
+сохраняет manual instance только при наличии его root и console. После rescan
+полный state snapshot больше не содержит stale UID, поэтому MCC удаляет только
+его host-cache row; это не запускает instance-delete и не изменяет файлы, БД,
+vhost, DNS или глобальную identity instance.
 
 Late-discovery observer читает roots только на минутной границе. Dependency
 context перечитывается только когда текущая generation не имеет подтверждённого

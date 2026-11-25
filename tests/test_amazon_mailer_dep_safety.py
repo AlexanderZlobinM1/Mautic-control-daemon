@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from mcd_agent.amazon_mailer_dep import (
+    _composer_lock_packages,
     _composer_project_is_mautic,
     _resolve_mailer_bridge_requirement,
     _composer_update_targeted_package,
@@ -17,6 +18,23 @@ from mcd_agent.amazon_mailer_dep import (
 
 
 class MailerComposerSafetyTests(unittest.TestCase):
+    def test_composer_lock_package_inventory_is_strict_and_normalized(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "composer.lock").write_text(
+                json.dumps({
+                    "packages": [{"name": "Nikic/PHP-Parser"}],
+                    "packages-dev": [{"name": "Vendor/Dev-Tool"}],
+                }),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                _composer_lock_packages(str(root)),
+                {"nikic/php-parser", "vendor/dev-tool"},
+            )
+            (root / "composer.lock").write_text('{"packages":"invalid"}', encoding="utf-8")
+            self.assertIsNone(_composer_lock_packages(str(root)))
+
     def test_sendgrid_wildcard_tracks_installed_symfony_mailer_minor(self) -> None:
         proc = Mock(
             returncode=0,
@@ -123,6 +141,49 @@ class MailerComposerSafetyTests(unittest.TestCase):
             package_name="nikic/php-parser:^5.0",
             timeout_sec=900,
         )
+
+    def test_existing_m7_runtime_dependency_skips_external_host_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "composer.json").write_text(
+                json.dumps({"name": "mautic/recommended-project", "require": {"mautic/core-lib": "^7.0"}}),
+                encoding="utf-8",
+            )
+            (root / "composer.lock").write_text(
+                json.dumps({
+                    "packages": [
+                        {"name": "mautic/core-lib", "version": "7.2.2"},
+                        {"name": "nikic/php-parser", "version": "v5.6.2"},
+                    ],
+                    "packages-dev": [],
+                }),
+                encoding="utf-8",
+            )
+            (root / "bin").mkdir()
+            (root / "bin" / "console").write_text("#!/usr/bin/env php\n", encoding="utf-8")
+            cfg = SimpleNamespace(php_bin="php", command_timeout_sec=900)
+
+            for reason in ("plugin-install", "plugin-update"):
+                with (
+                    patch("mcd_agent.amazon_mailer_dep.descriptor_for_root", return_value=None),
+                    patch("mcd_agent.amazon_mailer_dep.detect_install_type", return_value="composer"),
+                    patch("mcd_agent.amazon_mailer_dep._mautic_console_healthy", return_value=True),
+                    patch(
+                        "mcd_agent.amazon_mailer_dep.run_upgrade_os_operation",
+                        side_effect=AssertionError("satisfied lock must not request an operator profile"),
+                    ),
+                ):
+                    changed = _ensure_composer_packages(
+                        config=cfg,
+                        root=str(root),
+                        console_path=str(root / "bin" / "console"),
+                        required={"nikic/php-parser:^5.0"},
+                        reason=reason,
+                        ensure_node=False,
+                        no_scripts=True,
+                    )
+
+                self.assertFalse(changed)
 
     def test_targeted_update_restores_private_repositories(self) -> None:
         with tempfile.TemporaryDirectory() as td:

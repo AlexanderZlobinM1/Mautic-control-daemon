@@ -343,7 +343,44 @@ class InstanceInventory:
         row = self.conn.execute("SELECT COUNT(*) AS cnt FROM instances").fetchone()
         return int(row["cnt"]) if row else 0
 
+    @staticmethod
+    def _manual_install_is_present(inst: MauticInstall) -> bool:
+        """Return whether a preserved host install still has a real console."""
+
+        runtime = str(getattr(inst, "runtime", "host") or "host").strip().lower()
+        if runtime != "host":
+            # Descriptor discovery remains authoritative for non-host roots.
+            return True
+        root = Path(str(getattr(inst, "root", "") or ""))
+        console = Path(str(getattr(inst, "console_path", "") or ""))
+        return root.is_dir() and console.is_file()
+
+    @staticmethod
+    def _manual_install_is_pre_vhost_registration(inst: MauticInstall) -> bool:
+        """Keep a complete explicit runtime registration before its root exists."""
+
+        return bool(
+            str(getattr(inst, "runtime", "host") or "host").strip().lower() == "host"
+            and str(getattr(inst, "runtime_php_bin", "") or "").strip()
+            and str(getattr(inst, "runtime_user", "") or "").strip()
+        )
+
     def rescan(self, config: AgentConfig, *, preserve_manual: bool = False) -> int:
+        previous_rows = self.list_instances()
+        registered_manual = [
+            inst
+            for inst in previous_rows
+            if str(getattr(inst, "source", "") or "").strip().lower() == "manual"
+            and self._manual_install_is_pre_vhost_registration(inst)
+        ]
+        preserved_manual = [
+            inst
+            for inst in previous_rows
+            if preserve_manual
+            and str(getattr(inst, "source", "") or "").strip().lower() == "manual"
+            and not self._manual_install_is_pre_vhost_registration(inst)
+            and self._manual_install_is_present(inst)
+        ]
         installs = discover_mautic(
             config.discovery_roots,
             config.exclude_path_contains,
@@ -351,7 +388,7 @@ class InstanceInventory:
             config.custom_instances,
         )
         tokens = {str(row["root"]): row["registering_operation_id"] for row in self.conn.execute("SELECT root, registering_operation_id FROM instances")}
-        previous = {inst.root: inst for inst in self.list_instances()}
+        previous = {inst.root: inst for inst in previous_rows}
         seen_roots = set()
         for inst in installs:
             if inst.root in seen_roots:
@@ -363,21 +400,23 @@ class InstanceInventory:
                 if inst.runtime == "host":
                     inst.runtime_php_bin = inst.runtime_php_bin or old.runtime_php_bin
                     inst.runtime_user = inst.runtime_user or old.runtime_user
-        # Explicit runtime registration must survive a pre-vhost rescan.
-        installs.extend(old for root, old in previous.items()
-                        if root not in seen_roots and old.source == "manual"
-                        and old.runtime == "host" and old.runtime_php_bin and old.runtime_user)
+        for inst in registered_manual:
+            if str(inst.root) in seen_roots:
+                continue
+            installs.append(inst)
+            seen_roots.add(str(inst.root))
         with self.conn:
-            if preserve_manual:
-                self.conn.execute(
-                    "DELETE FROM instances WHERE source IN ('autodiscovery','runtime-descriptor')"
-                )
-            else:
-                self.conn.execute(
-                    "DELETE FROM instances WHERE source IN ('autodiscovery','manual','runtime-descriptor')"
-                )
+            self.conn.execute(
+                "DELETE FROM instances WHERE source IN ('autodiscovery','manual','runtime-descriptor')"
+            )
             for inst in installs:
                 self._upsert_install(inst, source=inst.source or "autodiscovery")
+                if tokens.get(inst.root):
+                    self.conn.execute("UPDATE instances SET registering_operation_id=? WHERE root=?", (tokens[inst.root], inst.root))
+            for inst in preserved_manual:
+                if str(inst.root) in seen_roots:
+                    continue
+                self._upsert_install(inst, source="manual")
                 if tokens.get(inst.root):
                     self.conn.execute("UPDATE instances SET registering_operation_id=? WHERE root=?", (tokens[inst.root], inst.root))
         return len(installs)

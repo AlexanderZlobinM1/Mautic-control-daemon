@@ -52,6 +52,144 @@ def test_status_apply_variants_survive_remote_catalog_refresh_without_remote_sel
     assert not list(root.glob('.manifest-*'))
 
 
+def test_manifest_refresh_hydrates_declared_cached_json_profile(cached, monkeypatch):
+    cfg, root, row, _file, _response = cached
+    cfg.custom_repo_base_url = "https://fixture.invalid/custom"
+    profile = {"schema": "mcc-upgrade-os-operator-profile-v1", "version": "1.0.1"}
+    profile_raw = json.dumps(profile, sort_keys=True, separators=(",", ":")).encode()
+    profile_sha = hashlib.sha256(profile_raw).hexdigest()
+    profile_file = f"profiles/upgrade-os-operator-profile-{profile_sha}.json"
+    remote = {
+        "manifest_version": 1,
+        "items": [row],
+        "operation_bindings": [{
+            "component": "composer",
+            "operation": "composer_host_prepare",
+            "profile_source": {
+                "type": "cached-json",
+                "file": profile_file,
+                "sha256": profile_sha,
+            },
+        }],
+    }
+    urls = []
+
+    def fetch(request, **_kwargs):
+        url = request.full_url
+        urls.append(url)
+        if url.endswith("/manifest.json"):
+            return BytesIO(json.dumps(remote).encode())
+        if url.endswith("/" + profile_file):
+            return BytesIO(profile_raw)
+        raise AssertionError(url)
+
+    monkeypatch.setattr(custom.urllib.request, "urlopen", fetch)
+    rows, source = custom.fetch_custom_manifest(cfg)
+
+    assert source == "remote"
+    assert rows[0]["key"] == row["key"]
+    cached_profile = root / profile_file
+    assert cached_profile.read_bytes() == profile_raw
+    assert cached_profile.stat().st_mode & 0o777 == 0o600
+    loaded = custom.load_configured_profile_cache(
+        cfg,
+        component="composer",
+        operation="composer_host_prepare",
+    )
+    assert loaded == {
+        "profile": profile,
+        "source": {"type": "cached-json", "file": profile_file, "sha256": profile_sha},
+    }
+
+    urls.clear()
+    custom.fetch_custom_manifest(cfg)
+    assert sum(url.endswith("/" + profile_file) for url in urls) == 0
+
+
+def test_cached_manifest_fallback_still_hydrates_declared_profile(cached, monkeypatch):
+    cfg, root, row, _file, _response = cached
+    cfg.custom_repo_base_url = "http://65.21.54.91"
+    cfg.custom_manifest_path = "/mauticctl/custom/manifest.json"
+    profile_raw = b'{"schema":"mcc-upgrade-os-operator-profile-v1","version":"1.0.1"}'
+    profile_sha = hashlib.sha256(profile_raw).hexdigest()
+    profile_file = f"profiles/upgrade-os-operator-profile-{profile_sha}.json"
+    (root / "manifest.json").write_text(json.dumps({
+        "manifest_version": 1,
+        "items": [row],
+        "operation_bindings": [{
+            "component": "composer",
+            "operation": "composer_host_prepare",
+            "profile_source": {
+                "type": "cached-json",
+                "file": profile_file,
+                "sha256": profile_sha,
+            },
+        }],
+    }), encoding="utf-8")
+    urls = []
+
+    def fetch(request, **_kwargs):
+        url = request.full_url
+        urls.append(url)
+        if url.endswith("/manifest.json"):
+            raise custom.urllib.error.HTTPError(url, 403, "forbidden", {}, None)
+        if url.endswith("/" + profile_file):
+            return BytesIO(profile_raw)
+        raise AssertionError(url)
+
+    monkeypatch.setattr(custom.urllib.request, "urlopen", fetch)
+    rows, source = custom.fetch_custom_manifest(cfg, use_cache_on_error=True)
+
+    assert source == "cache"
+    assert rows[0]["key"] == row["key"]
+    assert (root / profile_file).read_bytes() == profile_raw
+    assert urls == [
+        "http://65.21.54.91/mauticctl/custom/manifest.json",
+        "http://65.21.54.91/mauticctl/custom/" + profile_file,
+    ]
+
+
+@pytest.mark.parametrize("mutation", ["path", "digest", "ambiguous"])
+def test_manifest_refresh_rejects_invalid_cached_json_profile_without_activation(cached, monkeypatch, mutation):
+    cfg, root, row, _file, _response = cached
+    cfg.custom_repo_base_url = "https://fixture.invalid/custom"
+    profile_raw = b'{"version":"1.0.1"}'
+    profile_sha = hashlib.sha256(profile_raw).hexdigest()
+    source = {
+        "type": "cached-json",
+        "file": "profiles/operator.json",
+        "sha256": profile_sha,
+    }
+    if mutation == "path":
+        source["file"] = "../operator.json"
+    elif mutation == "digest":
+        source["sha256"] = "0" * 64
+    bindings = [{
+        "component": "composer",
+        "operation": "composer_host_prepare",
+        "profile_source": source,
+    }]
+    if mutation == "ambiguous":
+        bindings.append({
+            "component": "apt",
+            "operation": "apt_apply",
+            "profile_source": {**source, "sha256": "1" * 64},
+        })
+    remote = {"manifest_version": 1, "items": [row], "operation_bindings": bindings}
+
+    def fetch(request, **_kwargs):
+        if request.full_url.endswith("/manifest.json"):
+            return BytesIO(json.dumps(remote).encode())
+        return BytesIO(b"corrupt")
+
+    before = (root / "manifest.json").read_bytes()
+    monkeypatch.setattr(custom.urllib.request, "urlopen", fetch)
+    with pytest.raises(RuntimeError):
+        custom.fetch_custom_manifest(cfg, use_cache_on_error=False)
+    assert (root / "manifest.json").read_bytes() == before
+    assert not (root / "profiles" / "operator.json").exists()
+
+
 @pytest.mark.parametrize('field',['runtime_input','credentials','password','api_token'])
 def test_private_data_is_rejected_without_cache_mutation(cached,field):
     cfg,root,row,file,response=cached

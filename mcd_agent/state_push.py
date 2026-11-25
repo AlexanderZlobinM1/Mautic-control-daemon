@@ -54,6 +54,7 @@ from mcd_agent.plugin_inventory import (
     sync_payload as plugin_inventory_sync_payload,
     utc_now,
 )
+from mcd_agent.custom_scripts import external_component_capability_projection
 from mcd_agent.plugin_jobs import capability as plugin_job_capability
 from mcd_agent.plugin_jobs import recent_statuses as recent_plugin_job_statuses
 from mcd_agent.apt_jobs import capability as apt_job_capability
@@ -88,6 +89,32 @@ _MYSQL_WARN_THROTTLE_SEC = 300
 _DEFAULT_STATE_PUSH_TIMEOUT_SEC = 20
 _CAMPAIGN_NATIVE_FALLBACK_RETENTION_SEC = 30 * 86400
 _CAMPAIGN_NATIVE_FALLBACK_MAX_EVENTS = 5000
+
+
+def _advertise_external_component_capabilities(
+    payload: dict[str, Any],
+    projection: dict[str, Any],
+    *,
+    transport_capabilities: Mapping[str, dict[str, Any]] | None = None,
+) -> None:
+    """Pass component descriptors through and gate native transport protocols.
+
+    Component operations remain opaque manifest data.  A native MCD job
+    protocol is a separate wire contract and is advertised only while the
+    descriptor-selected component for the same generic component name is ready.
+    """
+
+    payload["external_component_capabilities"] = projection
+    transports = dict(transport_capabilities or {})
+    for capability in projection.get("capabilities", []):
+        if not isinstance(capability, dict):
+            continue
+        component = str(capability.get("component") or "").strip()
+        if re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", component) is None:
+            continue
+        alias = f"{component.replace('-', '_')}_capabilities"
+        transport = transports.get(component)
+        payload[alias] = dict(transport) if isinstance(transport, dict) else capability
 
 
 def _galera_routing_eligibility(galera: dict[str, Any]) -> tuple[bool, str]:
@@ -2658,6 +2685,7 @@ class MCCStatePusher:
             )
         instances.sort(key=lambda x: str(x["instance_uid"]))
 
+        component_projection = external_component_capability_projection(self.cfg, refresh=True)
         payload: dict[str, Any] = {
             "schema": "mcd-state-v1",
             "apt_capabilities": apt_job_capability(),
@@ -2665,7 +2693,6 @@ class MCCStatePusher:
                 self.runtime_store,
                 mcc_enabled=bool(getattr(self.cfg, "mcc_url", None)),
             ),
-            "plugin_capabilities": plugin_job_capability(),
             "plugin_jobs": recent_plugin_job_statuses(
                 self.runtime_store,
                 mcc_enabled=bool(getattr(self.cfg, "mcc_url", None)),
@@ -2721,6 +2748,11 @@ class MCCStatePusher:
             "instance_sizes": self._instance_size_cache.collect(installs, now_ts=now_ts),
             "sent_at_utc": datetime.fromtimestamp(now_ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
+        _advertise_external_component_capabilities(
+            payload,
+            component_projection,
+            transport_capabilities={"plugin": plugin_job_capability()},
+        )
         _advertise_image_compatibility(payload)
         runtime_dir = Path(str(getattr(self.cfg, "mcd_install_dir", "/opt/mcd") or "/opt/mcd")) / "runtime"
         if runtime_dir.is_dir():

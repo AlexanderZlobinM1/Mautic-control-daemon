@@ -308,6 +308,7 @@ class PluginConflictPathTests(unittest.TestCase):
             (root / "plugins").mkdir()
             cfg = SimpleNamespace(
                 plugins_state_filename=".mcd-plugin.json",
+                plugins_cache_relative_paths=["var/cache/prod"],
                 mcc_token="",
                 cluster_id="",
             )
@@ -365,6 +366,76 @@ class PluginConflictPathTests(unittest.TestCase):
             self.assertTrue(results[0]["terminal"])
             self.assertEqual(results[0]["overall_status"], "failed")
             self.assertEqual(results[0]["rc"], 1)
+
+    def test_missing_cache_paths_fails_before_any_plugin_mutation(self) -> None:
+        root = "/tmp/mcd-plugin-cache-preflight"
+        cfg = SimpleNamespace(
+            plugins_post_cache_clear=True,
+            plugins_post_install=True,
+            plugins_state_filename=".mcd-plugin.json",
+            mcc_token="",
+            cluster_id="",
+        )
+        install = SimpleNamespace(
+            root=root,
+            db=None,
+            mautic_major=7,
+            console_path=f"{root}/bin/console",
+        )
+        selected = [{
+            "bundle": "DemoBundle",
+            "install_bundle": "DemoBundle",
+            "item": {
+                "bundle": "DemoBundle",
+                "version": "1.0.0",
+                "url": "https://mcc.example/DemoBundle.tar.gz",
+            },
+            "package": "DemoBundle.tar.gz",
+            "status": "UPDATE",
+        }]
+        output = io.StringIO()
+
+        with redirect_stdout(output), patch(
+            "mcd_agent.plugins._cleanup_conflicting_plugin_rows"
+        ) as cleanup_rows, patch(
+            "mcd_agent.plugins._ensure_plugin_reload_runtime_packages"
+        ) as prepare_runtime, patch(
+            "mcd_agent.plugins._install_or_replace_plugin"
+        ) as install_plugin, patch(
+            "mcd_agent.plugins._run_post_steps"
+        ) as post_steps, patch(
+            "mcd_agent.plugins._plugin_files_applied_observed"
+        ) as observe_files:
+            with self.assertRaisesRegex(RuntimeError, "plugin_cache_paths_not_configured"):
+                _apply_plugin_file_changes(
+                    config=cfg,
+                    install=install,
+                    install_root=root,
+                    manifest_dir="https://mcc.example/",
+                    fallback_ip=None,
+                    action="update",
+                    selected=selected,
+                    auto_remove_bundles=[],
+                    rows_by_bundle={},
+                    run_post_steps=True,
+                    operation_id="cache-path-preflight-1",
+                )
+
+        cleanup_rows.assert_not_called()
+        prepare_runtime.assert_not_called()
+        install_plugin.assert_not_called()
+        post_steps.assert_not_called()
+        observe_files.assert_not_called()
+        results = [
+            json.loads(line.split("=", 1)[1])
+            for line in output.getvalue().splitlines()
+            if line.startswith("MCD_PLUGIN_APPLY_RESULT=")
+        ]
+        self.assertEqual(len(results), 1)
+        self.assertFalse(results[0]["files_applied"])
+        self.assertEqual(results[0]["post_step_status"], "failed")
+        self.assertEqual(results[0]["overall_status"], "failed")
+        self.assertEqual(results[0]["error"], "plugin_cache_paths_not_configured")
 
     def test_conflict_cleanup_does_not_delete_selected_runtime_path(self) -> None:
         selected = [
@@ -1024,7 +1095,11 @@ class PluginConflictPathTests(unittest.TestCase):
             db_cls.assert_not_called()
 
     def test_previous_failed_plugin_update_runs_reload_after_version_prealign(self) -> None:
-        cfg = SimpleNamespace(plugins_post_cache_clear=True, plugins_post_install=True)
+        cfg = SimpleNamespace(
+            plugins_post_cache_clear=True,
+            plugins_post_install=True,
+            plugins_cache_relative_paths=["var/cache/prod"],
+        )
         install = SimpleNamespace(root="/tmp/missing-root", db=None, mautic_major=6)
         selected = [
             {
@@ -1062,6 +1137,7 @@ class PluginConflictPathTests(unittest.TestCase):
             plugins_post_install=True,
             mcc_token="",
             plugins_state_filename=".mcd-plugin.json",
+            plugins_cache_relative_paths=["var/cache/prod"],
         )
         install = SimpleNamespace(
             root="/tmp/missing-root",
@@ -1212,7 +1288,11 @@ class PluginConflictPathTests(unittest.TestCase):
 
     def test_no_file_change_runs_post_steps_and_rejects_stale_target(self) -> None:
         root = "/tmp/mcd-plugin-target-version-noop"
-        cfg = SimpleNamespace(plugins_state_filename=".mcd-plugin.json", mcc_token="")
+        cfg = SimpleNamespace(
+            plugins_state_filename=".mcd-plugin.json",
+            plugins_cache_relative_paths=["var/cache/prod"],
+            mcc_token="",
+        )
         install = SimpleNamespace(root=root, db=None, mautic_major=6)
         selected = [{
             "bundle": "DemoBundle",
@@ -1264,6 +1344,7 @@ class PluginConflictPathTests(unittest.TestCase):
             plugins_post_cache_clear=True,
             plugins_post_install=True,
             plugins_state_filename=".mcd-plugin.json",
+            plugins_cache_relative_paths=["var/cache/prod"],
             mcc_token="",
             cluster_id="",
         )
@@ -1433,6 +1514,7 @@ class PluginConflictPathTests(unittest.TestCase):
             cluster_id="cluster-a",
             plugins_post_cache_clear=True,
             plugins_post_install=True,
+            plugins_cache_relative_paths=["var/cache/prod"],
             command_timeout_sec=60,
         )
         install = SimpleNamespace(root="/var/www/ss/public_html", db=None)

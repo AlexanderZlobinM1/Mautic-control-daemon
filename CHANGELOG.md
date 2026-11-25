@@ -1,3 +1,58 @@
+## 1.7.14 - 2026-11-25
+
+- Exclude a vanished host root or console from every scheduler lane without
+  terminating the daemon or consuming its durable ring item. Complete rescans
+  preserve only manual roots that still have a real Mautic console.
+- Interpret an explicit MCC `null` for a required typed runtime field as the
+  LWW clear/inherit tombstone. A legacy empty local override is removed and
+  falls back to the profile/default value instead of being rematerialized.
+
+## 1.7.13 - 2026-11-24
+
+- Validate the operator-declared plugin cache path contract before changing a
+  bundle, registration row, or runtime dependency. Missing cache settings now
+  produce a terminal side-effect-free failure with `files_applied=false`
+  instead of failing only after plugin files have already been replaced.
+- Apply the same preflight before the cluster reference node starts its shared
+  file phase. Cache paths remain explicit managed-root-relative configuration;
+  MCD does not hardcode a host or Mautic layout path.
+
+## 1.7.12 - 2026-11-24
+
+- Restore the native `mcd-plugin-job-v1` transport capability whenever the
+  descriptor-selected plugin component is ready. Generic component operations
+  remain descriptor-driven under `external_component_capabilities`; the
+  transport capability only admits plugin job observation callbacks.
+- Hydrate immutable cached JSON resources from an already verified local
+  manifest even when the remote manifest endpoint falls back to that cache.
+  This preserves offline manifest use while repairing a missing declared
+  resource from its independently hash-pinned repository URL.
+
+## 1.7.11 - 2026-11-24
+
+- Make external-component resolution and dispatch descriptor-driven. MCD now
+  preserves MCC/component-owned operation, input/result, UI and capability
+  metadata without embedding a fixed operation list or sequencing policy.
+- Treat each Mautic-major plugin manifest as already filtered by MCC. MCD no
+  longer re-computes plugin compatibility from package metadata, while verified
+  local components remain available offline and invalid components fail closed.
+- Hydrate every manifest-declared immutable cached JSON operation resource from
+  the authenticated custom repository with path and SHA-256 validation before
+  activating the manifest. An already-satisfied Composer dependency is proven
+  from `composer.lock` before requesting external host preparation, so ordinary
+  Mautic 7 plugin install/update no longer fails on an unnecessary profile read.
+
+## 1.7.10 - 2026-11-24
+
+- Resolve the selected plugin-filesystem component through the authenticated
+  MCC component catalog before exposing plugin operations. A verified local
+  component remains usable offline, while a selected newer revision is
+  size/SHA validated and atomically activated before use.
+- Hide interactive and machine plugin capabilities and reject new plugin jobs
+  when the component or its complete operation closure is missing, corrupt or
+  failed activation. The explicit preflight status remains visible and a valid
+  restoration re-enables the same commands automatically.
+
 ## 1.7.9 - 2026-11-24
 
 - Replace three retained thread-per-root control families with four bounded

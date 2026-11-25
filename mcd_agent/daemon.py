@@ -1076,6 +1076,29 @@ def _runtime_response_has_host_tombstone(response: Mapping[str, Any], key: str) 
     return False
 
 
+def _runtime_response_required_clear_keys(response: Mapping[str, Any]) -> set[str]:
+    """Return required typed host fields explicitly cleared with ``null``.
+
+    MCC uses JSON ``null`` as the clear/inherit sentinel. Required typed
+    settings cannot materialize that sentinel in TOML, so the value remains
+    absent from the runtime map while its remote metadata becomes a tombstone.
+    Empty strings are malformed legacy values and stay on the warning path.
+    """
+    cleared: set[str] = set()
+    envelopes: list[object] = [response.get("runtime_overrides")]
+    desired = response.get("desired_state")
+    if isinstance(desired, Mapping):
+        envelopes.append(desired.get("runtime_overrides"))
+    for envelope in envelopes:
+        if not isinstance(envelope, Mapping):
+            continue
+        for raw_key, value in envelope.items():
+            key = str(raw_key)
+            if value is None and key in _invalid_required_runtime_values({key: value}):
+                cleared.add(key)
+    return cleared
+
+
 def _is_instance_runtime_map_key(key: object) -> bool:
     text = str(key or "").strip()
     return text.endswith("_instance_settings") or text in {
@@ -1791,6 +1814,11 @@ def _resolve_runtime_snapshots(
         remote_uid = remote_path[2] if remote_path else logical_uid
         local_stamp = _runtime_metadata_get(local_meta, scope, key, local_uid)
         remote_stamp = _runtime_metadata_get(remote_meta, scope, key, remote_uid)
+        if not local_present and not remote_present and not (
+            bool(local_stamp and local_stamp.get("tombstone"))
+            or bool(remote_stamp and remote_stamp.get("tombstone"))
+        ):
+            continue
         if local_present and not remote_present and not (remote_stamp and remote_stamp.get("tombstone")):
             winner = "local"
         elif remote_present and not local_present and not (local_stamp and local_stamp.get("tombstone")):
@@ -1930,6 +1958,21 @@ def _runtime_metadata_from_response(
         default_revision=host_revision,
         default_updated_at=host_updated_at,
     )
+    for key in sorted(_runtime_response_required_clear_keys(response)):
+        existing = _runtime_metadata_get(metadata, "host", key)
+        _runtime_metadata_set(
+            metadata,
+            "host",
+            key,
+            _runtime_metadata_stamp(
+                {**dict(existing or {}), "tombstone": True},
+                source="mcc",
+                revision=host_revision,
+                updated_at=host_updated_at,
+                event_id=f"mcc:tombstone:host:{key}:{host_revision}",
+                tombstone=True,
+            ),
+        )
     remote_fields = _runtime_snapshot_fields(remote_runtime)
     for scope, key, uid in remote_fields:
         if _runtime_metadata_get(metadata, scope, key, uid) is None:
@@ -2127,8 +2170,7 @@ def _persist_resolved_runtime_to_config(
     removals = {
         str(key)
         for key in stable_keys
-        if key in previous
-        and key not in resolved
+        if key not in resolved
         and _runtime_metadata_has_remote_tombstone(resolved_metadata, str(key))
     }
     # A named workload profile remains the baseline authority. Values that no
@@ -2702,20 +2744,20 @@ def _runtime_resolution_needs_full_snapshot(
 def _drop_invalid_required_remote_runtime_values(
     runtime: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Treat invalid required MCC placeholders as absent, never as settings.
+    """Keep required clear sentinels out of the materialized value map.
 
-    MCC may expose ``null`` for a required typed host field while carrying a
-    valid update for an independent instance lane in the same snapshot. Such
-    placeholders cannot be applied or persisted and therefore must not enter
-    LWW metadata, the local retry queue, or block the valid lane update.
+    An explicit ``null`` is represented separately as remote tombstone
+    metadata. A non-null malformed value remains invalid and is warned about.
     """
     cleaned = deepcopy(dict(runtime))
     invalid = _invalid_required_runtime_values(cleaned)
-    if invalid:
+    malformed = [key for key in invalid if cleaned.get(key) is not None]
+    if malformed:
         logging.warning(
             "runtime-overrides ignored invalid required MCC placeholders: keys=%s",
-            ",".join(invalid),
+            ",".join(malformed),
         )
+    if invalid:
         for key in invalid:
             cleaned.pop(key, None)
     return cleaned
@@ -11863,17 +11905,33 @@ def _fill_from_ring(
                             pass
                 ring.rotate(-1)
                 continue
-        args = (
-            _segment_chain_command_args(
-                build_args,
-                chain_ids,
-                exclude_ids=native_exclude_ids,
-                command_entity_ids=native_command_entity_ids,
-                exclude_ids_by_entity=native_exclude_ids_by_entity,
+        try:
+            args = (
+                _segment_chain_command_args(
+                    build_args,
+                    chain_ids,
+                    exclude_ids=native_exclude_ids,
+                    command_entity_ids=native_command_entity_ids,
+                    exclude_ids_by_entity=native_exclude_ids_by_entity,
+                )
+                if task_type == "segment"
+                else build_args(eid)
             )
-            if task_type == "segment"
-            else build_args(eid)
-        )
+        except FileNotFoundError as exc:
+            if admission_release is not None and claimed:
+                for chain_sid in claimed_ids:
+                    try:
+                        admission_release(int(chain_sid))
+                    except Exception:
+                        pass
+            logging.warning(
+                "[%s] %s command admission skipped: %s",
+                root,
+                task_type,
+                exc,
+            )
+            ring.rotate(-1)
+            break
         if task_type == "segment" and len(chain_ids) > 1:
             _segment_chain_runtime_write(
                 store,
@@ -15102,14 +15160,8 @@ def _dispatch_due_campaign_triggers(
             if realtime_trigger
             else max(1, int(config.campaign_trigger_priority_parallel or 1))
         )
-        started = priority_executor.launch(
-            config,
-            root=root,
-            task_type="campaign_trigger",
-            entity_id=campaign_id,
-            running=running,
-            store=store,
-            args=render_mautic_command(
+        try:
+            args = render_mautic_command(
                 php_bin=config.php_bin,
                 run_as_user=config.mautic_run_as_user,
                 root=root,
@@ -15117,7 +15169,18 @@ def _dispatch_due_campaign_triggers(
                 id=campaign_id,
                 campaign_limit=config.campaign_limit,
                 batch_limit=config.campaign_batch_limit,
-            ),
+            )
+        except FileNotFoundError as exc:
+            logging.warning("[%s] due campaign trigger admission skipped: %s", root, exc)
+            break
+        started = priority_executor.launch(
+            config,
+            root=root,
+            task_type="campaign_trigger",
+            entity_id=campaign_id,
+            running=running,
+            store=store,
+            args=args,
             interval_sec=effective_interval,
             max_parallel=effective_parallel,
             on_success=lambda campaign_id=campaign_id: on_success(campaign_id),
@@ -15174,6 +15237,18 @@ def _dispatch_due_campaign_rebuilds(
         claimed = _campaign_rebuild_liveness_cycle_claim(store, root, campaign_id)
         if store is not None and cycle and not claimed:
             break
+        try:
+            args = render_mautic_command(
+                php_bin=config.php_bin,
+                run_as_user=config.mautic_run_as_user,
+                root=root,
+                template=config.cmd_campaign_rebuild_template,
+                id=campaign_id,
+            )
+        except FileNotFoundError as exc:
+            _campaign_rebuild_liveness_cycle_release(store, root, campaign_id)
+            logging.warning("[%s] due campaign rebuild admission skipped: %s", root, exc)
+            break
         started = priority_executor.launch(
             config,
             root=root,
@@ -15181,13 +15256,7 @@ def _dispatch_due_campaign_rebuilds(
             entity_id=campaign_id,
             running=running,
             store=store,
-            args=render_mautic_command(
-                php_bin=config.php_bin,
-                run_as_user=config.mautic_run_as_user,
-                root=root,
-                template=config.cmd_campaign_rebuild_template,
-                id=campaign_id,
-            ),
+            args=args,
             interval_sec=rebuild_interval,
             max_parallel=rebuild_parallel,
             on_success=lambda campaign_id=campaign_id: on_success(campaign_id),
@@ -18800,6 +18869,56 @@ def _refresh_instance_db_maps(
             mautic_timezones_by_root.pop(root, None)
 
 
+_SCHEDULER_UNAVAILABLE_ROOT_LOG_AT: dict[str, float] = {}
+_SCHEDULER_UNAVAILABLE_ROOT_LOG_LOCK = threading.Lock()
+
+
+def _scheduler_install_is_runnable(inst: object, *, now_ts: float | None = None) -> bool:
+    """Fail closed for a vanished host root without affecting other roots."""
+
+    root = str(getattr(inst, "root", "") or "").strip()
+    if not root:
+        return False
+    runtime = str(getattr(inst, "runtime", "host") or "host").strip().lower()
+    if runtime != "host":
+        return True
+    if not hasattr(inst, "console_path"):
+        return True
+    console_raw = str(getattr(inst, "console_path", "") or "").strip()
+    console = Path(console_raw)
+    if console_raw and not console.is_absolute():
+        console = Path(root) / console
+    runnable = Path(root).is_dir() and bool(console_raw) and console.is_file()
+    if runnable:
+        with _SCHEDULER_UNAVAILABLE_ROOT_LOG_LOCK:
+            _SCHEDULER_UNAVAILABLE_ROOT_LOG_AT.pop(root, None)
+        return True
+
+    observed_at = time.time() if now_ts is None else float(now_ts)
+    with _SCHEDULER_UNAVAILABLE_ROOT_LOG_LOCK:
+        last_logged = float(_SCHEDULER_UNAVAILABLE_ROOT_LOG_AT.get(root, 0.0) or 0.0)
+        should_log = observed_at - last_logged >= 300.0
+        if should_log:
+            _SCHEDULER_UNAVAILABLE_ROOT_LOG_AT[root] = observed_at
+    if should_log:
+        reason = "root_missing" if not Path(root).is_dir() else "console_missing"
+        logging.warning(
+            "[%s] scheduler excluded unavailable instance uid=%s source=%s reason=%s",
+            root,
+            str(getattr(inst, "instance_uid", "") or "-"),
+            str(getattr(inst, "source", "") or "-"),
+            reason,
+        )
+    return False
+
+
+def _scheduler_runnable_installs(installs: Iterable[object]) -> list[object]:
+    """Return only roots that can safely render local scheduler commands."""
+
+    now_ts = time.time()
+    return [inst for inst in installs if _scheduler_install_is_runnable(inst, now_ts=now_ts)]
+
+
 def _inventory_snapshot_for_push(
     inventory: InstanceInventory,
     current: list[MauticInstall],
@@ -18899,7 +19018,7 @@ def run_loop(
     if bool(identity.get("clone_detected", False)):
         try:
             count = inventory.rescan(config)
-            installs = inventory.list_instances()
+            installs = _scheduler_runnable_installs(inventory.list_instances())
             logging.info(
                 "template clone detected: source=%s local=%s; inventory rescan applied (%s instances)",
                 str(identity.get("source_host_name") or "-"),
@@ -18908,9 +19027,9 @@ def run_loop(
             )
         except Exception as e:
             logging.warning("template clone inventory rescan failed; fallback to cached inventory: %s", e)
-            installs = inventory.list_instances()
+            installs = _scheduler_runnable_installs(inventory.list_instances())
     else:
-        installs = inventory.list_instances()
+        installs = _scheduler_runnable_installs(inventory.list_instances())
     recover_after_update = _mcd_runtime_update_recovery_needed(store)
     bootstrap_status = _bootstrap_remote_runtime_before_local_baseline(
         config,
@@ -19860,7 +19979,7 @@ def run_loop(
             open_observer_tick = current_observer_tick > observed_tick
             if open_observer_tick:
                 observed_tick = current_observer_tick
-            for inst in list(installs):
+            for inst in _scheduler_runnable_installs(list(installs)):
                 root = str(getattr(inst, "root", "") or "").strip()
                 if not root or not getattr(inst, "db", None) or root in futures:
                     continue
@@ -20215,7 +20334,7 @@ def run_loop(
                         backup_paused = False
                     if scheduler_paused or backup_paused:
                         continue
-                    base_installs = list(installs)
+                    base_installs = _scheduler_runnable_installs(list(installs))
                     ordered_installs = list(base_installs)
                     if base_installs:
                         start = int(refill_cursor or 0) % len(base_installs)
@@ -20696,7 +20815,7 @@ def run_loop(
                 time.sleep(1.0)
                 continue
 
-            for inst in list(installs):
+            for inst in _scheduler_runnable_installs(list(installs)):
                 if not getattr(inst, "db", None):
                     continue
                 root = str(getattr(inst, "root", "") or "").strip()
@@ -21552,7 +21671,7 @@ def run_loop(
                 30,
                 min(300, int(getattr(cfg, "campaign_rebuild_poll_interval_sec", 300) or 300)),
             )
-            for inst in list(installs):
+            for inst in _scheduler_runnable_installs(list(installs)):
                 if not getattr(inst, "db", None):
                     continue
                 root = str(getattr(inst, "root", "") or "").strip()
@@ -21772,6 +21891,23 @@ def run_loop(
             else:
                 time.sleep(1.0)
 
+    def _run_scheduler_with_missing_root_guard(name: str, worker: Callable[[], None]) -> None:
+        """Restart a scheduler lane only for a discovery/render disappearance race."""
+
+        while not control_stop_event.is_set() and (
+            _test_stop_event is None or not _test_stop_event.is_set()
+        ):
+            try:
+                worker()
+                return
+            except FileNotFoundError as exc:
+                logging.warning("%s scheduler pass skipped unavailable root: %s", name, exc)
+                installs[:] = _scheduler_runnable_installs(installs)
+                if _test_stop_event is not None:
+                    _test_stop_event.wait(1.0)
+                else:
+                    time.sleep(1.0)
+
     if not single_cycle:
         threading.Thread(
             target=_active_cycle_observation_worker,
@@ -21788,9 +21924,16 @@ def run_loop(
             name="mcd-canonical-lifecycle-scheduler",
             daemon=True,
         ).start()
-        threading.Thread(target=_priority_scheduler, name="mcd-priority-scheduler", daemon=True).start()
         threading.Thread(
-            target=_campaign_rebuild_liveness_scheduler,
+            target=lambda: _run_scheduler_with_missing_root_guard("priority", _priority_scheduler),
+            name="mcd-priority-scheduler",
+            daemon=True,
+        ).start()
+        threading.Thread(
+            target=lambda: _run_scheduler_with_missing_root_guard(
+                "campaign-rebuild-liveness",
+                _campaign_rebuild_liveness_scheduler,
+            ),
             name="mcd-campaign-rebuild-liveness",
             daemon=True,
         ).start()
@@ -21813,6 +21956,7 @@ def run_loop(
         )
 
     while _test_stop_event is None or not _test_stop_event.is_set():
+        installs = _scheduler_runnable_installs(installs)
         # Only refresh the snapshot here.  Each configured instance owns an
         # independently waking minute worker, so external handler activity or
         # another root's planning cannot delay its ring.
@@ -21883,7 +22027,7 @@ def run_loop(
                     sorted(f"{getattr(inst, 'instance_uid', '')}:{getattr(inst, 'root', '')}" for inst in before)
                 )
                 count = inventory.rescan(config, preserve_manual=True)
-                installs = inventory.list_instances()
+                installs = _scheduler_runnable_installs(inventory.list_instances())
                 _apply_instance_runtime_guard(installs, reason="inventory-auto-rescan")
                 after_sig = "|".join(
                     sorted(f"{getattr(inst, 'instance_uid', '')}:{getattr(inst, 'root', '')}" for inst in installs)
@@ -23058,7 +23202,7 @@ def run_loop(
                 store,
                 [str(getattr(inst, "root", "") or "") for inst in installs],
             )
-            installs = inventory.list_instances()
+            installs = _scheduler_runnable_installs(inventory.list_instances())
             reconcile_import_tag_patch(config, installs)
             _refresh_instance_db_maps(installs, db_configs_by_root, mautic_timezones_by_root)
             _apply_instance_runtime_guard(installs, reason="plan-refresh")

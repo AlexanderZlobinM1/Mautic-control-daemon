@@ -2770,6 +2770,93 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             )
         )
 
+    def test_required_null_runtime_clear_removes_legacy_empty_toml_value(self) -> None:
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        class MemoryStore:
+            def __init__(self):
+                self.values = {}
+
+            def get_runtime_sync(self, key):
+                return self.values.get(key)
+
+            def put_runtime_sync(self, key, value):
+                self.values[key] = dict(value)
+
+            def delete_runtime_sync(self, keys):
+                for key in keys:
+                    self.values.pop(key, None)
+                return 1
+
+        response = {
+            "status": "ok",
+            "runtime_overrides": {"segment_lazy_update_enabled": None},
+            "desired_state": {
+                "revision": 202,
+                "updated_at": 700.0,
+                "runtime_overrides": {"segment_lazy_update_enabled": None},
+            },
+        }
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "mcd.toml"
+            path.write_text(
+                '[profile]\nname = "custom"\n\n[runtime]\n'
+                'segment_lazy_update_enabled = ""\n',
+                encoding="utf-8",
+            )
+            cfg = replace(
+                load_config(str(path), allow_recover_from_mcc=False),
+                mcc_url="https://mcc.example",
+                mcc_token="token",
+            )
+            with patch("mcd_agent.daemon.fetch_runtime_overrides", return_value=response):
+                status = daemon._bootstrap_remote_runtime_before_local_baseline(
+                    cfg,
+                    MemoryStore(),
+                    [],
+                )
+
+            self.assertEqual(status, "applied")
+            self.assertNotIn("segment_lazy_update_enabled", path.read_text(encoding="utf-8"))
+            reloaded = load_config(str(path), allow_recover_from_mcc=False)
+            self.assertFalse(reloaded.segment_lazy_update_enabled)
+            self.assertNotIn("segment_lazy_update_enabled", local_runtime_overrides(reloaded))
+
+    def test_newer_valid_local_runtime_value_wins_over_older_remote_clear(self) -> None:
+        key = "segment_lazy_update_enabled"
+        local_runtime = {key: True}
+        local_metadata = daemon._runtime_metadata_empty()
+        daemon._runtime_metadata_set(
+            local_metadata,
+            "host",
+            key,
+            daemon._runtime_metadata_stamp(
+                source="mcd",
+                updated_at=900.0,
+                revision=203,
+                event_id="mcd:203",
+            ),
+        )
+        response = {
+            "runtime_overrides": {key: None},
+            "desired_state": {
+                "revision": 202,
+                "updated_at": 700.0,
+                "runtime_overrides": {key: None},
+            },
+        }
+        remote_metadata = daemon._runtime_metadata_from_response(response, {}, local_runtime)
+        resolved = daemon._resolve_runtime_snapshots(
+            local_runtime,
+            {},
+            local_metadata,
+            remote_metadata,
+        )
+
+        self.assertEqual(resolved["runtime"], local_runtime)
+        self.assertIn(("host", key, ""), resolved["local_wins"])
+
     def test_post_update_bootstrap_prefers_canonical_catalog_over_reset_local_projection(self) -> None:
         from pathlib import Path
         from tempfile import TemporaryDirectory

@@ -61,8 +61,11 @@ from mcd_agent.contact_field_metadata_report import (
 )
 from mcd_agent.mautic_version_cache import collect_mautic_version
 from mcd_agent.custom_scripts import (
+    external_component_capability_projection,
+    external_component_preflight,
     fetch_custom_manifest,
     format_custom_scripts_list,
+    run_external_component_operation,
     run_custom_script_by_key,
 )
 from mcd_agent.db import MauticDB
@@ -165,7 +168,11 @@ from mcd_agent.nginx_external import (
     default_stub_operation, ensure_nginx_baseline, ensure_cloudflare_real_ip,
     cloudflare_real_ip_state, nginx_baseline_satisfied, nginx_vhost_operation,
 )
-from mcd_agent.plugins import run_plugins_interactive, run_plugins_machine
+from mcd_agent.plugins import (
+    plugin_filesystem_component_preflight,
+    run_plugins_interactive,
+    run_plugins_machine,
+)
 from mcd_agent.plugin_operations import (
     effective_values,
     operation_command_tokens,
@@ -876,6 +883,11 @@ def _plugin_job_cli(cfg, args) -> int:
     key = plugin_job_runtime_key(operation_id)
     try:
         if command == "enqueue":
+            component_status = plugin_filesystem_component_preflight(cfg, refresh=True)
+            if component_status.get("status") != "ready":
+                raise PluginJobError(
+                    str(component_status.get("reason") or "plugin_filesystem_component_unavailable")
+                )
             request = canonical_plugin_job_request(
                 instance_uid=str(args.instance_uid or ""),
                 plugin_uids=list(args.plugin_uid or []),
@@ -1818,10 +1830,15 @@ def _run_interactive_hub(cfg, root: str | None, no_color: bool) -> int:
                 print("Active instance is required.")
                 continue
         active_label = active_root or "-"
+        plugin_status = plugin_filesystem_component_preflight(cfg, refresh=True)
+        plugins_ready = plugin_status.get("status") == "ready"
         print("")
         print(f"MCD Interactive (v{__version__})")
         print(f"Active instance: {active_label}")
-        print("1. Plugins")
+        if plugins_ready:
+            print("1. Plugins")
+        else:
+            print(f"Plugins unavailable: {plugin_status.get('reason') or 'component preflight failed'}")
         print("2. Mautic Upgrade")
         print("3. Instances")
         print("4. Cache")
@@ -1833,6 +1850,9 @@ def _run_interactive_hub(cfg, root: str | None, no_color: bool) -> int:
         print("0. Exit")
         choice = _ask("Select option: ").strip()
         if choice == "1":
+            if not plugins_ready:
+                print(f"Plugins unavailable: {plugin_status.get('reason') or 'component preflight failed'}")
+                continue
             if not active_root:
                 print("Select active instance first")
                 continue
@@ -2928,6 +2948,29 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     custom.add_argument("script", nargs="?", help="Exact script key from custom manifest")
     custom.add_argument("script_args", nargs=argparse.REMAINDER, help="Arguments for selected script (after --)")
+
+    external_component = sub.add_parser(
+        "external-component",
+        help="Resolve and invoke MCC-declared external components",
+    )
+    external_component_sub = external_component.add_subparsers(
+        dest="external_component_cmd",
+        required=True,
+    )
+    component_list = external_component_sub.add_parser("list", help="List projected component capabilities")
+    component_list.add_argument("--config", default=default_cfg)
+    component_list.add_argument("--json", action="store_true")
+    component_preflight = external_component_sub.add_parser("preflight", help="Resolve one component")
+    component_preflight.add_argument("--config", default=default_cfg)
+    component_preflight.add_argument("--identity", required=True)
+    component_preflight.add_argument("--offline", action="store_true")
+    component_preflight.add_argument("--json", action="store_true")
+    component_invoke = external_component_sub.add_parser("invoke", help="Invoke one declared operation")
+    component_invoke.add_argument("--config", default=default_cfg)
+    component_invoke.add_argument("--identity", required=True)
+    component_invoke.add_argument("--operation", required=True)
+    component_invoke.add_argument("--input-json", required=True, help="JSON object file, or - for stdin")
+    component_invoke.add_argument("--json", action="store_true")
 
     return parser
 
@@ -5818,6 +5861,38 @@ def main() -> int:
         else:
             print(json.dumps(st, ensure_ascii=True, indent=2))
         return 0
+
+    if args.cmd == "external-component":
+        cfg = load_config(args.config)
+        if args.external_component_cmd == "list":
+            payload = external_component_capability_projection(cfg, refresh=True)
+            print(json.dumps(payload, ensure_ascii=True, indent=2))
+            return 0
+        if args.external_component_cmd == "preflight":
+            payload = external_component_preflight(
+                cfg,
+                identity=str(args.identity or ""),
+                refresh=not bool(args.offline),
+            )
+            print(json.dumps(payload, ensure_ascii=True, indent=2))
+            return 0 if payload.get("status") == "ready" else 1
+        try:
+            raw = sys.stdin.read() if args.input_json == "-" else Path(args.input_json).read_text(encoding="utf-8")
+            operation_input = json.loads(raw)
+            if not isinstance(operation_input, dict):
+                raise ValueError("external_component_input_must_be_object")
+        except (OSError, UnicodeError, ValueError, TypeError) as exc:
+            print(json.dumps({"status": "error", "reason": str(exc)}, ensure_ascii=True, indent=2))
+            return 2
+        rc, output = run_external_component_operation(
+            cfg,
+            identity=str(args.identity or ""),
+            operation=str(args.operation or ""),
+            operation_input=operation_input,
+        )
+        if output:
+            print(output)
+        return rc
 
     if args.cmd == "custom":
         cfg = load_config(args.config)
