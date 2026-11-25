@@ -105,13 +105,6 @@ def assert_production_runtime_origin(install_dir: str | Path = "/opt/mcd") -> No
         raise RuntimeError("production MCD must not use the forbidden checkout via PYTHONPATH or sys.path")
 
 
-def _semver(v: str) -> tuple[int, int, int]:
-    nums = [x for x in "".join(ch if ch.isdigit() else "." for ch in (v or "")).split(".") if x.isdigit()]
-    while len(nums) < 3:
-        nums.append("0")
-    return (int(nums[0]), int(nums[1]), int(nums[2]))
-
-
 def _artifact_sha(plan: dict[str, Any]) -> str:
     """Return the catalog digest for an admitted runtime artifact."""
     return str(plan.get("sha256") or plan.get("artifact_sha256") or "").strip().lower()
@@ -2302,7 +2295,7 @@ def maybe_auto_update(cfg: AgentConfig, *, force: bool = False) -> tuple[str | N
     if admission_reason == "mcc_update_admission_disabled" and auto:
         target = str(decision.get("target", "")).strip()
         package_url = str(decision.get("package_url", "")).strip()
-        if target and package_url and _semver(target) > _semver(installed_agent_version()):
+        if target and package_url and _decision_requires_sync(decision, installed_agent_version()):
             decision = dict(decision)
             decision["status"] = "update"
             decision["mcd_update_admission_override"] = "stale_mcd_runtime_repair"

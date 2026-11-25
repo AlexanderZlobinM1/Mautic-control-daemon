@@ -62,9 +62,9 @@ def test_mcc_admission_disabled_still_repairs_stale_mcd_runtime(tmp_path, monkey
     response = {
         'status': 'disabled',
         'reason': 'mcc_update_admission_disabled',
-        'current': '1.6.40',
-        'target': '1.7.0',
-        'package_url': 'https://fixture.invalid/mcd-runtime-1.7.0.tar.gz',
+        'current': '1.7.14',
+        'target': '1.6.145',
+        'package_url': 'https://fixture.invalid/mcd-runtime-1.6.145.tar.gz',
         'sha256': 'a' * 64,
     }
     states = []
@@ -75,19 +75,19 @@ def test_mcc_admission_disabled_still_repairs_stale_mcd_runtime(tmp_path, monkey
     monkeypatch.setattr(self_update, '_maybe_run_update_cleanup', lambda *a, **kw: False)
     monkeypatch.setattr(self_update, 'recover_stale_update_admission_barrier', lambda *a, **kw: {})
     monkeypatch.setattr(self_update, '_active_mautic_processes', lambda: [])
-    monkeypatch.setattr(self_update, 'installed_agent_version', lambda: '1.6.40')
+    monkeypatch.setattr(self_update, 'installed_agent_version', lambda: '1.7.14')
     monkeypatch.setattr(self_update, 'scheduler_admission_lock', lambda cfg: nullcontext())
     monkeypatch.setattr(self_update, 'create_update_admission_barrier', lambda *a, **kw: {})
     monkeypatch.setattr(self_update, 'remove_update_admission_barrier', lambda *a, **kw: True)
 
     def apply(_cfg, plan):
         applied.append(plan)
-        return True, 'updated to 1.7.0'
+        return True, 'updated to 1.6.145'
 
     monkeypatch.setattr(self_update, 'apply_update', apply)
     message, retry = self_update.maybe_auto_update(cfg, force=True)
 
-    assert message == 'updated to 1.7.0'
+    assert message == 'updated to 1.6.145'
     assert retry > 0
     assert applied and applied[0]['status'] == 'update'
     assert applied[0]['mcd_update_admission_override'] == 'stale_mcd_runtime_repair'
