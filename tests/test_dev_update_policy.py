@@ -138,7 +138,7 @@ def test_assigned_older_channel_artifact_is_not_skipped_by_semver(tmp_path, monk
     assert states[-1]['last_decision']['channel_sync_required'] is True
 
 
-def test_channel_pointer_change_before_apply_replaces_admitted_plan(monkeypatch):
+def test_channel_pointer_change_before_apply_rejects_admitted_plan(monkeypatch):
     cfg = SimpleNamespace(
         mcc_url='https://fixture.invalid',
         mcc_token='token',
