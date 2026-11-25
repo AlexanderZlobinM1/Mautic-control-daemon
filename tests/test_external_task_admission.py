@@ -101,6 +101,55 @@ class ExternalTaskAdmissionTests(unittest.TestCase):
         self.assertEqual(len(observed), 2)
         self.assertEqual([row["entity_id"] for row in observed], [92, 93])
 
+    def test_restart_readopts_only_mcd_owned_child_into_durable_store(self) -> None:
+        root = "/var/www/client"
+        owned_key = daemon._task_key(root, "campaign_trigger", 110)
+        observed = [
+            {
+                "root": root,
+                "task_type": "campaign_trigger",
+                "entity_id": 110,
+                "pid": 3667,
+                "started_at": 100.0,
+                "command_str": "php|bin/console|mautic:campaigns:trigger|-i|110",
+                "mcd_ownership": {
+                    "MCD_TASK_OWNER": "mcd",
+                    "MCD_TASK_KEY": owned_key,
+                    "MCD_TASK_ROOT": root,
+                    "MCD_TASK_TYPE": "campaign_trigger",
+                    "MCD_TASK_ENTITY_ID": "110",
+                    "MCD_TASK_TIMEOUT_SEC": "0",
+                },
+            },
+            {
+                "root": root,
+                "task_type": "segment",
+                "entity_id": 92,
+                "pid": 5001,
+                "started_at": 101.0,
+                "command_str": "php|bin/console|mautic:segments:update|-i|92",
+                "mcd_ownership": {},
+            },
+        ]
+        store = TaskStore(":memory:")
+        running: dict[str, RunningTask] = {}
+        with patch.object(daemon, "list_external_runtime_task_summaries", return_value=observed):
+            result = daemon._sync_external_running_tasks_unfenced(
+                installs=[SimpleNamespace(root=root)],
+                running=running,
+                popens={},
+                store=store,
+            )
+
+        self.assertEqual(result["adopted"], 2)
+        self.assertIn(owned_key, running)
+        self.assertFalse(running[owned_key].external)
+        self.assertTrue(store.has_running_task_key(owned_key))
+        manual = next(task for task in running.values() if task.entity_id == 92)
+        self.assertTrue(manual.external)
+        self.assertFalse(store.has_running_task_key(manual.task_key))
+        store.close()
+
     @staticmethod
     def _external_segment(root: str, entity_id: int, started_at: float) -> RunningTask:
         return RunningTask(

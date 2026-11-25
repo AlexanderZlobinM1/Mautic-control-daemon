@@ -387,24 +387,51 @@ class InstanceInventory:
         row = self.conn.execute("SELECT COUNT(*) AS cnt FROM instances").fetchone()
         return int(row["cnt"]) if row else 0
 
+    @staticmethod
+    def _manual_install_is_present(inst: MauticInstall) -> bool:
+        """Return whether a preserved host install still has a runnable console.
+
+        ``preserve_manual`` protects valid operator-added instances from being
+        replaced by web-server autodiscovery.  It must not make a vanished
+        root immortal: a missing manual row would otherwise remain scheduler
+        eligible and be published to MCC forever after the underlying
+        instance was removed or migrated.
+        """
+
+        runtime = str(getattr(inst, "runtime", "host") or "host").strip().lower()
+        if runtime != "host":
+            # Non-host rows are rebuilt by runtime descriptor discovery.  Do
+            # not infer container liveness from an in-container console path.
+            return True
+        root = Path(str(getattr(inst, "root", "") or ""))
+        console = Path(str(getattr(inst, "console_path", "") or ""))
+        return root.is_dir() and console.is_file()
+
     def rescan(self, config: AgentConfig, *, preserve_manual: bool = False) -> int:
         retired = self.list_retired_instances()
+        preserved_manual = [
+            inst
+            for inst in self.list_all_instances()
+            if preserve_manual
+            and str(getattr(inst, "source", "") or "").strip().lower() == "manual"
+            and self._local_state_profile(inst.root) not in {"artifact", "unknown"}
+            and self._manual_install_is_present(inst)
+        ]
         installs = discover_mautic(
             config.discovery_roots,
             config.exclude_path_contains,
             config.supported_mautic_majors,
             config.custom_instances,
         )
-        if preserve_manual:
-            self.conn.execute(
-                "DELETE FROM instances WHERE source IN ('autodiscovery','runtime-descriptor')"
-            )
-        else:
-            self.conn.execute(
-                "DELETE FROM instances WHERE source IN ('autodiscovery','manual','runtime-descriptor')"
-            )
+        self.conn.execute(
+            "DELETE FROM instances WHERE source IN ('autodiscovery','manual','runtime-descriptor')"
+        )
         for inst in installs:
             self._upsert_install(inst, source=inst.source or "autodiscovery")
+        discovered_roots = {str(inst.root) for inst in installs}
+        for inst in preserved_manual:
+            if str(inst.root) not in discovered_roots:
+                self._upsert_install(inst, source="manual")
         for inst in retired:
             if Path(inst.root).is_dir():
                 self._upsert_install(inst, source="artifact")

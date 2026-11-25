@@ -543,6 +543,13 @@ MCC. После MCD update этот режим включается всегда
 из остальных файлов и продолжает штатное восстановление из MCC. Само повреждение
 не отправляется в MCC как операторская правка. Явные `0`, `false`, пустые списки
 и карты, а также очистка действительно необязательных полей сохраняют свой смысл.
+Отдельный случай — явный JSON `null` в canonical MCC desired state для
+обязательного host-поля: это transport-сигнал «очистить override и наследовать»,
+а не значение TOML. Он участвует в обычном сравнении времени/revision как
+tombstone; если он новее локальной правки, MCD удаляет только соответствующую
+строку из mutable runtime include и использует значение профиля или default.
+Пустая строка `""` этим сигналом не является и никогда не записывается вместо
+`null`.
 Ошибочное поле отклоняется отдельно: оно не отменяет применение и сохранение
 остальных корректных настроек из того же snapshot.
 
@@ -677,6 +684,69 @@ config на его profile baseline и только после этого при
 явный desired profile, включая `passive`, имеет приоритет.
 
 ## 3. Построение ordinary cycle и порядок
+
+Каждый Mautic instance владеет собственной durable generation ordinary cycle.
+На минутном системном тике terminal instance получает актуальный список,
+исключает весь свой `super-priority` набор и распределяет оставшиеся задачи по
+существующим ordinary и priority/business классам. Эти per-instance наборы
+пополняют общие очереди соответствующего класса, которые потребляются общими
+воркерами строго в существующих profile budget/slot limits. Идентичность одной
+работы внутри generation — `instance + task type + entity ID + cycle_id`.
+
+Цикл instance считается terminal только после terminal receipt всех
+распределённых им ordinary/priority задач; отдельный super-priority worker в
+этот barrier не входит. Пока generation active, частый runtime refresh только
+наблюдает и продолжает её: он не перечитывает её как новый набор, не создаёт
+новые очереди/потоки и не дублирует работу. После terminal instance ждёт
+ближайшую следующую границу системной минуты и только на ней допускает новую
+generation. Начало и завершение каждой generation сохраняются per instance в
+durable cycle state (`cycle_id`, `admitted_at`, `updated_at`, `status` и
+terminal receipts), поэтому restart не превращает текущий цикл в новый.
+Если на одной минутной границе eligible несколько instances, один общий
+host-level planner формирует их DB snapshots строго последовательно в
+стабильном порядке: завершает первый root и сразу начинает следующий, не ждёт
+ещё одного тика и не выполняет параллельные planning reads. Это ограничение
+касается только формирования очередей; уже admitted работа продолжает
+исполняться параллельно в существующих profile slots.
+Набор претендентов фиксируется на самой минутной границе. Instance, чей
+предыдущий cycle стал terminal уже после неё, не вклинивается в текущую
+последовательность и ждёт следующего тика. Если serial planning batch прошлого
+тика ещё не завершён на новой границе, новый batch на этой границе не
+открывается; после завершения старого следующие претенденты ждут очередной
+минутной границы.
+
+Control plane не масштабирует число Linux threads по числу instances. Lifecycle
+monitor использует bounded shared lane только для roots с реально running или
+durable задачами; minute observer и dependency recovery используют отдельную
+bounded shared I/O lane. Добавление/удаление root не создаёт и не удерживает
+персональный executor. При завершении daemon обе lane закрываются, queued
+control futures отменяются.
+
+Запись локального inventory не является доказательством существования host
+instance. Перед admission MCD проверяет фактические root и Mautic console; если
+они исчезли после миграции или удаления, этот instance исключается из всех
+scheduler lane, его durable ring не считается выполненным, а остальные roots
+продолжают работу. Исчезновение между проверкой и построением команды также
+завершается локальным skip, а не падением daemon. Полный inventory rescan
+сохраняет manual instance только при наличии его root и console. После rescan
+полный state snapshot больше не содержит stale UID, поэтому MCC удаляет только
+его host-cache row; это не запускает instance-delete и не изменяет файлы, БД,
+vhost, DNS или глобальную identity instance.
+
+Late-discovery observer читает roots только на минутной границе. Dependency
+context перечитывается только когда текущая generation не имеет подтверждённого
+snapshot, cycle/context generation расходятся либо отсутствует обязательная
+capability. Возраст корректного snapshot сам по себе не запускает rehydrate.
+Один root не имеет больше одного незавершённого refresh; неудача или
+generation-race получает backoff не менее минуты. Результат старой generation
+атомарно отбрасывается и никогда не перезаписывает новый context.
+
+Каждая команда, запущенная MCD, наследует ownership marker с task key, root,
+типом, entity ID и timeout. После restart MCD сопоставляет marker с фактической
+Mautic-командой и execution lock, восстанавливает durable running receipt и
+продолжает наблюдение без повторного запуска. Процесс без marker считается
+внешним/ручным: он учитывается для защиты от overlap, но MCD не присваивает
+себе владение и не завершает его как собственный.
 
 1. По умолчанию (`segment_lazy_update_enabled = false`) планировщик получает
    bounded full snapshot опубликованных сегментов; он удаляет union статических

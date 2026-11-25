@@ -1,3 +1,33 @@
+## 1.6.145 - 2026-11-25
+
+- Exclude a vanished host root or console from every scheduler lane without
+  terminating the daemon or consuming its durable ring item. A complete
+  inventory rescan now preserves only manual instances that still have a real
+  root and console, allowing the authoritative MCD snapshot to prune the stale
+  host-cache row in MCC without deleting instance data.
+- Interpret an explicit MCC `null` for a required typed runtime field as the
+  clear/inherit sentinel. The newer LWW tombstone removes a legacy empty local
+  override and falls back to the profile/default value instead of repeatedly
+  warning about or rematerializing `key = ""`.
+
+## 1.6.144 - 2026-11-24
+
+- Replace three retained thread-per-root control families with four bounded
+  shared control workers, minute-boundary observation and active-root-only
+  lifecycle monitoring. Dependency refresh is generation-driven with a
+  one-minute failure/race backoff. MCD child ownership markers allow safe
+  durable re-adoption after restart without taking ownership of manual tasks.
+
+## 1.6.143 - 2026-11-24
+
+- Admit each instance's next ordinary segment generation only on the first
+  system-minute boundary after its previous generation becomes terminal.
+  Frequent runtime refreshes continue active durable cycles without rebuilding
+  queues or duplicating work; super-priority remains outside this lifecycle.
+- Serialize DB snapshot planning across instances that become eligible on the
+  same minute tick; the next instance starts immediately after the previous
+  planner finishes, while admitted execution keeps its existing parallelism.
+
 ## 1.6.141 - 2026-11-23
 
 - Reconcile a successful same-cycle Mautic 7 native-coverage receipt into a

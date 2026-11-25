@@ -33,6 +33,9 @@ from mcd_agent.daemon import (
     _segment_shared_slots_available,
     _segment_lazy_update_effective_setting,
     _segment_full_scan_admission_enabled,
+    _segment_next_cycle_due_at,
+    _segment_cycle_planner_executor,
+    _segment_plan_tick_transition,
     _fill_from_ring,
     _iter_instances_with_root_dispatch_gate,
     _SchedulerRuntimeRegistry,
@@ -59,6 +62,61 @@ def _leadlist_filter(segment_id: int) -> str:
 
 class SegmentLivenessTests(unittest.TestCase):
     """M6/M7 dispatch invariants for persisted ordinary-cycle liveness."""
+
+    def test_next_cycle_waits_for_root_local_minute_tick(self) -> None:
+        terminal_a = {"status": "terminal", "updated_at": 121.25, "cycle_id": "a-1"}
+        terminal_b = {"status": "terminal", "updated_at": 179.99, "cycle_id": "b-1"}
+        active = {"status": "active", "updated_at": 1.0, "cycle_id": "a-2"}
+
+        self.assertEqual(_segment_next_cycle_due_at(terminal_a), 180.0)
+        self.assertEqual(_segment_next_cycle_due_at(terminal_b), 180.0)
+        self.assertEqual(_segment_next_cycle_due_at({}), 0.0)
+        self.assertEqual(_segment_next_cycle_due_at(None), 0.0)
+        self.assertEqual(_segment_next_cycle_due_at(active), float("inf"))
+
+    def test_instance_cycle_planning_is_serial_but_advances_without_another_tick(self) -> None:
+        executor = _segment_cycle_planner_executor()
+        first_started = threading.Event()
+        release_first = threading.Event()
+        second_started = threading.Event()
+        order: list[str] = []
+
+        def first() -> str:
+            first_started.set()
+            self.assertTrue(release_first.wait(timeout=2.0))
+            order.append("first")
+            return "first"
+
+        def second() -> str:
+            second_started.set()
+            order.append("second")
+            return "second"
+
+        try:
+            first_future = executor.submit(first)
+            second_future = executor.submit(second)
+            self.assertTrue(first_started.wait(timeout=1.0))
+            self.assertFalse(second_started.wait(timeout=0.05))
+            release_first.set()
+            self.assertEqual(first_future.result(timeout=2.0), "first")
+            self.assertEqual(second_future.result(timeout=2.0), "second")
+            self.assertEqual(order, ["first", "second"])
+        finally:
+            release_first.set()
+            executor.shutdown(wait=True, cancel_futures=True)
+
+    def test_busy_previous_tick_defers_new_arrivals_to_the_following_tick(self) -> None:
+        observed, opened = _segment_plan_tick_transition(60.0, 120.1, pending_plans=True)
+        self.assertEqual(observed, 120.0)
+        self.assertFalse(opened)
+
+        observed, opened = _segment_plan_tick_transition(observed, 150.0, pending_plans=False)
+        self.assertEqual(observed, 120.0)
+        self.assertFalse(opened)
+
+        observed, opened = _segment_plan_tick_transition(observed, 180.0, pending_plans=False)
+        self.assertEqual(observed, 180.0)
+        self.assertTrue(opened)
 
     @staticmethod
     def _config() -> SimpleNamespace:
@@ -2131,6 +2189,17 @@ class SegmentLivenessTests(unittest.TestCase):
                 now_ts=200.0,
             )
         )
+        self.assertGreaterEqual(daemon._dependency_refresh_retry_delay(self._config()), 60.0)
+        self.assertFalse(
+            daemon._segment_dispatch_context_needs_dependency_refresh(
+                live_context,
+                cycle,
+                config=self._config(),
+                mautic_major=7,
+                now_ts=10_000.0,
+            ),
+            "age without a generation/definition change must not create a refresh loop",
+        )
 
         preserved_context = dict(context)
         preserved_context["dependency_snapshot_mode"] = "preserved_previous"
@@ -2301,10 +2370,11 @@ class SegmentLivenessTests(unittest.TestCase):
                 return True
 
             errors: list[BaseException] = []
+            outcomes: list[dict[str, object]] = []
 
             def refresh() -> None:
                 try:
-                    daemon._rehydrate_segment_dispatch_context(
+                    outcomes.append(daemon._rehydrate_segment_dispatch_context(
                         store,
                         root=root,
                         db_config=object(),
@@ -2312,7 +2382,7 @@ class SegmentLivenessTests(unittest.TestCase):
                         context=context,
                         config=config,
                         mautic_major=7,
-                    )
+                    ))
                 except BaseException as exc:
                     errors.append(exc)
 
@@ -2335,8 +2405,8 @@ class SegmentLivenessTests(unittest.TestCase):
                 thread.join(timeout=2.0)
 
             self.assertFalse(thread.is_alive())
-            self.assertEqual(len(errors), 1)
-            self.assertIsInstance(errors[0], daemon._SegmentDispatchContextGenerationChanged)
+            self.assertEqual(errors, [])
+            self.assertEqual(outcomes[0]["status"], "discarded_generation_change")
             self.assertEqual(
                 store.get_runtime_sync(cycle_key(root))["cycle_id"],
                 "cycle-new",
@@ -2346,6 +2416,46 @@ class SegmentLivenessTests(unittest.TestCase):
             self.assertEqual(preserved["segment_slot_limit"], 5)
             self.assertNotIn("dependency_snapshot_authoritative", preserved)
             store.close()
+
+    def test_shared_control_executor_is_bounded_across_many_roots_and_reuses_threads(self) -> None:
+        executor = daemon._control_executor()
+        release = threading.Event()
+        started = 0
+        guard = threading.Lock()
+
+        def work() -> None:
+            nonlocal started
+            with guard:
+                started += 1
+            release.wait(timeout=2.0)
+
+        try:
+            first = [executor.submit(work) for _ in range(35 * 3)]
+            deadline = time.time() + 1.0
+            while time.time() < deadline:
+                with guard:
+                    if started >= daemon._CONTROL_EXECUTOR_MAX_WORKERS:
+                        break
+                time.sleep(0.01)
+            with guard:
+                self.assertEqual(started, daemon._CONTROL_EXECUTOR_MAX_WORKERS)
+            control_threads = [
+                thread for thread in threading.enumerate() if thread.name.startswith("mcd-control")
+            ]
+            self.assertLessEqual(len(control_threads), daemon._CONTROL_EXECUTOR_MAX_WORKERS)
+            release.set()
+            for future in first:
+                future.result(timeout=3.0)
+            second = [executor.submit(lambda: None) for _ in range(35)]
+            for future in second:
+                future.result(timeout=3.0)
+            control_threads_after = [
+                thread for thread in threading.enumerate() if thread.name.startswith("mcd-control")
+            ]
+            self.assertLessEqual(len(control_threads_after), daemon._CONTROL_EXECUTOR_MAX_WORKERS)
+        finally:
+            release.set()
+            executor.shutdown(wait=True, cancel_futures=True)
 
     def test_restart_rehydrates_frozen_full_cycle_without_resetting_claims_or_closure(self) -> None:
         """A stale context must recover the live graph before one M7 worker starts."""
