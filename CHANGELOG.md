@@ -1,3 +1,12 @@
+## 1.7.14 - 2026-11-25
+
+- Exclude a vanished host root or console from every scheduler lane without
+  terminating the daemon or consuming its durable ring item. Complete rescans
+  preserve only manual roots that still have a real Mautic console.
+- Interpret an explicit MCC `null` for a required typed runtime field as the
+  LWW clear/inherit tombstone. A legacy empty local override is removed and
+  falls back to the profile/default value instead of being rematerialized.
+
 ## 1.7.13 - 2026-11-24
 
 - Validate the operator-declared plugin cache path contract before changing a
