@@ -30,6 +30,21 @@ def test_scheduler_excludes_only_missing_host_root(tmp_path: Path) -> None:
     assert daemon._scheduler_runnable_installs([stale, live]) == [live]
 
 
+def test_scheduler_excludes_inventory_artifact_even_when_root_is_executable(tmp_path: Path) -> None:
+    artifact_root = tmp_path / "artifact" / "public_html"
+    live_root = tmp_path / "live" / "public_html"
+    for root in (artifact_root, live_root):
+        (root / "bin").mkdir(parents=True)
+        (root / "bin" / "console").write_text("#!/usr/bin/env php\n", encoding="utf-8")
+
+    artifact = _install(artifact_root, "artifact-instance", source="artifact")
+    # Match the production residue: a host-runtime inventory row may retain a
+    # plausible console path. Its artifact source remains authoritative.
+    live = _install(live_root, "live-instance", source="autodiscovery")
+
+    assert daemon._scheduler_runnable_installs([artifact, live]) == [live]
+
+
 def test_preserving_manual_inventory_prunes_vanished_root(tmp_path: Path, monkeypatch) -> None:
     live_root = tmp_path / "live" / "public_html"
     (live_root / "bin").mkdir(parents=True)

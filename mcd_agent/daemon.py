@@ -18874,10 +18874,25 @@ _SCHEDULER_UNAVAILABLE_ROOT_LOG_LOCK = threading.Lock()
 
 
 def _scheduler_install_is_runnable(inst: object, *, now_ts: float | None = None) -> bool:
-    """Fail closed for a vanished host root without affecting other roots."""
+    """Admit only executable instances, never inventory-only artifacts."""
 
     root = str(getattr(inst, "root", "") or "").strip()
     if not root:
+        return False
+    source = str(getattr(inst, "source", "") or "").strip().lower()
+    if source == "artifact":
+        observed_at = time.time() if now_ts is None else float(now_ts)
+        with _SCHEDULER_UNAVAILABLE_ROOT_LOG_LOCK:
+            last_logged = float(_SCHEDULER_UNAVAILABLE_ROOT_LOG_AT.get(root, 0.0) or 0.0)
+            should_log = observed_at - last_logged >= 300.0
+            if should_log:
+                _SCHEDULER_UNAVAILABLE_ROOT_LOG_AT[root] = observed_at
+        if should_log:
+            logging.warning(
+                "[%s] scheduler excluded inventory-only instance uid=%s source=artifact",
+                root,
+                str(getattr(inst, "instance_uid", "") or "-"),
+            )
         return False
     runtime = str(getattr(inst, "runtime", "host") or "host").strip().lower()
     if runtime != "host":
