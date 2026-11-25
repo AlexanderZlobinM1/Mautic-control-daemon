@@ -4,11 +4,15 @@ MCD agent 1.2.8 exposes capability and evidence schema
 `mcd-plugin-cache-reset-v1` for plugin filesystem operations.
 
 Before plugin files are removed, installed or replaced, MCD validates the
-operator-declared `[plugins].cache_relative_paths` list together with the
-external filesystem owner/group/mode contract. The paths are strict relative
-paths under the selected instance managed root; MCD does not guess a layout or
-hardcode a host path. A missing or invalid list stops the operation before any
-plugin, registration or dependency mutation and reports `files_applied=false`.
+effective `[plugins].cache_relative_paths` list together with the external
+filesystem owner/group/mode contract. Existing configs without a `[plugins]`
+section receive the release defaults for the supported Mautic 6/7 component:
+`var/cache/prod`, the Mautic runtime user for owner/group, and mode `0775`.
+Explicit MCC/operator values remain authoritative. The paths are strict
+relative paths under the selected instance managed root; MCD never accepts a
+host-specific path from a one-off operation command. An explicitly missing or
+invalid effective list stops the operation before any plugin, registration or
+dependency mutation and reports `files_applied=false`.
 
 After that preflight and before the first Symfony console boot, the selected
 external filesystem component atomically detaches every declared active cache

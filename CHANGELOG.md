@@ -1,3 +1,10 @@
+## 1.7.17 - 2026-11-25
+
+- Restore the standard plugin filesystem/cache release defaults when an older
+  local config has no `[plugins]` section. Explicit MCC/operator values still
+  override them; Mautic 6/7 plugin apply remains side-effect-free when an
+  explicitly supplied value is invalid.
+
 ## 1.7.16 - 2026-11-25
 
 - Recheck inventory authority at the common root-dispatch and pending/fairness

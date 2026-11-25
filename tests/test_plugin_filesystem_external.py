@@ -70,10 +70,24 @@ def test_plugin_cache_relative_paths_accept_strict_relative_values(tmp_path, val
     assert load_config(str(path), allow_recover_from_mcc=False).plugins_cache_relative_paths == value
 
 
-def test_plugin_cache_relative_paths_missing_is_none(tmp_path):
+def test_plugin_cache_relative_paths_missing_uses_release_default(tmp_path):
     path = tmp_path / "mcd.toml"
     path.write_text("[plugins]\n", encoding="utf-8")
-    assert load_config(str(path), allow_recover_from_mcc=False).plugins_cache_relative_paths is None
+    config = load_config(str(path), allow_recover_from_mcc=False)
+    assert config.plugins_cache_relative_paths == ["var/cache/prod"]
+    assert config.plugins_filesystem_owner == "www-data"
+    assert config.plugins_filesystem_group == "www-data"
+    assert config.plugins_filesystem_mode == "0775"
+
+
+def test_plugin_filesystem_release_defaults_apply_without_plugins_table(tmp_path):
+    path = tmp_path / "mcd.toml"
+    path.write_text('[profile]\nname = "custom"\n', encoding="utf-8")
+    config = load_config(str(path), allow_recover_from_mcc=False)
+    assert config.plugins_cache_relative_paths == ["var/cache/prod"]
+    assert config.plugins_filesystem_owner == "www-data"
+    assert config.plugins_filesystem_group == "www-data"
+    assert config.plugins_filesystem_mode == "0775"
 
 
 @pytest.mark.parametrize("value", ["var/cache/prod", [], ["/tmp/x"], ["."], [".."], ["a/../b"], ["a\\b"], ["a\u0000b"], ["C:/x"], ["C:x"], ["//server/share"], ["a/"], ["a//b"], ["a/ b"]])

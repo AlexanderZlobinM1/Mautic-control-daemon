@@ -25,6 +25,12 @@ except ModuleNotFoundError:  # pragma: no cover - py3.10 compatibility
 
 
 DEFAULT_CUSTOM_CACHE_DIR = "/opt/mcd/var/custom"
+# Plugin filesystem operations need a safe release default so an older local
+# config without a [plugins] section remains usable after the external
+# component is installed. Explicit MCC/operator values still override these
+# values; they are not host-specific paths or permissions.
+DEFAULT_PLUGIN_FILESYSTEM_MODE = "0775"
+DEFAULT_PLUGIN_CACHE_RELATIVE_PATHS = ["var/cache/prod"]
 # Ready runtime cache is a sibling of the managed venv, including standalone
 # installations using an explicit prefix. Never inspect a source checkout.
 DEFAULT_RUNTIME_ARTIFACT_DIR = str(Path(sys.prefix).parent / "runtime")
@@ -2878,6 +2884,7 @@ def _load_config_inner(path: str) -> AgentConfig:
         "mcd-agent-" + hashlib.sha256(canonical_agent_source.encode("utf-8")).hexdigest()[:24]
     )
     plugins = data.get("plugins", {})
+    plugins = plugins if isinstance(plugins, dict) else {}
     custom = data.get("custom", {}) if isinstance(data.get("custom", {}), dict) else {}
     state = data.get("state", {}) if isinstance(data.get("state", {}), dict) else {}
     backup = data.get("backup", {})
@@ -2898,6 +2905,7 @@ def _load_config_inner(path: str) -> AgentConfig:
     hardware_profile_name = str(
         hardware.get("profile", hardware.get("profile_name", runtime.get("hardware_profile", "auto")))
     ).strip().lower() or "auto"
+    plugin_runtime_user = str(runtime.get("mautic_run_as_user") or "www-data").strip() or "www-data"
     state_backend = str(runtime.get("state_backend", state.get("backend", "sqlite"))).strip().lower() or "sqlite"
     if state_backend in {"mysql", "mariadb", "hybrid"}:
         state_backend = "mysql_hybrid"
@@ -3628,19 +3636,21 @@ def _load_config_inner(path: str) -> AgentConfig:
         plugins_filesystem_owner=(
             str(plugins.get("filesystem_owner")).strip()
             if isinstance(plugins.get("filesystem_owner"), str) and str(plugins.get("filesystem_owner")).strip()
-            else None
+            else (plugin_runtime_user if "filesystem_owner" not in plugins else None)
         ),
         plugins_filesystem_group=(
             str(plugins.get("filesystem_group")).strip()
             if isinstance(plugins.get("filesystem_group"), str) and str(plugins.get("filesystem_group")).strip()
-            else None
+            else (plugin_runtime_user if "filesystem_group" not in plugins else None)
         ),
         plugins_filesystem_mode=(
             str(plugins.get("filesystem_mode")).strip()
             if isinstance(plugins.get("filesystem_mode"), str) and str(plugins.get("filesystem_mode")).strip()
-            else None
+            else (DEFAULT_PLUGIN_FILESYSTEM_MODE if "filesystem_mode" not in plugins else None)
         ),
-        plugins_cache_relative_paths=_strict_plugin_cache_paths(plugins.get("cache_relative_paths")),
+        plugins_cache_relative_paths=_strict_plugin_cache_paths(
+            plugins.get("cache_relative_paths", list(DEFAULT_PLUGIN_CACHE_RELATIVE_PATHS))
+        ),
         plugins_cluster_file_sync_wait_sec=max(
             30,
             int(plugins.get("cluster_file_sync_wait_sec", 900) or 900),

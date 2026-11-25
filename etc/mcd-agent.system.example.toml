@@ -528,6 +528,14 @@ post_cache_clear = true
 post_plugin_install = true
 # Metadata filename placed in plugin directory.
 state_filename = ".mcd-plugin.json"
+# Standard Mautic 6/7 plugin cache path, relative to the selected instance.
+# Explicit MCC/operator values may replace this list for a supported layout.
+cache_relative_paths = ["var/cache/prod"]
+# Ownership and mode for the materialized plugin tree and disposable cache.
+# Defaults follow runtime.mautic_run_as_user and 0775 when omitted.
+filesystem_owner = "www-data"
+filesystem_group = "www-data"
+filesystem_mode = "0775"
 # Cluster plugin operations: reference node waits this long for Syncthing/file
 # propagation before cache clear fan-out.
 cluster_file_sync_wait_sec = 900

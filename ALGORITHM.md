@@ -248,18 +248,21 @@ layout this is the stable project wrapper while `plugins_root` may be its
 `[plugins].managed_root` remains authoritative. MCD rejects relative or
 traversal-containing roots before invoking a configured binding, and the
 external recipe independently rejects `plugins_root` outside `managed_root`.
-For apply/noop and cache reset, `owner`, `group` and `mode` are likewise
-required from effective external `[plugins].filesystem_owner`,
-`[plugins].filesystem_group` and `[plugins].filesystem_mode`; missing or
-invalid values fail before the configured runner. MCD supplies no ownership,
-group or mode default and does not accept these values from operation input.
-До изменения файлов плагина, записей регистрации или host dependencies MCD
-также обязан проверить операторский список cache paths. Пути задаются
-относительно managed root конкретного инстанса, а не зашиваются в код и не
-передаются в разовой команде. Если список отсутствует или невалиден, операция
-завершается fail-closed с `files_applied=false`: старый bundle, база и cache
-остаются без изменений. Только после этого preflight внешний обработчик может
-атомарно заменить bundle и сбросить ровно объявленные disposable cache paths.
+For apply/noop and cache reset, `owner`, `group` and `mode` come from effective
+`[plugins].filesystem_owner`, `[plugins].filesystem_group` and
+`[plugins].filesystem_mode`. If an older local config has no `[plugins]`
+section, MCD supplies the standard release defaults: the Mautic runtime user
+for owner/group and `0775`; explicit MCC/operator values remain authoritative.
+An explicitly supplied invalid value still fails before the configured runner.
+For the supported Mautic 6/7 plugin filesystem component, the release default
+cache path is `var/cache/prod`; an explicit operator list can replace it. Paths
+remain relative to the selected instance managed root and are never accepted
+from a one-off operation command. Before plugin files, registration rows or
+host dependencies change, MCD validates the effective cache list. If it is
+missing or invalid, the operation fails closed with `files_applied=false`:
+the old bundle, database and cache remain unchanged. Only then may the
+external handler atomically replace the bundle and reset exactly the declared
+disposable cache paths.
 For a single bundle it contains `status`/`plugin_status`, a 64-hex `digest`,
 `installed_version`, `state` (object or null), and boolean
 `has_doctrine_entity_metadata` / `has_native_migrations`. Inventory uses
