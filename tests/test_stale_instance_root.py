@@ -45,6 +45,34 @@ def test_scheduler_excludes_inventory_artifact_even_when_root_is_executable(tmp_
     assert daemon._scheduler_runnable_installs([artifact, live]) == [live]
 
 
+def test_artifact_is_excluded_again_at_pending_and_root_dispatch_boundaries(tmp_path: Path) -> None:
+    artifact_root = tmp_path / "artifact" / "public_html"
+    live_root = tmp_path / "live" / "public_html"
+    for root in (artifact_root, live_root):
+        (root / "bin").mkdir(parents=True)
+        (root / "bin" / "console").write_text("#!/usr/bin/env php\n", encoding="utf-8")
+
+    artifact = _install(artifact_root, "gc.sales-snap.com", source="artifact")
+    live = _install(live_root, "live-instance", source="autodiscovery")
+
+    pending = daemon._scheduler_pending_roots(
+        [artifact, live],
+        persisted_pending_roots={str(artifact_root), str(live_root)},
+    )
+    assert pending == {str(live_root)}
+
+    busy_roots: set[str] = set()
+    dispatched = list(
+        daemon._iter_instances_with_root_dispatch_gate(
+            [artifact, live],
+            busy_roots=busy_roots,
+            lock=daemon._SCHEDULER_RUNTIME_LOCK,
+        )
+    )
+    assert dispatched == [live]
+    assert busy_roots == set()
+
+
 def test_preserving_manual_inventory_prunes_vanished_root(tmp_path: Path, monkeypatch) -> None:
     live_root = tmp_path / "live" / "public_html"
     (live_root / "bin").mkdir(parents=True)

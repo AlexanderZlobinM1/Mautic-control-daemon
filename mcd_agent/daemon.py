@@ -833,6 +833,13 @@ def _iter_instances_with_root_dispatch_gate(
             if current_root:
                 with lock:
                     busy_roots.discard(current_root)
+                current_root = ""
+            # The dispatch gate is the last common boundary before root-local
+            # planning, pending telemetry and command rendering. Re-check here
+            # because a cached dispatch list can outlive an inventory source
+            # transition (for example executable -> artifact).
+            if not _scheduler_install_is_runnable(inst):
+                continue
             current_root = str(getattr(inst, "root", "") or "").strip()
             if current_root:
                 with lock:
@@ -8620,18 +8627,24 @@ def _scheduler_pending_roots(
     between plan refreshes and lose every free slot to unrelated roots.
     """
 
+    runnable_installs = _scheduler_runnable_installs(list(installs))
+    runnable_roots = {
+        str(getattr(inst, "root", "") or "").strip()
+        for inst in runnable_installs
+        if str(getattr(inst, "root", "") or "").strip()
+    }
     roots = {
         str(root).strip()
         for root in priority_pending_roots
-        if str(root or "").strip()
+        if str(root or "").strip() in runnable_roots
     }
     roots.update(
         str(root).strip()
         for root in persisted_pending_roots
-        if str(root or "").strip()
+        if str(root or "").strip() in runnable_roots
     )
     ring_sources = tuple(ring_maps)
-    for inst in installs:
+    for inst in runnable_installs:
         root = str(getattr(inst, "root", "") or "").strip()
         if root and any(bool(ring_map.get(root)) for ring_map in ring_sources):
             roots.add(root)
