@@ -1,3 +1,10 @@
+## 1.7.15 - 2026-11-25
+
+- Exclude inventory-only `source=artifact` rows from every scheduler lane even
+  when their root, console, or non-host runtime descriptor remains present.
+  Artifact observations stay visible in inventory without launching Mautic
+  commands or changing files, databases, virtual hosts, or DNS.
+
 ## 1.7.14 - 2026-11-25
 
 - Exclude a vanished host root or console from every scheduler lane without

@@ -840,6 +840,13 @@ scheduler lane, его durable ring не считается выполненны
 его host-cache row; это не запускает instance-delete и не изменяет файлы, БД,
 vhost, DNS или глобальную identity instance.
 
+Inventory-запись с источником `artifact` является только наблюдаемым следом
+инстанса и никогда не участвует в активном планировании. MCD исключает её из
+segment, campaign, import, plugin-operation и остальных scheduler lane даже
+при существующих root или console и независимо от runtime descriptor. Запись
+остаётся видимой в inventory/state для диагностики; исключение из scheduler не
+удаляет и не изменяет файлы, БД, vhost или DNS.
+
 Late-discovery observer читает roots только на минутной границе. Dependency
 context перечитывается только когда текущая generation не имеет подтверждённого
 snapshot, cycle/context generation расходятся либо отсутствует обязательная
