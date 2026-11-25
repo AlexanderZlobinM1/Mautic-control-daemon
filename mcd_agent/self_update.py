@@ -112,6 +112,82 @@ def _semver(v: str) -> tuple[int, int, int]:
     return (int(nums[0]), int(nums[1]), int(nums[2]))
 
 
+def _artifact_sha(plan: dict[str, Any]) -> str:
+    """Return the catalog digest for an admitted runtime artifact."""
+    return str(plan.get("sha256") or plan.get("artifact_sha256") or "").strip().lower()
+
+
+def _artifact_identity(plan: dict[str, Any]) -> tuple[str, str]:
+    """Identify a channel artifact by its immutable target and SHA.
+
+    The package URL is transport metadata and may move between equivalent
+    catalog mirrors.  The target plus digest is the channel pointer identity.
+    """
+    return (str(plan.get("target") or "").strip(), _artifact_sha(plan))
+
+
+def _decision_has_artifact(decision: dict[str, Any]) -> bool:
+    return bool(
+        str(decision.get("target") or "").strip()
+        and str(decision.get("package_url") or "").strip()
+    )
+
+
+def _decision_requires_sync(decision: dict[str, Any], installed: str) -> bool:
+    """Use the assigned artifact, regardless of numeric version ordering."""
+    target = str(decision.get("target") or "").strip()
+    return bool(_decision_has_artifact(decision) and target != str(installed or "").strip())
+
+
+def _revalidate_channel_plan(
+    cfg: AgentConfig,
+    plan: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Re-read the assigned channel immediately before a runtime mutation.
+
+    Admission and apply are separate events.  If MCC changed the pointer in
+    between (including a cross-line change such as 1.7 -> 1.6), the admitted
+    plan is stale and must never be written.  The apply attempt fails closed;
+    the next ordinary check acquires the fresh SHA-pinned channel plan. An
+    unavailable or incomplete pointer also fails closed with no filesystem
+    mutation.
+    """
+    if not _api_base(cfg):
+        return dict(plan), None
+
+    current = check_with_mcc(
+        cfg,
+        auto_update_enabled=bool(getattr(cfg, "mcd_auto_update_enabled", False)),
+    )
+    if not _decision_has_artifact(current):
+        return None, "MCD update rejected: assigned channel has no published artifact"
+    current_sha = _artifact_sha(current)
+    if not current_sha:
+        return None, "MCD update rejected: assigned channel artifact has no sha256"
+
+    admitted_identity = _artifact_identity(plan)
+    current_identity = _artifact_identity(current)
+    if admitted_identity != current_identity:
+        logging.warning(
+            "MCD update admission changed before apply: admitted=%s current=%s; refusing stale write",
+            admitted_identity,
+            current_identity,
+        )
+        return None, (
+            "MCD update deferred: channel artifact changed before apply "
+            f"(admitted={admitted_identity[0]}:{admitted_identity[1] or '-'} "
+            f"current={current_identity[0]}:{current_identity[1]})"
+        )
+
+    refreshed = dict(current)
+    refreshed["status"] = "update"
+    # Keep the session that owns the original admission when MCC does not
+    # return a replacement session for the refreshed pointer.
+    if not str(refreshed.get("session_id") or "").strip():
+        refreshed["session_id"] = str(plan.get("session_id") or "").strip()
+    return refreshed, None
+
+
 def _state_path(cfg: AgentConfig) -> Path:
     return Path(cfg.state_db_path).parent / "mcd-self-update.json"
 
@@ -168,9 +244,9 @@ def _post_json(url: str, payload: dict[str, Any], token: str | None, timeout_sec
 
 
 def _api_base(cfg: AgentConfig) -> str | None:
-    if not cfg.mcc_url:
+    if not getattr(cfg, "mcc_url", None):
         return None
-    return cfg.mcc_url.rstrip("/")
+    return str(cfg.mcc_url).rstrip("/")
 
 
 def _update_policy(cfg: AgentConfig) -> str:
@@ -1331,13 +1407,13 @@ def _cluster_sync_host_name(cfg: AgentConfig) -> str:
 
 def _cluster_plan_from_decision(cfg: AgentConfig, decision: dict[str, Any], *, now_s: int) -> dict[str, Any] | None:
     status = str(decision.get("status", "")).strip().lower()
-    if status not in {"update", "update_available"}:
+    if status not in {"update", "update_available", "up_to_date"}:
         return None
     target = str(decision.get("target", "")).strip()
     package_url = str(decision.get("package_url", "")).strip()
     if not target or not package_url:
         return None
-    if _semver(target) <= _semver(installed_agent_version()):
+    if target == str(installed_agent_version() or "").strip():
         return None
     return {
         "status": "update",
@@ -1510,7 +1586,11 @@ def _cluster_update_seed_or_refresh(
         current_target = str((current_plan or {}).get("target", "") or "").strip()
         candidate_target = str(candidate_plan.get("target", "") or "").strip()
         phase = str(payload.get("phase", "") or "").strip().lower()
-        if not current_plan or phase in {"", "done", "failed"} or _semver(candidate_target) > _semver(current_target):
+        if (
+            not current_plan
+            or phase in {"", "done", "failed"}
+            or _artifact_identity(candidate_plan) != _artifact_identity(current_plan)
+        ):
             payload.clear()
             payload.update(
                 {
@@ -1563,7 +1643,7 @@ def _cluster_update_seed_or_refresh(
         }
     )
     target = str((current_plan or {}).get("target", "") or "").strip()
-    if target and _semver(installed_agent_version()) >= _semver(target):
+    if target and str(installed_agent_version() or "").strip() == target:
         local_node["download_status"] = "downloaded"
         local_node["install_status"] = "success"
         local_node.setdefault("downloaded_at", now_s)
@@ -1889,6 +1969,32 @@ def _apply_update_locked(cfg: AgentConfig, plan: dict[str, Any], lock_f) -> tupl
     )
     if backup_defer is not None:
         return False, backup_defer
+    refreshed_plan, revalidation_error = _revalidate_channel_plan(cfg, plan)
+    if revalidation_error is not None or refreshed_plan is None:
+        msg = revalidation_error or "MCD update rejected: channel revalidation failed"
+        state.update(
+            {
+                "last_status": "channel_revalidation_failed",
+                "last_result": msg,
+                "last_target": target,
+                "last_attempt_ts": now_s,
+                "last_session_id": session_id,
+            }
+        )
+        _write_state(cfg, state)
+        if session_id:
+            release_session(
+                cfg,
+                session_id,
+                result_status="deferred",
+                result_message=msg,
+                new_version=installed_agent_version(),
+            )
+        return False, msg
+    plan = refreshed_plan
+    target = str(plan.get("target", "")).strip()
+    package_url = str(plan.get("package_url", "")).strip()
+    session_id = str(plan.get("session_id", "")).strip()
     # Do not inspect or gate on live Mautic/PHP console PIDs here. Their
     # supervisor-owned process identity survives the restart and TaskStore
     # re-adopts the work. Only MCD-owned locks/barriers may defer this path:
@@ -1901,7 +2007,7 @@ def _apply_update_locked(cfg: AgentConfig, plan: dict[str, Any], lock_f) -> tupl
     )
     src_dir = install_dir / "runtime"
     current_installed = installed_agent_version()
-    if _semver(target) <= _semver(current_installed):
+    if target == str(current_installed or "").strip():
         if current_installed != __version__ or _agent_package_sync_needed(current_installed):
             repair_note = ""
             if _agent_package_sync_needed(current_installed):
@@ -2201,6 +2307,15 @@ def maybe_auto_update(cfg: AgentConfig, *, force: bool = False) -> tuple[str | N
             decision["status"] = "update"
             decision["mcd_update_admission_override"] = "stale_mcd_runtime_repair"
             status = "update"
+    # MCC may correctly return ``up_to_date`` for a channel whose published
+    # artifact is numerically older than the runtime.  Channel ownership is
+    # authoritative: an assigned 1.6 artifact must not be skipped merely
+    # because a 1.7 runtime was previously admitted.
+    if status == "up_to_date" and _decision_requires_sync(decision, installed_agent_version()):
+        decision = dict(decision)
+        decision["status"] = "update"
+        decision["channel_sync_required"] = True
+        status = "update"
     retry_after = int(decision.get("retry_after_sec", 0) or 0)
     if retry_after <= 0:
         retry_after = int(cfg.mcd_update_check_interval_sec or 3600)
@@ -2283,7 +2398,7 @@ def maybe_auto_update(cfg: AgentConfig, *, force: bool = False) -> tuple[str | N
     if status in {"update", "update_available"}:
         target = str(decision.get("target", "")).strip()
         current_installed = installed_agent_version()
-        if _semver(target) <= _semver(current_installed):
+        if target == str(current_installed or "").strip():
             if current_installed != __version__ or _agent_package_sync_needed(current_installed):
                 install_dir = Path(str(getattr(cfg, "mcd_install_dir", "/opt/mcd") or "/opt/mcd"))
                 repair_note = ""

@@ -92,3 +92,151 @@ def test_mcc_admission_disabled_still_repairs_stale_mcd_runtime(tmp_path, monkey
     assert applied and applied[0]['status'] == 'update'
     assert applied[0]['mcd_update_admission_override'] == 'stale_mcd_runtime_repair'
     assert states[-1]['last_decision']['reason'] == 'mcc_update_admission_disabled'
+
+
+def test_assigned_older_channel_artifact_is_not_skipped_by_semver(tmp_path, monkeypatch):
+    path = tmp_path / 'mcd.toml'
+    path.write_text(
+        '[profile]\nname="custom"\n[runtime]\n'
+        'mcd_update_policy="approved"\nmcd_auto_update_enabled=true\nbackup_enabled=false\n'
+        '[mcc]\nurl="https://fixture.invalid"\ntoken="synthetic-unit-fixture"\n',
+        encoding='utf-8',
+    )
+    cfg = config.load_config(str(path), allow_recover_from_mcc=False)
+    response = {
+        'status': 'up_to_date',
+        'policy': 'approved',
+        'current': '1.7.14',
+        'target': '1.6.145',
+        'package_url': 'https://fixture.invalid/mcd-agent-1.6.145.tar.gz',
+        'sha256': 'a' * 64,
+    }
+    states = []
+    applied = []
+    monkeypatch.setattr(self_update, '_post_json', lambda *a, **kw: dict(response))
+    monkeypatch.setattr(self_update, '_read_state', lambda cfg: {})
+    monkeypatch.setattr(self_update, '_write_state', lambda cfg, value: states.append(value))
+    monkeypatch.setattr(self_update, '_maybe_run_update_cleanup', lambda *a, **kw: False)
+    monkeypatch.setattr(self_update, 'recover_stale_update_admission_barrier', lambda *a, **kw: {})
+    monkeypatch.setattr(self_update, '_active_mautic_processes', lambda: [])
+    monkeypatch.setattr(self_update, 'installed_agent_version', lambda: '1.7.14')
+    monkeypatch.setattr(self_update, 'scheduler_admission_lock', lambda cfg: nullcontext())
+    monkeypatch.setattr(self_update, 'create_update_admission_barrier', lambda *a, **kw: {})
+    monkeypatch.setattr(self_update, 'remove_update_admission_barrier', lambda *a, **kw: True)
+
+    def apply(_cfg, plan):
+        applied.append(plan)
+        return True, 'updated to 1.6.145'
+
+    monkeypatch.setattr(self_update, 'apply_update', apply)
+    message, retry = self_update.maybe_auto_update(cfg, force=True)
+
+    assert message == 'updated to 1.6.145'
+    assert retry > 0
+    assert applied and applied[0]['status'] == 'update'
+    assert applied[0]['target'] == '1.6.145'
+    assert states[-1]['last_decision']['channel_sync_required'] is True
+
+
+def test_channel_pointer_change_before_apply_replaces_admitted_plan(monkeypatch):
+    cfg = SimpleNamespace(
+        mcc_url='https://fixture.invalid',
+        mcc_token='token',
+        mcd_auto_update_enabled=True,
+    )
+    admitted = {
+        'status': 'update',
+        'target': '1.7.14',
+        'package_url': 'https://fixture.invalid/mcd-agent-1.7.14.tar.gz',
+        'sha256': 'a' * 64,
+        'session_id': 'old-session',
+    }
+    monkeypatch.setattr(
+        self_update,
+        'check_with_mcc',
+        lambda *a, **kw: {
+            'status': 'up_to_date',
+            'policy': 'approved',
+            'target': '1.6.145',
+            'package_url': 'https://fixture.invalid/mcd-agent-1.6.145.tar.gz',
+            'sha256': 'b' * 64,
+        },
+    )
+
+    refreshed, error = self_update._revalidate_channel_plan(cfg, admitted)
+
+    assert refreshed is None
+    assert error is not None
+    assert 'channel artifact changed before apply' in error
+
+
+def test_channel_without_published_sha_fails_closed(monkeypatch):
+    cfg = SimpleNamespace(
+        mcc_url='https://fixture.invalid',
+        mcc_token='token',
+        mcd_auto_update_enabled=True,
+    )
+    monkeypatch.setattr(
+        self_update,
+        'check_with_mcc',
+        lambda *a, **kw: {
+            'status': 'up_to_date',
+            'target': '1.6.145',
+            'package_url': 'https://fixture.invalid/mcd-agent-1.6.145.tar.gz',
+        },
+    )
+
+    refreshed, error = self_update._revalidate_channel_plan(
+        cfg,
+        {
+            'status': 'update',
+            'target': '1.7.14',
+            'package_url': 'https://fixture.invalid/mcd-agent-1.7.14.tar.gz',
+            'sha256': 'a' * 64,
+        },
+    )
+
+    assert refreshed is None
+    assert error == 'MCD update rejected: assigned channel artifact has no sha256'
+
+
+def test_changed_channel_pointer_never_reaches_filesystem_apply(tmp_path, monkeypatch):
+    cfg = SimpleNamespace(
+        state_db_path=str(tmp_path / 'state.db'),
+        mcc_url='https://fixture.invalid',
+        mcc_token='token',
+        mcd_auto_update_enabled=True,
+        backup_enabled=False,
+        mcd_install_dir=str(tmp_path / 'mcd'),
+        config_file_path='',
+    )
+    monkeypatch.setattr(
+        self_update,
+        'check_with_mcc',
+        lambda *a, **kw: {
+            'status': 'up_to_date',
+            'target': '1.6.145',
+            'package_url': 'https://fixture.invalid/mcd-agent-1.6.145.tar.gz',
+            'sha256': 'b' * 64,
+        },
+    )
+    monkeypatch.setattr(self_update, 'installed_agent_version', lambda: '1.7.14')
+    monkeypatch.setattr(
+        self_update,
+        '_ensure_update_archive',
+        lambda *a, **kw: pytest.fail('stale channel plan reached archive/apply'),
+    )
+
+    ok, message = self_update._apply_update_locked(
+        cfg,
+        {
+            'status': 'update',
+            'target': '1.7.14',
+            'package_url': 'https://fixture.invalid/mcd-agent-1.7.14.tar.gz',
+            'sha256': 'a' * 64,
+        },
+        None,
+    )
+
+    assert ok is False
+    assert 'channel artifact changed before apply' in message

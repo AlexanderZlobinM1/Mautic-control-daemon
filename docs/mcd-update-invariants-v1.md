@@ -29,6 +29,23 @@ receipt all agree with both documents.
   listed above. A new blocker may be introduced only as an explicit
   MCD-owned lock/barrier added to this algorithm and its behavioral tests.
 
+## Channel selection and apply-time revalidation
+
+- The assigned channel is authoritative. MCD reads the currently published
+  artifact for that channel and synchronizes that artifact; numeric semver
+  ordering is not a permission to skip a different channel line. A higher
+  installed version therefore does not make an assigned lower/different-line
+  artifact `up_to_date`.
+- Admission and filesystem mutation are separate events. Immediately before
+  install/sync, MCD rereads the channel pointer and artifact SHA. If the
+  pointer or digest changed, the admitted plan is discarded and only the
+  freshly read, SHA-pinned artifact may continue. If the channel no longer
+  resolves to a complete artifact, MCD fails closed without changing the
+  runtime.
+- This is channel synchronization and integrity checking, not a rollback or
+  recovery planner. MCD does not retain host-specific exceptions or invent a
+  target; MCC owns channel assignment and publication.
+
 ## Scheduler result semantics
 
 - `segment_filter_safety` is diagnostic-only. A heuristic such as `today -1`
