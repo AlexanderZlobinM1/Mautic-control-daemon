@@ -1,3 +1,15 @@
+## 1.6.145 - 2026-11-25
+
+- Exclude a vanished host root or console from every scheduler lane without
+  terminating the daemon or consuming its durable ring item. A complete
+  inventory rescan now preserves only manual instances that still have a real
+  root and console, allowing the authoritative MCD snapshot to prune the stale
+  host-cache row in MCC without deleting instance data.
+- Interpret an explicit MCC `null` for a required typed runtime field as the
+  clear/inherit sentinel. The newer LWW tombstone removes a legacy empty local
+  override and falls back to the profile/default value instead of repeatedly
+  warning about or rematerializing `key = ""`.
+
 ## 1.6.144 - 2026-11-24
 
 - Replace three retained thread-per-root control families with four bounded

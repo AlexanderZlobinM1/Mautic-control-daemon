@@ -135,7 +135,16 @@ def test_native_rescan_uses_current_local_config_and_preserves_manual_instances(
     monkeypatch.setattr("mcd_agent.daemon.load_config", load)
     monkeypatch.setattr("mcd_agent.daemon.default_scenario_runner_argv", lambda: [sys.executable])
     native = InstanceInventory(config.state_db_path)
-    manual = MauticInstall("manual", "manual", str(tmp_path / "manual"), "/manual/bin/console", source="manual")
+    manual_root = tmp_path / "manual"
+    (manual_root / "bin").mkdir(parents=True)
+    (manual_root / "bin" / "console").write_text("#!/usr/bin/env php\n", encoding="utf-8")
+    manual = MauticInstall(
+        "manual",
+        "manual",
+        str(manual_root),
+        str(manual_root / "bin" / "console"),
+        source="manual",
+    )
     discovered = MauticInstall("new", "new", str(tmp_path / "current-root"), "/new/bin/console", mautic_major=7)
     native._upsert_install(manual)
     native.conn.commit()
