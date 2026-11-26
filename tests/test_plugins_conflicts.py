@@ -882,6 +882,27 @@ class PluginConflictPathTests(unittest.TestCase):
         prealign.assert_called_once_with(install, selected)
         post_steps.assert_called_once_with(cfg, install, expected_bundles={"DemoBundle"})
 
+    def test_post_install_rebuilds_container_after_native_reload(self) -> None:
+        cfg = SimpleNamespace(plugins_post_cache_clear=True, plugins_post_install=True)
+        install = SimpleNamespace(root="/var/www/ss/public_html", db=None)
+        events: list[str] = []
+
+        with patch(
+            "mcd_agent.plugins._run_plugin_cache_clear",
+            side_effect=lambda *_args, **_kwargs: events.append("cache-clear"),
+        ), patch(
+            "mcd_agent.plugins._run_plugin_install_reload",
+            side_effect=lambda *_args, **_kwargs: events.append("plugin-install"),
+        ), patch(
+            "mcd_agent.plugins._run_plugin_cache_warmup",
+            return_value={"schema": "mcd-plugin-container-bootstrap-v1", "status": "verified"},
+        ) as warmup, patch("mcd_agent.plugins._assert_plugin_bundles_registered"):
+            evidence = _run_post_steps(cfg, install, expected_bundles={"AuthGuardBundle"})
+
+        self.assertEqual(events, ["cache-clear", "plugin-install", "cache-clear"])
+        warmup.assert_called_once_with(cfg, install)
+        self.assertTrue(evidence["container_bootstrap_verified"])
+
     def test_update_action_repairs_broken_plugin_registration(self) -> None:
         cfg = SimpleNamespace(
             plugins_post_cache_clear=True,
@@ -985,7 +1006,7 @@ class PluginConflictPathTests(unittest.TestCase):
             ), patch("mcd_agent.plugins._cleanup_conflicting_plugin_rows"), patch(
                 "mcd_agent.plugins._set_owner_group"
             ), patch("mcd_agent.plugins._run_plugin_template", side_effect=post_step):
-                with self.assertRaisesRegex(RuntimeError, "cache:warmup failed"):
+                with self.assertRaisesRegex(RuntimeError, "plugin container bootstrap verification failed"):
                     _apply_plugin_file_changes(
                         config=cfg,
                         install=install,
@@ -1329,7 +1350,7 @@ class PluginConflictPathTests(unittest.TestCase):
 
         self.assertEqual(rc, 0)
         wait_sync.assert_called_once()
-        cache_clear.assert_called_once()
+        self.assertEqual(cache_clear.call_count, 2)
         plugin_reload.assert_called_once_with(cfg, install, expected_bundles={"DemoBundle"})
         cache_warmup.assert_called_once_with(cfg, install)
         confirm_inventory.assert_called_once()
@@ -1399,26 +1420,24 @@ class PluginConflictPathTests(unittest.TestCase):
                     nonlocal boots
                     self.assertFalse(stale.exists())
                     self.assertEqual(cache_path.stat().st_mode & 0o777, 0o775)
-                    if template == "cache:clear":
-                        return 0, "cache cleared"
                     if template == "cache:warmup":
                         return 0, "cache warmed"
                     boots += 1
                     generated = cache_path / f"ContainerFresh{boots}.php"
                     generated.write_text("<?php // clean generated cache\n", encoding="utf-8")
-                    return 0, "plugins reloaded"
+                    return 0, "cache cleared" if template == "cache:clear" else "plugins reloaded"
 
                 with patch("mcd_agent.plugins._set_owner_group"), patch(
                     "mcd_agent.plugins._run_plugin_template", side_effect=console_boot
                 ):
                     _run_post_steps(cfg, install, expected_bundles=set())
-                    first_generation = cache_path / "ContainerFresh1.php"
+                    first_generation = cache_path / "ContainerFresh3.php"
                     self.assertTrue(first_generation.exists())
                     _run_post_steps(cfg, install, expected_bundles={"QueuedBundle"})
 
                 self.assertFalse(first_generation.exists())
-                self.assertTrue((cache_path / "ContainerFresh2.php").exists())
-                self.assertEqual(boots, 2)
+                self.assertTrue((cache_path / "ContainerFresh6.php").exists())
+                self.assertEqual(boots, 6)
 
     def test_failed_cache_clear_does_not_restore_stale_compiled_container(self) -> None:
         with TemporaryDirectory() as tmp:

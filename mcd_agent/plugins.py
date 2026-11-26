@@ -67,6 +67,7 @@ _PLUGIN_SYNC_IGNORED_NAMES = {".DS_Store", "__MACOSX", ".stfolder", ".stversions
 _PLUGIN_SYNC_IGNORED_RE = re.compile(r"(sync-conflict|\.sync-conflict|\.syncthing\..*\.tmp$|\.tmp$|\.part$)", re.IGNORECASE)
 _MAUTIC7_PLUGIN_RUNTIME_PACKAGES = {"nikic/php-parser:^5.0"}
 _PLUGIN_CACHE_RESET_SCHEMA = "mcd-plugin-cache-reset-v1"
+_PLUGIN_CONTAINER_BOOTSTRAP_SCHEMA = "mcd-plugin-container-bootstrap-v1"
 _PLUGIN_APPLY_RESULT_SCHEMA = "mcd-plugin-apply-result-v1"
 _PLUGIN_OPERATION_RESULT_SCHEMA = "mcd-plugin-operation-result-v2"
 _PLUGIN_OPERATION_RESULT_PREFIX = "MCD_PLUGIN_OPERATION_RESULT="
@@ -1688,6 +1689,7 @@ def _emit_plugin_apply_result(
     cache_inventory_confirmed: bool,
     overall_status: str,
     rc: int | None,
+    container_bootstrap_verified: bool = False,
     inventory: list[dict[str, Any]] | None = None,
     inventory_sync: dict[str, Any] | None = None,
     error: str = "",
@@ -1705,6 +1707,7 @@ def _emit_plugin_apply_result(
         "files_applied": files_applied,
         "post_step_status": post_step_status,
         "cache_inventory_confirmed": cache_inventory_confirmed,
+        "container_bootstrap_verified": bool(container_bootstrap_verified),
         "overall_status": overall_status,
         "rc": rc,
         "inventory": list(inventory or []),
@@ -1844,10 +1847,16 @@ def _run_plugin_cache_clear(config: AgentConfig, install) -> None:
         raise RuntimeError(f"cache:clear failed: {out}")
 
 
-def _run_plugin_cache_warmup(config: AgentConfig, install) -> None:
+def _run_plugin_cache_warmup(config: AgentConfig, install) -> dict[str, Any]:
     rc, out = _run_plugin_template(config, install, "cache:warmup")
     if rc != 0:
-        raise RuntimeError(f"cache:warmup failed: {out}")
+        raise RuntimeError(f"plugin container bootstrap verification failed: {out}")
+    return {
+        "schema": _PLUGIN_CONTAINER_BOOTSTRAP_SCHEMA,
+        "status": "verified",
+        "command": "cache:warmup",
+        "output_sha256": hashlib.sha256(str(out or "").encode("utf-8")).hexdigest(),
+    }
 
 
 def _run_plugin_install_reload(config: AgentConfig, install, expected_bundles: set[str] | None = None) -> None:
@@ -1876,7 +1885,7 @@ def _run_plugin_install_reload(config: AgentConfig, install, expected_bundles: s
     raise RuntimeError("mautic:plugin:install failed: " + str(out))
 
 
-def _run_post_steps(config: AgentConfig, install, expected_bundles: set[str] | None = None) -> None:
+def _run_post_steps(config: AgentConfig, install, expected_bundles: set[str] | None = None) -> dict[str, Any]:
     if config.plugins_post_cache_clear:
         _run_plugin_cache_clear(config, install)
     else:
@@ -1885,8 +1894,14 @@ def _run_post_steps(config: AgentConfig, install, expected_bundles: set[str] | N
         _run_plugin_install_reload(config, install, expected_bundles=expected_bundles)
         _assert_plugin_bundles_registered(install, set(expected_bundles or set()))
         if install.db and plugin_registration.restore(MauticDB(install.db), set(expected_bundles or set()), allow_schema_creation=not bool(getattr(config, "cluster_id", None))):
-            _run_plugin_cache_clear(config, install)
-    _run_plugin_cache_warmup(config, install)
+            logging.info("[%s] restored plugin registration rows after native reload", install.root)
+        # The bundle and its constructor graph changed.  Rebuild the generated
+        # Symfony container after native registration even when registration
+        # rows were already present; otherwise a stale AppKernel container can
+        # still call an updated plugin constructor with the old argument list.
+        _run_plugin_cache_clear(config, install)
+    bootstrap = _run_plugin_cache_warmup(config, install)
+    return {"container_bootstrap_verified": bool(bootstrap.get("status") == "verified"), "bootstrap": bootstrap}
 
 
 def _run_manifest_sql_fixes(config: AgentConfig, install, selected_rows: list[dict[str, Any]]) -> None:
@@ -2335,7 +2350,7 @@ def _apply_plugin_file_changes_impl(
                         if isinstance(row.get("item"), dict)
                     }
                 )
-                _run_post_steps(config, install, expected_bundles=expected_bundles)
+                post_evidence = _run_post_steps(config, install, expected_bundles=expected_bundles)
                 inventory = _confirm_plugin_apply_inventory(
                     config=config,
                     install_root=install_root,
@@ -2357,6 +2372,7 @@ def _apply_plugin_file_changes_impl(
                     files_applied=True,
                     post_step_status="success",
                     cache_inventory_confirmed=True,
+                    container_bootstrap_verified=bool(post_evidence.get("container_bootstrap_verified")),
                     overall_status="success",
                     rc=0,
                     inventory=inventory,
@@ -2372,7 +2388,7 @@ def _apply_plugin_file_changes_impl(
                     if isinstance(row.get("item"), dict)
                 }
             )
-            _run_post_steps(config, install, expected_bundles=expected_bundles)
+            post_evidence = _run_post_steps(config, install, expected_bundles=expected_bundles)
             inventory = _confirm_plugin_apply_inventory(
                 config=config,
                 install_root=install_root,
@@ -2394,6 +2410,7 @@ def _apply_plugin_file_changes_impl(
                 files_applied=False,
                 post_step_status="success",
                 cache_inventory_confirmed=True,
+                container_bootstrap_verified=bool(post_evidence.get("container_bootstrap_verified")),
                 overall_status="success",
                 rc=0,
                 inventory=inventory,
@@ -3127,6 +3144,7 @@ def _run_cluster_plugin_operation(
                 expected_hosts=expected_hosts,
                 reference_host=reference_host,
             )
+        container_bootstrap_verified = False
         if config.plugins_post_install:
             _cluster_plugin_set_phase(
                 config,
@@ -3140,10 +3158,15 @@ def _run_cluster_plugin_operation(
             expected = set() if action in {"remove", "purge"} else set(_selected_install_bundles(selected))
             _run_plugin_install_reload(config, install, expected_bundles=expected)
             if install.db and plugin_registration.restore(MauticDB(install.db), expected, allow_schema_creation=False):
-                _cluster_plugin_cache_clear_all(config=config, install=install, key=key,
-                    request_hash=request_hash, expected_hosts=expected_hosts, reference_host=reference_host)
+                logging.info("[%s] restored plugin registration rows after native reload", install.root)
+            # Rebuild every cluster node after the bundle/constructor graph has
+            # changed.  Registration rows may already have been present, so
+            # restore() alone is not a valid signal for cache invalidation.
+            _cluster_plugin_cache_clear_all(config=config, install=install, key=key,
+                request_hash=request_hash, expected_hosts=expected_hosts, reference_host=reference_host)
         if config.plugins_post_cache_clear or config.plugins_post_install:
-            _run_plugin_cache_warmup(config, install)
+            bootstrap = _run_plugin_cache_warmup(config, install)
+            container_bootstrap_verified = bool(bootstrap.get("status") == "verified")
         inventory = _confirm_plugin_apply_inventory(
             config=config,
             install_root=install_root,
@@ -3165,6 +3188,7 @@ def _run_cluster_plugin_operation(
             files_applied=changed,
             post_step_status="success",
             cache_inventory_confirmed=True,
+            container_bootstrap_verified=container_bootstrap_verified,
             overall_status="success",
             rc=0,
             inventory=inventory,
@@ -3741,6 +3765,11 @@ def _plugin_operation_terminal_payload(
         "rc": int(rc),
         "selected": list(selected) if isinstance(selected, list) else [],
         "inventory": list(inventory) if isinstance(inventory, list) else [],
+        "container_bootstrap_verified": (
+            bool(terminal_payload.get("container_bootstrap_verified"))
+            if "container_bootstrap_verified" in terminal_payload
+            else None
+        ),
         "error_code": str(error_code or ""),
         "error": str(error or terminal_payload.get("error") or ""),
         "mcd_version": __version__,
