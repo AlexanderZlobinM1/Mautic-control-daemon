@@ -156,7 +156,9 @@ from mcd_agent.runtime_overrides import (
 from mcd_agent.runtime_sync_v3 import (
     STATE_KEY as _RUNTIME_SYNC_V3_KEY,
     conflict_active as _runtime_sync_v3_conflict_active,
+    conflict_safe_metadata as _runtime_sync_v3_conflict_safe_metadata,
     conflict_safe_runtime as _runtime_sync_v3_conflict_safe_runtime,
+    conflict_safe_runtime_from_central as _runtime_sync_v3_conflict_safe_runtime_from_central,
     desired_runtime_from_response as _runtime_sync_v3_desired_runtime,
     intent_id as _runtime_sync_v3_intent_id,
     resolution_seen as _runtime_sync_v3_resolution_seen,
@@ -22292,6 +22294,7 @@ def run_loop(
 
         runtime_poll_enabled = bool(getattr(config, "mcc_runtime_overrides_poll_enabled", False))
         should_runtime_poll = runtime_poll_enabled and now >= next_runtime_overrides_poll_at
+        v3_conflict_hold = False
         v3_conflict_active = _runtime_sync_v3_conflict_active(_runtime_sync_v3_state(store))
         if config.mcc_url and config.mcc_token and not local_runtime_push_pending and not v3_conflict_active:
             # Re-sample immediately before the remote fetch. A file edit can
@@ -22313,8 +22316,10 @@ def run_loop(
             poll_interval = max(15, min(300, int(config.mcc_push_interval_sec or config.poll_interval_sec or 60)))
             v3_state = _runtime_sync_v3_state(store)
             if _runtime_sync_v3_conflict_active(v3_state) and not _runtime_sync_v3_resolution_seen(v3_state, ro):
-                status = "v3_conflict_hold"
-                logging.warning("runtime-sync-v3 conflict remains unresolved; holding ambiguous runtime keys")
+                v3_conflict_hold = True
+                logging.warning(
+                    "runtime-sync-v3 conflict remains unresolved; projecting non-ambiguous runtime keys and holding the conflict set"
+                )
             elif _runtime_sync_v3_conflict_active(v3_state):
                 _runtime_sync_v3_mark(store, {"schema": "mcd-runtime-sync-v3-state-v1", "status": "resolved", "resolved_revision": ro.get("desired_state", {}).get("revision") if isinstance(ro.get("desired_state"), Mapping) else None})
             if status == "ok" and not local_runtime_push_pending:
@@ -22369,6 +22374,13 @@ def run_loop(
                     )
                     remote_runtime = _drop_invalid_required_remote_runtime_values(remote_runtime)
                     current_local_runtime = local_runtime_overrides(config)
+                    conflict = v3_state.get("conflict") if isinstance(v3_state.get("conflict"), Mapping) else {}
+                    if v3_conflict_hold:
+                        remote_runtime = _runtime_sync_v3_conflict_safe_runtime_from_central(
+                            conflict,
+                            remote_runtime,
+                            current_local_runtime,
+                        )
                     local_runtime_was_reset = _runtime_snapshot_loss_detected(
                         current_local_runtime,
                         remote_runtime,
@@ -22383,6 +22395,11 @@ def run_loop(
                         remote_runtime,
                         current_local_runtime,
                     )
+                    if v3_conflict_hold:
+                        remote_metadata = _runtime_sync_v3_conflict_safe_metadata(
+                            conflict,
+                            remote_metadata,
+                        )
                     resolution = _resolve_runtime_snapshots(
                         current_local_runtime,
                         remote_runtime,
@@ -22610,7 +22627,7 @@ def run_loop(
                             "unsupported_keys": unsupported_keys,
                         },
                     )
-                if not local_runtime_push_pending:
+                if not local_runtime_push_pending and not v3_conflict_hold:
                     # ACK the complete MCC-requested host map, including
                     # operator-owned structured keys. Chunking bounds the
                     # transport; projecting to desired_state.runtime_overrides

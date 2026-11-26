@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from copy import deepcopy
 from typing import Any, Mapping
 
 SCHEMA = "mcc-desired-runtime-sync-v3"
@@ -151,6 +152,68 @@ def conflict_safe_runtime(conflict: Mapping[str, Any], local_runtime: Mapping[st
                 result[key] = local_runtime[key]
             else:
                 result.pop(key, None)
+    return result
+
+
+def conflict_keys(conflict: Mapping[str, Any]) -> set[str]:
+    """Return the top-level runtime keys whose values are ambiguous."""
+    keys: set[str] = set()
+    raw_conflicts = conflict.get("conflicts")
+    if not isinstance(raw_conflicts, list):
+        return keys
+    for item in raw_conflicts:
+        if not isinstance(item, Mapping):
+            continue
+        raw_keys = item.get("keys")
+        if not isinstance(raw_keys, list):
+            continue
+        keys.update(str(key).strip() for key in raw_keys if str(key).strip())
+    return keys
+
+
+def conflict_safe_runtime_from_central(
+    conflict: Mapping[str, Any],
+    central_runtime: Mapping[str, Any],
+    local_runtime: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Project a fresh central snapshot while holding only conflict keys.
+
+    A v3 conflict is not a reason to freeze unrelated runtime fields.  The
+    caller supplies the latest central snapshot; only fields named by the
+    durable conflict are replaced with their local values (or omitted when
+    the local side has no value).  The conflict state itself remains active
+    until MCC returns an explicit operator-resolution snapshot.
+    """
+    result = deepcopy(dict(central_runtime))
+    for key in conflict_keys(conflict):
+        if key in local_runtime:
+            result[key] = deepcopy(local_runtime[key])
+        else:
+            result.pop(key, None)
+    return result
+
+
+def conflict_safe_metadata(
+    conflict: Mapping[str, Any],
+    remote_metadata: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Remove central stamps for held keys so LWW cannot re-apply them."""
+    result = deepcopy(dict(remote_metadata))
+    held = conflict_keys(conflict)
+    if not held:
+        return result
+    host = result.get("host")
+    if isinstance(host, Mapping):
+        result["host"] = {key: value for key, value in host.items() if str(key) not in held}
+    instances = result.get("instances")
+    if isinstance(instances, Mapping):
+        result["instances"] = {
+            str(uid): {
+                key: value for key, value in fields.items() if str(key) not in held
+            }
+            for uid, fields in instances.items()
+            if isinstance(fields, Mapping)
+        }
     return result
 
 

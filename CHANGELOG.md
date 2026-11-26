@@ -1,3 +1,10 @@
+## 1.7.18 - 2026-11-26
+
+- Keep runtime-sync-v3 conflicts scoped to their ambiguous keys: apply and
+  observe unrelated runtime settings while retaining the durable conflict
+  until an explicit operator resolution, so unrelated plugin operations do not
+  remain queued behind it.
+
 ## 1.7.17 - 2026-11-25
 
 - Restore the standard plugin filesystem/cache release defaults when an older

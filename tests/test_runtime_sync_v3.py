@@ -7,7 +7,9 @@ from pathlib import Path
 from mcd_agent import daemon
 from mcd_agent.runtime_overrides import push_runtime_sync_v3
 from mcd_agent.runtime_sync_v3 import (
+    conflict_safe_metadata,
     conflict_safe_runtime,
+    conflict_safe_runtime_from_central,
     intent_id,
     runtime_changes,
     three_way_merge,
@@ -137,3 +139,45 @@ def test_daemon_v3_conflict_is_durable_and_does_not_choose_a_winner(monkeypatch)
     assert result["handled"] is True
     assert result["status"] == "conflict"
     assert store.get_runtime_sync("mcc_runtime_sync_v3")["status"] == "conflict"
+
+
+def test_conflict_holds_only_ambiguous_keys_while_central_progress_continues():
+    conflict = {
+        "conflicts": [{"group_id": "workers", "keys": ["jobs_max_workers"]}],
+    }
+    local = {
+        "jobs_max_workers": 3,
+        "plugin_operations": {"scops:giganewsletter": {"enabled": True}},
+    }
+    central = {
+        "jobs_max_workers": 9,
+        "plugin_operations": {"scops:giganewsletter": {"enabled": True, "interval_sec": 60}},
+    }
+
+    projected = conflict_safe_runtime_from_central(conflict, central, local)
+
+    assert projected["jobs_max_workers"] == 3
+    assert projected["plugin_operations"] == central["plugin_operations"]
+
+
+def test_conflict_metadata_cannot_reapply_held_keys():
+    conflict = {"conflicts": [{"keys": ["jobs_max_workers", "plugin_operation_instance_settings"]}]}
+    metadata = {
+        "host": {
+            "jobs_max_workers": {"source": "mcc"},
+            "scheduler_host_max_parallel": {"source": "mcc"},
+        },
+        "instances": {
+            "instance-a": {
+                "plugin_operation_instance_settings": {"source": "mcc"},
+                "segment_priority_instance_settings": {"source": "mcc"},
+            }
+        },
+    }
+
+    safe = conflict_safe_metadata(conflict, metadata)
+
+    assert "jobs_max_workers" not in safe["host"]
+    assert "scheduler_host_max_parallel" in safe["host"]
+    assert "plugin_operation_instance_settings" not in safe["instances"]["instance-a"]
+    assert "segment_priority_instance_settings" in safe["instances"]["instance-a"]
