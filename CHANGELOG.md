@@ -1,3 +1,10 @@
+## 1.6.147 - 2026-11-26
+
+- Detect stale external Mautic console tasks in kernel `D` state only after
+  unchanged independent progress and verified PID/start-time/PGID/SID identity;
+  terminate only the exact process group, reconcile its scheduler claim, and
+  expose the typed stale reason in scheduler status.
+
 ## 1.6.146 - 2026-11-26
 
 - Keep runtime-sync-v3 conflicts scoped to their ambiguous keys: apply and
