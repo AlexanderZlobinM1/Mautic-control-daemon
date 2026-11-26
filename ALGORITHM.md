@@ -1546,6 +1546,20 @@ root/task admission.
 Для dependency closure live owner marker распространяется на все его covered
 members: member не release-ится и не запускает duplicate, пока owner PID и
 его start identity живы.
+Последовательный batch dependency-closure может быть одной scheduler-задачей,
+но его shell-parent не является доказательством здоровья каждого дочернего
+Mautic command. Пока parent жив, MCD отдельно обнаруживает текущий descendant
+`bin/console` по process tree, root, command и entity ID и ведёт для него
+собственные PID/start-time/PGID/SID и CPU/IO/DB progress evidence. Дочерний
+процесс не получает отдельный scheduler slot или TaskStore claim: это
+наблюдаемая часть уже занятого batch. Долгая команда с независимым progress
+остаётся до завершения, даже если работает часами. Если именно child проходит
+полный stall/D-state grace без progress, MCD пишет отдельный stale receipt и
+сигналит только подтверждённый PID child; общий process group не используется,
+поскольку в нём находится живой shell-parent. Parent остаётся под наблюдением,
+а его обычный `set -e`/terminal outcome доводит batch до конца или фиксирует
+ошибку. При смене child на следующий command старое child-observation state
+удаляется, parent claim и queue order сохраняются.
 Ложный `cron_disallowed` при разрешённом route не допускается: receipt
 различает `cron_disallowed`, `cycle_claim_or_terminal_reconcile` и
 `no_projected_pending`. Это root-local reconciliation и не становится
@@ -1700,6 +1714,7 @@ cycle без ручного `segments:update`, profile/capacity/data changes. Ad
 | host/instance slots и rotation | `mcd_agent/daemon.py` | `tests/test_campaign_ring_dispatch.py` |
 | external Mautic logical-task dedupe by root/type/entity and regular-slot reservation | `mcd_agent/daemon.py:list_external_runtime_task_summaries`, `_effective_segment_priority_slot_limit`, ordinary segment dispatch | `tests/test_external_task_admission.py`, `tests/test_segment_liveness.py` |
 | external console D-state watchdog, PID start-time/PGID/SID fencing and auditable stale reason | `mcd_agent/daemon.py:_pid_process_identity`, `_external_task_identity_evidence`, `_terminate_external_task_group`, `_external_d_state_watchdog` | `tests/test_external_task_admission.py` |
+| sequential batch child progress is observed independently from its live parent and stale child termination is PID-scoped | `mcd_agent/daemon.py:list_batch_child_runtime_task_summaries`, `_monitor_sequential_batch_children` | `tests/test_external_task_admission.py` |
 | normal hard caps, manual per-instance N+1 и dedicated super budget не смешиваются | `mcd_agent/daemon.py:_scheduler_host_slots_available`, `_scheduler_instance_slots_available`, `_submit_if_slot_uncoordinated` | `tests/test_campaign_ring_dispatch.py` hard-cap/3+ root rows; `tests/test_segment_admission.py` cap-4 и `11+3→14→...→10→11` receipts |
 | важный root с заполненной capacity не ставит global remaining barrier | `mcd_agent/daemon.py:_scheduler_segment_entity_allowed`, `_scheduler_important_root_dispatchable` | `test_remaining_root_uses_free_host_slot_when_important_root_is_instance_full` |
 | root-local continuous monitor/refill, live durable occupancy, eligibility-aware terminal hand-off/rotation and shared claim lifecycle | `mcd_agent/daemon.py:_iter_instances_with_root_dispatch_gate`, `_SchedulerRuntimeRegistry`, `_scheduler_store_running_rows`, `_scheduler_live_task_capacity_keys`, `_scheduler_notify_refill_priority`, `_ordinary_persisted_refill_worker` (`_refill_priority_root_ready`) | `tests/test_segment_liveness.py`; `tests/test_dispatcher_production_sandbox.py` full `run_loop` paths with unavailable static graph, dead TaskStore rows and terminal-root hand-off |
