@@ -1,3 +1,10 @@
+## 1.7.23 - 2026-11-26
+
+- Rebuild the Mautic/Symfony production container after every successful
+  plugin install or update, then verify the generated container bootstrap
+  before emitting a terminal success receipt. This prevents stale constructor
+  wiring after plugin replacement.
+
 ## 1.7.22 - 2026-11-26
 
 - Track the active Mautic child inside sequential segment batches independently
