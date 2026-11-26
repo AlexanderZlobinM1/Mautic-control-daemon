@@ -522,6 +522,7 @@ class AgentConfig:
     task_retry_max: int
     task_retry_delay_sec: int
     worker_watchdog_sec: int
+    external_task_stale_after_sec: int
     worker_stuck_policy: str
     worker_stuck_restart_limit: int
     jobs_max_workers: int
@@ -902,6 +903,7 @@ class AgentConfig:
 PROFILE_MANAGED_RUNTIME_KEYS = (
     "command_timeout_sec",
     "worker_watchdog_sec",
+    "external_task_stale_after_sec",
     "ring_mode",
     "disable_throttle",
     "disable_whitelist",
@@ -2383,6 +2385,7 @@ _RUNTIME_TO_ATTR: dict[str, str] = {
     "task_retry_delay_sec": "task_retry_delay_sec",
     "segment_retry_count": "segment_retry_count",
     "worker_watchdog_sec": "worker_watchdog_sec",
+    "external_task_stale_after_sec": "external_task_stale_after_sec",
     "worker_stuck_policy": "worker_stuck_policy",
     "worker_stuck_restart_limit": "worker_stuck_restart_limit",
     "jobs_max_workers": "jobs_max_workers",
@@ -3230,6 +3233,10 @@ def _load_config_inner(path: str) -> AgentConfig:
         task_retry_delay_sec=int(runtime.get("task_retry_delay_sec", 2)),
         segment_retry_count=max(0, int(runtime.get("segment_retry_count", 2) or 0)),
         worker_watchdog_sec=int(runtime.get("worker_watchdog_sec", 0)),
+        external_task_stale_after_sec=max(
+            30,
+            int(runtime.get("external_task_stale_after_sec", 900) or 900),
+        ),
         worker_stuck_policy=str(runtime.get("worker_stuck_policy", "skip")),
         worker_stuck_restart_limit=int(runtime.get("worker_stuck_restart_limit", 1)),
         jobs_max_workers=int(runtime.get("jobs_max_workers", 2)),
