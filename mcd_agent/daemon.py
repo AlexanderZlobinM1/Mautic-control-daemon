@@ -871,6 +871,16 @@ def _runtime_sync_v3_groups(config: AgentConfig, store: object) -> list[dict[str
     return [dict(item) for item in raw if isinstance(item, Mapping)] if isinstance(raw, list) else []
 
 
+def _runtime_sync_v3_scope_key(config: AgentConfig, store: object) -> str:
+    """Use MCC's canonical host identity for every runtime write/read."""
+    desired = store.get_runtime_sync("mcc_runtime_desired_state")
+    if isinstance(desired, Mapping):
+        scope_key = str(desired.get("scope_key") or "").strip()
+        if scope_key:
+            return scope_key
+    return str(getattr(config, "mcc_host_name", "") or "").strip()
+
+
 def _runtime_sync_v3_base(store: object) -> tuple[int | None, dict[str, Any]]:
     state = _runtime_sync_v3_state(store)
     base = state.get("base")
@@ -915,6 +925,7 @@ def _runtime_sync_v3_attempt(
     if base_revision is None:
         return {"handled": False, "reason": "runtime_sync_v3_base_unavailable"}
     groups = _runtime_sync_v3_groups(config, store)
+    scope_key = _runtime_sync_v3_scope_key(config, store)
     changes = _runtime_sync_v3_changes(base, current_runtime, allowed_keys=runtime_remote_allowed_keys())
     if not changes:
         return {"handled": False, "reason": "runtime_sync_v3_no_changes"}
@@ -935,7 +946,7 @@ def _runtime_sync_v3_attempt(
     key = str(state.get("idempotency_key") or "")
     if not key or str(state.get("current_digest") or "") != current_digest:
         key = _runtime_sync_v3_intent_id(
-            scope_key=str(getattr(config, "mcc_host_name", "") or ""),
+            scope_key=scope_key,
             base_revision=base_revision,
             base=base,
             changes=changes,
@@ -948,6 +959,7 @@ def _runtime_sync_v3_attempt(
         changes=changes,
         idempotency_key=key,
         semantic_conflict_groups=groups,
+        scope_key=scope_key,
     )
     supported = response.get("v3_supported")
     next_state: dict[str, Any] = {
@@ -2786,7 +2798,11 @@ def _bootstrap_remote_runtime_before_local_baseline(
     """Read canonical MCC state before startup can mistake a missing file row for deletion."""
     if not config.mcc_url or not config.mcc_token:
         return "disabled"
-    response = fetch_runtime_overrides(config, instance_uids=instance_uids)
+    response = fetch_runtime_overrides(
+        config,
+        instance_uids=instance_uids,
+        host_scope_key=_runtime_sync_v3_scope_key(config, store),
+    )
     status = str(response.get("status", "")).strip().lower()
     if status != "ok":
         return status or "error"
@@ -2956,6 +2972,92 @@ def _rebase_local_runtime_payload(
     return rebased
 
 
+def _runtime_delta_payload(
+    previous_local_runtime: Mapping[str, Any],
+    current_local_runtime: Mapping[str, Any],
+    installs: list[object],
+    runtime_metadata: Mapping[str, Any] | None,
+    canonical_uids: object = None,
+) -> tuple[dict[str, Any], dict[str, dict[str, Any]], dict[str, Any]]:
+    """Build a durable sparse host/instance delta for the MCC merge path.
+
+    Runtime snapshots remain useful as local baselines and recovery material,
+    but a normal edit must not transmit or replace the whole host snapshot.
+    The wire payload contains only changed cells; explicit removals are carried
+    by address-specific metadata tombstones.  Instance rows are canonicalized
+    through the installed UID list before transport.
+    """
+    previous = dict(previous_local_runtime)
+    current = dict(current_local_runtime)
+    metadata = _runtime_metadata_normalize(runtime_metadata)
+    delta_metadata = _runtime_metadata_empty()
+    delta_metadata["clock"] = metadata.get("clock", 0)
+    host_delta: dict[str, Any] = {}
+    instance_delta: dict[str, dict[str, Any]] = {}
+    for scope, key, uid in sorted(
+        set(_runtime_snapshot_fields(previous)) | set(_runtime_snapshot_fields(current))
+    ):
+        if scope != "host":
+            continue
+        before_present = key in previous
+        after_present = key in current
+        if before_present and after_present and previous.get(key) == current.get(key):
+            continue
+        stamp = _runtime_metadata_get(metadata, "host", key) or _runtime_metadata_stamp(
+            source="mcd", event_id=f"delta:host:{key}",
+        )
+        if after_present:
+            host_delta[key] = deepcopy(current[key])
+            _runtime_metadata_set(delta_metadata, "host", key, stamp)
+        else:
+            delta_metadata.setdefault("tombstones", []).append({
+                "scope": "host", "key": key, "uid": "", **dict(stamp), "tombstone": True,
+            })
+
+    previous_rows, current_rows = _local_instance_runtime_rows(
+        previous, current, installs,
+    )
+    available_uids = {
+        str(uid or "").strip()
+        for uid in (canonical_uids if isinstance(canonical_uids, (list, tuple, set, dict)) else [])
+        if str(uid or "").strip()
+    }
+    used_uids: set[str] = set()
+
+    def transport_uid(uid: str) -> str:
+        if not available_uids or uid in available_uids:
+            used_uids.add(uid)
+            return uid
+        base_uid = uid.split("@", 1)[0]
+        matches = [
+            candidate for candidate in available_uids
+            if candidate not in used_uids and candidate.split("@", 1)[0] == base_uid
+        ]
+        selected = matches[0] if len(matches) == 1 else uid
+        used_uids.add(selected)
+        return selected
+
+    for uid in sorted(set(previous_rows) | set(current_rows)):
+        wire_uid = transport_uid(uid)
+        before_row = previous_rows.get(uid, {})
+        after_row = current_rows.get(uid, {})
+        for key in sorted(set(before_row) | set(after_row)):
+            if key in before_row and key in after_row and before_row[key] == after_row[key]:
+                continue
+            stamp = _runtime_metadata_get(metadata, "instance", key, uid) or _runtime_metadata_stamp(
+                source="mcd", event_id=f"delta:instance:{uid}:{key}",
+            )
+            if key in after_row:
+                instance_delta.setdefault(wire_uid, {})[key] = deepcopy(after_row[key])
+                _runtime_metadata_set(delta_metadata, "instance", key, stamp, wire_uid)
+            else:
+                delta_metadata.setdefault("tombstones", []).append({
+                    "scope": "instance", "key": key, "uid": wire_uid,
+                    **dict(stamp), "tombstone": True,
+                })
+    return host_delta, instance_delta, delta_metadata
+
+
 def _normalize_instance_runtime_row(value: object) -> dict[str, Any]:
     """Normalize one desired-state row to the lane-key wire shape."""
     if not isinstance(value, dict):
@@ -3118,8 +3220,17 @@ def _retry_local_runtime_push_after_conflict(
     installs: list[object],
     runtime_metadata: Mapping[str, Any] | None = None,
     instance_revisions: Mapping[str, Any] | None = None,
+    host_scope_key: str | None = None,
 ) -> dict[str, Any]:
     """Fetch current MCC state and retry the local delta on its new revision."""
+    initial_delta, initial_instances, initial_metadata = _runtime_delta_payload(
+        previous_local_runtime,
+        current_local_runtime,
+        installs,
+        runtime_metadata,
+    )
+    if not initial_delta and not initial_instances and not initial_metadata.get("tombstones"):
+        return {"status": "noop", "reason": "runtime_delta_empty"}
     instance_uids = sorted(
         {
             str(getattr(inst, "instance_uid", "") or "").strip()
@@ -3127,7 +3238,10 @@ def _retry_local_runtime_push_after_conflict(
             if str(getattr(inst, "instance_uid", "") or "").strip()
         }
     )
-    fresh = fetch_runtime_overrides(config, instance_uids=instance_uids)
+    fetch_kwargs: dict[str, Any] = {"instance_uids": instance_uids}
+    if host_scope_key:
+        fetch_kwargs["host_scope_key"] = host_scope_key
+    fresh = fetch_runtime_overrides(config, **fetch_kwargs)
     if str(fresh.get("status", "")).strip().lower() != "ok":
         return fresh
 
@@ -3135,13 +3249,12 @@ def _retry_local_runtime_push_after_conflict(
     latest_host = latest_host if isinstance(latest_host, dict) else {}
     latest_instance_states = fresh.get("instance_desired_states")
     latest = merge_instance_desired_states(latest_host, latest_instance_states)
-    rebased, desired_instances = _rebase_local_instance_runtime_states(
-        latest,
-        latest_instance_states,
+    delta_runtime, desired_instances, delta_metadata = _runtime_delta_payload(
         previous_local_runtime,
         current_local_runtime,
         installs,
-        canonical_uids=set(instance_revisions or {}),
+        runtime_metadata,
+        canonical_uids=set(latest_instance_states) if isinstance(latest_instance_states, dict) else set(instance_revisions or {}),
     )
 
     desired_state = fresh.get("desired_state")
@@ -3158,13 +3271,14 @@ def _retry_local_runtime_push_after_conflict(
             fresh_instance_revisions[str(uid)] = int(revision)
     return push_runtime_overrides(
         config,
-        rebased,
-        merge=False,
+        delta_runtime,
+        merge=True,
         target="desired",
         desired_state_revision=desired_revision,
         instance_desired_states=desired_instances,
         instance_desired_state_revisions=fresh_instance_revisions,
-        runtime_change_metadata=dict(runtime_metadata) if isinstance(runtime_metadata, Mapping) else None,
+        host_scope_key=host_scope_key,
+        runtime_change_metadata=delta_metadata,
     )
 
 
@@ -3177,8 +3291,17 @@ def _push_local_runtime_change(
     desired_revision: int | None,
     instance_revisions: Mapping[str, Any],
     runtime_metadata: Mapping[str, Any] | None = None,
+    host_scope_key: str | None = None,
 ) -> dict[str, Any]:
     """Push a local edit on a fresh snapshot, retrying once on conflict."""
+    initial_delta, initial_instances, initial_metadata = _runtime_delta_payload(
+        previous_local_runtime,
+        current_local_runtime,
+        installs,
+        runtime_metadata,
+    )
+    if not initial_delta and not initial_instances and not initial_metadata.get("tombstones"):
+        return {"status": "noop", "reason": "runtime_delta_empty"}
     instance_uids = sorted(
         {
             str(getattr(inst, "instance_uid", "") or "").strip()
@@ -3186,7 +3309,10 @@ def _push_local_runtime_change(
             if str(getattr(inst, "instance_uid", "") or "").strip()
         }
     )
-    fresh = fetch_runtime_overrides(config, instance_uids=instance_uids)
+    fetch_kwargs: dict[str, Any] = {"instance_uids": instance_uids}
+    if host_scope_key:
+        fetch_kwargs["host_scope_key"] = host_scope_key
+    fresh = fetch_runtime_overrides(config, **fetch_kwargs)
     if str(fresh.get("status", "")).strip().lower() != "ok":
         return fresh
 
@@ -3194,13 +3320,12 @@ def _push_local_runtime_change(
     latest_host = latest_host if isinstance(latest_host, dict) else {}
     latest_instance_states = fresh.get("instance_desired_states")
     latest = merge_instance_desired_states(latest_host, latest_instance_states)
-    rebased, desired_instances = _rebase_local_instance_runtime_states(
-        latest,
-        latest_instance_states,
+    delta_runtime, desired_instances, delta_metadata = _runtime_delta_payload(
         previous_local_runtime,
         current_local_runtime,
         installs,
-        canonical_uids=set(instance_revisions),
+        runtime_metadata,
+        canonical_uids=set(latest_instance_states) if isinstance(latest_instance_states, dict) else set(instance_revisions),
     )
     fresh_desired_state = fresh.get("desired_state")
     fresh_desired_revision = (
@@ -3222,13 +3347,14 @@ def _push_local_runtime_change(
             fresh_instance_revisions[str(uid)] = int(revision)
     pushed = push_runtime_overrides(
         config,
-        rebased,
-        merge=False,
+        delta_runtime,
+        merge=True,
         target="desired",
         desired_state_revision=fresh_desired_revision,
         instance_desired_states=desired_instances,
         instance_desired_state_revisions=fresh_instance_revisions,
-        runtime_change_metadata=dict(runtime_metadata) if isinstance(runtime_metadata, Mapping) else None,
+        host_scope_key=host_scope_key,
+        runtime_change_metadata=delta_metadata,
     )
     if str(pushed.get("status", "")).strip().lower() != "conflict":
         return pushed
@@ -3239,6 +3365,7 @@ def _push_local_runtime_change(
         installs,
         runtime_metadata=runtime_metadata,
         instance_revisions=instance_revisions,
+        host_scope_key=host_scope_key,
     )
     result = dict(rebased)
     result["_local_rebase_attempted"] = True
@@ -22435,6 +22562,7 @@ def run_loop(
         runtime_overrides_sync_lock.acquire()
         local_runtime = local_runtime_overrides(config)
         local_fp = overrides_fingerprint(local_runtime)
+        host_scope_key = _runtime_sync_v3_scope_key(config, store)
         pending_local_runtime = None
         local_runtime_push_accepted_this_tick = False
         v3_conflict_active = _runtime_sync_v3_conflict_active(_runtime_sync_v3_state(store))
@@ -22544,6 +22672,7 @@ def run_loop(
                         desired_revision=known_revision,
                         instance_revisions=known_instance_revisions,
                         runtime_metadata=push_metadata,
+                        host_scope_key=host_scope_key,
                     )
                 p_status = str(pushed.get("status", "")).strip().lower()
                 accepted = p_status == "ok" and _store_desired_runtime_push_result(
@@ -22646,6 +22775,7 @@ def run_loop(
             ro = fetch_runtime_overrides(
                 config,
                 instance_uids=[str(getattr(inst, "instance_uid", "") or "") for inst in installs],
+                host_scope_key=host_scope_key,
             )
             status = str(ro.get("status", "")).strip().lower()
             poll_interval = max(15, min(300, int(config.mcc_push_interval_sec or config.poll_interval_sec or 60)))

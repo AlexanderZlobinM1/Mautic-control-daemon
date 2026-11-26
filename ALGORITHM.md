@@ -699,6 +699,19 @@ round-trip и непосредственно перед baseline refresh; pendin
 разрешает сохранить новый local baseline и удалить pending; conflict/error или
 неполный ответ оставляют delta для следующего ровно одного rebased push.
 
+Обычная доставка такого pending выполняется не полным runtime snapshot, а
+sparse delta. Каждая ячейка имеет адрес `(host, parameter_path)` либо
+`(host, instance_uid, parameter_path)`; для одной отправки допускается несколько
+независимых instance-ячеек. В payload попадают только изменённые значения и
+адресные tombstone для удалённых ячеек, а `runtime_change_metadata` содержит их
+собственные revision/time/event stamps. Неподготовленная полная выборка не
+перезаписывается: MCC сливает delta с текущим состоянием по этим ячейкам.
+Повтор той же delta с тем же event/idempotency receipt безопасен, а пустая
+delta не вызывает ни сетевого чтения, ни записи. Полный snapshot разрешён
+только для начальной регистрации или подтверждённого recovery/rescan; rescan
+ограничен одним хостом и также разрешает значения соседних ячеек по их
+собственным stamps.
+
 После принятого local runtime push MCD не выполняет remote poll в том же
 main-loop tick. Принятый ответ уже является canonical результатом записи;
 немедленный poll может вернуть lagging/неполный snapshot, снова положить

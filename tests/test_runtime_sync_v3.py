@@ -7,6 +7,7 @@ from pathlib import Path
 from mcd_agent import daemon
 from mcd_agent.runtime_overrides import push_runtime_sync_v3
 from mcd_agent.runtime_sync_v3 import (
+    conflict_cells,
     conflict_safe_metadata,
     conflict_safe_runtime,
     conflict_safe_runtime_from_central,
@@ -93,6 +94,7 @@ def test_runtime_sync_v3_transport_declares_protocol_and_preserves_legacy_bounda
         changes={"a": 2},
         idempotency_key="mcd-v3-test",
         semantic_conflict_groups=[],
+        scope_key="host-65-109-236-89",
     )
     assert result["status"] == "applied"
     assert result["v3_supported"] is True
@@ -100,6 +102,8 @@ def test_runtime_sync_v3_transport_declares_protocol_and_preserves_legacy_bounda
     assert seen["payload"]["desired_state_sync_protocol"] == 3
     assert seen["payload"]["base_revision"] == 4
     assert seen["payload"]["origin"] == "host"
+    assert seen["payload"]["scope_key"] == "host-65-109-236-89"
+    assert seen["payload"]["mcc_host_name"] == "host-65-109-236-89"
 
 
 def test_daemon_v3_attempt_persists_accepted_canonical_base(monkeypatch):
@@ -116,6 +120,25 @@ def test_daemon_v3_attempt_persists_accepted_canonical_base(monkeypatch):
     state = store.get_runtime_sync("mcc_runtime_sync_v3")
     assert state["base_revision"] == 5
     assert state["base"] == {"a": 2, "b": 3}
+
+
+def test_daemon_v3_uses_canonical_mcc_host_scope_key(monkeypatch):
+    store = Store({
+        "mcc_runtime": {"a": 1},
+        "mcc_runtime_desired_state": {"revision": 4, "scope_key": "host-65-109-236-89"},
+    })
+    cfg = SimpleNamespace(mcc_host_name="")
+    seen = {}
+    monkeypatch.setattr("mcd_agent.daemon.runtime_remote_allowed_keys", lambda: {"a", "b"})
+    monkeypatch.setattr(
+        "mcd_agent.daemon.push_runtime_sync_v3",
+        lambda *args, **kwargs: seen.update(kwargs) or {"status": "queued"},
+    )
+
+    result = daemon._runtime_sync_v3_attempt(cfg, store, {"a": 2})
+
+    assert result["status"] == "queued"
+    assert seen["scope_key"] == "host-65-109-236-89"
 
 
 def test_daemon_v3_conflict_is_durable_and_does_not_choose_a_winner(monkeypatch):
@@ -225,3 +248,44 @@ def test_conflict_metadata_cannot_reapply_held_keys():
     assert "scheduler_host_max_parallel" in safe["host"]
     assert "plugin_operation_instance_settings" not in safe["instances"]["instance-a"]
     assert "segment_priority_instance_settings" in safe["instances"]["instance-a"]
+
+
+def test_instance_map_conflict_holds_only_the_ambiguous_uid():
+    key = "segment_super_priority_instance_settings"
+    conflict = {
+        "conflicts": [{
+            "group_id": key,
+            "keys": [key],
+            "base": {key: {
+                "instance-a": {"segments": []},
+                "instance-b": {"segments": []},
+            }},
+            "central": {key: {
+                "instance-a": {"segments": [10]},
+                "instance-b": {"segments": [20]},
+            }},
+            "host": {key: {
+                "instance-a": {"segments": [11]},
+                "instance-b": {"segments": []},
+            }},
+        }],
+    }
+    assert conflict_cells(conflict) == {("instance", key, "instance-a")}
+    projected = conflict_safe_runtime_from_central(
+        conflict,
+        conflict["conflicts"][0]["central"],
+        conflict["conflicts"][0]["host"],
+    )
+    assert projected[key]["instance-a"] == {"segments": [11]}
+    assert projected[key]["instance-b"] == {"segments": [20]}
+
+    metadata = {
+        "host": {},
+        "instances": {
+            "instance-a": {key: {"source": "mcc"}},
+            "instance-b": {key: {"source": "mcc"}},
+        },
+    }
+    safe = conflict_safe_metadata(conflict, metadata)
+    assert "instance-a" not in safe["instances"]
+    assert key in safe["instances"]["instance-b"]

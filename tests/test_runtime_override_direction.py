@@ -1056,7 +1056,7 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
         self.assertEqual(result, accepted)
         self.assertEqual(push.call_count, 1)
         row = push.call_args.kwargs["instance_desired_states"][qualified_uid]
-        self.assertEqual(row["segment_whitelist_instance_settings"], {"segments": [909]})
+        self.assertNotIn("segment_whitelist_instance_settings", row)
         self.assertEqual(
             row["segment_super_priority_instance_settings"],
             {"segments": [201, 202], "slots_override": 1},
@@ -1314,48 +1314,20 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
                 "generic.sales-snap.com@MauticFarm-02": {
                     "segment_priority_instance_settings": {"segments": [102]},
                 },
-                "other.sales-snap.com@MauticFarm-02": {
-                    "segment_priority_instance_settings": {"segments": [303]},
-                },
             },
         )
         self.assertEqual(
             push.call_args_list[0].kwargs["instance_desired_state_revisions"],
             {
                 "generic.sales-snap.com@MauticFarm-02": 8,
-                "other.sales-snap.com@MauticFarm-02": 4,
             },
         )
         payload = push.call_args.args[1]
         self.assertEqual(payload["scheduler_host_max_parallel"], 6)
-        self.assertEqual(payload["scheduler_instance_max_parallel"], 7)
-        self.assertEqual(
-            payload["segment_priority_instance_settings"]["generic.sales-snap.com@MauticFarm-02"],
-            {"segments": [102]},
-        )
-        self.assertEqual(
-            payload["segment_priority_instance_settings"]["other.sales-snap.com@MauticFarm-02"],
-            {"segments": [303]},
-        )
+        self.assertNotIn("scheduler_instance_max_parallel", payload)
+        self.assertNotIn("segment_priority_instance_settings", payload)
+        self.assertTrue(push.call_args_list[0].kwargs["merge"])
         self.assertEqual(push.call_args.kwargs["desired_state_revision"], 12)
-        self.assertEqual(
-            push.call_args.kwargs["instance_desired_states"],
-            {
-                "generic.sales-snap.com@MauticFarm-02": {
-                    "segment_priority_instance_settings": {"segments": [102]},
-                },
-                "other.sales-snap.com@MauticFarm-02": {
-                    "segment_priority_instance_settings": {"segments": [303]},
-                },
-            },
-        )
-        self.assertEqual(
-            push.call_args.kwargs["instance_desired_state_revisions"],
-            {
-                "generic.sales-snap.com@MauticFarm-02": 8,
-                "other.sales-snap.com@MauticFarm-02": 4,
-            },
-        )
         class MemoryStore:
             def __init__(self):
                 self.values = {}
@@ -1419,25 +1391,14 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "ok")
         payload = push.call_args.args[1]
-        self.assertEqual(
-            payload["segment_super_priority_instance_settings"][qualified_uid],
-            {"segments": [101, 102], "slots_override": 1},
-        )
+        self.assertNotIn("segment_super_priority_instance_settings", payload)
         self.assertEqual(
             push.call_args.kwargs["instance_desired_states"],
-            {
-                qualified_uid: {
-                    "segment_priority_instance_settings": {"segments": []},
-                    "segment_super_priority_instance_settings": {
-                        "segments": [101, 102],
-                        "slots_override": 1,
-                    },
-                },
-            },
+            {},
         )
         self.assertEqual(
             push.call_args.kwargs["instance_desired_state_revisions"],
-            {qualified_uid: 5},
+            {},
         )
         self.assertEqual(push.call_args.kwargs["desired_state_revision"], 7)
 
@@ -1495,17 +1456,13 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         row = push.call_args.kwargs["instance_desired_states"][qualified_uid]
         self.assertEqual(row["segment_priority_instance_settings"], {"segments": [303]})
-        self.assertEqual(row["segment_whitelist_instance_settings"], {"segments": [909]})
         self.assertNotIn("segment_super_priority_instance_settings", row)
         payload = push.call_args.args[1]
+        self.assertEqual(payload, {})
+        tombstones = push.call_args.kwargs["runtime_change_metadata"]["tombstones"]
         self.assertEqual(
-            payload["segment_priority_instance_settings"][qualified_uid],
-            {"segments": [303]},
-        )
-        self.assertNotIn("segment_super_priority_instance_settings", payload)
-        self.assertEqual(
-            payload["segment_whitelist_instance_settings"][qualified_uid],
-            {"segments": [909]},
+            {(item["scope"], item["key"], item["uid"]) for item in tombstones},
+            {("instance", "segment_super_priority_instance_settings", qualified_uid)},
         )
 
     def test_last_local_instance_removal_publishes_explicit_empty_uid_row(self) -> None:
@@ -1545,18 +1502,12 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             )
 
         self.assertEqual(result["status"], "ok")
-        self.assertEqual(
-            push.call_args.kwargs["instance_desired_states"],
-            {qualified_uid: {}},
-        )
+        self.assertEqual(push.call_args.kwargs["instance_desired_states"], {})
         self.assertEqual(
             push.call_args.kwargs["instance_desired_state_revisions"],
-            {qualified_uid: 7},
-        )
-        self.assertEqual(
-            push.call_args.args[1]["segment_lazy_update_instance_settings"],
             {},
         )
+        self.assertEqual(push.call_args.args[1], {})
 
     def test_direct_local_instance_add_is_sent_without_dropping_remote_fields(self) -> None:
         cfg = SimpleNamespace(mcc_url="https://mcc.example", mcc_token="token")
@@ -1607,11 +1558,65 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
             row["segment_super_priority_instance_settings"],
             {"segments": [201, 202], "slots_override": 1},
         )
-        self.assertEqual(row["segment_whitelist_instance_settings"], {"segments": [909]})
         self.assertEqual(
-            push.call_args.args[1]["segment_super_priority_instance_settings"][qualified_uid],
-            {"segments": [201, 202], "slots_override": 1},
+            push.call_args.args[1],
+            {},
         )
+
+    def test_runtime_delta_is_sparse_and_keeps_two_instance_cells_addressable(self) -> None:
+        installs = [
+            SimpleNamespace(
+                instance_uid="a.sales-snap.com", root="/var/www/a", name="a",
+                primary_domain="a.sales-snap.com", domains=["a.sales-snap.com"],
+            ),
+            SimpleNamespace(
+                instance_uid="b.sales-snap.com", root="/var/www/b", name="b",
+                primary_domain="b.sales-snap.com", domains=["b.sales-snap.com"],
+            ),
+        ]
+        previous = {
+            "scheduler_host_max_parallel": 4,
+            "segment_priority_instance_settings": {
+                "a.sales-snap.com": {"segments": [1]},
+                "b.sales-snap.com": {"segments": [2]},
+            },
+        }
+        current = {
+            "scheduler_host_max_parallel": 6,
+            "segment_priority_instance_settings": {
+                "a.sales-snap.com": {"segments": [11]},
+                "b.sales-snap.com": {"segments": [22]},
+            },
+        }
+        host_delta, instance_delta, metadata = daemon._runtime_delta_payload(
+            previous, current, installs, None,
+        )
+        self.assertEqual(host_delta, {"scheduler_host_max_parallel": 6})
+        self.assertEqual(
+            instance_delta,
+            {
+                "a.sales-snap.com": {"segment_priority_instance_settings": {"segments": [11]}},
+                "b.sales-snap.com": {"segment_priority_instance_settings": {"segments": [22]}},
+            },
+        )
+        self.assertEqual(metadata.get("tombstones", []), [])
+
+    def test_zero_runtime_delta_is_a_noop_without_remote_read(self) -> None:
+        cfg = SimpleNamespace(mcc_url="https://mcc.example", mcc_token="token")
+        with patch("mcd_agent.daemon.fetch_runtime_overrides") as fetch, patch(
+            "mcd_agent.daemon.push_runtime_overrides"
+        ) as push:
+            result = daemon._push_local_runtime_change(
+                cfg,
+                {"scheduler_host_max_parallel": 6},
+                {"scheduler_host_max_parallel": 6},
+                [],
+                desired_revision=10,
+                instance_revisions={},
+            )
+        self.assertEqual(result, {"status": "noop", "reason": "runtime_delta_empty"})
+        fetch.assert_not_called()
+        push.assert_not_called()
 
     def test_remote_instance_state_persists_through_restart_without_clearing_push(self) -> None:
         from pathlib import Path
@@ -1691,17 +1696,8 @@ class RuntimeOverrideDirectionTests(unittest.TestCase):
                     instance_revisions={qualified_uid: 5},
                 )
 
-            self.assertEqual(result["status"], "ok")
-            self.assertEqual(
-                push.call_args.kwargs["instance_desired_states"][qualified_uid][
-                    "segment_super_priority_instance_settings"
-                ],
-                {"segments": [101, 102], "slots_override": 1},
-            )
-            self.assertEqual(
-                push.call_args.kwargs["instance_desired_state_revisions"],
-                {qualified_uid: 5},
-            )
+            self.assertEqual(result["status"], "noop")
+            self.assertFalse(push.called)
 
     def test_legacy_suffixed_mcc_response_maps_rings_and_acks_stable_uid(self) -> None:
         base_uid = "generic.sales-snap.com"

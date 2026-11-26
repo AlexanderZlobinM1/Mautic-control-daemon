@@ -499,19 +499,27 @@ def merge_instance_desired_states(runtime: dict[str, Any], states: object) -> di
     return merged
 
 
-def fetch_runtime_overrides(cfg: AgentConfig, *, instance_uids: list[str] | None = None) -> dict[str, Any]:
+def fetch_runtime_overrides(
+    cfg: AgentConfig,
+    *,
+    instance_uids: list[str] | None = None,
+    host_scope_key: str | None = None,
+) -> dict[str, Any]:
     base = _api_base(cfg)
     if not base:
         return {"status": "disabled", "reason": "mcc_url_not_set"}
     ident = resolve_agent_identity(cfg)
-    effective_host_name = str(ident.get("effective_mcc_host_name") or ident.get("effective_hostname") or "").strip()
+    canonical_host_name = str(host_scope_key or "").strip()
+    effective_host_name = canonical_host_name or str(
+        ident.get("effective_mcc_host_name") or ident.get("effective_hostname") or ""
+    ).strip()
     canonical_instance_uids = _canonical_instance_uids(
         instance_uids or [],
         host_name=effective_host_name,
     )
     payload = {
         "hostname": str(ident.get("effective_hostname") or ""),
-        "mcc_host_name": str(ident.get("effective_mcc_host_name") or ""),
+        "mcc_host_name": canonical_host_name or str(ident.get("effective_mcc_host_name") or ""),
         "agent_hostname": str(ident.get("local_hostname") or ""),
         "configured_host_name": str(ident.get("configured_host_name") or ""),
         "desired_state_protocol": 1,
@@ -547,16 +555,19 @@ def push_runtime_overrides(
     runtime_overrides: dict[str, Any],
     *,
     merge: bool = False,
+    push_mode: str | None = None,
     target: str = "observed",
     desired_state_revision: int | None = None,
     instance_desired_states: dict[str, dict[str, Any]] | None = None,
     instance_desired_state_revisions: dict[str, int] | None = None,
     runtime_change_metadata: dict[str, Any] | None = None,
+    host_scope_key: str | None = None,
 ) -> dict[str, Any]:
     base = _api_base(cfg)
     if not base:
         return {"status": "disabled", "reason": "mcc_url_not_set"}
     ident = resolve_agent_identity(cfg)
+    canonical_host_name = str(host_scope_key or "").strip()
     target_mode = str(target or "observed").strip().lower()
     if target_mode not in {"observed", "desired"}:
         target_mode = "observed"
@@ -581,13 +592,16 @@ def push_runtime_overrides(
                 for uid, values in instance_desired_states.items()
                 if isinstance(values, dict)
             }
+    selected_push_mode = str(push_mode or ("merge" if merge else "replace")).strip().lower()
+    if selected_push_mode not in {"merge", "replace"}:
+        selected_push_mode = "merge" if merge else "replace"
     payload = {
         "hostname": str(ident.get("effective_hostname") or ""),
-        "mcc_host_name": str(ident.get("effective_mcc_host_name") or ""),
+        "mcc_host_name": canonical_host_name or str(ident.get("effective_mcc_host_name") or ""),
         "agent_hostname": str(ident.get("local_hostname") or ""),
         "configured_host_name": str(ident.get("configured_host_name") or ""),
         "runtime_overrides": runtime_payload,
-        "push_mode": "merge" if merge else "replace",
+        "push_mode": selected_push_mode,
         "target": target_mode,
     }
     payload.update(agent_version_payload())
@@ -622,6 +636,7 @@ def push_runtime_sync_v3(
     changes: dict[str, Any],
     idempotency_key: str,
     semantic_conflict_groups: list[dict[str, Any]] | None = None,
+    scope_key: str | None = None,
 ) -> dict[str, Any]:
     """Submit one opt-in host intent to MCC's canonical v3 sync endpoint.
 
@@ -633,17 +648,18 @@ def push_runtime_sync_v3(
     if not api_base:
         return {"status": "disabled", "reason": "mcc_url_not_set", "v3_supported": False}
     ident = resolve_agent_identity(cfg)
+    canonical_host_name = str(scope_key or "").strip()
     payload: dict[str, Any] = {
         "desired_state_sync_protocol": 3,
         "scope": "host",
-        "scope_key": str(ident.get("effective_mcc_host_name") or ident.get("effective_hostname") or ""),
+        "scope_key": canonical_host_name or str(ident.get("effective_mcc_host_name") or ident.get("effective_hostname") or ""),
         "origin": "host",
         "base_revision": int(base_revision),
         "base": dict(base),
         "changes": dict(changes),
         "idempotency_key": str(idempotency_key),
         "hostname": str(ident.get("effective_hostname") or ""),
-        "mcc_host_name": str(ident.get("effective_mcc_host_name") or ""),
+        "mcc_host_name": canonical_host_name or str(ident.get("effective_mcc_host_name") or ""),
         "agent_hostname": str(ident.get("local_hostname") or ""),
         "configured_host_name": str(ident.get("configured_host_name") or ""),
     }
