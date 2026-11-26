@@ -1,3 +1,9 @@
+## 1.7.22 - 2026-11-26
+
+- Track the active Mautic child inside sequential segment batches independently
+  from its live shell parent. Child progress and identity are watchdog-checked;
+  a stale child is terminated by PID only so the parent batch is not killed.
+
 ## 1.7.21 - 2026-11-26
 
 - Deliver local runtime changes as durable sparse per-cell deltas. Host and

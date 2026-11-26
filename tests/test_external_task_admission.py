@@ -101,6 +101,148 @@ class ExternalTaskAdmissionTests(unittest.TestCase):
         self.assertEqual(len(observed), 2)
         self.assertEqual([row["entity_id"] for row in observed], [92, 93])
 
+    def test_sequential_batch_child_is_discovered_under_tracked_parent(self) -> None:
+        root = "/var/www/client"
+        parent = RunningTask(
+            row_id=1,
+            root=root,
+            task_key=daemon._task_key(root, "segment", 68),
+            task_type="segment",
+            entity_id=68,
+            command_str="/bin/sh|-c|set -e",
+            timeout_sec=0,
+            attempts=1,
+            started_at=100.0,
+            pid=9001,
+        )
+        ps_output = (
+            "9001 1 400 /bin/sh -c set -e\n"
+            "9002 9001 220 php /var/www/client/bin/console mautic:segments:update -i 89\n"
+        )
+
+        def cmdline(pid: int) -> list[str]:
+            if pid == 9002:
+                return [
+                    "php",
+                    "/var/www/client/bin/console",
+                    "mautic:segments:update",
+                    "-i",
+                    "89",
+                ]
+            return ["/bin/sh", "-c", "set -e"]
+
+        with patch.object(
+            subprocess,
+            "run",
+            return_value=SimpleNamespace(returncode=0, stdout=ps_output),
+        ), patch.object(daemon, "_pid_cmdline_args", side_effect=cmdline), patch.object(
+            daemon, "_pid_mcd_ownership", return_value={}
+        ), patch.object(
+            daemon,
+            "_pid_process_identity",
+            return_value={"pid": 9002, "pid_start_time": 12, "process_group_id": 9001, "session_id": 9001},
+        ):
+            rows = daemon.list_batch_child_runtime_task_summaries(parent)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["entity_id"], 89)
+        self.assertEqual(rows[0]["parent_pid"], 9001)
+        self.assertEqual(rows[0]["parent_task_key"], parent.task_key)
+
+    def test_stalled_sequential_child_does_not_kill_live_batch_parent(self) -> None:
+        root = "/var/www/client"
+        parent = RunningTask(
+            row_id=0,
+            root=root,
+            task_key=daemon._task_key(root, "segment", 68),
+            task_type="segment",
+            entity_id=68,
+            command_str="/bin/sh|-c|set -e",
+            timeout_sec=0,
+            attempts=1,
+            started_at=1.0,
+            pid=9001,
+        )
+        running = {parent.task_key: parent}
+        child_row = {
+            "root": root,
+            "task_type": "segment",
+            "entity_id": 89,
+            "pid": 9002,
+            "parent_pid": 9001,
+            "parent_task_key": parent.task_key,
+            "started_at": 1.0,
+            "command_str": "php|/var/www/client/bin/console|mautic:segments:update|-i|89",
+            "pid_start_time": 12,
+            "process_group_id": 9001,
+            "session_id": 9001,
+        }
+        config = SimpleNamespace(
+            external_task_stale_after_sec=30,
+            segment_sql_orphan_after_sec=30,
+            segment_kill_grace_sec=0,
+            worker_watchdog_sec=0,
+        )
+        store = TaskStore(":memory:")
+        watchdog: dict[str, dict[str, object]] = {}
+        clock = {"now": 40.0}
+
+        def process_signal(pid: int) -> dict[str, object]:
+            if pid == 9002:
+                return {
+                    "pid_alive": True,
+                    "process_state": "D",
+                    "process_group_alive": True,
+                    "pid_start_time": 12,
+                    "process_group_id": 9001,
+                    "session_id": 9001,
+                    "cpu_progress": (10, 2),
+                    "io_progress": (("read_bytes", 99),),
+                }
+            return {"pid_alive": True, "process_state": "S"}
+
+        with patch.object(daemon, "list_batch_child_runtime_task_summaries", return_value=[child_row]), patch.object(
+            daemon, "_is_pid_alive", return_value=True
+        ), patch.object(daemon, "_pid_matches_task_command", return_value=True), patch.object(
+            daemon, "_external_segment_process_liveness_signal", side_effect=process_signal
+        ), patch.object(
+            daemon,
+            "_pid_process_identity",
+            side_effect=lambda pid: process_signal(pid),
+        ), patch.object(
+            daemon,
+            "_terminate_external_task_group",
+            return_value={
+                "termination": "terminated",
+                "process_group_alive_after": False,
+                "termination_scope": "process",
+            },
+        ) as terminate, patch.object(daemon.time, "time", side_effect=lambda: clock["now"]):
+            daemon._monitor_running(
+                config=config,
+                store=store,
+                running=running,
+                popens={},
+                external_task_watchdog=watchdog,
+            )
+            clock["now"] = 50.0
+            daemon._monitor_running(
+                config=config,
+                store=store,
+                running=running,
+                popens={},
+                external_task_watchdog=watchdog,
+            )
+
+        self.assertIn(parent.task_key, running)
+        terminate.assert_called_once()
+        self.assertFalse(terminate.call_args.kwargs["whole_group"])
+        receipt = store.get_runtime_sync(daemon._SCHEDULER_RECONCILIATION_RECEIPT_KEY)
+        self.assertEqual(receipt["reason"], "external_task_d_state_no_progress")
+        self.assertEqual(receipt["parent_task_key"], parent.task_key)
+        self.assertTrue(receipt["child_process"])
+        store.close()
+
     def test_restart_readopts_only_mcd_owned_child_into_durable_store(self) -> None:
         root = "/var/www/client"
         owned_key = daemon._task_key(root, "campaign_trigger", 110)

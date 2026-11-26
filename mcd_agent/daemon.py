@@ -10558,6 +10558,12 @@ class RunningTask:
     pid_start_time: int | None = None
     process_group_id: int | None = None
     session_id: int | None = None
+    # A sequential shell batch can own a live Mautic console child while the
+    # parent task remains healthy.  These fields identify that child without
+    # turning it into a second scheduler slot or durable task row.
+    parent_task_key: str = ""
+    parent_pid: int | None = None
+    child_process: bool = False
 
 
 class _SchedulerRuntimeRegistry(dict[str, RunningTask]):
@@ -14153,6 +14159,7 @@ def _pid_process_identity(pid: int) -> dict[str, object]:
         # The tail starts at field 3 (state); field 22 (starttime) is index 19.
         if len(stat_tail) > 19:
             value["process_state"] = str(stat_tail[0] or "")
+            value["parent_process_id"] = int(stat_tail[1])
             value["process_group_id"] = int(stat_tail[2])
             value["session_id"] = int(stat_tail[3])
             value["pid_start_time"] = int(stat_tail[19])
@@ -14345,6 +14352,123 @@ def list_external_runtime_task_summaries(
         seen_pids.add(pid)
     rows = list(rows_by_logical_key.values())
     rows.sort(key=lambda row: (str(row.get("root") or ""), str(row.get("task_type") or ""), int(row.get("pid") or 0)))
+    return rows
+
+
+def list_batch_child_runtime_task_summaries(
+    task: RunningTask,
+    *,
+    timeout_sec: int = 4,
+) -> list[dict[str, object]]:
+    """Find live Mautic commands descended from one sequential MCD batch.
+
+    A chain task is one scheduler row, but its ``/bin/sh -c`` worker runs
+    several Mautic commands one after another.  The ordinary external scan
+    deliberately skips a task key that is already tracked; that is correct
+    for standalone commands but used to hide a pathological child while its
+    shell parent stayed alive.  This read-only process-tree probe exposes the
+    current child without creating another scheduler slot or TaskStore row.
+    """
+
+    parent_pid = int(getattr(task, "pid", 0) or 0)
+    if parent_pid <= 0 or str(getattr(task, "task_type", "") or "") not in _SEGMENT_RUNTIME_TASK_TYPES:
+        return []
+    try:
+        proc = subprocess.run(
+            ["ps", "-eo", "pid=,ppid=,etimes=,args="],
+            capture_output=True,
+            text=True,
+            timeout=max(1, int(timeout_sec)),
+        )
+    except Exception:
+        return []
+    if proc.returncode != 0:
+        return []
+
+    process_rows: dict[int, tuple[int, int, str]] = {}
+    children_by_parent: dict[int, list[int]] = {}
+    for raw in (proc.stdout or "").splitlines():
+        parts = raw.strip().split(None, 3)
+        if len(parts) < 4:
+            continue
+        try:
+            pid = int(parts[0])
+            ppid = int(parts[1])
+            elapsed_sec = int(parts[2])
+        except (TypeError, ValueError):
+            continue
+        if pid <= 0:
+            continue
+        process_rows[pid] = (ppid, elapsed_sec, parts[3])
+        children_by_parent.setdefault(ppid, []).append(pid)
+
+    descendants: set[int] = set()
+    pending = [parent_pid]
+    while pending:
+        current = pending.pop()
+        for child_pid in children_by_parent.get(current, ()):
+            if child_pid == parent_pid or child_pid in descendants:
+                continue
+            descendants.add(child_pid)
+            pending.append(child_pid)
+
+    root_norm = _normalize_root_path(str(getattr(task, "root", "") or ""))
+    rows: list[dict[str, object]] = []
+    for pid in sorted(descendants):
+        row = process_rows.get(pid)
+        if row is None:
+            continue
+        ppid, elapsed_sec, ps_args = row
+        cmdline_args = _pid_cmdline_args(pid)
+        if not cmdline_args:
+            try:
+                cmdline_args = shlex.split(ps_args)
+            except ValueError:
+                cmdline_args = []
+        console_path = ""
+        console_idx = -1
+        for idx, arg in enumerate(cmdline_args):
+            value = str(arg or "").strip()
+            if value.endswith("/bin/console") or value.endswith("/app/console"):
+                console_path = value
+                console_idx = idx
+                break
+        if console_idx < 0:
+            continue
+        command_name = ""
+        command_idx = -1
+        for idx in range(console_idx + 1, len(cmdline_args)):
+            value = str(cmdline_args[idx] or "").strip()
+            if value.startswith("mautic:"):
+                command_name = value
+                command_idx = idx
+                break
+        child_type = _EXTERNAL_TASK_TYPES.get(command_name)
+        if command_idx < 0 or child_type not in _SEGMENT_RUNTIME_TASK_TYPES:
+            continue
+        console_parent = Path(console_path).parent
+        if console_parent.name not in {"bin", "app"}:
+            continue
+        child_root = _normalize_root_path(str(console_parent.parent))
+        if child_root != root_norm:
+            continue
+        entity_id = _extract_mautic_task_entity_id(cmdline_args, command_idx + 1)
+        candidate: dict[str, object] = {
+            "root": str(getattr(task, "root", "") or ""),
+            "task_type": child_type,
+            "entity_id": entity_id,
+            "pid": pid,
+            "parent_pid": ppid,
+            "parent_task_key": str(getattr(task, "task_key", "") or ""),
+            "elapsed_sec": elapsed_sec,
+            "started_at": float(time.time() - max(0, elapsed_sec)),
+            "command_str": _CMD_SEP.join(str(value) for value in cmdline_args if str(value or "").strip()),
+            "external": True,
+            "mcd_ownership": _pid_mcd_ownership(pid),
+        }
+        candidate.update(_pid_process_identity(pid))
+        rows.append(candidate)
+    rows.sort(key=lambda row: (int(row.get("pid") or 0), int(row.get("entity_id") or 0)))
     return rows
 
 
@@ -14568,26 +14692,33 @@ def _terminate_external_task_group(
     task: RunningTask,
     *,
     grace_sec: int,
+    whole_group: bool = True,
 ) -> dict[str, object]:
-    """Signal only the process group whose identity was observed for ``task``.
+    """Signal only the observed task identity.
 
     The result distinguishes a successful group disappearance from a signal
     request that is still pending in kernel ``D`` state.  Callers must not
-    claim a terminal process result when the group remains present.
+    claim a terminal process result when the target remains present.  A child
+    inside a sequential batch is signalled as a PID only: its process group
+    also contains the live batch shell and must not be killed with it.
     """
 
     evidence = _external_task_identity_evidence(task)
     expected_pgid = int(evidence.get("expected_process_group_id") or 0)
-    safe_group = bool(
+    safe_target = bool(
         evidence.get("task_identity_match")
-        and expected_pgid > 1
-        and expected_pgid != os.getpgrp()
+        and (
+            not whole_group
+            or (expected_pgid > 1 and expected_pgid != os.getpgrp())
+        )
     )
-    if not safe_group:
+    if not safe_target:
         evidence["termination"] = "identity_unproven"
         return evidence
 
-    def group_alive() -> bool:
+    def target_alive() -> bool:
+        if not whole_group:
+            return _is_pid_alive(int(task.pid))
         try:
             os.killpg(expected_pgid, 0)
             return True
@@ -14596,29 +14727,38 @@ def _terminate_external_task_group(
         except (OSError, PermissionError):
             return True
 
+    def signal_target(sig: int) -> None:
+        if whole_group:
+            os.killpg(expected_pgid, sig)
+        else:
+            os.kill(int(task.pid), sig)
+
     try:
-        os.killpg(expected_pgid, signal.SIGTERM)
+        signal_target(signal.SIGTERM)
     except ProcessLookupError:
         evidence["termination"] = "already_exited"
         evidence["process_group_alive_after"] = False
+        evidence["termination_scope"] = "process_group" if whole_group else "process"
         return evidence
     except OSError as exc:
         evidence["termination"] = "signal_failed"
         evidence["termination_error"] = str(exc)
-        evidence["process_group_alive_after"] = group_alive()
+        evidence["process_group_alive_after"] = target_alive()
+        evidence["termination_scope"] = "process_group" if whole_group else "process"
         return evidence
 
     deadline = time.time() + max(0, int(grace_sec))
-    while time.time() < deadline and group_alive():
+    while time.time() < deadline and target_alive():
         time.sleep(0.2)
-    if group_alive():
+    if target_alive():
         try:
-            os.killpg(expected_pgid, signal.SIGKILL)
+            signal_target(signal.SIGKILL)
         except ProcessLookupError:
             pass
         except OSError as exc:
             evidence["termination_error"] = str(exc)
-    evidence["process_group_alive_after"] = group_alive()
+    evidence["process_group_alive_after"] = target_alive()
+    evidence["termination_scope"] = "process_group" if whole_group else "process"
     evidence["termination"] = (
         "terminated" if not evidence["process_group_alive_after"] else "termination_pending"
     )
@@ -17881,6 +18021,8 @@ def _monitor_running(
         task: RunningTask,
         key: str,
         evidence: Mapping[str, object],
+        *,
+        whole_group: bool = True,
     ) -> bool:
         """Reconcile an external console stuck in kernel ``D`` state.
 
@@ -17976,6 +18118,7 @@ def _monitor_running(
         termination = _terminate_external_task_group(
             task,
             grace_sec=int(getattr(config, "segment_kill_grace_sec", 10) or 10),
+            whole_group=whole_group,
         )
         merged.update(termination)
         termination_status = str(termination.get("termination") or "")
@@ -18135,8 +18278,16 @@ def _monitor_running(
         task: RunningTask,
         key: str,
         evidence: Mapping[str, object],
+        *,
+        whole_group: bool = True,
     ) -> bool:
-        """Keep an adopted segment only while independent progress is observed."""
+        """Keep a segment only while independent progress is observed.
+
+        ``whole_group=False`` is used for a child inside a sequential shell
+        batch.  The child shares the shell's process group, so signalling the
+        group would terminate the batch owner instead of only the stale
+        Mautic command.
+        """
 
         state = segment_watchdog.setdefault(key, {})
         progress_fields = {
@@ -18186,10 +18337,30 @@ def _monitor_running(
         # release path. Only kill when the process group is still owned by the
         # matching Mautic command and independent progress stayed absent for
         # the complete observation window.
-        if not bool(evidence.get("process_group_alive", True)):
+        alive_key = "process_group_alive" if whole_group else "pid_alive"
+        if not bool(evidence.get(alive_key, True)):
             segment_watchdog.pop(key, None)
             return False
-        _kill_pid(task.pid, int(getattr(config, "segment_kill_grace_sec", 10) or 10))
+        termination: dict[str, object] = {}
+        if whole_group:
+            _kill_pid(task.pid, int(getattr(config, "segment_kill_grace_sec", 10) or 10))
+        else:
+            termination = _terminate_external_task_group(
+                task,
+                grace_sec=int(getattr(config, "segment_kill_grace_sec", 10) or 10),
+                whole_group=False,
+            )
+            if str(termination.get("termination") or "") in {"identity_unproven", "signal_failed", "termination_pending"}:
+                state["termination_blocked"] = str(termination.get("termination") or "unknown")
+                _scheduler_reconciliation_receipt(
+                    store,
+                    task,
+                    state="stale",
+                    reason="external_child_termination_blocked",
+                    note="stale:external_child_termination_blocked",
+                    evidence={**dict(evidence), **termination},
+                )
+                return True
         note = "stale:external_segment_stall"
         _segment_runtime_marker_write(store, task, status="stale", now_ts=now, note=note)
         _scheduler_reconciliation_receipt(
@@ -18198,7 +18369,7 @@ def _monitor_running(
             state="stale",
             reason="external_segment_stall",
             note=note,
-            evidence={**dict(evidence), "pid_alive": True, "process_group_alive": True},
+            evidence={**dict(evidence), **termination, "pid_alive": True},
         )
         segment_watchdog.pop(key, None)
         running.pop(key, None)
@@ -18243,10 +18414,78 @@ def _monitor_running(
         ):
             segment_terminal_callback(task, True, None)
 
+    def _monitor_sequential_batch_children(task: RunningTask) -> None:
+        """Watch the current Mautic child without masking it by its shell."""
+
+        if bool(getattr(task, "external", False)) or task.task_type not in _SEGMENT_RUNTIME_TASK_TYPES:
+            return
+        child_rows = list_batch_child_runtime_task_summaries(task)
+        prefix = f"{task.task_key}|child:"
+        active_keys: set[str] = set()
+        for row in child_rows:
+            pid = int(row.get("pid") or 0)
+            if pid <= 0:
+                continue
+            start_time = int(row.get("pid_start_time") or 0)
+            child_key = f"{prefix}{pid}:{start_time}"
+            active_keys.add(child_key)
+            child = RunningTask(
+                row_id=0,
+                root=str(row.get("root") or task.root),
+                task_key=child_key,
+                task_type=str(row.get("task_type") or task.task_type),
+                entity_id=(int(row["entity_id"]) if row.get("entity_id") is not None else None),
+                command_str=str(row.get("command_str") or ""),
+                timeout_sec=0,
+                attempts=1,
+                started_at=float(row.get("started_at") or now),
+                pid=pid,
+                external=True,
+                pid_start_time=(start_time or None),
+                process_group_id=(int(row["process_group_id"]) if row.get("process_group_id") is not None else None),
+                session_id=(int(row["session_id"]) if row.get("session_id") is not None else None),
+                parent_task_key=task.task_key,
+                parent_pid=int(row.get("parent_pid") or task.pid),
+                child_process=True,
+            )
+            evidence = _external_segment_process_liveness_signal(child.pid)
+            probe_evidence = _segment_liveness_evidence(child)
+            if probe_evidence:
+                evidence.update(probe_evidence)
+            if _external_d_state_watchdog(child, child_key, evidence, whole_group=False):
+                continue
+            if bool(evidence.get("completed")):
+                _scheduler_reconciliation_receipt(
+                    store,
+                    child,
+                    state="recovered",
+                    reason="sequential_batch_child_completed",
+                    note="recovered:sequential_batch_child_completed",
+                    evidence=evidence,
+                )
+                external_watchdog.pop(child_key, None)
+                segment_watchdog.pop(child_key, None)
+                continue
+            _external_segment_watchdog_keepalive(
+                child,
+                child_key,
+                evidence,
+                whole_group=False,
+            )
+
+        # A sequential shell replaces one child with the next.  Retire only
+        # the child observation state; the parent task and its queue claim
+        # remain intact until the shell itself exits.
+        for watchdog in (external_watchdog, segment_watchdog):
+            for watch_key in list(watchdog):
+                if watch_key.startswith(prefix) and watch_key not in active_keys:
+                    watchdog.pop(watch_key, None)
+
     for key, task in list(running.items()):
         if roots is not None and str(task.root) not in roots:
             continue
         _plugin_operation_runtime_heartbeat(store, task, now)
+        _monitor_sequential_batch_children(task)
         if bool(getattr(task, "external", False)):
             alive = _is_pid_alive(task.pid)
             if alive and _pid_matches_task_command(task.pid, task.command_str):
@@ -18761,6 +19000,9 @@ def _scheduler_reconciliation_receipt(
         "task_type": str(task.task_type),
         "entity_id": task.entity_id,
         "pid": int(task.pid),
+        "parent_task_key": str(getattr(task, "parent_task_key", "") or ""),
+        "parent_pid": getattr(task, "parent_pid", None),
+        "child_process": bool(getattr(task, "child_process", False)),
         "age_sec": age_sec,
         "pid_alive": bool(evidence_payload.get("pid_alive")),
         "command": str(task.command_str),
