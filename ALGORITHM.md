@@ -482,6 +482,9 @@ SID и command identity всё ещё совпадают с первоначал
 остаётся fenced как `termination_pending`, поэтому новый duplicate не
 запускается. PID reuse, изменившийся PGID/SID или неподтверждённая identity
 никогда не сигнализируются — задача только помечается stale с точной причиной.
+Если identity подтвердить нельзя или сигнал группе завершился ошибкой, claim
+остаётся fenced с причиной `external_task_termination_blocked`; registry не
+освобождается до безопасной reconciliation, чтобы не допустить дубль.
 Последний receipt и причина доступны через `mcd-cli scheduler status
 --verbose --json`.
 
