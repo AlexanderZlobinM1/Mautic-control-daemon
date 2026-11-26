@@ -1,3 +1,10 @@
+## 1.6.146 - 2026-11-26
+
+- Keep runtime-sync-v3 conflicts scoped to their ambiguous keys: apply and
+  observe unrelated runtime settings while retaining the durable conflict
+  until an explicit operator resolution, so unrelated plugin operations do not
+  remain queued behind it.
+
 ## 1.6.145 - 2026-11-25
 
 - Exclude a vanished host root or console from every scheduler lane without

@@ -155,7 +155,9 @@ from mcd_agent.runtime_overrides import (
 from mcd_agent.runtime_sync_v3 import (
     STATE_KEY as _RUNTIME_SYNC_V3_KEY,
     conflict_active as _runtime_sync_v3_conflict_active,
+    conflict_safe_metadata as _runtime_sync_v3_conflict_safe_metadata,
     conflict_safe_runtime as _runtime_sync_v3_conflict_safe_runtime,
+    conflict_safe_runtime_from_central as _runtime_sync_v3_conflict_safe_runtime_from_central,
     desired_runtime_from_response as _runtime_sync_v3_desired_runtime,
     intent_id as _runtime_sync_v3_intent_id,
     resolution_seen as _runtime_sync_v3_resolution_seen,
@@ -23219,9 +23221,12 @@ def run_loop(
             poll_interval = max(15, min(300, int(config.mcc_push_interval_sec or config.poll_interval_sec or 60)))
             v3_state = _runtime_sync_v3_state(store)
             v3_reconcile_pending = _runtime_sync_v3_reconcile_pending(v3_state)
+            v3_conflict_hold = False
             if _runtime_sync_v3_conflict_active(v3_state) and not _runtime_sync_v3_resolution_seen(v3_state, ro):
-                status = "v3_conflict_hold"
-                logging.warning("runtime-sync-v3 conflict remains unresolved; holding ambiguous runtime keys")
+                v3_conflict_hold = True
+                logging.warning(
+                    "runtime-sync-v3 conflict remains unresolved; projecting non-ambiguous runtime keys and holding the conflict set"
+                )
             elif _runtime_sync_v3_conflict_active(v3_state):
                 _runtime_sync_v3_mark(store, {"schema": "mcd-runtime-sync-v3-state-v1", "status": "resolved", "resolved_revision": ro.get("desired_state", {}).get("revision") if isinstance(ro.get("desired_state"), Mapping) else None})
             if status == "ok":
@@ -23281,6 +23286,13 @@ def run_loop(
                     )
                     remote_runtime = _drop_invalid_required_remote_runtime_values(remote_runtime)
                     current_local_runtime = local_runtime_overrides(config)
+                    conflict = v3_state.get("conflict") if isinstance(v3_state.get("conflict"), Mapping) else {}
+                    if v3_conflict_hold:
+                        remote_runtime = _runtime_sync_v3_conflict_safe_runtime_from_central(
+                            conflict,
+                            remote_runtime,
+                            current_local_runtime,
+                        )
                     local_runtime_was_reset = _runtime_snapshot_loss_detected(
                         current_local_runtime,
                         remote_runtime,
@@ -23295,6 +23307,11 @@ def run_loop(
                         remote_runtime,
                         current_local_runtime,
                     )
+                    if v3_conflict_hold:
+                        remote_metadata = _runtime_sync_v3_conflict_safe_metadata(
+                            conflict,
+                            remote_metadata,
+                        )
                     resolution = _resolve_runtime_snapshots(
                         current_local_runtime,
                         remote_runtime,
@@ -23540,32 +23557,32 @@ def run_loop(
                             "unsupported_keys": unsupported_keys,
                         },
                     )
-                # ACK each scope after applying the resolved snapshot, even
-                # when an unrelated local delta remains pending. MCC can then
-                # observe the independently applied instance lane while the
-                # local delta continues through its own retry/rebase path.
-                # Host and instance scopes report their own exact status.
-                desired_state_runtime = (
-                    desired_state.get("runtime_overrides")
-                    if isinstance(desired_state, dict)
-                    else None
-                )
-                # ACK evidence must describe the canonical desired envelope;
-                # effective values are read back from config.
-                desired_host_runtime = (
-                    desired_state_runtime
-                    if isinstance(desired_state_runtime, dict)
-                    else overrides_raw if isinstance(overrides_raw, dict) else {}
-                )
-                for failure in acknowledge_desired_runtime_states(
-                    config,
-                    store,
-                    desired_state=desired_state,
-                    host_runtime=desired_host_runtime,
-                    instance_states=instance_states,
-                    runtime_fingerprint=fp,
-                ):
-                    logging.warning("runtime desired-state acknowledgement failed: %s", failure)
+                if not v3_conflict_hold:
+                    # ACK each scope after applying the resolved snapshot,
+                    # even when an unrelated local delta remains pending.
+                    # MCC can then observe the independently applied instance
+                    # lane while the local delta continues through its own
+                    # retry/rebase path. A v3 conflict cannot send a partial
+                    # ACK: MCC validates the complete canonical envelope.
+                    desired_state_runtime = (
+                        desired_state.get("runtime_overrides")
+                        if isinstance(desired_state, dict)
+                        else None
+                    )
+                    desired_host_runtime = (
+                        desired_state_runtime
+                        if isinstance(desired_state_runtime, dict)
+                        else overrides_raw if isinstance(overrides_raw, dict) else {}
+                    )
+                    for failure in acknowledge_desired_runtime_states(
+                        config,
+                        store,
+                        desired_state=desired_state,
+                        host_runtime=desired_host_runtime,
+                        instance_states=instance_states,
+                        runtime_fingerprint=fp,
+                    ):
+                        logging.warning("runtime desired-state acknowledgement failed: %s", failure)
                 if not local_runtime_push_pending:
                     startup_runtime_sync_pending = False
                     last_runtime_overrides_error = ""

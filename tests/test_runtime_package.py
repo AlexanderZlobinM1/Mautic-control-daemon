@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+import shutil
 import sys
 import tarfile
 import tempfile
@@ -11,6 +12,25 @@ import unittest
 import zipfile
 
 from mcd_agent import self_update
+
+
+def _canonical_source_fixture(parent: Path) -> tuple[Path, str]:
+    """Test the real payload with isolated refs, independent of the user's branch."""
+    repository = Path(__file__).parents[1]
+    source = parent / "source"
+    source.mkdir()
+    shutil.copytree(repository / "mcd_agent", source / "mcd_agent", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    for name in ("pyproject.toml", "requirements.txt", "README.md", "sitecustomize.py"):
+        shutil.copyfile(repository / name, source / name)
+    (source / "tests").mkdir()
+    (source / "tests" / "excluded.py").write_text("# development only\n")
+    (source / "docs").mkdir()
+    (source / "docs" / "excluded.md").write_text("development only\n")
+    for args in (["init", "-q"], ["config", "user.name", "Runtime QA"], ["config", "user.email", "runtime-qa@example.invalid"], ["add", "."], ["commit", "-qm", "Canonical runtime fixture"]):
+        subprocess.run(["git", *args], cwd=source, check=True, capture_output=True)
+    commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
+    subprocess.run(["git", "update-ref", "refs/remotes/origin/main", commit], cwd=source, check=True)
+    return source, commit
 
 
 class RuntimePackageTests(unittest.TestCase):
@@ -59,19 +79,15 @@ class RuntimePackageTests(unittest.TestCase):
     def test_builder_emits_runtime_only_archive_with_detached_provenance(self) -> None:
         root = Path(__file__).parents[1]
         builder = root / "tools" / "build-runtime-archive.py"
-        canonical_commit = subprocess.check_output(
-            ["git", "rev-parse", "origin/main"],
-            cwd=root,
-            text=True,
-        ).strip()
         with tempfile.TemporaryDirectory(prefix="mcd-runtime-test-") as tmp:
+            source, canonical_commit = _canonical_source_fixture(Path(tmp))
             archive = Path(tmp) / "mcd-agent-runtime.tar.gz"
             proc = subprocess.run(
                 [
                     sys.executable,
                     str(builder),
                     "--source",
-                    str(root),
+                    str(source),
                     "--output",
                     str(archive),
                     "--source-commit",
@@ -130,13 +146,14 @@ class RuntimePackageTests(unittest.TestCase):
         root = Path(__file__).parents[1]
         builder = root / "tools" / "build-runtime-archive.py"
         with tempfile.TemporaryDirectory(prefix="mcd-runtime-provenance-") as tmp:
+            source, _canonical_commit = _canonical_source_fixture(Path(tmp))
             archive = Path(tmp) / "mcd-agent-runtime.tar.gz"
             proc = subprocess.run(
                 [
                     sys.executable,
                     str(builder),
                     "--source",
-                    str(root),
+                    str(source),
                     "--output",
                     str(archive),
                     "--source-commit",
@@ -148,6 +165,20 @@ class RuntimePackageTests(unittest.TestCase):
             )
             self.assertNotEqual(proc.returncode, 0)
             self.assertIn("source commit mismatch", proc.stderr or proc.stdout)
+
+
+    def test_builder_rejects_feature_checkout_without_weakening_release_gate(self) -> None:
+        builder = Path(__file__).parents[1] / "tools" / "build-runtime-archive.py"
+        with tempfile.TemporaryDirectory(prefix="mcd-runtime-feature-") as tmp:
+            source, canonical = _canonical_source_fixture(Path(tmp))
+            (source / "README.md").write_text("feature checkout\n")
+            subprocess.run(["git", "add", "README.md"], cwd=source, check=True)
+            subprocess.run(["git", "commit", "-qm", "Feature fixture"], cwd=source, check=True)
+            archive = Path(tmp) / "must-not-exist.tar.gz"
+            proc = subprocess.run([sys.executable, str(builder), "--source", str(source), "--output", str(archive), "--source-commit", canonical], capture_output=True, text=True)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("not canonical origin/main", proc.stderr)
+            self.assertFalse(archive.exists())
 
 
 if __name__ == "__main__":
