@@ -835,7 +835,11 @@ def _runtime_sync_v3_attempt(
     """Produce one durable host intent, or explicitly decline to v2."""
     state = _runtime_sync_v3_state(store)
     if _runtime_sync_v3_conflict_active(state):
-        return {"handled": True, "status": "conflict", "response": {"status": "conflict", "conflict": state.get("conflict")}}
+        # An old v3 conflict is scoped to its recorded fields/groups.  It is
+        # not a host-wide write lock: the legacy desired path below fetches a
+        # fresh MCC snapshot and rebases only the newly changed local fields,
+        # so an independent instance/group can still converge safely.
+        return {"handled": False, "reason": "runtime_sync_v3_conflict_fallback"}
     if (
         str(state.get("status") or "").strip().lower() == "unsupported"
         and isinstance(state.get("retry_after"), (int, float))

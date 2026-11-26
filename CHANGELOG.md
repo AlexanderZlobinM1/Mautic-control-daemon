@@ -1,3 +1,9 @@
+## 1.6.148 - 2026-11-26
+
+- Keep an old runtime-sync-v3 conflict scoped to its recorded fields/groups;
+  independent local runtime deltas now fall back to the fresh field-scoped
+  desired-state rebase path instead of being swallowed by the conflict hold.
+
 ## 1.6.147 - 2026-11-26
 
 - Detect stale external Mautic console tasks in kernel `D` state only after

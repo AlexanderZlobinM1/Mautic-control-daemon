@@ -141,6 +141,50 @@ def test_daemon_v3_conflict_is_durable_and_does_not_choose_a_winner(monkeypatch)
     assert store.get_runtime_sync("mcc_runtime_sync_v3")["status"] == "conflict"
 
 
+def test_daemon_v3_old_conflict_does_not_swallow_independent_local_delta(monkeypatch):
+    uid = "b2bss.sales-snap.com"
+    store = Store({
+        "mcc_runtime": {
+            "segment_super_priority_instance_settings": {uid: {"segments": []}},
+        },
+        "mcc_runtime_desired_state": {"revision": 231},
+        "mcc_runtime_sync_v3": {
+            "schema": "mcd-runtime-sync-v3-state-v1",
+            "status": "conflict",
+            "base_revision": 218,
+            "conflict": {
+                "conflicts": [
+                    {"group_id": "campaign-super", "keys": ["campaign_super_priority_instance_settings"]},
+                    {"group_id": "segment-priority", "keys": ["segment_priority_instance_settings"]},
+                    {"group_id": "segment-super", "keys": ["segment_super_priority_instance_settings"]},
+                ],
+            },
+        },
+    })
+    cfg = SimpleNamespace(mcc_host_name="MauticFarm-02")
+    monkeypatch.setattr(
+        "mcd_agent.daemon.runtime_remote_allowed_keys",
+        lambda: {"segment_super_priority_instance_settings"},
+    )
+    def unexpected_v3_push(*_args, **_kwargs):
+        raise AssertionError("old v3 conflict must use the fresh legacy rebase path")
+
+    monkeypatch.setattr("mcd_agent.daemon.push_runtime_sync_v3", unexpected_v3_push)
+
+    result = daemon._runtime_sync_v3_attempt(
+        cfg,
+        store,
+        {
+            "segment_super_priority_instance_settings": {
+                uid: {"segments": [161]},
+            },
+        },
+    )
+
+    assert result == {"handled": False, "reason": "runtime_sync_v3_conflict_fallback"}
+    assert store.get_runtime_sync("mcc_runtime_sync_v3")["status"] == "conflict"
+
+
 def test_conflict_holds_only_ambiguous_keys_while_central_progress_continues():
     conflict = {
         "conflicts": [{"group_id": "workers", "keys": ["jobs_max_workers"]}],

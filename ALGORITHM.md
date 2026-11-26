@@ -2185,6 +2185,11 @@ without allowing a row from another host to be guessed or merged.
 An operator resolution is accepted only after a newer canonical snapshot is
 read back with `source=sync_v3_operator_resolution`; the conflict hold is then
 cleared and the ordinary apply/ACK path verifies the actual local state. The
+hold is not a host-wide write lock: a new local delta outside the held
+conflict fields/groups uses the existing fresh field-scoped desired-state
+rebase path and is delivered independently, while the old conflict remains
+durable for explicit resolution. This preserves unrelated instance settings
+without selecting a winner for the held conflict. The
 legacy v2, corporate, and standalone paths remain unchanged when v3 is not
 negotiated.
 
