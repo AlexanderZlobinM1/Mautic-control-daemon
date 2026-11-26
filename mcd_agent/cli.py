@@ -70,6 +70,7 @@ from mcd_agent.custom_scripts import (
 )
 from mcd_agent.db import MauticDB
 from mcd_agent.daemon import (
+    _SCHEDULER_RECONCILIATION_RECEIPT_KEY,
     TaskStore,
     _reconcile_running_state,
     list_external_runtime_task_summaries,
@@ -1585,6 +1586,21 @@ def _observed_running_tasks(cfg) -> tuple[list[dict[str, object]], list[dict[str
     tracked = _tracked_running_tasks(cfg)
     external = _external_running_tasks(cfg, tracked)
     return tracked, external
+
+
+def _scheduler_reconciliation_receipt(cfg) -> dict[str, object] | None:
+    """Return the last watchdog/reconciliation receipt for CLI observability."""
+
+    store = None
+    try:
+        store = TaskStore(cfg.state_db_path, cfg)
+        receipt = store.get_runtime_sync(_SCHEDULER_RECONCILIATION_RECEIPT_KEY)
+        return dict(receipt) if isinstance(receipt, dict) else None
+    except Exception:
+        return None
+    finally:
+        if store is not None:
+            store.close()
 
 
 def _list_mautic_console_processes() -> list[tuple[int, str]]:
@@ -4628,6 +4644,7 @@ def main() -> int:
             return 0
         paused = flag.exists()
         tracked, external = _observed_running_tasks(cfg)
+        reconciliation = _scheduler_reconciliation_receipt(cfg)
         running = len(tracked) + len(external)
         if bool(getattr(args, "json", False)):
             payload: dict[str, object] = {
@@ -4635,6 +4652,7 @@ def main() -> int:
                 "running_tasks": int(running),
                 "tracked_running_tasks": int(len(tracked)),
                 "external_running_tasks": int(len(external)),
+                "last_reconciliation": reconciliation,
             }
             if bool(getattr(args, "verbose", False)):
                 payload["tracked_tasks"] = tracked
@@ -4649,6 +4667,14 @@ def main() -> int:
                 external_count=len(external),
             )
         )
+        if reconciliation:
+            print(
+                "last_reconciliation state={state} reason={reason} note={note}".format(
+                    state=str(reconciliation.get("state") or "-"),
+                    reason=str(reconciliation.get("reason") or "-"),
+                    note=str(reconciliation.get("note") or "-"),
+                )
+            )
         if bool(getattr(args, "verbose", False)):
             for task in tracked:
                 print(

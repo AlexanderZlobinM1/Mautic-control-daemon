@@ -30,6 +30,9 @@ mautic_run_as_user = "www-data"
 command_timeout_sec = 0
 # Watchdog timeout for running tasks, sec; 0 means disabled.
 worker_watchdog_sec = 0
+# External Mautic console task is stale only after this bounded interval
+# with an unchanged kernel identity/state and no independent progress.
+external_task_stale_after_sec = 900
 # Segment planner cycles per dispatch tick.
 segment_cycles_per_tick = 4
 # SQL ring for simple segments (direct DB rebuild; excluded from Mautic segment rings).

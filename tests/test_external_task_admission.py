@@ -225,3 +225,104 @@ class ExternalTaskAdmissionTests(unittest.TestCase):
         self.assertEqual(receipt["reason"], "external_segment_stall")
         store.close()
 
+    def test_external_d_state_watchdog_terminates_exact_group_and_records_reason(self) -> None:
+        root = "/var/www/client"
+        config = SimpleNamespace(
+            external_task_stale_after_sec=30,
+            segment_kill_grace_sec=0,
+            worker_watchdog_sec=0,
+        )
+        task = self._external_segment(root, 89, 1.0)
+        task.pid_start_time = 1234
+        task.process_group_id = 5678
+        task.session_id = 5678
+        store = TaskStore(":memory:")
+        running = {task.task_key: task}
+        watchdog: dict[str, dict[str, object]] = {}
+        clock = {"now": 40.0}
+        process = {
+            "pid_alive": True,
+            "process_state": "D",
+            "process_wchan": "folio_wait_bit_common",
+            "process_group_id": 5678,
+            "session_id": 5678,
+            "pid_start_time": 1234,
+            "process_group_alive": True,
+            "cpu_progress": (10, 2),
+            "io_progress": (("read_bytes", 99), ("write_bytes", 0)),
+        }
+        kill_calls: list[tuple[int, int]] = []
+
+        def fake_killpg(pgid: int, sig: int) -> None:
+            kill_calls.append((pgid, sig))
+            if sig == 0:
+                raise ProcessLookupError
+
+        with patch.object(daemon, "_is_pid_alive", return_value=True), patch.object(
+            daemon, "_pid_matches_task_command", return_value=True
+        ), patch.object(daemon, "_pid_process_identity", return_value=dict(process)), patch.object(
+            daemon, "_external_segment_process_liveness_signal", return_value=dict(process)
+        ), patch.object(daemon.os, "killpg", side_effect=fake_killpg), patch.object(
+            daemon.time, "time", side_effect=lambda: clock["now"]
+        ):
+            daemon._monitor_running(
+                config=config,
+                store=store,
+                running=running,
+                popens={},
+                external_task_watchdog=watchdog,
+            )
+            clock["now"] = 50.0
+            daemon._monitor_running(
+                config=config,
+                store=store,
+                running=running,
+                popens={},
+                external_task_watchdog=watchdog,
+            )
+
+        self.assertNotIn(task.task_key, running)
+        self.assertIn((5678, daemon.signal.SIGTERM), kill_calls)
+        receipt = store.get_runtime_sync(daemon._SCHEDULER_RECONCILIATION_RECEIPT_KEY)
+        self.assertEqual(receipt["reason"], "external_task_d_state_no_progress")
+        self.assertEqual(receipt["note"], "stale:external_task_d_state_no_progress")
+        self.assertEqual(receipt["evidence"]["process_wchan"], "folio_wait_bit_common")
+        store.close()
+
+    def test_external_d_state_watchdog_keeps_recent_or_progressing_task(self) -> None:
+        root = "/var/www/client"
+        config = SimpleNamespace(external_task_stale_after_sec=30, segment_kill_grace_sec=0)
+        task = self._external_segment(root, 90, 100.0)
+        task.pid_start_time = 1235
+        task.process_group_id = 5679
+        task.session_id = 5679
+        store = TaskStore(":memory:")
+        running = {task.task_key: task}
+        process = {
+            "pid_alive": True,
+            "process_state": "D",
+            "process_group_id": 5679,
+            "session_id": 5679,
+            "pid_start_time": 1235,
+            "process_group_alive": True,
+            "cpu_progress": (10, 2),
+            "io_progress": (("read_bytes", 99),),
+        }
+        with patch.object(daemon, "_is_pid_alive", return_value=True), patch.object(
+            daemon, "_pid_matches_task_command", return_value=True
+        ), patch.object(daemon, "_pid_process_identity", return_value=dict(process)), patch.object(
+            daemon, "_external_segment_process_liveness_signal", return_value=dict(process)
+        ), patch.object(daemon, "_terminate_external_task_group") as terminate, patch.object(
+            daemon.time, "time", return_value=110.0
+        ):
+            daemon._monitor_running(
+                config=config,
+                store=store,
+                running=running,
+                popens={},
+                external_task_watchdog={},
+            )
+        self.assertIn(task.task_key, running)
+        terminate.assert_not_called()
+        store.close()
+

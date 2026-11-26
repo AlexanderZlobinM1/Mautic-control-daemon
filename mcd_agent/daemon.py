@@ -10421,6 +10421,12 @@ class RunningTask:
     external: bool = False
     stdout_path: str = ""
     stderr_path: str = ""
+    # Runtime identity captured when an externally observed process is
+    # admitted.  These values are deliberately in-memory: they fence a
+    # recycled PID/process-group before a watchdog is allowed to signal it.
+    pid_start_time: int | None = None
+    process_group_id: int | None = None
+    session_id: int | None = None
 
 
 class _SchedulerRuntimeRegistry(dict[str, RunningTask]):
@@ -13997,6 +14003,56 @@ def _pid_matches_task_command(pid: int, command_str: str) -> bool:
     return all(_cmdline_has_token(cmdline_args, tok) for tok in signature)
 
 
+def _pid_process_identity(pid: int) -> dict[str, object]:
+    """Read the PID identity and kernel state used by external-task fencing.
+
+    ``os.kill(pid, 0)`` is only an existence check.  A PID can be recycled,
+    and a process can remain alive in uninterruptible sleep (``D``) while it
+    makes no scheduler progress.  Keep this probe small and read-only so the
+    watchdog can prove that a later signal still targets the process that was
+    observed originally.
+    """
+
+    value: dict[str, object] = {"pid": int(pid or 0)}
+    if int(pid or 0) <= 0:
+        return value
+    try:
+        raw = Path(f"/proc/{int(pid)}/stat").read_text(encoding="utf-8", errors="replace")
+        stat_tail = raw.rsplit(")", 1)[-1].split()
+        # The tail starts at field 3 (state); field 22 (starttime) is index 19.
+        if len(stat_tail) > 19:
+            value["process_state"] = str(stat_tail[0] or "")
+            value["process_group_id"] = int(stat_tail[2])
+            value["session_id"] = int(stat_tail[3])
+            value["pid_start_time"] = int(stat_tail[19])
+    except (OSError, TypeError, ValueError, IndexError):
+        pass
+    try:
+        wchan = Path(f"/proc/{int(pid)}/wchan").read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        wchan = ""
+    if wchan:
+        value["process_wchan"] = wchan[:200]
+    value["pid_alive"] = _is_pid_alive(int(pid))
+    pgid = int(value.get("process_group_id") or 0)
+    if pgid <= 0:
+        try:
+            pgid = int(os.getpgid(int(pid)))
+        except (OSError, TypeError, ValueError):
+            pgid = 0
+        if pgid > 0:
+            value["process_group_id"] = pgid
+    if pgid > 1:
+        try:
+            os.killpg(pgid, 0)
+            value["process_group_alive"] = True
+        except (OSError, ProcessLookupError, PermissionError):
+            value["process_group_alive"] = False
+    else:
+        value["process_group_alive"] = bool(value.get("pid_alive"))
+    return value
+
+
 def _normalize_root_path(path: str) -> str:
     raw = str(path or "").strip()
     if not raw:
@@ -14147,6 +14203,7 @@ def list_external_runtime_task_summaries(
             "external": True,
             "mcd_ownership": _pid_mcd_ownership(pid),
         }
+        candidate.update(_pid_process_identity(pid))
         previous = rows_by_logical_key.get(logical_key)
         # A sudo/flock/php tree can expose multiple matching console processes.
         # They are one logical Mautic task; retain the oldest observed process
@@ -14246,6 +14303,21 @@ def _sync_external_running_tasks_unfenced(
             pid=pid,
             manual_request_id=None,
             external=not mcd_owned,
+            pid_start_time=(
+                int(row["pid_start_time"])
+                if row.get("pid_start_time") is not None
+                else None
+            ),
+            process_group_id=(
+                int(row["process_group_id"])
+                if row.get("process_group_id") is not None
+                else None
+            ),
+            session_id=(
+                int(row["session_id"])
+                if row.get("session_id") is not None
+                else None
+            ),
         )
 
     for key, task in list(running.items()):
@@ -14319,6 +14391,107 @@ def _kill_pid(pid: int, grace_sec: int) -> None:
             _signal(signal.SIGKILL)
         except OSError:
             return
+
+
+def _external_task_identity_evidence(task: RunningTask) -> dict[str, object]:
+    """Verify that an observed task still owns the same PID/process group."""
+
+    current = _pid_process_identity(task.pid)
+    expected_start = int(task.pid_start_time or 0)
+    expected_pgid = int(task.process_group_id or 0)
+    expected_sid = int(task.session_id or 0)
+    current_start = int(current.get("pid_start_time") or 0)
+    current_pgid = int(current.get("process_group_id") or 0)
+    current_sid = int(current.get("session_id") or 0)
+    if expected_start <= 0 and current_start > 0:
+        task.pid_start_time = current_start
+        expected_start = current_start
+    if expected_pgid <= 0 and current_pgid > 0:
+        task.process_group_id = current_pgid
+        expected_pgid = current_pgid
+    if expected_sid <= 0 and current_sid > 0:
+        task.session_id = current_sid
+        expected_sid = current_sid
+    current["pid_start_identity_match"] = bool(
+        expected_start > 0 and current_start > 0 and expected_start == current_start
+    )
+    current["process_group_identity_match"] = bool(
+        expected_pgid > 0 and current_pgid > 0 and expected_pgid == current_pgid
+    )
+    current["session_identity_match"] = bool(
+        expected_sid > 0 and current_sid > 0 and expected_sid == current_sid
+    )
+    current["task_identity_match"] = bool(
+        current.get("pid_alive")
+        and current["pid_start_identity_match"]
+        and current["process_group_identity_match"]
+        and current["session_identity_match"]
+    )
+    current["expected_pid_start_time"] = expected_start
+    current["expected_process_group_id"] = expected_pgid
+    current["expected_session_id"] = expected_sid
+    return current
+
+
+def _terminate_external_task_group(
+    task: RunningTask,
+    *,
+    grace_sec: int,
+) -> dict[str, object]:
+    """Signal only the process group whose identity was observed for ``task``.
+
+    The result distinguishes a successful group disappearance from a signal
+    request that is still pending in kernel ``D`` state.  Callers must not
+    claim a terminal process result when the group remains present.
+    """
+
+    evidence = _external_task_identity_evidence(task)
+    expected_pgid = int(evidence.get("expected_process_group_id") or 0)
+    safe_group = bool(
+        evidence.get("task_identity_match")
+        and expected_pgid > 1
+        and expected_pgid != os.getpgrp()
+    )
+    if not safe_group:
+        evidence["termination"] = "identity_unproven"
+        return evidence
+
+    def group_alive() -> bool:
+        try:
+            os.killpg(expected_pgid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except (OSError, PermissionError):
+            return True
+
+    try:
+        os.killpg(expected_pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        evidence["termination"] = "already_exited"
+        evidence["process_group_alive_after"] = False
+        return evidence
+    except OSError as exc:
+        evidence["termination"] = "signal_failed"
+        evidence["termination_error"] = str(exc)
+        evidence["process_group_alive_after"] = group_alive()
+        return evidence
+
+    deadline = time.time() + max(0, int(grace_sec))
+    while time.time() < deadline and group_alive():
+        time.sleep(0.2)
+    if group_alive():
+        try:
+            os.killpg(expected_pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError as exc:
+            evidence["termination_error"] = str(exc)
+    evidence["process_group_alive_after"] = group_alive()
+    evidence["termination"] = (
+        "terminated" if not evidence["process_group_alive_after"] else "termination_pending"
+    )
+    return evidence
 
 
 def _spawn_command(
@@ -15949,20 +16122,7 @@ def _external_segment_process_liveness_signal(pid: int) -> dict[str, object]:
     signal = _import_process_liveness_signal(pid)
     if int(pid or 0) <= 0:
         return signal
-    signal["pid_alive"] = _is_pid_alive(int(pid))
-    try:
-        pgid = int(os.getpgid(int(pid)))
-    except (OSError, TypeError, ValueError):
-        pgid = 0
-    signal["process_group_id"] = pgid
-    if pgid > 1:
-        try:
-            os.killpg(pgid, 0)
-            signal["process_group_alive"] = True
-        except (OSError, ProcessLookupError, PermissionError):
-            signal["process_group_alive"] = False
-    else:
-        signal["process_group_alive"] = bool(signal.get("pid_alive"))
+    signal.update(_pid_process_identity(pid))
     cli_progress = {}
     for name in ("cpu_progress", "io_progress"):
         if name in signal:
@@ -17522,6 +17682,7 @@ def _monitor_running(
     campaign_progress_watchdog: dict[str, dict[str, object]] | None = None,
     import_progress_watchdog: dict[str, dict[str, object]] | None = None,
     segment_progress_watchdog: dict[str, dict[str, object]] | None = None,
+    external_task_watchdog: dict[str, dict[str, object]] | None = None,
     segment_terminal_callback: Callable[[RunningTask, bool, str | None], None] | None = None,
     segment_liveness_probe: Callable[[RunningTask], Mapping[str, object] | bool] | None = None,
     import_liveness_probe: Callable[[RunningTask], Mapping[str, object] | bool] | None = None,
@@ -17533,6 +17694,7 @@ def _monitor_running(
     progress_watchdog = campaign_progress_watchdog if campaign_progress_watchdog is not None else {}
     import_watchdog = import_progress_watchdog if import_progress_watchdog is not None else {}
     segment_watchdog = segment_progress_watchdog if segment_progress_watchdog is not None else {}
+    external_watchdog = external_task_watchdog if external_task_watchdog is not None else {}
 
     def _segment_liveness_evidence(task: RunningTask) -> dict[str, object]:
         if task.task_type not in _SEGMENT_RUNTIME_TASK_TYPES:
@@ -17583,6 +17745,153 @@ def _monitor_running(
             result["marker"] = True
             result["active"] = True
         return result
+
+    def _external_d_state_watchdog(
+        task: RunningTask,
+        key: str,
+        evidence: Mapping[str, object],
+    ) -> bool:
+        """Reconcile an external console stuck in kernel ``D`` state.
+
+        Age alone never expires a task.  The process must remain in
+        uninterruptible sleep, its independent CPU/IO counters must remain
+        unchanged for the configured window, and PID/start-time/PGID/SID plus
+        the command identity must still match.  A recycled or unprovable PID
+        is released without signalling it.
+        """
+
+        state = external_watchdog.setdefault(key, {})
+        merged = {str(name): value for name, value in evidence.items()}
+        merged.update(_external_task_identity_evidence(task))
+        process_state = str(merged.get("process_state") or "").strip().upper()
+        if not process_state.startswith("D"):
+            if state.get("termination_pending") and not bool(merged.get("process_group_alive")):
+                external_watchdog.pop(key, None)
+            elif not state.get("termination_pending"):
+                external_watchdog.pop(key, None)
+            return False
+
+        if not bool(merged.get("task_identity_match")):
+            note = "stale:external_task_identity_changed"
+            _scheduler_reconciliation_receipt(
+                store,
+                task,
+                state="stale",
+                reason="external_task_identity_changed",
+                note=note,
+                evidence=merged,
+            )
+            _segment_runtime_marker_write(store, task, status="stale", now_ts=now, note=note)
+            if int(getattr(task, "row_id", 0) or 0) > 0:
+                store.finish(task.row_id, state="lost", rc=None, note=note)
+            external_watchdog.pop(key, None)
+            running.pop(key, None)
+            popens.pop(key, None)
+            return True
+
+        progress_fields = {
+            name: merged.get(name)
+            for name in ("cpu_progress", "io_progress", "db_query_progress", "db_active")
+            if name in merged
+        }
+        fingerprint = repr(sorted(progress_fields.items(), key=lambda item: item[0]))
+        previous_fingerprint = state.get("progress_fingerprint")
+        if progress_fields and previous_fingerprint is None:
+            # The first observation is only a baseline.  It must not grant a
+            # fresh lease to a process already old when the daemon discovers
+            # it after restart or delayed external-task polling.
+            state["progress_fingerprint"] = fingerprint
+            state.setdefault("last_progress_at", float(task.started_at or now))
+        elif progress_fields and fingerprint != previous_fingerprint:
+            state["progress_fingerprint"] = fingerprint
+            state["last_progress_at"] = float(now)
+            state.pop("stale_observed_at", None)
+        elif "last_progress_at" not in state:
+            state["last_progress_at"] = float(task.started_at or now)
+
+        stale_after = max(
+            30.0,
+            float(getattr(config, "external_task_stale_after_sec", 900) or 900),
+        )
+        last_progress_at = float(state.get("last_progress_at") or task.started_at or now)
+        if now - float(task.started_at or now) <= stale_after or now - last_progress_at <= stale_after:
+            return False
+
+        if state.get("termination_pending"):
+            # A D-state process can ignore both signals until the kernel I/O
+            # wait returns.  Keep the claim fenced and retry observation; do
+            # not let a new task overlap the still-present exact group.
+            if bool(merged.get("process_group_alive")):
+                return True
+            external_watchdog.pop(key, None)
+            running.pop(key, None)
+            popens.pop(key, None)
+            return True
+
+        observed_at = state.get("stale_observed_at")
+        if observed_at is None:
+            state["stale_observed_at"] = float(now)
+            logging.warning(
+                "[%s] external %s entity=%s is in D state without progress for %.1fs; starting stale recheck",
+                task.root,
+                task.task_type,
+                task.entity_id,
+                max(0.0, now - last_progress_at),
+            )
+            return True
+        if now - float(observed_at) <= max(1.0, min(30.0, stale_after / 10.0)):
+            return True
+
+        termination = _terminate_external_task_group(
+            task,
+            grace_sec=int(getattr(config, "segment_kill_grace_sec", 10) or 10),
+        )
+        merged.update(termination)
+        note = "stale:external_task_d_state_no_progress"
+        if str(termination.get("termination") or "") == "identity_unproven":
+            note = "stale:external_task_identity_unproven"
+        reason = (
+            "external_task_d_state_no_progress"
+            if note.endswith("no_progress")
+            else "external_task_identity_unproven"
+        )
+        _segment_runtime_marker_write(store, task, status="stale", now_ts=now, note=note)
+        _scheduler_reconciliation_receipt(
+            store,
+            task,
+            state="stale",
+            reason=reason,
+            note=note,
+            evidence=merged,
+        )
+        if str(termination.get("termination") or "") == "termination_pending":
+            state["termination_pending"] = True
+            state["termination_requested_at"] = float(now)
+            return True
+
+        if int(getattr(task, "row_id", 0) or 0) > 0:
+            store.finish(task.row_id, state="lost", rc=None, note=note)
+        if task.manual_request_id is not None:
+            store.finish_manual_request(task.manual_request_id, "lost", note)
+        external_watchdog.pop(key, None)
+        running.pop(key, None)
+        popens.pop(key, None)
+        if (
+            segment_terminal_callback is not None
+            and task.task_type == "segment"
+            and task.entity_id is not None
+        ):
+            segment_terminal_callback(task, False, note)
+        logging.warning(
+            "[%s] external %s entity=%s reconciled stale D-state task after %.1fs reason=%s termination=%s",
+            task.root,
+            task.task_type,
+            task.entity_id,
+            max(0.0, now - last_progress_at),
+            reason,
+            termination.get("termination"),
+        )
+        return True
 
     def _import_liveness_evidence(task: RunningTask) -> dict[str, object]:
         if task.task_type != "import":
@@ -17805,6 +18114,9 @@ def _monitor_running(
         if bool(getattr(task, "external", False)):
             alive = _is_pid_alive(task.pid)
             if alive and _pid_matches_task_command(task.pid, task.command_str):
+                process_evidence = _external_segment_process_liveness_signal(task.pid)
+                if _external_d_state_watchdog(task, key, process_evidence):
+                    continue
                 if task.task_type in _SEGMENT_RUNTIME_TASK_TYPES:
                     evidence = _segment_liveness_evidence(task)
                     if bool(evidence.get("completed")):
@@ -18051,6 +18363,17 @@ def _monitor_running(
                 task.entity_id,
                 task.pid,
             )
+            continue
+
+        # A daemon restart leaves adopted MCD-owned children without a local
+        # Popen handle.  Apply the same D-state/identity fence to that
+        # re-adopted path; ordinary long-running R/S workers continue below.
+        proc = popens.get(key)
+        if alive and proc is None and _external_d_state_watchdog(
+            task,
+            key,
+            _external_segment_process_liveness_signal(task.pid),
+        ):
             continue
 
         if alive and _campaign_super_priority_watchdog(
@@ -19043,6 +19366,7 @@ def run_loop(
     campaign_progress_watchdog: dict[str, dict[str, object]] = {}
     import_progress_watchdog: dict[str, dict[str, object]] = {}
     segment_progress_watchdog: dict[str, dict[str, object]] = {}
+    external_task_watchdog: dict[str, dict[str, object]] = {}
 
     identity = resolve_agent_identity(config)
     if bool(identity.get("clone_detected", False)):
@@ -19400,6 +19724,7 @@ def run_loop(
                 campaign_progress_watchdog=campaign_progress_watchdog,
                 import_progress_watchdog=import_progress_watchdog,
                 segment_progress_watchdog=segment_progress_watchdog,
+                external_task_watchdog=external_task_watchdog,
                 segment_terminal_callback=_segment_terminal_callback,
                 segment_liveness_probe=_segment_liveness_probe,
                 import_liveness_probe=_import_liveness_probe,
@@ -19429,6 +19754,7 @@ def run_loop(
                 campaign_progress_watchdog=campaign_progress_watchdog,
                 import_progress_watchdog=import_progress_watchdog,
                 segment_progress_watchdog=segment_progress_watchdog,
+                external_task_watchdog=external_task_watchdog,
                 segment_terminal_callback=_segment_terminal_callback,
                 segment_liveness_probe=_segment_liveness_probe,
                 import_liveness_probe=_import_liveness_probe,

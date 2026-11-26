@@ -87,6 +87,8 @@ segment_sql_lock_heartbeat_sec = 15
 segment_sql_orphan_policy = "reclaim_stale"
 # Consider SQL-ring lock stale after this many seconds without heartbeat.
 segment_sql_orphan_after_sec = 900
+# External Mautic console task D-state/no-progress stale observation window.
+external_task_stale_after_sec = 900
 # Allow page_hits-based SQL segments only in quiet window.
 segment_sql_page_hits_quiet_only = true
 # Quiet window start hour for page_hits-based SQL segments.
