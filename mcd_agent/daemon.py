@@ -18377,14 +18377,13 @@ def _monitor_running(
             grace_sec=int(getattr(config, "segment_kill_grace_sec", 10) or 10),
         )
         merged.update(termination)
-        note = "stale:external_task_d_state_no_progress"
-        if str(termination.get("termination") or "") == "identity_unproven":
-            note = "stale:external_task_identity_unproven"
-        reason = (
-            "external_task_d_state_no_progress"
-            if note.endswith("no_progress")
-            else "external_task_identity_unproven"
-        )
+        termination_status = str(termination.get("termination") or "")
+        if termination_status in {"identity_unproven", "signal_failed"}:
+            note = "stale:external_task_termination_blocked"
+            reason = "external_task_termination_blocked"
+        else:
+            note = "stale:external_task_d_state_no_progress"
+            reason = "external_task_d_state_no_progress"
         _segment_runtime_marker_write(store, task, status="stale", now_ts=now, note=note)
         _scheduler_reconciliation_receipt(
             store,
@@ -18394,7 +18393,13 @@ def _monitor_running(
             note=note,
             evidence=merged,
         )
-        if str(termination.get("termination") or "") == "termination_pending":
+        if termination_status in {"identity_unproven", "signal_failed"}:
+            state["termination_blocked"] = True
+            state["termination_blocked_at"] = float(now)
+            # Keep the claim fenced.  Releasing an unkillable/foreign group
+            # would allow a duplicate Mautic command to overlap it.
+            return True
+        if termination_status == "termination_pending":
             state["termination_pending"] = True
             state["termination_requested_at"] = float(now)
             return True

@@ -326,3 +326,56 @@ class ExternalTaskAdmissionTests(unittest.TestCase):
         terminate.assert_not_called()
         store.close()
 
+    def test_external_d_state_watchdog_keeps_task_fenced_when_termination_is_unproven(self) -> None:
+        root = "/var/www/client"
+        config = SimpleNamespace(external_task_stale_after_sec=30, segment_kill_grace_sec=0)
+        task = self._external_segment(root, 91, 1.0)
+        task.pid_start_time = 1236
+        task.process_group_id = 5680
+        task.session_id = 5680
+        store = TaskStore(":memory:")
+        running = {task.task_key: task}
+        watchdog: dict[str, dict[str, object]] = {}
+        clock = {"now": 40.0}
+        process = {
+            "pid_alive": True,
+            "process_state": "D",
+            "process_group_id": 5680,
+            "session_id": 5680,
+            "pid_start_time": 1236,
+            "process_group_alive": True,
+            "cpu_progress": (10, 2),
+            "io_progress": (("read_bytes", 99),),
+        }
+        with patch.object(daemon, "_is_pid_alive", return_value=True), patch.object(
+            daemon, "_pid_matches_task_command", return_value=True
+        ), patch.object(daemon, "_pid_process_identity", return_value=dict(process)), patch.object(
+            daemon, "_external_segment_process_liveness_signal", return_value=dict(process)
+        ), patch.object(
+            daemon,
+            "_terminate_external_task_group",
+            return_value={"termination": "identity_unproven", "process_group_alive_after": True},
+        ), patch.object(daemon.time, "time", side_effect=lambda: clock["now"]):
+            daemon._monitor_running(
+                config=config,
+                store=store,
+                running=running,
+                popens={},
+                external_task_watchdog=watchdog,
+            )
+            clock["now"] = 50.0
+            daemon._monitor_running(
+                config=config,
+                store=store,
+                running=running,
+                popens={},
+                external_task_watchdog=watchdog,
+            )
+
+        self.assertIn(task.task_key, running)
+        self.assertTrue(watchdog[task.task_key]["termination_blocked"])
+        receipt = store.get_runtime_sync(daemon._SCHEDULER_RECONCILIATION_RECEIPT_KEY)
+        self.assertEqual(receipt["reason"], "external_task_termination_blocked")
+        self.assertEqual(receipt["note"], "stale:external_task_termination_blocked")
+        store.close()
+
