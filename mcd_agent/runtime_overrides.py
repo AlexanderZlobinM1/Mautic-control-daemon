@@ -604,6 +604,7 @@ def push_runtime_overrides(
     runtime_overrides: dict[str, Any],
     *,
     merge: bool = False,
+    push_mode: str | None = None,
     target: str = "observed",
     desired_state_revision: int | None = None,
     instance_desired_states: dict[str, dict[str, Any]] | None = None,
@@ -640,13 +641,16 @@ def push_runtime_overrides(
                 for uid, values in instance_desired_states.items()
                 if isinstance(values, dict)
             }
+    selected_push_mode = str(push_mode or ("merge" if merge else "replace")).strip().lower()
+    if selected_push_mode not in {"merge", "replace"}:
+        selected_push_mode = "merge" if merge else "replace"
     payload = {
         "hostname": str(ident.get("effective_hostname") or ""),
         "mcc_host_name": canonical_host_name or str(ident.get("effective_mcc_host_name") or ""),
         "agent_hostname": str(ident.get("local_hostname") or ""),
         "configured_host_name": str(ident.get("configured_host_name") or ""),
         "runtime_overrides": runtime_payload,
-        "push_mode": "merge" if merge else "replace",
+        "push_mode": selected_push_mode,
         "target": target_mode,
     }
     payload.update(agent_version_payload())

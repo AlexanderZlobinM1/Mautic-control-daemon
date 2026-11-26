@@ -7,6 +7,7 @@ from pathlib import Path
 from mcd_agent import daemon
 from mcd_agent.runtime_overrides import push_runtime_sync_v3
 from mcd_agent.runtime_sync_v3 import (
+    conflict_cells,
     conflict_safe_metadata,
     conflict_safe_runtime,
     conflict_safe_runtime_from_central,
@@ -266,3 +267,44 @@ def test_daemon_v3_http_409_requests_snapshot_reconciliation(monkeypatch):
     state = store.get_runtime_sync("mcc_runtime_sync_v3")
     assert state["status"] == "reconcile_pending"
     assert state["reason"] == "http_409"
+
+
+def test_instance_map_conflict_holds_only_the_ambiguous_uid():
+    key = "segment_super_priority_instance_settings"
+    conflict = {
+        "conflicts": [{
+            "group_id": key,
+            "keys": [key],
+            "base": {key: {
+                "instance-a": {"segments": []},
+                "instance-b": {"segments": []},
+            }},
+            "central": {key: {
+                "instance-a": {"segments": [10]},
+                "instance-b": {"segments": [20]},
+            }},
+            "host": {key: {
+                "instance-a": {"segments": [11]},
+                "instance-b": {"segments": []},
+            }},
+        }],
+    }
+    assert conflict_cells(conflict) == {("instance", key, "instance-a")}
+    projected = conflict_safe_runtime_from_central(
+        conflict,
+        conflict["conflicts"][0]["central"],
+        conflict["conflicts"][0]["host"],
+    )
+    assert projected[key]["instance-a"] == {"segments": [11]}
+    assert projected[key]["instance-b"] == {"segments": [20]}
+
+    metadata = {
+        "host": {},
+        "instances": {
+            "instance-a": {key: {"source": "mcc"}},
+            "instance-b": {key: {"source": "mcc"}},
+        },
+    }
+    safe = conflict_safe_metadata(conflict, metadata)
+    assert "instance-a" not in safe["instances"]
+    assert key in safe["instances"]["instance-b"]

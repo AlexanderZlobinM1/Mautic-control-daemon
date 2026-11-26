@@ -1,3 +1,10 @@
+## 1.6.149 - 2026-11-26
+
+- Deliver local runtime changes as durable sparse per-cell deltas. Host and
+  instance settings keep independent addressable tombstones, empty deltas are
+  no-ops, and runtime-sync conflicts narrow instance maps to only the ambiguous
+  UID instead of freezing neighboring cells.
+
 ## 1.6.148 - 2026-11-26
 
 - Keep an old runtime-sync-v3 conflict scoped to its recorded fields/groups;
