@@ -216,6 +216,11 @@ from mcd_agent.segment_recurring_priority import entries_for_instance as recurri
 from mcd_agent.segment_recurring_priority import state_key as recurring_priority_state_key
 from mcd_agent.segment_recurring_priority import state_payload as recurring_priority_state_payload
 from mcd_agent.segment_sql_auto import DetectedSQLSegmentRule, detect_auto_sql_segment_rules
+from mcd_agent.time_scheduler import (
+    TimeTaskSpec,
+    WallClockDispatcher,
+    interval_from_schedule as _wall_clock_interval_from_schedule,
+)
 from mcd_agent.segment_dependencies import (
     dependency_segment_closure,
     dependency_execution_chains,
@@ -6995,6 +7000,21 @@ def _plugin_operation_has_registered_bundle(db: MauticDB | None, item: object) -
         return False
     bundle = str(item.get("bundle", "") or "").strip()
     return bool(bundle and db.has_installed_plugin_matching(bundle))
+
+
+def _plugin_operation_schedule_spec(
+    item: Mapping[str, object],
+    values: Mapping[str, object],
+    task: Mapping[str, object],
+) -> tuple[bool, int, dict[str, object]]:
+    """Return the declarative enable/interval pair for wall-clock dispatch."""
+
+    operation = item.get("operation") if isinstance(item.get("operation"), dict) else {}
+    schedule = task.get("schedule") if isinstance(task.get("schedule"), dict) else operation.get("schedule")
+    schedule = dict(schedule) if isinstance(schedule, dict) else {}
+    enabled_field = str(schedule.get("enabled_field", "enabled") or "enabled")
+    enabled = bool(values.get(enabled_field, True))
+    return enabled, _wall_clock_interval_from_schedule(schedule, values), schedule
 
 
 def _instance_scoped_whitelist_entry(settings: object, inst: object) -> tuple[bool, object]:
@@ -17498,6 +17518,7 @@ def _submit_if_slot(
     manual_request_id: int | None = None,
     bypass_repeat_guard: bool = False,
     bypass_baseline_admission: bool = False,
+    time_based: bool = False,
     stdout_path: str = "",
     stderr_path: str = "",
 ) -> bool:
@@ -17532,6 +17553,7 @@ def _submit_if_slot(
                 manual_request_id=manual_request_id,
                 bypass_repeat_guard=bypass_repeat_guard,
                 bypass_baseline_admission=bypass_baseline_admission,
+                time_based=time_based,
                 stdout_path=stdout_path,
                 stderr_path=stderr_path,
             )
@@ -17584,6 +17606,7 @@ def _submit_if_slot_uncoordinated(
     manual_request_id: int | None = None,
     bypass_repeat_guard: bool = False,
     bypass_baseline_admission: bool = False,
+    time_based: bool = False,
     stdout_path: str = "",
     stderr_path: str = "",
 ) -> bool:
@@ -17620,13 +17643,14 @@ def _submit_if_slot_uncoordinated(
     # update-admission lock above/below still applies.  The manual worker is
     # deliberately kept in ``running`` so normal admission sees the true
     # overcommit and waits until capacity is genuinely free again.
-    if not manual_override and not _scheduler_shared_admission_allowed(root, task_type):
+    if not time_based and not manual_override and not _scheduler_shared_admission_allowed(root, task_type):
         return False
     baseline_lane = _scheduler_baseline_lane(task_type)
     baseline_admission = bool(
         str(task_type or "").strip().lower() != "import"
         and
         baseline_lane is not None
+        and not time_based
         and _scheduler_root_lane_running_count(running, root, baseline_lane) <= 0
     )
     if (
@@ -17709,11 +17733,11 @@ def _submit_if_slot_uncoordinated(
     task.row_id = store.add_running(task)
     _segment_runtime_marker_write(store, task, status="running", now_ts=task.started_at)
     running[key] = task
-    if not manual_override:
+    if not manual_override and not time_based:
         _mark_scheduler_shared_admission(root, task_type)
-    if baseline_admission and not bypass_baseline_admission and not manual_override:
+    if baseline_admission and not bypass_baseline_admission and not manual_override and not time_based:
         _mark_scheduler_baseline_launch(str(baseline_lane), task.started_at)
-    if not manual_override:
+    if not manual_override and not time_based:
         _mark_scheduler_fairness_claim(root, task_type)
     if popens is not None:
         popens[key] = proc
@@ -20085,6 +20109,9 @@ def run_loop(
     db_dispatch_pause_until: dict[str, float] = {}
     db_dispatch_pause_reasons: dict[str, str] = {}
     jobs_last_run: dict[tuple[str, str], float] = {}
+    wall_clock_dispatcher = WallClockDispatcher(store)
+    wall_clock_stop_event = threading.Event()
+    wall_clock_thread: threading.Thread | None = None
     last_backup_schedule_ts = 0.0
     last_backup_schedule_day = ""
     backup_thread: threading.Thread | None = None
@@ -22723,6 +22750,395 @@ def run_loop(
             else:
                 time.sleep(1.0)
 
+    wall_clock_specs: list[TimeTaskSpec] = []
+    wall_clock_specs_refreshed_at = 0.0
+
+    def _wall_clock_specs_snapshot() -> list[TimeTaskSpec]:
+        """Build independent interval tasks without running them in the planner.
+
+        The snapshot is deliberately cheap and refreshed separately from the
+        heavy segment/campaign plan.  Due decisions and durable anchors live
+        in ``WallClockDispatcher``; this function only describes work and
+        supplies the existing MCD admission callback.
+        """
+
+        specs: list[TimeTaskSpec] = []
+        current_installs = list(_scheduler_runnable_installs(list(installs)))
+        for inst in current_installs:
+            root = str(getattr(inst, "root", "") or "").strip()
+            if not root or not getattr(inst, "db", None):
+                continue
+            try:
+                db = MauticDB(inst.db)
+            except Exception as exc:
+                logging.warning("[%s] wall-clock task snapshot skipped: %s", root, exc)
+                continue
+
+            if supports_message_queue(inst):
+                queue_enabled, queue_interval = effective_message_queue_setting(config, inst)
+                if queue_enabled:
+                    queue_key = f"mautic_messages_send:{root}"
+
+                    def _dispatch_queue(
+                        due_ts: float,
+                        _state: Mapping[str, object],
+                        *,
+                        _root: str = root,
+                        _inst: object = inst,
+                        _interval: int = queue_interval,
+                    ) -> Mapping[str, object]:
+                        if not cluster_route_allows(config, "cron"):
+                            return {"status": "deferred", "reason": "cron_route_disallowed"}
+                        args = render_mautic_command(
+                            php_bin=config.php_bin,
+                            run_as_user=config.mautic_run_as_user,
+                            root=_root,
+                            template="mautic:messages:send",
+                        )
+                        launched = _submit_if_slot(
+                            config=config,
+                            store=store,
+                            running=running,
+                            root=_root,
+                            task_type="job:mautic_messages_send",
+                            entity_id=None,
+                            args=args,
+                            timeout_sec=config.command_timeout_sec,
+                            max_parallel_for_type=1,
+                            popens=popens,
+                            bypass_repeat_guard=True,
+                            time_based=True,
+                        )
+                        return (
+                            {"status": "launched", "due_ts": due_ts, "interval_sec": _interval}
+                            if launched
+                            else {"status": "deferred", "reason": "admission_unavailable"}
+                        )
+
+                    specs.append(
+                        TimeTaskSpec(
+                            key=queue_key,
+                            interval_sec=max(1, int(queue_interval)),
+                            enabled=True,
+                            dispatch=_dispatch_queue,
+                        )
+                    )
+
+            email_setting = _monitored_email_parser_effective_setting(config, inst)
+            if email_setting.enabled:
+                email_key = f"monitored_email:{root}"
+
+                def _dispatch_monitored_email(
+                    _due_ts: float,
+                    _state: Mapping[str, object],
+                    *,
+                    _root: str = root,
+                    _inst: object = inst,
+                    _setting: MonitoredEmailParserSettings = email_setting,
+                ) -> Mapping[str, object]:
+                    if not cluster_route_allows(config, "cron"):
+                        return {"status": "deferred", "reason": "cron_route_disallowed"}
+                    state_key = monitored_email_state_key(_root, _setting)
+                    state = store.get_runtime_sync(state_key) or {}
+                    result = process_monitored_email(
+                        db=MauticDB(_inst.db),
+                        local_php_path=getattr(_inst, "local_php_path", None),
+                        php_bin=config.php_bin,
+                        settings=_setting,
+                        state=state,
+                    )
+                    store.put_runtime_sync(state_key, result.state)
+                    if result.errors:
+                        logging.warning(
+                            "[%s] monitored_email parser completed with errors: %s",
+                            _root,
+                            " | ".join(result.errors[:5]),
+                        )
+                    return {"status": "completed", "reason": "parser_tick"}
+
+                specs.append(
+                    TimeTaskSpec(
+                        key=email_key,
+                        interval_sec=max(1, int(email_setting.interval_sec)),
+                        enabled=True,
+                        dispatch=_dispatch_monitored_email,
+                    )
+                )
+
+            for plugin_item in plugin_operations_for_instance(config, inst):
+                operation = plugin_item.get("operation") if isinstance(plugin_item.get("operation"), dict) else {}
+                if str(operation.get("mode", "") or "") != "scheduled":
+                    continue
+                if not _plugin_operation_has_registered_bundle(db, plugin_item):
+                    continue
+                operation_key = str(plugin_item.get("operation_key", "") or "")
+                values = plugin_operation_effective_values(config, inst, plugin_item)
+                for plugin_task in plugin_operation_scheduled_tasks(plugin_item):
+                    task_id = str(plugin_task.get("id", "") or "")
+                    if not operation_key or not task_id:
+                        continue
+                    enabled, interval, schedule = _plugin_operation_schedule_spec(
+                        plugin_item,
+                        values,
+                        plugin_task,
+                    )
+                    schedule_key = f"plugin_operation:{root}:{operation_key}:{task_id}"
+                    resource_key = _plugin_operation_resource_key(operation_key, plugin_task)
+                    resource_digest = _plugin_operation_resource_digest(root, resource_key)
+
+                    def _dispatch_plugin(
+                        due_ts: float,
+                        state: Mapping[str, object],
+                        *,
+                        _root: str = root,
+                        _inst: object = inst,
+                        _db: MauticDB = db,
+                        _item: dict[str, object] = plugin_item,
+                        _task: dict[str, object] = dict(plugin_task),
+                        _values: dict[str, object] = dict(values),
+                        _operation_key: str = operation_key,
+                        _task_id: str = task_id,
+                        _resource_key: str = resource_key,
+                        _resource_digest: str = resource_digest,
+                        _interval: int = interval,
+                    ) -> Mapping[str, object]:
+                        if not cluster_route_allows(config, "cron"):
+                            return {"status": "deferred", "reason": "cron_route_disallowed"}
+                        now_dispatch = time.time()
+                        now_utc_dispatch = datetime.now(timezone.utc)
+                        now_local_dispatch = mautic_local_datetime(
+                            now_utc_dispatch,
+                            getattr(_inst, "mautic_timezone", None),
+                        )
+                        if not plugin_operation_schedule_due(
+                            _item,
+                            _values,
+                            now_epoch=now_dispatch,
+                            now_local=now_local_dispatch,
+                            last_epoch=0.0,
+                            task=_task,
+                        ):
+                            return {"status": "deferred", "reason": "schedule_window_closed"}
+                        bootstrap = _task.get("bootstrap") if isinstance(_task.get("bootstrap"), dict) else None
+                        if bootstrap is not None and bool(bootstrap.get("reset_on_enable", False)):
+                            enabled_field = str(
+                                (_task.get("schedule") if isinstance(_task.get("schedule"), dict) else {}).get(
+                                    "enabled_field",
+                                    "enabled",
+                                )
+                                or "enabled"
+                            )
+                            _sync_plugin_operation_bootstrap_enabled_state(
+                                store,
+                                _plugin_operation_bootstrap_digest(_root, _operation_key, _task_id),
+                                enabled=bool(_values.get(enabled_field, True)),
+                            )
+                        guard = _task.get("guard")
+                        if guard is not None and not _plugin_operation_guard_matches(
+                            _db,
+                            guard,
+                            now_local_dispatch,
+                        ):
+                            _plugin_operation_runtime_update(
+                                store,
+                                _resource_digest,
+                                {
+                                    "root": _root,
+                                    "operation_key": _operation_key,
+                                    "task_id": _task_id,
+                                    "resource_key": _resource_key,
+                                    "state": "skipped",
+                                    "skipped_reason": "guard_not_met",
+                                    "next_run_at": float(due_ts) + float(_interval),
+                                    "heartbeat_at": now_dispatch,
+                                    "stale": False,
+                                },
+                            )
+                            return {"status": "skipped", "reason": "guard_not_met"}
+                        selected_command = _task.get("command") if isinstance(_task.get("command"), dict) else {}
+                        task_type = (
+                            "job:plugin_operation_safety"
+                            if str(_task.get("task_class", "standard") or "standard") == "safety"
+                            else "job:plugin_operation"
+                        )
+                        if bootstrap is not None:
+                            digest = _plugin_operation_bootstrap_digest(_root, _operation_key, _task_id)
+                            complete_when = bootstrap.get("complete_when")
+                            try:
+                                completed = _plugin_operation_bootstrap_is_completed(
+                                    store,
+                                    digest,
+                                    db=_db,
+                                    complete_when=complete_when,
+                                    now_local=now_local_dispatch,
+                                )
+                            except Exception as exc:
+                                logging.warning(
+                                    "[%s] plugin operation %s/%s bootstrap probe failed: %s",
+                                    _root,
+                                    _operation_key,
+                                    _task_id,
+                                    exc,
+                                )
+                                completed = False
+                            if not completed:
+                                selected_command = bootstrap.get("command") if isinstance(bootstrap.get("command"), dict) else selected_command
+                                task_type = f"job:plugin_operation_bootstrap:{digest}"
+                        task_type = f"{task_type}:{_resource_digest}"
+                        template = plugin_operation_command_template(
+                            _item,
+                            _values,
+                            task=_task,
+                            command=selected_command,
+                        )
+                        args = render_mautic_command(
+                            php_bin=config.php_bin,
+                            run_as_user=config.mautic_run_as_user,
+                            root=_root,
+                            template=template,
+                        )
+                        task_key = _task_key(_root, task_type, None)
+                        if task_key in running or store.has_running_task_key(task_key):
+                            return {"status": "deferred", "reason": "same_task_running"}
+                        stdout_path, stderr_path = _plugin_operation_output_paths(config, _resource_digest)
+                        launched = _submit_if_slot(
+                            config=config,
+                            store=store,
+                            running=running,
+                            root=_root,
+                            task_type=task_type,
+                            entity_id=None,
+                            args=args,
+                            timeout_sec=config.command_timeout_sec,
+                            max_parallel_for_type=1,
+                            popens=popens,
+                            bypass_repeat_guard=True,
+                            time_based=True,
+                            stdout_path=stdout_path,
+                            stderr_path=stderr_path,
+                        )
+                        if not launched:
+                            return {"status": "deferred", "reason": "admission_unavailable"}
+                        launched_task = running.get(task_key)
+                        _plugin_operation_runtime_update(
+                            store,
+                            _resource_digest,
+                            {
+                                "root": _root,
+                                "operation_key": _operation_key,
+                                "task_id": _task_id,
+                                "resource_key": _resource_key,
+                                "next_run_at": float(due_ts) + float(_interval),
+                                "state": "running",
+                                "last_started_at": now_dispatch,
+                                "last_finished_at": None,
+                                "rc": None,
+                                "duration_sec": None,
+                                "stdout": "",
+                                "stderr": "",
+                                "skipped_reason": "",
+                                "heartbeat_at": now_dispatch,
+                                "owner_pid": int(launched_task.pid if launched_task is not None else 0),
+                                "stale": False,
+                                "_stdout_path": stdout_path,
+                                "_stderr_path": stderr_path,
+                            },
+                        )
+                        return {"status": "launched"}
+
+                    specs.append(
+                        TimeTaskSpec(
+                            key=schedule_key,
+                            interval_sec=interval,
+                            enabled=enabled,
+                            dispatch=_dispatch_plugin,
+                        )
+                    )
+
+            for job in config.scheduled_jobs:
+                if not job.enabled or supports_message_queue(inst):
+                    if supports_message_queue(inst) and _is_mautic_message_send_template(job.command_template):
+                        continue
+                    if not job.enabled:
+                        continue
+                if _is_mautic_email_fetch_template(job.command_template) and _monitored_email_fetch_replaces_mautic(config, inst):
+                    continue
+                job_key = f"scheduled_job:{root}:{job.name}"
+
+                def _dispatch_job(
+                    due_ts: float,
+                    _state: Mapping[str, object],
+                    *,
+                    _root: str = root,
+                    _job: object = job,
+                    _inst: object = inst,
+                ) -> Mapping[str, object]:
+                    if not cluster_route_allows(config, "cron"):
+                        return {"status": "deferred", "reason": "cron_route_disallowed"}
+                    dt_job = datetime.now(ZoneInfo(_inst.mautic_timezone)) if getattr(_inst, "mautic_timezone", None) else datetime.now()
+                    if _job.quiet_hour is not None and not (
+                        dt_job.hour == max(0, min(23, int(_job.quiet_hour)))
+                        and dt_job.minute < max(1, min(180, int(_job.quiet_window_min)))
+                    ):
+                        return {"status": "deferred", "reason": "quiet_window_closed"}
+                    args = render_mautic_command(
+                        php_bin=config.php_bin,
+                        run_as_user=config.mautic_run_as_user,
+                        root=_root,
+                        template=_job.command_template,
+                        batch_limit=config.segment_batch_limit,
+                        campaign_limit=config.campaign_limit,
+                        import_limit=config.import_limit,
+                    )
+                    launched = _submit_if_slot(
+                        config=config,
+                        store=store,
+                        running=running,
+                        root=_root,
+                        task_type=f"job:{_job.name}",
+                        entity_id=None,
+                        args=args,
+                        timeout_sec=_job.timeout_sec if _job.timeout_sec else config.command_timeout_sec,
+                        max_parallel_for_type=max(1, config.jobs_max_workers),
+                        popens=popens,
+                        bypass_repeat_guard=True,
+                        time_based=True,
+                    )
+                    return {"status": "launched"} if launched else {"status": "deferred", "reason": "admission_unavailable"}
+
+                specs.append(
+                    TimeTaskSpec(
+                        key=job_key,
+                        interval_sec=max(1, int(job.interval_sec)),
+                        enabled=bool(job.enabled),
+                        dispatch=_dispatch_job,
+                    )
+                )
+        return specs
+
+    def _wall_clock_dispatch_worker() -> None:
+        nonlocal wall_clock_specs, wall_clock_specs_refreshed_at
+        while not wall_clock_stop_event.is_set() and (
+            _test_stop_event is None or not _test_stop_event.is_set()
+        ):
+            now_wall = time.time()
+            try:
+                if now_wall - wall_clock_specs_refreshed_at >= 5.0:
+                    wall_clock_specs = _wall_clock_specs_snapshot()
+                    wall_clock_specs_refreshed_at = now_wall
+                outcomes = wall_clock_dispatcher.tick(wall_clock_specs, now_ts=now_wall)
+                for outcome in outcomes:
+                    if outcome.get("event") == "deferred":
+                        logging.info(
+                            "wall-clock task deferred key=%s reason=%s due_at=%s",
+                            outcome.get("key", "-"),
+                            outcome.get("reason", "-"),
+                            outcome.get("due_at", "-"),
+                        )
+            except Exception as exc:
+                logging.warning("wall-clock task dispatcher failed: %s", exc)
+            wall_clock_stop_event.wait(max(0.2, min(1.0, float(getattr(config, "dispatch_interval_sec", 1) or 1))))
+
     def _run_scheduler_with_missing_root_guard(name: str, worker: Callable[[], None]) -> None:
         """Restart a scheduler lane only for a discovery/render disappearance race."""
 
@@ -22741,6 +23157,12 @@ def run_loop(
                     time.sleep(1.0)
 
     if not single_cycle:
+        wall_clock_thread = threading.Thread(
+            target=_wall_clock_dispatch_worker,
+            name="mcd-wall-clock-dispatcher",
+            daemon=True,
+        )
+        wall_clock_thread.start()
         threading.Thread(
             target=_active_cycle_observation_worker,
             name="mcd-root-observer",
@@ -24029,7 +24451,7 @@ def run_loop(
         # complete inventory before applying the ordinary segment-cycle plan
         # gate below; otherwise a continuously active persisted segment cycle
         # can starve IMAP polling indefinitely.
-        if (config.profile_name or "").strip().lower() != "passive":
+        if wall_clock_thread is None and (config.profile_name or "").strip().lower() != "passive":
             _run_due_monitored_email_parsers(
                 config=config,
                 installs=installs,
@@ -28292,7 +28714,7 @@ def run_loop(
                 ):
                     last_cache_warm_ts[root] = now
 
-            if cluster_cron_allowed and supports_message_queue(inst):
+            if wall_clock_thread is None and cluster_cron_allowed and supports_message_queue(inst):
                 queue_enabled, queue_interval = effective_message_queue_setting(config, inst)
                 queue_job_name = "mautic:messages:send"
                 previous = jobs_last_run.get((root, queue_job_name), 0.0)
@@ -28317,7 +28739,7 @@ def run_loop(
                     ):
                         jobs_last_run[(root, queue_job_name)] = now
 
-            if cluster_cron_allowed:
+            if wall_clock_thread is None and cluster_cron_allowed:
                 for plugin_item in plugin_operations_for_instance(config, inst):
                     operation = plugin_item.get("operation") if isinstance(plugin_item.get("operation"), dict) else {}
                     if str(operation.get("mode", "") or "") != "scheduled":
@@ -28478,6 +28900,7 @@ def run_loop(
                                 max_parallel_for_type=1,
                                 popens=popens,
                                 bypass_repeat_guard=True,
+                                time_based=True,
                                 stdout_path=stdout_path,
                                 stderr_path=stderr_path,
                             ):
@@ -28525,6 +28948,8 @@ def run_loop(
                                 exc,
                             )
             for job in config.scheduled_jobs:
+                if wall_clock_thread is not None:
+                    continue
                 if not cluster_cron_allowed:
                     break
                 if not job.enabled:
@@ -28609,6 +29034,9 @@ def run_loop(
         segment_dispatch_wakeup.clear()
 
     control_stop_event.set()
+    wall_clock_stop_event.set()
+    if wall_clock_thread is not None and wall_clock_thread.ident is not None:
+        wall_clock_thread.join(timeout=2.0)
     lifecycle_monitor_wakeup.set()
     ordinary_refill_wakeup.set()
     lifecycle_control_executor.shutdown(wait=False, cancel_futures=True)
