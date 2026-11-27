@@ -31,6 +31,7 @@ MANIFEST_SCHEMA = "mcd-runtime-package-v1"
 REQUIRED_RUNTIME_FILES = {
     "mcd_agent/__init__.py",
     "mcd_agent/daemon.py",
+    "mcd_agent/empty_leads_cleanup.py",
     "mcd_agent/state_push.py",
     "mcd_agent/mcd_control.py",
 }

@@ -1,3 +1,9 @@
+## 1.7.26 - 2026-11-27
+
+- Make the cleanup module an immutable runtime requirement and verify its exact
+  imported path and SHA during bridge activation and systemd readback. Add a
+  regression proving a cleanup batch runs before a long segment session ends.
+
 ## 1.7.25 - 2026-11-27
 
 - Run empty-contact and orphan-page-hit cleanup in one host-wide service ring,

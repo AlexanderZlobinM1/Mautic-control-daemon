@@ -107,6 +107,7 @@ class RuntimePackageTests(unittest.TestCase):
                 self.assertIn("mcd-runtime-manifest.json", names)
                 self.assertIn("mcd_agent/__init__.py", names)
                 self.assertIn("mcd_agent/mcd_control.py", names)
+                self.assertIn("mcd_agent/empty_leads_cleanup.py", names)
                 self.assertIn("mcd_agent/state_push.py", names)
                 wheel_names = [name for name in names if name.startswith("wheel/") and name.endswith(".whl")]
                 self.assertEqual(len(wheel_names), 1)
