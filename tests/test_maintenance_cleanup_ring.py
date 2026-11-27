@@ -55,7 +55,7 @@ def _maps():
 def test_admission_reads_all_live_instances_and_round_robins_without_dispatch_roots():
     store = _Store()
     ring = deque()
-    installs = [_inst(f"/var/www/instance-{index}") for index in range(35)]
+    installs = [_inst(f"/var/www/instance-{index}") for index in range(60)]
     maps = _maps()
 
     live = daemon._maintenance_cleanup_ring_admit(
@@ -69,7 +69,7 @@ def test_admission_reads_all_live_instances_and_round_robins_without_dispatch_ro
     )
 
     assert list(live) == [inst.root for inst in installs]
-    assert len(ring) == 35
+    assert len(ring) == 60
     assert ring[0] == (installs[0].root, "empty_leads_cleanup")
     assert daemon._service_cleanup_ring_select(
         ring,

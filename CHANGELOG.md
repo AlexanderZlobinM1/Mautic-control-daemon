@@ -1,3 +1,10 @@
+## 1.6.158 - 2026-11-27
+
+- Execute the host-wide maintenance ring in its own dedicated worker. Ordinary
+  scheduler passes, Mautic patch scans and unrelated workload cannot insert
+  multi-minute gaps between cleanup items; the durable FIFO ring advances to
+  the next eligible item immediately after each batch.
+
 ## 1.6.157 - 2026-11-27
 
 - Run empty-contact and orphan page-hit maintenance from a durable, host-wide
