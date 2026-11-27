@@ -1,4 +1,4 @@
-## 1.7.32 - 2026-11-27
+## 1.7.33 - 2026-11-27
 
 - Add the typed `mautic_upgrade_scenario_v1` capability for MCD 1.7.
   MCD verifies or fetches the exact scenario artifact, projects its complete

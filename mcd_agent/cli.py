@@ -4068,6 +4068,8 @@ def main() -> int:
                 root=str(args.root or "") or None,
                 inventory_rescan=rescan_after_scenario,
             )
+            if result.get("status") == "succeeded":
+                _push_state_after_change(cfg, "mautic-upgrade-scenario-apply")
             print("MCD_MAUTIC_UPGRADE_SCENARIO_RECEIPT=" + json.dumps(result, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
             return 0 if result.get("status") == "succeeded" else 1
         if args.patch_plan_file:
