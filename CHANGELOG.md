@@ -1,3 +1,10 @@
+## 1.7.28 - 2026-11-27
+
+- Preserve fresh empty contacts during Clean Empty Contacts maintenance. Each
+  instance uses `min_contact_age_days` (default 7), and SQL selects only
+  contacts with `date_added` strictly older than the computed UTC cutoff.
+  Legacy instance settings gain the new field without losing existing values.
+
 ## 1.7.27 - 2026-11-27
 
 - Dispatch recurring interval work from durable wall-clock anchors instead of

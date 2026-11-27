@@ -8215,10 +8215,15 @@ def _service_cleanup_ring_select(
 def _empty_leads_cleanup_effective_setting(
     config: AgentConfig,
     inst: object,
-) -> tuple[bool, int, str, str, str, int, int, str, str, int]:
+) -> tuple[bool, int, str, str, str, int, int, int, str, str, int]:
     enabled = bool(getattr(config, "empty_leads_cleanup_enabled", False))
     interval = max(60, int(getattr(config, "empty_leads_cleanup_interval_sec", 900) or 900))
     batch_size = max(1, int(getattr(config, "empty_leads_cleanup_batch_size", 5000) or 5000))
+    raw_min_contact_age_days = getattr(config, "empty_leads_cleanup_min_contact_age_days", 7)
+    try:
+        min_contact_age_days = max(0, int(7 if raw_min_contact_age_days is None else raw_min_contact_age_days))
+    except (TypeError, ValueError):
+        min_contact_age_days = 7
     max_runs_per_window = max(0, int(getattr(config, "empty_leads_cleanup_max_runs_per_window", 0) or 0))
     window_start = "22:00"
     window_end = "09:00"
@@ -8235,6 +8240,7 @@ def _empty_leads_cleanup_effective_setting(
             schedule_type,
             cron_expr,
             batch_size,
+            min_contact_age_days,
             window_min,
             window_start,
             window_end,
@@ -8255,6 +8261,11 @@ def _empty_leads_cleanup_effective_setting(
             if "batch_size" in raw:
                 try:
                     batch_size = max(1, int(raw.get("batch_size") or batch_size))
+                except Exception:
+                    pass
+            if "min_contact_age_days" in raw:
+                try:
+                    min_contact_age_days = max(0, int(raw.get("min_contact_age_days")))
                 except Exception:
                     pass
             if "max_runs_per_window" in raw:
@@ -8298,6 +8309,7 @@ def _empty_leads_cleanup_effective_setting(
                 schedule_type,
                 cron_expr,
                 batch_size,
+                min_contact_age_days,
                 window_min,
                 window_start,
                 window_end,
@@ -8311,6 +8323,7 @@ def _empty_leads_cleanup_effective_setting(
                 schedule_type,
                 cron_expr,
                 batch_size,
+                min_contact_age_days,
                 window_min,
                 window_start,
                 window_end,
@@ -8323,6 +8336,7 @@ def _empty_leads_cleanup_effective_setting(
         schedule_type,
         cron_expr,
         batch_size,
+        min_contact_age_days,
         window_min,
         window_start,
         window_end,
@@ -8428,15 +8442,20 @@ def _migrate_empty_leads_cleanup_runtime(config: AgentConfig, lines: list[str]) 
         cm = re.search(r"MCD_EMPTY_LEADS_MIGRATE\s+.*cron_expr='([^']+)'", str(line or ""))
         if cm:
             cron_expr = cm.group(1).strip()
-    if interval_sec <= 0 and not cron_expr:
-        return False
     current = local_runtime_overrides(config)
+    legacy_migration_requested = interval_sec > 0 or bool(cron_expr)
+    raw_default_age_days = getattr(config, "empty_leads_cleanup_min_contact_age_days", 7)
+    try:
+        default_age_days = max(0, int(7 if raw_default_age_days is None else raw_default_age_days))
+    except (TypeError, ValueError):
+        default_age_days = 7
     schedule_type = "cron" if cron_expr else "interval"
     interval_sec = max(60, interval_sec or int(getattr(config, "empty_leads_cleanup_interval_sec", 900) or 900))
     default_setting = {
         "enabled": True,
         "interval_sec": interval_sec,
         "mode": "both_null",
+        "min_contact_age_days": default_age_days,
         "schedule_type": schedule_type,
     }
     if cron_expr:
@@ -8448,6 +8467,9 @@ def _migrate_empty_leads_cleanup_runtime(config: AgentConfig, lines: list[str]) 
         for key, value in current_settings.items():
             if isinstance(value, dict):
                 merged = dict(value)
+                if "min_contact_age_days" not in merged:
+                    merged["min_contact_age_days"] = default_age_days
+                    changed_any = True
                 if not merged.get("schedule_type"):
                     merged["schedule_type"] = schedule_type
                     merged["interval_sec"] = int(merged.get("interval_sec") or interval_sec)
@@ -8460,12 +8482,20 @@ def _migrate_empty_leads_cleanup_runtime(config: AgentConfig, lines: list[str]) 
         if not changed_any:
             return False
     else:
+        if not legacy_migration_requested:
+            return False
         next_settings = {"default": default_setting}
     updates = {
-        "empty_leads_cleanup_enabled": True,
-        "empty_leads_cleanup_interval_sec": interval_sec,
+        "empty_leads_cleanup_min_contact_age_days": default_age_days,
         "empty_leads_cleanup_instance_settings": next_settings,
     }
+    if legacy_migration_requested:
+        updates.update(
+            {
+                "empty_leads_cleanup_enabled": True,
+                "empty_leads_cleanup_interval_sec": interval_sec,
+            }
+        )
     path, changed = upsert_runtime_values(config.config_file_path, updates)
     if changed:
         logging.info("empty leads cleanup runtime migrated from cron into %s", path)
@@ -28372,6 +28402,7 @@ def run_loop(
                 empty_cleanup_schedule_type,
                 empty_cleanup_cron_expr,
                 empty_cleanup_batch_size,
+                empty_cleanup_min_contact_age_days,
                 empty_cleanup_window_min,
                 empty_cleanup_window_start,
                 empty_cleanup_window_end,
@@ -28380,6 +28411,9 @@ def run_loop(
                 config,
                 inst,
             )
+            empty_cleanup_cutoff_utc = (
+                now_utc - timedelta(days=empty_cleanup_min_contact_age_days)
+            ).strftime("%Y-%m-%d %H:%M:%S")
             if root not in empty_leads_cleanup_state_cache:
                 empty_leads_cleanup_state_cache[root] = _empty_leads_cleanup_state_load(store, root)
             empty_cleanup_state = empty_leads_cleanup_state_cache.get(root, {})
@@ -28562,6 +28596,7 @@ def run_loop(
                         db, root,
                         mode=empty_cleanup_mode,
                         batch_size=empty_cleanup_batch_size,
+                        cutoff_utc=empty_cleanup_cutoff_utc,
                     )
                     deleted = int(result.get("total_deleted", 0) or 0)
                     if deleted > 0:
@@ -28583,9 +28618,11 @@ def run_loop(
                             },
                         )
                         logging.info(
-                            "[%s] empty_leads_cleanup ok mode=%s batches=%s batch_size=%s deleted=%s elapsed=%.2fs stop=%s",
+                            "[%s] empty_leads_cleanup ok mode=%s age_days=%s cutoff_utc=%s batches=%s batch_size=%s deleted=%s elapsed=%.2fs stop=%s",
                             root,
                             str(result.get("mode") or empty_cleanup_mode),
+                            empty_cleanup_min_contact_age_days,
+                            str(result.get("cutoff_utc") or empty_cleanup_cutoff_utc),
                             int(result.get("batches_run", 0) or 0),
                             int(result.get("batch_size", 0) or empty_cleanup_batch_size),
                             deleted,

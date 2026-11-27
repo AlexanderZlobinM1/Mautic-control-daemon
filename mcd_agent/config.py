@@ -651,6 +651,7 @@ class AgentConfig:
     empty_leads_cleanup_enabled: bool
     empty_leads_cleanup_interval_sec: int
     empty_leads_cleanup_batch_size: int
+    empty_leads_cleanup_min_contact_age_days: int
     empty_leads_cleanup_max_batches_per_run: int
     empty_leads_cleanup_quiet_window_min: int
     empty_leads_cleanup_max_runs_per_window: int
@@ -2416,6 +2417,7 @@ _RUNTIME_TO_ATTR: dict[str, str] = {
     "empty_leads_cleanup_enabled": "empty_leads_cleanup_enabled",
     "empty_leads_cleanup_interval_sec": "empty_leads_cleanup_interval_sec",
     "empty_leads_cleanup_batch_size": "empty_leads_cleanup_batch_size",
+    "empty_leads_cleanup_min_contact_age_days": "empty_leads_cleanup_min_contact_age_days",
     "empty_leads_cleanup_max_batches_per_run": "empty_leads_cleanup_max_batches_per_run",
     "empty_leads_cleanup_quiet_window_min": "empty_leads_cleanup_quiet_window_min",
     "empty_leads_cleanup_max_runs_per_window": "empty_leads_cleanup_max_runs_per_window",
@@ -3447,6 +3449,14 @@ def _load_config_inner(path: str) -> AgentConfig:
         empty_leads_cleanup_enabled=bool(runtime.get("empty_leads_cleanup_enabled", False)),
         empty_leads_cleanup_interval_sec=max(60, int(runtime.get("empty_leads_cleanup_interval_sec", 900) or 900)),
         empty_leads_cleanup_batch_size=max(1, int(runtime.get("empty_leads_cleanup_batch_size", 5000) or 5000)),
+        empty_leads_cleanup_min_contact_age_days=max(
+            0,
+            int(
+                runtime.get("empty_leads_cleanup_min_contact_age_days")
+                if runtime.get("empty_leads_cleanup_min_contact_age_days") is not None
+                else 7
+            ),
+        ),
         empty_leads_cleanup_max_batches_per_run=max(
             1,
             int(runtime.get("empty_leads_cleanup_max_batches_per_run", 10) or 10),

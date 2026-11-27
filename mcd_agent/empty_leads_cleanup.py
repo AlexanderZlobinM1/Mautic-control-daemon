@@ -19,7 +19,7 @@ def cleanup_fence(root: str, lock_directory: str = "/run/lock/mcd-tasks"):
     yield
 
 
-def delete_empty_leads_safely(db, root: str, *, mode: str, batch_size: int,
+def delete_empty_leads_safely(db, root: str, *, mode: str, batch_size: int, cutoff_utc: str,
                              lock_directory: str = "/run/lock/mcd-tasks"):
     """Delete at most one batch under a per-database advisory lock.
 
@@ -38,7 +38,12 @@ def delete_empty_leads_safely(db, root: str, *, mode: str, batch_size: int,
     if connection is None:
         raise CleanupBusy("cleanup_db_lock_busy")
     try:
-        result = db.delete_empty_leads(mode=mode, batch_size=batch_size, max_batches=1)
+        result = db.delete_empty_leads(
+            mode=mode,
+            batch_size=batch_size,
+            max_batches=1,
+            cutoff_utc=cutoff_utc,
+        )
         if isinstance(result, dict):
             result = dict(result)
             result.setdefault("lock_scope", "database_advisory_batch")

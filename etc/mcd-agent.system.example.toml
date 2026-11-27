@@ -301,6 +301,7 @@ maintenance_cleanup_workers = 1
 empty_leads_cleanup_enabled = false
 empty_leads_cleanup_interval_sec = 900
 empty_leads_cleanup_batch_size = 50000
+empty_leads_cleanup_min_contact_age_days = 7
 empty_leads_cleanup_max_batches_per_run = 10
 # Default cron-window length for legacy cron schedules, e.g. 22:00 + 660 min.
 empty_leads_cleanup_quiet_window_min = 660
