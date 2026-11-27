@@ -87,6 +87,17 @@ def test_default_age_is_seven_days_and_instance_override_is_preserved():
     assert effective[6] == 14
 
 
+def test_zero_age_is_preserved_and_disables_age_filter():
+    inst = SimpleNamespace(instance_uid="instance-a", root="/var/www/a", name="a")
+    configured = _cleanup_config(
+        empty_leads_cleanup_instance_settings={
+            "instance-a": {"enabled": True, "min_contact_age_days": 0}
+        }
+    )
+    effective = _empty_leads_cleanup_effective_setting(configured, inst)
+    assert effective[6] == 0
+
+
 def test_legacy_instance_settings_gain_age_without_losing_other_fields():
     config = _cleanup_config(
         config_file_path="/tmp/mcd-cleanup-age-test.toml",
@@ -131,3 +142,24 @@ def test_delete_sql_excludes_fresh_empty_contacts_with_strict_cutoff():
     assert "`date_added` < %s" in sql
     assert params == ("2026-11-20 00:00:00", 5000)
     assert result["cutoff_utc"] == "2026-11-20 00:00:00"
+
+
+def test_delete_sql_omits_age_predicate_when_cutoff_is_disabled():
+    db = MauticDB(
+        DBConfig(host="localhost", port=3306, name="baza_ss", user="u", password="p", table_prefix="ss_")
+    )
+    connection = _Connection()
+    db._connect = lambda: connection  # type: ignore[method-assign]
+
+    result = db.delete_empty_leads(
+        mode="both_null",
+        batch_size=5000,
+        max_batches=1,
+        cutoff_utc=None,
+    )
+
+    sql, params = connection.cursor_value.calls[0]
+    assert "`date_added`" not in sql
+    assert params == (5000,)
+    assert result["cutoff_utc"] is None
+    assert result["age_filter_enabled"] is False

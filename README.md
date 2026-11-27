@@ -867,7 +867,8 @@ Important:
   - `window_start = "22:00"`, `window_end = "09:00"`
   - `batch_size = 50000`
   - `min_contact_age_days = 7` (`Minimum contact age before cleanup (days)`;
-    help: `Contacts newer than this value are preserved.`)
+    help: `Contacts newer than this value are preserved.`; `0` disables the
+    age restriction)
   - `max_runs_per_window = 0` for no limit while the window is open
 - MCC-managed Monitored Email Parser can replace `mautic:email:fetch` per instance:
   - `monitored_email_parser_interval_sec = 900`

@@ -8681,6 +8681,7 @@ def _run_empty_leads_cleanup_ring_item(
     previous_finished_at = float(previous_state.get("finished_at") or 0.0)
     started_at = float(now)
     cutoff_utc = (now_utc - timedelta(days=min_contact_age_days)).strftime("%Y-%m-%d %H:%M:%S")
+    query_cutoff_utc = cutoff_utc if min_contact_age_days > 0 else None
     _in_window, schedule_occurrence = _cleanup_session_key(
         schedule_type=schedule_type,
         now_local=datetime.now(),
@@ -8752,7 +8753,7 @@ def _run_empty_leads_cleanup_ring_item(
             root,
             mode=mode,
             batch_size=batch_size,
-            cutoff_utc=cutoff_utc,
+            cutoff_utc=query_cutoff_utc,
         )
         deleted = int(result.get("total_deleted", 0) or 0)
         next_due = now if deleted > 0 else now + float(interval)
@@ -29132,6 +29133,9 @@ def run_loop(
             empty_cleanup_cutoff_utc = (
                 now_utc - timedelta(days=empty_cleanup_min_contact_age_days)
             ).strftime("%Y-%m-%d %H:%M:%S")
+            empty_cleanup_query_cutoff_utc = (
+                empty_cleanup_cutoff_utc if empty_cleanup_min_contact_age_days > 0 else None
+            )
             if root not in empty_leads_cleanup_state_cache:
                 empty_leads_cleanup_state_cache[root] = _empty_leads_cleanup_state_load(store, root)
             empty_cleanup_state = empty_leads_cleanup_state_cache.get(root, {})
@@ -29314,7 +29318,7 @@ def run_loop(
                         db, root,
                         mode=empty_cleanup_mode,
                         batch_size=empty_cleanup_batch_size,
-                        cutoff_utc=empty_cleanup_cutoff_utc,
+                        cutoff_utc=empty_cleanup_query_cutoff_utc,
                     )
                     deleted = int(result.get("total_deleted", 0) or 0)
                     if deleted > 0:
