@@ -1190,6 +1190,7 @@ class MauticDB:
         mode: str,
         batch_size: int,
         max_batches: int,
+        cutoff_utc: str,
     ) -> dict[str, Any]:
         """
         Delete contacts that are unusable for import/matching.
@@ -1212,6 +1213,9 @@ class MauticDB:
             predicate = mobile_empty
         else:
             raise ValueError(f"unsupported_empty_leads_cleanup_mode:{normalized_mode}")
+        cutoff = str(cutoff_utc or "").strip()
+        if not cutoff:
+            raise ValueError("empty_leads_cleanup_cutoff_required")
         limit = max(1, int(batch_size))
         batches_left = max(1, int(max_batches))
         delete_sql = (
@@ -1219,7 +1223,7 @@ class MauticDB:
             "WHERE `id` IN ("
             "  SELECT doomed.id FROM ("
             f"    SELECT `id` FROM `{table}` "
-            f"    WHERE {predicate} "
+            f"    WHERE {predicate} AND `date_added` < %s "
             "    ORDER BY `id` ASC "
             "    LIMIT %s"
             "  ) doomed"
@@ -1233,7 +1237,7 @@ class MauticDB:
         with self._connect() as conn:
             while batches_run < batches_left:
                 with conn.cursor() as cur:
-                    affected = int(cur.execute(delete_sql, (limit,)) or 0)
+                    affected = int(cur.execute(delete_sql, (cutoff, limit)) or 0)
                 last_deleted = affected
                 if affected <= 0:
                     stop_reason = "empty"
@@ -1251,6 +1255,7 @@ class MauticDB:
             "elapsed_sec": max(0.0, float(time.monotonic() - started)),
             "stop_reason": stop_reason,
             "batch_size": limit,
+            "cutoff_utc": cutoff,
         }
 
     def add_dnc_for_emails(

@@ -31,9 +31,20 @@ class FakeDB:
 def test_cleanup_uses_short_db_lock_even_when_instance_root_work_is_active():
     db = FakeDB()
     with cleanup_fence("/var/www/one", "/unused"):
-        result = delete_empty_leads_safely(db, "/var/www/one", mode="both_null", batch_size=5000)
+        result = delete_empty_leads_safely(
+            db,
+            "/var/www/one",
+            mode="both_null",
+            batch_size=5000,
+            cutoff_utc="2026-11-20 00:00:00",
+        )
     assert result["lock_scope"] == "database_advisory_batch"
-    assert db.deleted == [{"mode": "both_null", "batch_size": 5000, "max_batches": 1}]
+    assert db.deleted == [{
+        "mode": "both_null",
+        "batch_size": 5000,
+        "max_batches": 1,
+        "cutoff_utc": "2026-11-20 00:00:00",
+    }]
     assert db.released == [db.connection]
 
 
@@ -61,6 +72,7 @@ def test_cleanup_deletes_before_long_segment_session_finishes(monkeypatch):
             "/var/www/ogistra",
             mode="both_null",
             batch_size=5000,
+            cutoff_utc="2026-11-20 00:00:00",
         )
         cleanup_finished.set()
 
@@ -81,7 +93,13 @@ def test_cleanup_deletes_before_long_segment_session_finishes(monkeypatch):
 def test_busy_db_lock_defers_without_delete():
     db = FakeDB(connection=None)
     with pytest.raises(CleanupBusy, match="cleanup_db_lock_busy"):
-        delete_empty_leads_safely(db, "/var/www/one", mode="both_null", batch_size=5000)
+        delete_empty_leads_safely(
+            db,
+            "/var/www/one",
+            mode="both_null",
+            batch_size=5000,
+            cutoff_utc="2026-11-20 00:00:00",
+        )
     assert db.deleted == []
     assert db.released == []
 
@@ -90,13 +108,25 @@ def test_db_lock_is_released_after_delete_failure():
     db = FakeDB()
     db.delete_empty_leads = lambda **_: (_ for _ in ()).throw(RuntimeError("sql failure"))
     with pytest.raises(RuntimeError, match="sql failure"):
-        delete_empty_leads_safely(db, "/var/www/one", mode="both_null", batch_size=5000)
+        delete_empty_leads_safely(
+            db,
+            "/var/www/one",
+            mode="both_null",
+            batch_size=5000,
+            cutoff_utc="2026-11-20 00:00:00",
+        )
     assert db.released == [db.connection]
 
 
 def test_missing_lock_api_fails_closed():
     with pytest.raises(CleanupBusy, match="cleanup_db_lock_unavailable"):
-        delete_empty_leads_safely(object(), "/var/www/one", mode="both_null", batch_size=5000)
+        delete_empty_leads_safely(
+            object(),
+            "/var/www/one",
+            mode="both_null",
+            batch_size=5000,
+            cutoff_utc="2026-11-20 00:00:00",
+        )
 
 
 class FakeStore:
