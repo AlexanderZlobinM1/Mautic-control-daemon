@@ -20,7 +20,8 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from mcd_agent.commercial_portal import canonical_json
-from mcd_agent.discovery import discover_mautic
+from mcd_agent.instance_uid import canonical_instance_uid
+from mcd_agent.inventory import InstanceInventory
 from mcd_agent.mautic_version_cache import read_mautic_version_evidence_read_only
 from mcd_agent.scenario_artifact_store import ScenarioArtifactStore
 from mcd_agent.scenario_sync import local_scenario
@@ -135,13 +136,26 @@ def _scenario_store(config: Any, instance_uid: str = "") -> ScenarioArtifactStor
 
 
 def _install_for_uid(config: Any, instance_uid: str) -> Any:
-    installs = discover_mautic(
-        config.discovery_roots,
-        config.exclude_path_contains,
-        config.supported_mautic_majors,
-        config.custom_instances,
-    )
-    matches = [item for item in installs if str(getattr(item, "instance_uid", "")) == instance_uid]
+    """Resolve the stable UID from the current registered local inventory.
+
+    A manually registered instance is already an authoritative current MCD
+    instance. Re-running filesystem discovery here can legitimately omit it
+    (for example, before vhost/domain discovery) and must not invalidate the
+    standard UID-only command path.
+    """
+    state_path = Path(str(getattr(config, "state_db_path", "") or "")).expanduser()
+    if not state_path.is_absolute() or not state_path.name or not state_path.is_file():
+        raise MauticUpgradeScenarioError("mautic_upgrade_scenario_state_path_invalid")
+    inventory = InstanceInventory(str(state_path))
+    try:
+        installs = inventory.list_instances()
+    finally:
+        inventory.conn.close()
+    matches = [
+        item
+        for item in installs
+        if canonical_instance_uid(str(getattr(item, "instance_uid", ""))) == instance_uid
+    ]
     if len(matches) != 1:
         raise MauticUpgradeScenarioError("mautic_upgrade_scenario_instance_not_current")
     return matches[0]

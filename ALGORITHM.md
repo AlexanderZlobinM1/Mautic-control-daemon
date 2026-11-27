@@ -97,6 +97,10 @@ plan и остаётся идемпотентным.
 `mautic_upgrade`, command `apply`, и передаёт только короткую команду с
 `instance_uid`. MCC не
 передаёт в командном payload сценарий, SHA, target, patch plan или CLI flags.
+UID разрешается по текущему зарегистрированному локальному inventory MCD.
+Ручная регистрация через `mcd-cli instances add` является таким же текущим
+инстансом, как autodiscovered запись, и не требует повторного обнаружения
+домена/vhost перед upgrade. Неизвестный или неоднозначный UID блокируется.
 MCD получает latest-compatible scenario через обычный ответ MCC на
 `/api/v1/agent/state`: MCC возвращает `control.scenario_sync` с семейством,
 манифестом и точными SHA/размерами пакетов. MCD принимает этот блок внутри

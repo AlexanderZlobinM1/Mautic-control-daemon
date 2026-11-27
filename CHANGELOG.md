@@ -1,3 +1,9 @@
+## 1.7.35 - 2026-11-28
+
+- Resolve the standard UID-only Mautic upgrade command from MCD's current
+  registered instance inventory. Explicit manual registrations no longer fail
+  scenario admission merely because a second filesystem discovery omits them.
+
 ## 1.7.34 - 2026-11-27
 
 - Consume the corporate MCC `mcc-mcd-scenario-sync-v1` returned by the normal

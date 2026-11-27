@@ -238,6 +238,46 @@ def test_validate_scenario_binds_plan_and_post_steps(monkeypatch):
     assert validated["post"] == {"cache_clear": True, "inventory_rescan": True}
 
 
+def test_registered_manual_instance_is_current_for_uid_only_upgrade(tmp_path: Path):
+    from mcd_agent.inventory import InstanceInventory
+    from mcd_agent import mautic_upgrade_scenario as scenario
+
+    root = tmp_path / "public_html"
+    console = root / "bin" / "console"
+    console.parent.mkdir(parents=True)
+    console.write_text("#!/usr/bin/env php\n", encoding="utf-8")
+    state_path = tmp_path / "state" / "mcd-state.db"
+    inventory = InstanceInventory(str(state_path))
+    try:
+        inventory.add_or_update_manual(
+            name="MCD 1.7.34 sandbox",
+            root=str(root),
+            console_path=str(console),
+            local_php_path=None,
+            mautic_major=7,
+            db_host=None,
+            db_port=None,
+            db_name=None,
+            db_user=None,
+            db_password=None,
+            db_table_prefix=None,
+            instance_uid="mcd1734-720-20261128",
+            runtime_php_bin="/usr/bin/php8.4",
+            runtime_user="www-data",
+        )
+    finally:
+        inventory.conn.close()
+
+    selected = scenario._install_for_uid(
+        SimpleNamespace(state_db_path=str(state_path)),
+        "mcd1734-720-20261128",
+    )
+    assert selected.instance_uid == "mcd1734-720-20261128"
+    assert selected.root == str(root)
+    assert selected.source == "manual"
+    assert selected.runtime_php_bin == "/usr/bin/php8.4"
+
+
 def test_execute_returns_mcd_receipt_bindings(monkeypatch, tmp_path: Path):
     from mcd_agent import mautic_upgrade
     from mcd_agent import mautic_upgrade_scenario as scenario
@@ -288,6 +328,7 @@ def test_execute_returns_mcd_receipt_bindings(monkeypatch, tmp_path: Path):
 def test_execute_uses_state_synced_external_scenario_runner(monkeypatch, tmp_path: Path):
     from mcd_agent import commercial_self_hosted
     from mcd_agent import mautic_upgrade_scenario as scenario
+    from mcd_agent.inventory import InstanceInventory
 
     artifact = tmp_path / "mautic-upgrade.sh"
     artifact.write_bytes(b"#!/bin/sh\nexit 0\n")
@@ -303,8 +344,32 @@ def test_execute_uses_state_synced_external_scenario_runner(monkeypatch, tmp_pat
         "artifact_transport": "mcc_authenticated_api",
         "trusted_catalog": {"source": "mcc", "transport": "mcc_authenticated_api", "status": "active", "revision": "7.2.3", "artifact_digest": digest},
     }
-    install = SimpleNamespace(instance_uid="instance-1", root="/var/www/example/public_html", console_path="/var/www/example/public_html/bin/console")
-    config = SimpleNamespace(state_db_path=str(tmp_path / "state.sqlite3"), command_timeout_sec=60)
+    root = tmp_path / "public_html"
+    console = root / "bin" / "console"
+    console.parent.mkdir(parents=True)
+    console.write_text("#!/usr/bin/env php\n", encoding="utf-8")
+    state_path = tmp_path / "state.sqlite3"
+    inventory = InstanceInventory(str(state_path))
+    try:
+        inventory.add_or_update_manual(
+            name="instance-1",
+            root=str(root),
+            console_path=str(console),
+            local_php_path=None,
+            mautic_major=7,
+            db_host=None,
+            db_port=None,
+            db_name=None,
+            db_user=None,
+            db_password=None,
+            db_table_prefix=None,
+            instance_uid="instance-1",
+            runtime_php_bin="/usr/bin/php8.4",
+            runtime_user="www-data",
+        )
+    finally:
+        inventory.conn.close()
+    config = SimpleNamespace(state_db_path=str(state_path), command_timeout_sec=60)
 
     class FakeRunner:
         def __init__(self, *_args, **_kwargs):
@@ -313,7 +378,6 @@ def test_execute_uses_state_synced_external_scenario_runner(monkeypatch, tmp_pat
         def run(self, **_kwargs):
             return {"status": "succeeded", "runner": {"status": "succeeded"}}
 
-    monkeypatch.setattr(scenario, "_install_for_uid", lambda *_args: install)
     monkeypatch.setattr(scenario, "local_scenario", lambda *_args: {"id": "mautic-upgrade", "version": "7.2.3", "pin": pin})
     monkeypatch.setattr(scenario, "read_mautic_version_evidence_read_only", lambda _root: {"version": "7.2.2", "source": "static_metadata"})
     monkeypatch.setattr(scenario, "_latest_upgrade_target", lambda *_args: (_ for _ in ()).throw(AssertionError("offline path must not resolve target")))
