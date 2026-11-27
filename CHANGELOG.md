@@ -1,3 +1,11 @@
+## 1.6.155 - 2026-11-27
+
+- Dispatch recurring interval work from durable wall-clock anchors instead of
+  the planner loop. Scheduled plugin operations, message queue, scheduled jobs
+  and monitored-email ticks keep independent `next_due` values across restart;
+  busy admission produces an explicit deferred receipt without shifting the
+  schedule.
+
 ## 1.6.154 - 2026-11-27
 
 - Make the cleanup module an immutable runtime requirement and verify its exact
