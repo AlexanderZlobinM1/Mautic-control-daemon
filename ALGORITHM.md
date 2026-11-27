@@ -116,6 +116,11 @@ patch, migration, rollback и supervision поведением. После ус�
 тот же контур завершает cache clear, MCD перечитывает финальную версию и
 запускает inventory rescan.
 
+Локальный `mcd-cli` и команда, пришедшая от MCC, используют этот же MCD
+executor и тот же `execute`-путь; различается только адаптер входа: локальный
+CLI читает staged-файл, а MCC передаёт его exact artifact pin. MCC не выполняет
+upgrade, не дублирует cache clear и не выбирает другой алгоритм.
+
 Terminal generic receipt обязан содержать те же scenario/instance bindings,
 CLI parameter projection, patch catalog/plan/payload SHA, фактическую версию,
 cache-clear result и inventory-rescan result. Mautic 6 этот capability не
