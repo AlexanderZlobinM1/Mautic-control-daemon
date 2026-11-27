@@ -1,3 +1,11 @@
+## 1.7.29 - 2026-11-27
+
+- Run empty-contact and orphan page-hit maintenance from a durable, host-wide
+  service ring independent of ordinary scheduler admission. The ring reads the
+  live instance tiles, keeps queued work across runtime sync/restart, advances
+  immediately after each batch, and writes receipts with effective settings,
+  cutoff, timing and ring position.
+
 ## 1.7.28 - 2026-11-27
 
 - Preserve fresh empty contacts during Clean Empty Contacts maintenance. Each

@@ -225,6 +225,17 @@ worker повторяет задачу после следующего допу�
 Старые записи настроек без этого ключа получают 7 без изменения остальных
 полей; receipt сохраняет применённый cutoff.
 
+Очистка контактов и orphan page-hits работает в отдельном host-wide service
+ring с числом воркеров из `maintenance_cleanup_workers` (на текущем этапе 1).
+На каждом admission ring читает текущий список discovered instances и их tile
+настройки напрямую, не ожидая segment/campaign planner, ordinary budget,
+priority/super-priority ring или lifecycle gate. Включённые due-задачи всех
+инстансов добавляются в общий FIFO-круг; после завершения batch следующий
+элемент запускается сразу, а повтор текущего инстанса ставится в хвост круга.
+Очередь и receipts durable, поэтому runtime sync и restart не сбрасывают уже
+принятые элементы. Receipt содержит instance root, schedule occurrence,
+previous/started/next timestamps, ring position, effective settings и cutoff.
+
 Generic component capability и MCD-native transport capability — разные
 контракты. Операции plugin component остаются только в descriptor projection,
 но при ready-состоянии этого компонента MCD отдельно объявляет
