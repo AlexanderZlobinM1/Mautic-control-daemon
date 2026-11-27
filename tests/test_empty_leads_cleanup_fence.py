@@ -176,6 +176,36 @@ def test_service_ring_is_one_worker_and_instance_order_is_contact_then_orphan():
     assert _service_cleanup_ring_select(ring, "instance-b", ["empty_leads_cleanup", "page_hits_orphan_cleanup"]) == "empty_leads_cleanup"
 
 
+def test_host_ring_advances_sixty_items_while_ordinary_planner_is_blocked():
+    ring = deque((f"instance-{index}", "empty_leads_cleanup") for index in range(60))
+    planner_started = Event()
+    planner_release = Event()
+    worker_finished = Event()
+    visited = []
+
+    def slow_ordinary_planner():
+        planner_started.set()
+        planner_release.wait(timeout=2)
+
+    def service_worker():
+        while ring:
+            root = ring[0][0]
+            assert _service_cleanup_ring_select(ring, root, ["empty_leads_cleanup"]) == "empty_leads_cleanup"
+            visited.append(root)
+        worker_finished.set()
+
+    planner_thread = Thread(target=slow_ordinary_planner)
+    service_thread = Thread(target=service_worker)
+    planner_thread.start()
+    assert planner_started.wait(timeout=1)
+    service_thread.start()
+    assert worker_finished.wait(timeout=1)
+    assert visited == [f"instance-{index}" for index in range(60)]
+    planner_release.set()
+    planner_thread.join(timeout=2)
+    service_thread.join(timeout=2)
+
+
 def test_unconfigured_service_is_skipped_without_ring_admission():
     ring = deque()
     assert _service_cleanup_ring_select(ring, "instance-a", []) == ""

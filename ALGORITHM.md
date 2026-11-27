@@ -227,6 +227,13 @@ worker повторяет задачу после следующего допу�
 
 Очистка контактов и orphan page-hits работает в отдельном host-wide service
 ring с числом воркеров из `maintenance_cleanup_workers` (на текущем этапе 1).
+У ring есть собственный host-wide worker и wakeup-цикл: он не исполняется
+внутри ordinary planner pass и не ждёт segment/campaign/import dispatch,
+Mautic patch scan, их budgets или завершения чужой задачи. Пока в durable
+кольце есть подходящий элемент, worker сразу выбирает следующий элемент;
+искусственная минутная пауза или ожидание следующего scheduler tick не
+вставляются. Один зависший/долгий внешний проход поэтому не останавливает
+движение служебного кольца.
 На каждом admission ring читает текущий список discovered instances и их tile
 настройки напрямую, не ожидая segment/campaign planner, ordinary budget,
 priority/super-priority ring или lifecycle gate. Включённые due-задачи всех

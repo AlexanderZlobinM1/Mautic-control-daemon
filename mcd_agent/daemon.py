@@ -20745,6 +20745,11 @@ def run_loop(
     # One host-wide service lane. Entries are (root, service_name); it never
     # consumes ordinary/priority/super-priority scheduler slots.
     maintenance_cleanup_ring: deque[tuple[str, str]] = _maintenance_cleanup_ring_load(store)
+    maintenance_cleanup_installs_by_root: dict[str, object] = {}
+    maintenance_cleanup_lock = threading.RLock()
+    maintenance_cleanup_wakeup = threading.Event()
+    maintenance_cleanup_stop = threading.Event()
+    maintenance_cleanup_thread: threading.Thread | None = None
     last_cache_clear_ts: dict[str, float] = {}
     last_cache_warm_ts: dict[str, float] = {}
     last_monitored_email_parser_ts: dict[str, float] = {}
@@ -23858,6 +23863,73 @@ def run_loop(
             popens=popens,
         )
 
+    def _maintenance_cleanup_worker() -> None:
+        """Drain the service ring without sharing the ordinary dispatch loop."""
+        while not maintenance_cleanup_stop.is_set():
+            maintenance_cleanup_wakeup.wait(timeout=1.0)
+            maintenance_cleanup_wakeup.clear()
+            while not maintenance_cleanup_stop.is_set():
+                with maintenance_cleanup_lock:
+                    if not maintenance_cleanup_ring:
+                        break
+                    queued_root, queued_service = maintenance_cleanup_ring[0]
+                    queued_inst = maintenance_cleanup_installs_by_root.get(queued_root)
+                    if queued_inst is None:
+                        maintenance_cleanup_ring.popleft()
+                        _maintenance_cleanup_ring_save(store, maintenance_cleanup_ring, now_ts=time.time())
+                        continue
+                    selected_service = _service_cleanup_ring_select(
+                        maintenance_cleanup_ring,
+                        queued_root,
+                        [queued_service],
+                        worker_limit=1,
+                        active_workers=0,
+                    )
+                    if not selected_service:
+                        break
+                    _maintenance_cleanup_ring_save(store, maintenance_cleanup_ring, now_ts=time.time())
+                    worker_now = time.time()
+                    worker_config = config
+                    if selected_service == "empty_leads_cleanup":
+                        _run_empty_leads_cleanup_ring_item(
+                            worker_config,
+                            store,
+                            queued_inst,
+                            maintenance_cleanup_ring,
+                            now=worker_now,
+                            now_utc=datetime.now(timezone.utc),
+                            ring_position=0,
+                            empty_leads_cleanup_state_cache=empty_leads_cleanup_state_cache,
+                            last_empty_leads_cleanup_ts=last_empty_leads_cleanup_ts,
+                            last_empty_leads_cleanup_idle_ts=last_empty_leads_cleanup_idle_ts,
+                            empty_leads_cleanup_window_counts=empty_leads_cleanup_window_counts,
+                            empty_leads_cleanup_window_keys=empty_leads_cleanup_window_keys,
+                            empty_leads_cleanup_done_window_keys=empty_leads_cleanup_done_window_keys,
+                        )
+                    elif selected_service == "page_hits_orphan_cleanup":
+                        _run_page_hits_cleanup_ring_item(
+                            worker_config,
+                            store,
+                            queued_inst,
+                            maintenance_cleanup_ring,
+                            now=worker_now,
+                            now_utc=datetime.now(timezone.utc),
+                            ring_position=0,
+                            page_hits_orphan_cleanup_active=page_hits_orphan_cleanup_active,
+                            page_hits_orphan_cleanup_window_counts=page_hits_orphan_cleanup_window_counts,
+                            page_hits_orphan_cleanup_done_window_keys=page_hits_orphan_cleanup_done_window_keys,
+                        )
+                    else:
+                        logging.warning("[%s] unknown maintenance cleanup service: %s", queued_root, selected_service)
+                        _maintenance_cleanup_ring_save(store, maintenance_cleanup_ring, now_ts=time.time())
+
+    maintenance_cleanup_thread = threading.Thread(
+        target=_maintenance_cleanup_worker,
+        name="mcd-maintenance-cleanup-ring",
+        daemon=True,
+    )
+    maintenance_cleanup_thread.start()
+
     while _test_stop_event is None or not _test_stop_event.is_set():
         installs = _scheduler_runnable_installs(installs)
         # Only refresh the snapshot here.  Each configured instance owns an
@@ -24448,7 +24520,8 @@ def run_loop(
                         empty_leads_cleanup_window_keys.clear()
                         empty_leads_cleanup_done_window_keys.clear()
                         last_monitored_email_parser_ts.clear()
-                        _maintenance_cleanup_ring_save(store, maintenance_cleanup_ring, now_ts=now)
+                        with maintenance_cleanup_lock:
+                            _maintenance_cleanup_ring_save(store, maintenance_cleanup_ring, now_ts=now)
                         logging.info(
                             "runtime-overrides cleanup schedules refreshed for next independent ring admission"
                         )
@@ -26987,86 +27060,31 @@ def run_loop(
             1,
             int(getattr(config, "maintenance_cleanup_workers", 1) or 1),
         )
-        maintenance_installs_by_root = _maintenance_cleanup_ring_admit(
-            config,
-            installs,
-            store,
-            maintenance_cleanup_ring,
-            now=now,
-            cluster_cron_allowed=cluster_cron_allowed,
-            empty_leads_cleanup_state_cache=empty_leads_cleanup_state_cache,
-            last_empty_leads_cleanup_ts=last_empty_leads_cleanup_ts,
-            empty_leads_cleanup_window_counts=empty_leads_cleanup_window_counts,
-            empty_leads_cleanup_window_keys=empty_leads_cleanup_window_keys,
-            empty_leads_cleanup_done_window_keys=empty_leads_cleanup_done_window_keys,
-            last_page_hits_orphan_cleanup_ts=last_page_hits_orphan_cleanup_ts,
-            page_hits_orphan_cleanup_active=page_hits_orphan_cleanup_active,
-            page_hits_orphan_cleanup_window_counts=page_hits_orphan_cleanup_window_counts,
-            page_hits_orphan_cleanup_window_keys=page_hits_orphan_cleanup_window_keys,
-            page_hits_orphan_cleanup_done_window_keys=page_hits_orphan_cleanup_done_window_keys,
-        )
-        maintenance_cleanup_workers_started = 0
-        maintenance_cleanup_roots = []
-        maintenance_cleanup_seen_roots: set[str] = set()
-        for queued_root, _queued_service in maintenance_cleanup_ring:
-            if queued_root in maintenance_installs_by_root and queued_root not in maintenance_cleanup_seen_roots:
-                maintenance_cleanup_roots.append(queued_root)
-                maintenance_cleanup_seen_roots.add(queued_root)
-        if maintenance_cleanup_roots:
-            maintenance_prefix = [maintenance_installs_by_root[root] for root in maintenance_cleanup_roots]
-            maintenance_root_set = set(maintenance_cleanup_roots)
-            dispatch_installs = maintenance_prefix + [
-                inst
-                for inst in dispatch_installs
-                if str(getattr(inst, "root", "") or "").strip() not in maintenance_root_set
-            ]
-        while maintenance_cleanup_workers_started < maintenance_cleanup_worker_limit and maintenance_cleanup_ring:
-            queued_root, queued_service = maintenance_cleanup_ring[0]
-            if queued_service not in {"empty_leads_cleanup", "page_hits_orphan_cleanup"}:
-                break
-            queued_inst = maintenance_installs_by_root.get(queued_root)
-            if queued_inst is None:
-                break
-            selected_service = _service_cleanup_ring_select(
+        with maintenance_cleanup_lock:
+            admitted_maintenance_installs = _maintenance_cleanup_ring_admit(
+                config,
+                installs,
+                store,
                 maintenance_cleanup_ring,
-                queued_root,
-                [queued_service],
-                worker_limit=maintenance_cleanup_worker_limit,
-                active_workers=maintenance_cleanup_workers_started,
+                now=now,
+                cluster_cron_allowed=cluster_cron_allowed,
+                empty_leads_cleanup_state_cache=empty_leads_cleanup_state_cache,
+                last_empty_leads_cleanup_ts=last_empty_leads_cleanup_ts,
+                empty_leads_cleanup_window_counts=empty_leads_cleanup_window_counts,
+                empty_leads_cleanup_window_keys=empty_leads_cleanup_window_keys,
+                empty_leads_cleanup_done_window_keys=empty_leads_cleanup_done_window_keys,
+                last_page_hits_orphan_cleanup_ts=last_page_hits_orphan_cleanup_ts,
+                page_hits_orphan_cleanup_active=page_hits_orphan_cleanup_active,
+                page_hits_orphan_cleanup_window_counts=page_hits_orphan_cleanup_window_counts,
+                page_hits_orphan_cleanup_window_keys=page_hits_orphan_cleanup_window_keys,
+                page_hits_orphan_cleanup_done_window_keys=page_hits_orphan_cleanup_done_window_keys,
             )
-            if selected_service not in {"empty_leads_cleanup", "page_hits_orphan_cleanup"}:
-                break
-            _maintenance_cleanup_ring_save(store, maintenance_cleanup_ring, now_ts=now)
-            if selected_service == "empty_leads_cleanup":
-                _run_empty_leads_cleanup_ring_item(
-                    config,
-                    store,
-                    queued_inst,
-                    maintenance_cleanup_ring,
-                    now=now,
-                    now_utc=datetime.now(timezone.utc),
-                    ring_position=0,
-                    empty_leads_cleanup_state_cache=empty_leads_cleanup_state_cache,
-                    last_empty_leads_cleanup_ts=last_empty_leads_cleanup_ts,
-                    last_empty_leads_cleanup_idle_ts=last_empty_leads_cleanup_idle_ts,
-                    empty_leads_cleanup_window_counts=empty_leads_cleanup_window_counts,
-                    empty_leads_cleanup_window_keys=empty_leads_cleanup_window_keys,
-                    empty_leads_cleanup_done_window_keys=empty_leads_cleanup_done_window_keys,
-                )
-            else:
-                _run_page_hits_cleanup_ring_item(
-                    config,
-                    store,
-                    queued_inst,
-                    maintenance_cleanup_ring,
-                    now=now,
-                    now_utc=datetime.now(timezone.utc),
-                    ring_position=0,
-                    page_hits_orphan_cleanup_active=page_hits_orphan_cleanup_active,
-                    page_hits_orphan_cleanup_window_counts=page_hits_orphan_cleanup_window_counts,
-                    page_hits_orphan_cleanup_done_window_keys=page_hits_orphan_cleanup_done_window_keys,
-                )
-            maintenance_cleanup_workers_started += 1
+            maintenance_cleanup_installs_by_root.clear()
+            maintenance_cleanup_installs_by_root.update(admitted_maintenance_installs)
+        maintenance_cleanup_wakeup.set()
+        # The dedicated worker owns the service ring. The ordinary dispatcher
+        # must never execute or wait for a maintenance item.
+        maintenance_cleanup_workers_started = maintenance_cleanup_worker_limit
         for inst in _iter_instances_with_root_dispatch_gate(
             dispatch_installs,
             busy_roots=main_dispatch_busy_roots,
@@ -29735,7 +29753,8 @@ def run_loop(
                 ):
                     jobs_last_run[(root, job.name)] = time.time()
 
-        _maintenance_cleanup_ring_save(store, maintenance_cleanup_ring, now_ts=now)
+        with maintenance_cleanup_lock:
+            _maintenance_cleanup_ring_save(store, maintenance_cleanup_ring, now_ts=now)
         if pusher.enabled():
             try:
                 monitor_signals = collect_monitor_signals(
@@ -29758,6 +29777,10 @@ def run_loop(
                     last_monitor_signals_push_error = reason
 
         if single_cycle:
+            maintenance_cleanup_stop.set()
+            maintenance_cleanup_wakeup.set()
+            if maintenance_cleanup_thread is not None and maintenance_cleanup_thread.ident is not None:
+                maintenance_cleanup_thread.join(timeout=2.0)
             control_stop_event.set()
             lifecycle_control_executor.shutdown(wait=False, cancel_futures=True)
             io_control_executor.shutdown(wait=False, cancel_futures=True)
@@ -29771,6 +29794,10 @@ def run_loop(
         segment_dispatch_wakeup.wait(timeout=max(0.1, float(config.dispatch_interval_sec)))
         segment_dispatch_wakeup.clear()
 
+    maintenance_cleanup_stop.set()
+    maintenance_cleanup_wakeup.set()
+    if maintenance_cleanup_thread is not None and maintenance_cleanup_thread.ident is not None:
+        maintenance_cleanup_thread.join(timeout=2.0)
     control_stop_event.set()
     wall_clock_stop_event.set()
     if wall_clock_thread is not None and wall_clock_thread.ident is not None:
