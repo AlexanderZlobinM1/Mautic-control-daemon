@@ -123,6 +123,32 @@ class MauticDB:
         # connection closes. Closing also avoids a separate RELEASE_LOCK race.
         conn.close()
 
+    def try_acquire_empty_leads_cleanup_lock(self) -> pymysql.connections.Connection | None:
+        """Acquire the short per-database empty-leads maintenance lock."""
+        conn = self._connect()
+        identity = f"{self.cfg.name}:{self.cfg.table_prefix}"
+        digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:40]
+        lock_name = f"mcd:empty_leads_cleanup:{digest}"
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT GET_LOCK(%s, 0) AS acquired", (lock_name,))
+                row = cur.fetchone()
+            if isinstance(row, dict) and int(row.get("acquired") or 0) == 1:
+                return conn
+        except Exception:
+            conn.close()
+            raise
+        conn.close()
+        return None
+
+    @staticmethod
+    def release_empty_leads_cleanup_lock(conn: pymysql.connections.Connection | None) -> None:
+        if conn is None:
+            return
+        # Closing the owning connection releases the named lock and keeps the
+        # maintenance window bounded even when the DELETE raises.
+        conn.close()
+
     @staticmethod
     def _safe_column(name: str) -> str:
         raw = str(name or "").strip()

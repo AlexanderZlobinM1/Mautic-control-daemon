@@ -12,12 +12,16 @@ lists; idempotent queued/conflict remain distinct. Missing intent status or
 canonical runtime fails without clearing pending/defaulting settings.
 Evidence: tests/test_runtime_intent_observation.py.
 
-Empty-contact cleanup gate: either existing task fence held shared prevents
-SQL deletion; exclusive cleanup prevents new shared admission on both fences.
-Failure releases all acquired fences; a second instance remains independent.
-A contact read followed by FK membership insertion remains valid while cleanup
-is deferred. SQLite unit proof is not a live MySQL/Mautic acceptance receipt.
-Evidence: tests/test_empty_leads_cleanup_fence.py.
+Service-cleanup ring gate: one host-wide maintenance worker admits enabled
+empty-contact and orphan-page-hit jobs in instance order. For each instance,
+empty-contact cleanup is first, orphan page-hit cleanup follows, then the ring
+advances to the next instance. A completed non-empty batch is requeued at the
+tail without waiting for a cleanup interval; an unselected task is skipped.
+Empty-contact deletion uses a short per-database advisory lock, never the
+long-lived segment/campaign root fences, and a busy/failed attempt persists a
+pending receipt for retry. The lane never consumes scheduler task slots.
+Evidence: tests/test_empty_leads_cleanup_fence.py and the paired 1.6/1.7
+service-ring regression.
 
 Install-type gate: ZIP/source with composer.json, composer.lock, config/local.php,
 bin/console and docroot/public stays zip and uses update-package then finish.
