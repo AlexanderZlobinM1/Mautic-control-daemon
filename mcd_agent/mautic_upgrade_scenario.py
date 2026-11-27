@@ -14,6 +14,7 @@ import base64
 import json
 import os
 import re
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -22,6 +23,7 @@ from mcd_agent.commercial_portal import canonical_json
 from mcd_agent.discovery import discover_mautic
 from mcd_agent.mautic_version_cache import read_mautic_version_evidence_read_only
 from mcd_agent.scenario_artifact_store import ScenarioArtifactStore
+from mcd_agent.scenario_sync import local_scenario
 
 
 SCENARIO_SCHEMA = "mcd-mautic-upgrade-scenario-v1"
@@ -157,6 +159,18 @@ def _resolve_scenario(
     source_version = str(evidence.get("version") or "").strip()
     if not source_version or str(evidence.get("source") or "") != "static_metadata":
         raise MauticUpgradeScenarioError("mautic_upgrade_scenario_source_version_unavailable")
+    # Corporate MCC delivers executable scenario packages through the normal
+    # state-push control response.  They are host-wide catalog objects, not
+    # per-command JSON envelopes and therefore do not use the old per-instance
+    # ScenarioArtifactStore.
+    runtime_item = local_scenario(config, "mautic-upgrade")
+    if runtime_item is not None:
+        return (
+            str(runtime_item["id"]),
+            str(runtime_item["version"]),
+            dict(runtime_item["pin"]),
+            source_version,
+        )
     local_store = _scenario_store(config, instance_uid)
     local = local_store.read_current()
     local_result: tuple[str, str, dict[str, Any], str] | None = None
@@ -217,6 +231,206 @@ def _resolve_scenario(
     scenario_revision = _identifier(resolved.get("scenario_revision"), "mautic_upgrade_scenario_resolution_invalid")
     pin = _artifact_pin(resolved.get("scenario_artifact"), allow_local=allow_local)
     return scenario_id, scenario_revision, pin, source_version
+
+
+def _latest_upgrade_target(config: Any, source_version: str) -> str:
+    from mcd_agent.mautic_upgrade import _latest_same_branch
+
+    target = _latest_same_branch(config, source_version)
+    if not target:
+        raise MauticUpgradeScenarioError("mautic_upgrade_scenario_target_unavailable")
+    return str(target)
+
+
+def _external_scenario_context(
+    *,
+    config: Any,
+    install: Any,
+    instance_uid: str,
+    scenario_id: str,
+    scenario_revision: str,
+    artifact_digest: str,
+    source_version: str,
+    target_version: str,
+    install_type: str,
+    run_id: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Build only observed host/application facts for the generic runner."""
+    from mcd_agent.commercial_detector import (
+        applicability_facts_digest,
+        read_normalized_applicability_facts,
+    )
+
+    capabilities = ["package_manager.query"]
+    facts = read_normalized_applicability_facts(
+        target_kind="existing_server",
+        capabilities=capabilities,
+    )
+    php_bin = str(getattr(install, "runtime_php_bin", "") or getattr(config, "php_bin", "") or "php")
+    run_as_user = str(getattr(install, "runtime_user", "") or getattr(config, "mautic_run_as_user", "") or "www-data")
+    composer = str(getattr(config, "composer_bin", "") or shutil.which("composer") or "/usr/local/bin/composer")
+    php_version = "8.4"
+    match = re.search(r"php(?:/|)(\d+\.\d+)", php_bin)
+    if match:
+        php_version = match.group(1)
+    job_id = f"mautic-upgrade-scenario-{run_id}"
+    binding = {
+        "job_id": job_id,
+        "request_id": job_id,
+        "command_id": "apply",
+        "idempotency_key": job_id,
+    }
+    scenario_binding = {
+        "scenario_id": scenario_id,
+        "revision": scenario_revision,
+        "artifact_revision": scenario_revision,
+        "artifact_digest": artifact_digest,
+    }
+    target_label = target_version or "scenario"
+    parameters = {
+        "run_id": run_id,
+        "transition_id": f"mautic-{source_version}-to-{target_label}-{install_type}",
+        "instance_uid": instance_uid,
+        "root": str(install.root),
+        "console_path": str(install.console_path),
+        "php_bin": php_bin,
+        "run_as_user": run_as_user,
+        "source_version": source_version,
+        "target_version": target_version,
+        "install_type": install_type,
+        "composer_bin": composer,
+        "runtime_php": php_version,
+    }
+    context = {
+        "schema": "mcd-scenario-executable-context-v1",
+        "contract_version": "1.0",
+        "job": binding,
+        "scenario": scenario_binding,
+        "applicability": {"facts_digest": applicability_facts_digest(facts)},
+        "parameters": parameters,
+        "secret_references": [],
+    }
+    return context, facts
+
+
+def _run_external_scenario(
+    *,
+    config: Any,
+    install: Any,
+    instance_uid: str,
+    scenario_id: str,
+    scenario_revision: str,
+    pin: Mapping[str, Any],
+    source_version: str,
+    job: Mapping[str, Any],
+    inventory_rescan: Callable[[], Any] | None,
+) -> Mapping[str, Any]:
+    """Run an MCC-delivered executable scenario through the shared MCD runner."""
+    # The executable scenario is authoritative for its own upgrade steps.  A
+    # target is needed only to resolve the optional MCC patch plan; a missing
+    # MCC connection/catalog must not prevent a verified local scenario from
+    # running offline.
+    target_version = ""
+    if str(getattr(config, "mcc_url", "") or "").strip():
+        try:
+            target_version = _latest_upgrade_target(config, source_version)
+        except MauticUpgradeScenarioError:
+            target_version = ""
+    from mcd_agent.install_type import detect_install_type
+    from mcd_agent.commercial_self_hosted import ExternalProcessPolicy, default_scenario_runner_argv
+
+    install_type = detect_install_type(str(install.root))
+    selected = (
+        _resolve_patch_plan(
+            config,
+            install,
+            source=source_version,
+            target=target_version,
+            mode=install_type,
+        )
+        if target_version
+        else None
+    )
+    patch_cache = None
+    patch = None
+    if selected is not None:
+        plan = _mapping(selected.get("plan"), "mautic_upgrade_scenario_patch_plan_invalid")
+        patch = {
+            "catalog_revision": str(selected.get("catalog_revision") or ""),
+            "catalog_sha256": "sha256:" + str(selected.get("catalog_sha256") or ""),
+            "plan_sha256": "sha256:" + str(selected.get("plan_sha256") or ""),
+            "run_id": str(plan.get("run_id") or ""),
+            "plan": plan,
+        }
+        patch_cache = _stage_patch_plan(config, instance_uid, {"plan": plan})
+    run_id = str(job.get("job_id") or job.get("command_id") or "scenario")
+    context, facts = _external_scenario_context(
+        config=config,
+        install=install,
+        instance_uid=instance_uid,
+        scenario_id=scenario_id,
+        scenario_revision=scenario_revision,
+        artifact_digest=str(pin["artifact_digest"]),
+        source_version=source_version,
+        target_version=target_version,
+        install_type=install_type,
+        run_id=run_id,
+    )
+    runner = ExternalProcessPolicy(
+        default_scenario_runner_argv(),
+        timeout_sec=int(getattr(config, "command_timeout_sec", 1800) or 1800),
+    )
+    try:
+        runner_result = runner.run(
+            artifact=Path(str(pin["artifact_path"])).read_bytes(),
+            job={
+                "job_id": context["job"]["job_id"],
+                "scenario": context["scenario"],
+                "scenario_artifact": dict(pin),
+            },
+            facts=facts,
+            context=context,
+        )
+    except Exception as exc:
+        reason = str(getattr(exc, "code", "mautic_upgrade_scenario_runner_failed"))
+        return {"status": "failed", "reason": reason, "scenario": {"id": scenario_id, "revision": scenario_revision, "artifact_digest": pin["artifact_digest"]}}
+    patch_result: Mapping[str, Any] = {"status": "not_available"}
+    if patch is not None:
+        from mcd_agent.mautic_patch_plan_v3 import atomic_preflight, execute as execute_patch_plan
+        from mcd_agent.mautic_patch_fact_binding import bound_provider, needs_facts
+
+        plan = patch["plan"]
+        root = str(install.root)
+        facts_provider = bound_provider(config, root) if needs_facts(plan) else None
+        preflight = atomic_preflight(
+            root,
+            plan,
+            facts_provider=facts_provider,
+        )
+        accepted_facts = preflight.get("facts_receipt")
+        patch_result = execute_patch_plan(
+            root,
+            plan,
+            phase="post_source_install",
+            observed_major=int(source_version.split(".", 1)[0]),
+            facts_provider=facts_provider,
+            accepted_facts=accepted_facts,
+        )
+        if patch_result.get("status") != "success":
+            return {"status": "failed", "reason": "mautic_upgrade_scenario_patch_apply_failed", "scenario": {"id": scenario_id, "revision": scenario_revision}, "runner": runner_result, "patch": patch_result}
+    final_version = read_mautic_version_evidence_read_only(str(install.root))
+    inventory = inventory_rescan() if inventory_rescan is not None else {"status": "not_configured"}
+    return {
+        "status": "succeeded",
+        "scenario": {"id": scenario_id, "revision": scenario_revision, "artifact_digest": pin["artifact_digest"]},
+        "instance_uid": instance_uid,
+        "application_root": str(install.root),
+        "runner": runner_result,
+        "patch": {"status": "staged_and_applied" if patch is not None else "not_available", "cache": patch_cache, "result": patch_result},
+        "cache_clear": {"status": "scenario_owned"},
+        "final_version": final_version,
+        "inventory_rescan": inventory,
+    }
 
 
 def load_scenario_artifact(
@@ -494,6 +708,18 @@ def execute(
             resolver=scenario_resolver,
             allow_local=bool(job.get("_local_scenario")),
         )
+        if str(pin.get("artifact_media_type") or "") in {"application/x-sh", "application/x-elf"}:
+            return _run_external_scenario(
+                config=config,
+                install=install,
+                instance_uid=instance_uid,
+                scenario_id=scenario_id,
+                scenario_revision=scenario_revision,
+                pin=pin,
+                source_version=_source_version,
+                job=job,
+                inventory_rescan=inventory_rescan,
+            )
         document, delivery = load_scenario_artifact(
             config,
             pin,

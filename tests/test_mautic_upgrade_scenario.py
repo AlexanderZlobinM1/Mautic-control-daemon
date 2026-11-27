@@ -283,3 +283,104 @@ def test_execute_returns_mcd_receipt_bindings(monkeypatch, tmp_path: Path):
         "instance_uid": "instance-1",
         "source_version": "7.2.2",
     }]
+
+
+def test_execute_uses_state_synced_external_scenario_runner(monkeypatch, tmp_path: Path):
+    from mcd_agent import commercial_self_hosted
+    from mcd_agent import mautic_upgrade_scenario as scenario
+
+    artifact = tmp_path / "mautic-upgrade.sh"
+    artifact.write_bytes(b"#!/bin/sh\nexit 0\n")
+    digest = "sha256:" + hashlib.sha256(artifact.read_bytes()).hexdigest()
+    pin = {
+        "artifact_path": str(artifact),
+        "artifact_grant": "mcc-state-sync",
+        "artifact_digest": digest,
+        "artifact_size_bytes": artifact.stat().st_size,
+        "artifact_media_type": "application/x-sh",
+        "artifact_revision": "7.2.3",
+        "artifact_trust_mode": "mcc_catalog_sha256",
+        "artifact_transport": "mcc_authenticated_api",
+        "trusted_catalog": {"source": "mcc", "transport": "mcc_authenticated_api", "status": "active", "revision": "7.2.3", "artifact_digest": digest},
+    }
+    install = SimpleNamespace(instance_uid="instance-1", root="/var/www/example/public_html", console_path="/var/www/example/public_html/bin/console")
+    config = SimpleNamespace(state_db_path=str(tmp_path / "state.sqlite3"), command_timeout_sec=60)
+
+    class FakeRunner:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def run(self, **_kwargs):
+            return {"status": "succeeded", "runner": {"status": "succeeded"}}
+
+    monkeypatch.setattr(scenario, "_install_for_uid", lambda *_args: install)
+    monkeypatch.setattr(scenario, "local_scenario", lambda *_args: {"id": "mautic-upgrade", "version": "7.2.3", "pin": pin})
+    monkeypatch.setattr(scenario, "read_mautic_version_evidence_read_only", lambda _root: {"version": "7.2.2", "source": "static_metadata"})
+    monkeypatch.setattr(scenario, "_latest_upgrade_target", lambda *_args: (_ for _ in ()).throw(AssertionError("offline path must not resolve target")))
+    monkeypatch.setattr(scenario, "_resolve_patch_plan", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("mcd_agent.install_type.detect_install_type", lambda _root: "composer")
+    context_args = {}
+    monkeypatch.setattr(
+        scenario,
+        "_external_scenario_context",
+        lambda **kwargs: (context_args.update(kwargs) or {"job": {"job_id": "job-1"}, "scenario": {}}, {}),
+    )
+    monkeypatch.setattr(commercial_self_hosted, "ExternalProcessPolicy", FakeRunner)
+    monkeypatch.setattr(commercial_self_hosted, "default_scenario_runner_argv", lambda: ["runner"])
+    monkeypatch.setattr(scenario, "read_mautic_version_evidence_read_only", lambda _root: {"version": "7.2.3", "source": "static_metadata"})
+
+    result = scenario.execute(
+        {"job_id": "job-1", "command_id": "apply", "input": {"instance_uid": "instance-1"}},
+        config=config,
+        scenario_downloader=None,
+        scenario_resolver=None,
+        inventory_rescan=lambda: {"status": "succeeded"},
+    )
+    assert result["status"] == "succeeded"
+    assert result["scenario"]["artifact_digest"] == digest
+    assert result["cache_clear"]["status"] == "scenario_owned"
+    assert context_args["target_version"] == ""
+
+
+def test_external_scenario_context_covers_mautic_72_patch_matrix(monkeypatch):
+    from mcd_agent import commercial_detector
+    from mcd_agent import mautic_upgrade_scenario as scenario
+
+    monkeypatch.setattr(
+        commercial_detector,
+        "read_normalized_applicability_facts",
+        lambda **_kwargs: {"schema": "mcd-portal-applicability-facts-v1", "facts": []},
+    )
+    monkeypatch.setattr(
+        commercial_detector,
+        "applicability_facts_digest",
+        lambda _facts: "sha256:" + "1" * 64,
+    )
+    install = SimpleNamespace(
+        root="/var/www/example/public_html",
+        console_path="/var/www/example/public_html/bin/console",
+        runtime_php_bin="/usr/bin/php8.4",
+        runtime_user="www-data",
+    )
+    config = SimpleNamespace(
+        php_bin="/usr/bin/php8.4",
+        composer_bin="/usr/local/bin/composer",
+        mautic_run_as_user="www-data",
+    )
+    for source_version in ("7.2.0", "7.2.1", "7.2.2"):
+        context, facts = scenario._external_scenario_context(
+            config=config,
+            install=install,
+            instance_uid="instance-1",
+            scenario_id="mautic-upgrade",
+            scenario_revision="7.2.3",
+            artifact_digest="sha256:" + "a" * 64,
+            source_version=source_version,
+            target_version="7.2.3",
+            install_type="composer",
+            run_id="matrix-" + source_version.replace(".", "-"),
+        )
+        assert context["parameters"]["source_version"] == source_version
+        assert context["parameters"]["target_version"] == "7.2.3"
+        assert context["scenario"]["artifact_digest"] == "sha256:" + "a" * 64
+        assert facts["schema"] == "mcd-portal-applicability-facts-v1"

@@ -67,6 +67,8 @@ from mcd_agent.maintenance_mode import collect_maintenance_state
 from mcd_agent.mautic_version_cache import collect_mautic_version
 from mcd_agent.message_queue import collect_message_queue_snapshot
 from mcd_agent.runtime_overrides import local_runtime_overrides
+from mcd_agent.scenario_sync import apply_sync as apply_scenario_sync
+from mcd_agent.scenario_sync import read_runtime as read_scenario_runtime
 from mcd_agent.state_backend import (
     mark_outbound_event_mysql,
     mark_state_snapshot_push_result_mysql,
@@ -278,13 +280,24 @@ def _ingest_control_response(
     state_db_path: str,
     payload: dict[str, Any],
     control: dict[str, Any],
+    config: AgentConfig | None = None,
 ) -> None:
-    """Persist MCC key ACKs even when no control-command envelope is present."""
+    """Persist control data and consume the MCD 1.7 scenario catalog sync."""
     nested = control.get("control")
     if control.get("schema") != SCHEMA and isinstance(nested, dict):
         control = nested
     if control.get("schema") != SCHEMA:
         return
+    scenario_sync = control.get("scenario_sync")
+    if config is not None and isinstance(scenario_sync, dict):
+        try:
+            result = apply_scenario_sync(config, scenario_sync)
+            if result.get("status") == "failed":
+                logging.error("MCC scenario catalog sync failed: %s", result.get("reason"))
+        except Exception:
+            # Scenario delivery must not prevent ordinary command ACKs or
+            # result-key processing from reaching the next state push.
+            logging.exception("MCC scenario catalog sync crashed")
     store = ControlStore(state_db_path)
     commands = control.get("commands")
     if isinstance(commands, list) and control.get("contract_version") == "1.0":
@@ -2722,6 +2735,7 @@ class MCCStatePusher:
                 "scope": "php_fpm_mysql_nginx_redis_os",
             },
             "runtime_overrides": _runtime_overrides_for_state_push(self.cfg),
+            "scenario_runtime": read_scenario_runtime(self.cfg),
             "maintenance_state": collect_maintenance_state(self.cfg),
             "config_state": {
                 "path": self.cfg.config_file_path,
@@ -2800,7 +2814,7 @@ class MCCStatePusher:
                             if isinstance(control, dict) and (
                                 control.get("schema") == SCHEMA or isinstance(control.get("control"), dict)
                             ):
-                                _ingest_control_response(self.cfg.state_db_path, payload, control)
+                                _ingest_control_response(self.cfg.state_db_path, payload, control, self.cfg)
                                 result_key = payload.get("result_signing_key")
                                 executed_receipts = self._execute_pending_control_jobs(
                                     ControlStore(self.cfg.state_db_path),

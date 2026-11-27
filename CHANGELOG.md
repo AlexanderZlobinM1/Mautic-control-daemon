@@ -1,3 +1,11 @@
+## 1.7.34 - 2026-11-27
+
+- Consume the corporate MCC `mcc-mcd-scenario-sync-v1` returned by the normal
+  state push. MCD now verifies and atomically activates the external scenario
+  catalog under `runtime/scenario`, reports the verified runtime manifest back
+  to MCC, reuses exact cached bytes without GET/HEAD, and runs the synced
+  executable scenario from the standard UID-only `mautic-upgrade apply` path.
+
 ## 1.7.33 - 2026-11-27
 
 - Route the standard `mautic_upgrade`/`apply` command through the MCD-owned

@@ -1,0 +1,50 @@
+{
+  "schema": "mcc-mcd-scenario-sync-v1",
+  "contract_version": "1.0",
+  "runtime_schema": "mcc-mcd-scenario-runtime-v1",
+  "runtime_directory": "scenario",
+  "delivery": {
+    "path": "mcd-state-v1.control.scenario_sync",
+    "owner": "MCC",
+    "consumer": "MCD 1.7+",
+    "mcd_1_6": "unsupported",
+    "command_input": "mcd-cli mautic-upgrade apply --instance-uid <uid>"
+  },
+  "catalog": {
+    "required_fields": [
+      "schema",
+      "contract_version",
+      "family",
+      "runtime_directory",
+      "replace",
+      "manifest_sha256",
+      "scenarios"
+    ],
+    "scenario_fields": [
+      "id",
+      "version",
+      "entrypoint",
+      "package",
+      "dependencies",
+      "download_url"
+    ],
+    "package_fields": ["file", "sha256", "size"],
+    "download": "MCD accepts only the configured MCC HTTPS origin and the canonical scenario artifact route; it fetches only missing or corrupt required bytes.",
+    "integrity": "MCD verifies package size and SHA-256 before activation and verifies the complete runtime manifest digest.",
+    "activation": "All required objects are staged first; the runtime directory is replaced atomically; a failed sync leaves the active runtime unchanged.",
+    "cache": "An exact active manifest and matching package bytes are reused without GET or HEAD requests."
+  },
+  "execution": {
+    "owner": "MCD",
+    "runner": "mcd-scenario-runner",
+    "context_schema": "mcd-scenario-executable-context-v1",
+    "source_of_parameters": "MCD observed instance UID/root/version/install type and host applicability facts; scenario policy and upgrade steps remain in the selected artifact.",
+    "post_steps": "The scenario owns its required cache clear and verification; MCD performs the existing patch resolver/staging and post-source-install patch operation when MCC is reachable, then inventory rescan."
+  },
+  "offline": "If MCC is unavailable, MCD uses the last verified local runtime scenario. A missing or corrupt required object fails closed.",
+  "receipt": {
+    "local_sync": "mcd-scenario-sync-receipt-v1",
+    "state_projection": "mcc-mcd-scenario-runtime-v1",
+    "upgrade": "Existing MCD upgrade operation receipt bound to instance_uid, scenario revision/digest, patch result, final version and inventory rescan."
+  }
+}
