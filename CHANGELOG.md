@@ -1,3 +1,11 @@
+## 1.7.32 - 2026-11-27
+
+- Add the typed `mautic_upgrade_scenario_v1` capability for MCD 1.7.
+  MCD verifies or fetches the exact scenario artifact, projects its complete
+  upgrade parameters through the existing `mcd-cli mautic-upgrade` flow,
+  applies the immutable patch plan, clears cache, rescans inventory and emits
+  bound terminal evidence. Mautic 6 remains unchanged.
+
 ## 1.7.31 - 2026-11-27
 
 - Honor the operator-selected `min_contact_age_days` cleanup value per

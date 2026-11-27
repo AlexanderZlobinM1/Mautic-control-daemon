@@ -91,6 +91,36 @@ MCC через существующий `record_mautic_patch_evidence`; stdout m
 успех без фактической проверки. Повторный запуск использует тот же immutable
 plan и остаётся идемпотентным.
 
+### Mautic 7 upgrade scenario
+
+Для MCD 1.7 кнопка Mautic upgrade передаёт задачу в capability
+`mautic_upgrade_scenario_v1`. MCC публикует внешний JSON-сценарий и его
+неизменяемую привязку `scenario_id`, `scenario_revision`, `artifact_digest` и
+`artifact_size_bytes`. Если такой сценарий уже есть в локальном кеше и его
+полный SHA совпадает, MCD использует кеш без сетевого запроса. Иначе MCD
+скачивает ровно указанный объект через authenticated MCC transport, проверяет
+revision, размер и SHA, атомарно сохраняет его и только после этого разбирает
+параметры.
+
+Сценарий содержит source/target version, mode, backup/system-upgrade flags,
+immutable patch catalog и plan references, canonical `plan_sha256`, selected
+patch payloads, а также обязательные `cache_clear` и `inventory_rescan` steps.
+`scenario_digest` — отдельный SHA канонического JSON без самого поля
+`scenario_digest`; он не является самоссылочным SHA полного файла.
+
+MCD не создаёт второй upgrade executor. Он проверяет UID и application root,
+показывает принятые параметры в `MCD_MAUTIC_UPGRADE_SCENARIO_PARAMETERS`, затем
+использует существующий канонический контур `mcd-cli mautic-upgrade apply`
+(`mcd_agent.mautic_upgrade.run_upgrade_apply`) с тем же scheduler, backup,
+patch, migration, rollback и supervision поведением. После успешного upgrade
+тот же контур завершает cache clear, MCD перечитывает финальную версию и
+запускает inventory rescan.
+
+Terminal generic receipt обязан содержать те же scenario/instance bindings,
+CLI parameter projection, patch catalog/plan/payload SHA, фактическую версию,
+cache-clear result и inventory-rescan result. Mautic 6 этот capability не
+рекламирует и не использует.
+
 Разрешение Mautic application root для Composer split-layout проверяет сначала
 project root с `composer.json` и `bin/console`, затем `docroot/` или `public/` с
 валидированными `app/` и `plugins/`. Если в project root остался только

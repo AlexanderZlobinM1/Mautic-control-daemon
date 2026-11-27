@@ -1,0 +1,99 @@
+{
+  "schema": "mcd-mautic-upgrade-scenario-v1",
+  "contract_version": "1.0",
+  "capability_id": "mautic_upgrade_scenario_v1",
+  "command_id": "apply",
+  "input_schema_ref": "portal://mcd/input/mautic-upgrade-scenario-v1",
+  "artifact": {
+    "media_type": "application/json",
+    "required_pin": [
+      "artifact_path",
+      "artifact_grant",
+      "artifact_digest",
+      "artifact_size_bytes",
+      "artifact_media_type",
+      "artifact_revision",
+      "artifact_trust_mode",
+      "artifact_transport",
+      "trusted_catalog"
+    ],
+    "trust": "mcc_authenticated_api plus exact SHA-256 equality to the active MCC catalog entry"
+  },
+  "input": {
+    "required": [
+      "scenario_id",
+      "scenario_revision",
+      "scenario_artifact",
+      "instance_uid",
+      "application_root"
+    ],
+    "source_of_upgrade_parameters": "scenario_artifact",
+    "scenario_digest": "SHA-256 of canonical JSON with scenario_digest omitted; artifact_digest remains the SHA-256 of the complete downloaded artifact bytes"
+  },
+  "scenario": {
+    "required": [
+      "schema",
+      "contract_version",
+      "scenario_id",
+      "scenario_revision",
+      "scenario_digest",
+      "instance_uid",
+      "application_root",
+      "source_version",
+      "target_version",
+      "cli",
+      "patch",
+      "post"
+    ],
+    "optional": ["context"],
+    "cli_required": [
+      "mode",
+      "yes",
+      "backup",
+      "with_system_upgrade",
+      "allow_minor",
+      "allow_major",
+      "allow_release_transition",
+      "mcc_preflighted_single_instance"
+    ],
+    "patch_required": [
+      "catalog_revision",
+      "catalog_sha256",
+      "plan_sha256",
+      "run_id",
+      "plan"
+    ],
+    "post_required": ["cache_clear", "inventory_rescan"]
+  },
+  "execution": {
+    "owner": "MCD",
+    "entrypoint": "mcd-cli mautic-upgrade apply",
+    "implementation": "mcd_agent.mautic_upgrade.run_upgrade_apply",
+    "no_second_executor": true,
+    "cache_clear": "the existing MCD upgrade flow",
+    "inventory_rescan": "the existing MCD inventory operation after successful apply"
+  },
+  "receipts": {
+    "stage": "portal-mcd-generic-stage-receipt-v1",
+    "terminal": "portal-mcd-generic-terminal-receipt-v1",
+    "result_bindings": [
+      "scenario_id",
+      "scenario_revision",
+      "scenario_digest",
+      "instance_uid",
+      "application_root",
+      "source_version",
+      "target_version",
+      "patch_catalog_revision",
+      "patch_catalog_sha256",
+      "patch_plan_sha256",
+      "patch_run_id",
+      "cli_parameters",
+      "patch.selected",
+      "cache_clear",
+      "final_version",
+      "inventory_rescan"
+    ]
+  },
+  "minimum_mcd_version": "1.7.32"
+}

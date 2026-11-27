@@ -126,6 +126,23 @@ def build_capability_inventory(
                     ],
                 }
             )
+            unsigned["capabilities"].append(
+                {
+                    "capability_id": "mautic_upgrade_scenario_v1",
+                    "version": CAPABILITY_VERSION,
+                    "commands": [
+                        {
+                            "command_id": "apply",
+                            "version": COMMAND_VERSION,
+                            "execution": "generic_primitive",
+                            "mutates_state": True,
+                            "input_schema_ref": "portal://mcd/input/mautic-upgrade-scenario-v1",
+                            "target_scope": "instance",
+                            **binding,
+                        }
+                    ],
+                }
+            )
         from mcd_agent.connected_host_lifecycle import capability as lifecycle_capability
         lifecycle = lifecycle_capability(config)
         if lifecycle is not None:
@@ -310,8 +327,9 @@ def _service_state(names: tuple[str, ...]) -> dict[str, Any]:
 
 
 def execute_generic_primitive(
-    job: Mapping[str, Any], *, inventory_rescan: Callable[[], int] | None = None,
+    job: Mapping[str, Any], *, inventory_rescan: Callable[[], Any] | None = None,
     config: AgentConfig | None = None,
+    scenario_downloader: Callable[[Mapping[str, Any]], bytes] | None = None,
 ) -> Mapping[str, Any]:
     """Execute one declared primitive without caller-controlled paths or argv.
 
@@ -325,6 +343,16 @@ def execute_generic_primitive(
         return _execute_maintenance_service_status(job, config)
     if command == "apply" and str((job.get("capability") or {}).get("capability_id") or "") == "mautic_upgrade":
         return _execute_mautic_upgrade(job, config)
+    if command == "apply" and str((job.get("capability") or {}).get("capability_id") or "") == "mautic_upgrade_scenario_v1":
+        if config is None:
+            return {"status": "failed", "reason": "mautic_upgrade_scenario_config_unavailable"}
+        from mcd_agent.mautic_upgrade_scenario import execute
+        return execute(
+            job,
+            config=config,
+            scenario_downloader=scenario_downloader,
+            inventory_rescan=inventory_rescan,
+        )
     value = job.get("input")
     capability_id = str((job.get("capability") or {}).get("capability_id") or "")
     if capability_id == "mautic_lifecycle":

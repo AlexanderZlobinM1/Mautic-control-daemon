@@ -644,6 +644,11 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
                     job,
                     inventory_rescan=lambda: rescan_inventory(installation_id),
                     config=local_cfg,
+                    scenario_downloader=lambda pin: portal_client.download_artifact(
+                        path=str(pin["artifact_path"]),
+                        grant=str(pin["artifact_grant"]),
+                        expected_size=int(pin["artifact_size_bytes"]),
+                    ),
                 )
 
             def rescan_inventory(installation_id: str) -> Mapping[str, Any]:

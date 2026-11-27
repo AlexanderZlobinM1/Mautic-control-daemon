@@ -112,6 +112,34 @@ class ScenarioArtifactStore:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
             handle.close()
 
+    def read_active(self, *, revision: str, digest: str) -> bytes | None:
+        """Read the active object only when its immutable pin matches.
+
+        Callers use this before contacting MCC.  A missing, stale, or
+        unreadable object is reported as ``None`` so the caller can fetch the
+        exact pinned bytes and pass them through :meth:`deliver`.
+        """
+        expected_revision = str(revision or "").strip()
+        expected_digest = str(digest or "").lower()
+        if not expected_revision or not _valid_digest(expected_digest):
+            raise ScenarioArtifactStoreError("scenario_store_metadata_invalid")
+        handle = self._lock()
+        try:
+            active = self._read_pointer()
+            if not active or active.get("revision") != expected_revision or active.get("digest") != expected_digest:
+                return None
+            path = self.objects / expected_digest[7:]
+            try:
+                data = path.read_bytes()
+            except OSError:
+                return None
+            if _digest(data) != expected_digest:
+                return None
+            return data
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            handle.close()
+
     def _write_json_atomic(self, destination: Path, value: Mapping[str, Any]) -> None:
         temporary = self.staging / ("." + destination.name + "." + secrets.token_hex(8) + ".tmp")
         try:

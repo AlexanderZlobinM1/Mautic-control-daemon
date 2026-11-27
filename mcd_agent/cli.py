@@ -133,6 +133,7 @@ from mcd_agent.mautic_upgrade import (
     run_upgrade_interactive,
     run_upgrade_preflight,
 )
+from mcd_agent.mautic_upgrade_scenario import execute_local_file
 from mcd_agent.mautic6_core_patch import (
     ensure_m6_plugin_update_metadata_patch,
     patch_status as mautic6_patch_status,
@@ -2524,6 +2525,8 @@ def _build_parser() -> argparse.ArgumentParser:
     up.add_argument("--repair-auth-output-file", default="", help="Optional root-owned output path for authorize-repair context")
     up.add_argument("--json", action="store_true", help="Emit the machine-readable preflight contract")
     up.add_argument("--mcc-preflighted-single-instance", action="store_true", help="Root-only, explicitly acknowledged single-instance manual upgrade after MCC preflight; permits forward same-major targets while preserving selected patch-plan validation")
+    up.add_argument("--scenario-file", default="", help="MCD 1.7 typed upgrade scenario JSON")
+    up.add_argument("--scenario-sha256", default="", help="Expected SHA-256 of --scenario-file")
 
     img = sub.add_parser("mautic-image", help="Install a Mautic instance from an MCC image")
     img.add_argument("--config", default=default_cfg)
@@ -4044,6 +4047,29 @@ def main() -> int:
         return 0
 
     if args.cmd == "mautic-upgrade":
+        if args.scenario_file:
+            if args.op != "apply":
+                print("--scenario-file is valid only with mautic-upgrade apply")
+                return 2
+            cfg = load_config(args.config)
+
+            def rescan_after_scenario():
+                inventory = InstanceInventory(cfg.state_db_path)
+                try:
+                    count = inventory.rescan(cfg, preserve_manual=True)
+                finally:
+                    inventory.conn.close()
+                return {"status": "succeeded", "discovered_count": int(count)}
+
+            result = execute_local_file(
+                cfg,
+                scenario_file=str(args.scenario_file),
+                expected_sha256=str(args.scenario_sha256),
+                root=str(args.root or "") or None,
+                inventory_rescan=rescan_after_scenario,
+            )
+            print("MCD_MAUTIC_UPGRADE_SCENARIO_RECEIPT=" + json.dumps(result, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
+            return 0 if result.get("status") == "succeeded" else 1
         if args.patch_plan_file:
             if args.patch_plan_json:
                 raise RuntimeError("Choose exactly one patch plan transport")
