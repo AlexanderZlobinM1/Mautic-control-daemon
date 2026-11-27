@@ -859,6 +859,9 @@ Important:
   - `contacts_cleanup_interval_sec = 86400`
   - `contacts_cleanup_quiet_hour = 2`
   - `contacts_cleanup_quiet_window_min = 60`
+- Host-wide service-cleanup ring:
+  - `maintenance_cleanup_workers = 1` (one worker for the whole host; it does
+    not reduce segment, import or campaign budgets)
 - MCC-managed Clean Empty Contacts can run per instance inside a nightly window:
   - `empty_leads_cleanup_instance_settings[<instance>].schedule_type = "nightly_window"`
   - `window_start = "22:00"`, `window_end = "09:00"`

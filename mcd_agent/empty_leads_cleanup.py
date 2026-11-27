@@ -1,38 +1,47 @@
-"""Exclude destructive contact cleanup from supervised instance work."""
+"""Run bounded empty-contact cleanup in its own maintenance lane."""
 from contextlib import contextmanager
-import fcntl
-from pathlib import Path
-
-from mcd_agent.native_comparator import shared_root_fence_path, campaign_root_fence_path
 
 
 class CleanupBusy(RuntimeError):
-    pass
+    """The short database maintenance lock is currently held elsewhere."""
 
 
 @contextmanager
 def cleanup_fence(root: str, lock_directory: str = "/run/lock/mcd-tasks"):
-    """Reuse both task fences, without waiting or stopping active workers."""
-    handles = []
-    try:
-        for path in (
-            shared_root_fence_path(root, lock_directory),
-            campaign_root_fence_path(root, lock_directory),
-        ):
-            path.parent.mkdir(parents=True, exist_ok=True)
-            handle = path.open("a+b")
-            handles.append(handle)
-            try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError as exc:
-                raise CleanupBusy("instance_work_active") from exc
-        yield
-    finally:
-        for handle in reversed(handles):
-            handle.close()
+    """Compatibility boundary for callers of the former root-fence API.
+
+    Empty-contact cleanup must not acquire the instance scheduler fences: a
+    long segment/campaign session may legitimately hold those for its whole
+    batch. The actual mutual exclusion is the short database advisory lock
+    taken by :func:`delete_empty_leads_safely`.
+    """
+    del root, lock_directory
+    yield
 
 
 def delete_empty_leads_safely(db, root: str, *, mode: str, batch_size: int,
                              lock_directory: str = "/run/lock/mcd-tasks"):
-    with cleanup_fence(root, lock_directory):
-        return db.delete_empty_leads(mode=mode, batch_size=batch_size, max_batches=1)
+    """Delete at most one batch under a per-database advisory lock.
+
+    ``root`` and ``lock_directory`` remain accepted for compatibility with
+    existing operation callers, but are intentionally not used for fencing.
+    The DB lock is held only for this bounded SQL batch, so cleanup can make
+    progress while a long scheduler session continues and concurrent cleanup
+    attempts still serialize safely.
+    """
+    del root, lock_directory
+    acquire = getattr(db, "try_acquire_empty_leads_cleanup_lock", None)
+    release = getattr(db, "release_empty_leads_cleanup_lock", None)
+    if not callable(acquire) or not callable(release):
+        raise CleanupBusy("cleanup_db_lock_unavailable")
+    connection = acquire()
+    if connection is None:
+        raise CleanupBusy("cleanup_db_lock_busy")
+    try:
+        result = db.delete_empty_leads(mode=mode, batch_size=batch_size, max_batches=1)
+        if isinstance(result, dict):
+            result = dict(result)
+            result.setdefault("lock_scope", "database_advisory_batch")
+        return result
+    finally:
+        release(connection)

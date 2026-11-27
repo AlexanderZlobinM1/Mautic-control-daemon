@@ -596,6 +596,7 @@ class AgentConfig:
     campaign_rebuild_regular_parallel: int
     campaign_native_fallback_enabled: bool
     campaign_native_fallback_interval_sec: int
+    maintenance_cleanup_workers: int
     enable_contacts_cleanup: bool
     contacts_cleanup_interval_sec: int
     contacts_cleanup_quiet_hour: int
@@ -2359,6 +2360,7 @@ _RUNTIME_TO_ATTR: dict[str, str] = {
     "campaign_rebuild_regular_parallel": "campaign_rebuild_regular_parallel",
     "campaign_native_fallback_enabled": "campaign_native_fallback_enabled",
     "campaign_native_fallback_interval_sec": "campaign_native_fallback_interval_sec",
+    "maintenance_cleanup_workers": "maintenance_cleanup_workers",
     "enable_contacts_cleanup": "enable_contacts_cleanup",
     "contacts_cleanup_interval_sec": "contacts_cleanup_interval_sec",
     "contacts_cleanup_quiet_hour": "contacts_cleanup_quiet_hour",
@@ -3286,6 +3288,7 @@ def _load_config_inner(path: str) -> AgentConfig:
             300,
             int(runtime.get("campaign_native_fallback_interval_sec", 3600) or 3600),
         ),
+        maintenance_cleanup_workers=max(1, int(runtime.get("maintenance_cleanup_workers", 1) or 1)),
         enable_contacts_cleanup=bool(runtime.get("enable_contacts_cleanup", False)),
         contacts_cleanup_interval_sec=int(runtime.get("contacts_cleanup_interval_sec", 86_400)),
         contacts_cleanup_quiet_hour=int(runtime.get("contacts_cleanup_quiet_hour", 2)),

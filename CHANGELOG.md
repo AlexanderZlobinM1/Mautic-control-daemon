@@ -1,3 +1,14 @@
+## 1.7.25 - 2026-11-27
+
+- Run empty-contact and orphan-page-hit cleanup in one host-wide service ring,
+  ordered per instance, without consuming scheduler slots or waiting behind
+  long segment/campaign root fences. Empty-contact batches use a short
+  database advisory lock and durable pending receipts.
+
+- Make the host-wide service worker count configurable through
+  `maintenance_cleanup_workers`, defaulting to one without consuming
+  scheduler budgets.
+
 ## 1.7.23 - 2026-11-26
 
 - Rebuild the Mautic/Symfony production container after every successful

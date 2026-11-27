@@ -292,6 +292,10 @@ contacts_cleanup_mode = "email_and_mobile"
 # Max rows deleted per cleanup run.
 contacts_cleanup_max_delete_per_run = 10000
 
+# Host-wide service-cleanup ring workers. One worker is the current default;
+# this is a host setting and does not consume segment/campaign slots.
+maintenance_cleanup_workers = 1
+
 # MCC-managed per-instance empty leads cleanup. The instance settings map is
 # normally written by MCC from the Clean Empty Contacts tile.
 empty_leads_cleanup_enabled = false
