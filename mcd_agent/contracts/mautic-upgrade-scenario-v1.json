@@ -1,9 +1,9 @@
 {
   "schema": "mcd-mautic-upgrade-scenario-v1",
   "contract_version": "1.0",
-  "capability_id": "mautic_upgrade_scenario_v1",
+  "capability_id": "mautic_upgrade",
   "command_id": "apply",
-  "input_schema_ref": "portal://mcd/input/mautic-upgrade-scenario-v1",
+  "input_schema_ref": "portal://mcd/input/mautic-upgrade-apply-v1",
   "artifact": {
     "media_type": "application/json",
     "required_pin": [
@@ -21,14 +21,29 @@
   },
   "input": {
     "required": [
+      "instance_uid"
+    ],
+    "source_of_upgrade_parameters": "MCD-resolved scenario artifact",
+    "public_command": "The caller sends only instance_uid to the standard mautic_upgrade/apply command; this document is an internal MCD scenario contract, not a second advertised capability.",
+    "command_payload_forbids": [
       "scenario_id",
       "scenario_revision",
       "scenario_artifact",
-      "instance_uid",
-      "application_root"
+      "application_root",
+      "target_version",
+      "patch_plan",
+      "cli_flags"
     ],
-    "source_of_upgrade_parameters": "scenario_artifact",
     "scenario_digest": "SHA-256 of canonical JSON with scenario_digest omitted; artifact_digest remains the SHA-256 of the complete downloaded artifact bytes"
+  },
+  "resolution": {
+    "owner": "MCD",
+    "request_schema": "portal-mcd-mautic-upgrade-scenario-resolve-request-v1",
+    "request_route": "POST agents/{agent_id}/installations/{installation_id}/scenarios/resolve",
+    "request": "MCD resolves operation=mautic-upgrade and instance_uid against the Portal/MCC scenario catalog using the locally observed source version",
+    "response": ["status", "scenario_id", "scenario_revision", "scenario_artifact"],
+    "artifact_fetch": "MCD first checks the per-instance local scenario catalog, then fetches the exact returned catalog object only when needed",
+    "patch_fetch": "When MCC is reachable MCD asks the existing patch resolver, verifies every payload SHA, stages all payloads in the per-instance patches directory, and only then starts the scenario upgrade. If MCC is unavailable, the current verified local scenario runs without a new patch set."
   },
   "scenario": {
     "required": [
@@ -42,10 +57,9 @@
       "source_version",
       "target_version",
       "cli",
-      "patch",
       "post"
     ],
-    "optional": ["context"],
+    "optional": ["context", "patch"],
     "cli_required": [
       "mode",
       "yes",
@@ -56,7 +70,7 @@
       "allow_release_transition",
       "mcc_preflighted_single_instance"
     ],
-    "patch_required": [
+    "patch_required_when_embedded": [
       "catalog_revision",
       "catalog_sha256",
       "plan_sha256",

@@ -133,7 +133,7 @@ from mcd_agent.mautic_upgrade import (
     run_upgrade_interactive,
     run_upgrade_preflight,
 )
-from mcd_agent.mautic_upgrade_scenario import execute_local_file
+from mcd_agent.mautic_upgrade_scenario import execute as execute_upgrade_scenario, execute_local_file
 from mcd_agent.mautic6_core_patch import (
     ensure_m6_plugin_update_metadata_patch,
     patch_status as mautic6_patch_status,
@@ -2527,6 +2527,7 @@ def _build_parser() -> argparse.ArgumentParser:
     up.add_argument("--mcc-preflighted-single-instance", action="store_true", help="Root-only, explicitly acknowledged single-instance manual upgrade after MCC preflight; permits forward same-major targets while preserving selected patch-plan validation")
     up.add_argument("--scenario-file", default="", help="MCD 1.7 typed upgrade scenario JSON")
     up.add_argument("--scenario-sha256", default="", help="Expected SHA-256 of --scenario-file")
+    up.add_argument("--instance-uid", default="", help="MCD 1.7 standard scenario target; MCD resolves the scenario locally/through MCC")
 
     img = sub.add_parser("mautic-image", help="Install a Mautic instance from an MCC image")
     img.add_argument("--config", default=default_cfg)
@@ -4047,6 +4048,64 @@ def main() -> int:
         return 0
 
     if args.cmd == "mautic-upgrade":
+        if args.instance_uid and args.op != "apply":
+            print("--instance-uid is valid only with mautic-upgrade apply")
+            return 2
+        if args.instance_uid and not args.scenario_file:
+            cfg = load_config(args.config)
+
+            def rescan_after_scenario():
+                inventory = InstanceInventory(cfg.state_db_path)
+                try:
+                    count = inventory.rescan(cfg, preserve_manual=True)
+                finally:
+                    inventory.conn.close()
+                return {"status": "succeeded", "discovered_count": int(count)}
+
+            scenario_downloader = None
+            scenario_resolver = None
+            try:
+                state = CommercialState(cfg.state_db_path)
+                installation_id = str(state.get("commercial_active_installation_id") or "").strip()
+                if not installation_id:
+                    installation_ids = state.get("installation_ids")
+                    if isinstance(installation_ids, dict) and len(installation_ids) == 1:
+                        installation_id = str(next(iter(installation_ids.values())) or "").strip()
+                if installation_id:
+                    portal_client = PortalClient(state)
+                    scenario_downloader = lambda pin: portal_client.download_artifact(
+                        path=str(pin["artifact_path"]),
+                        grant=str(pin["artifact_grant"]),
+                        expected_size=int(pin["artifact_size_bytes"]),
+                    )
+                    scenario_resolver = lambda request: portal_client.resolve_mautic_upgrade_scenario(
+                        installation_id=installation_id,
+                        instance_uid=str(request["instance_uid"]),
+                        source_version=str(request["source_version"]),
+                    )
+            except Exception:
+                # Local verified scenario state remains usable when Portal/MCC
+                # enrollment or transport is unavailable.
+                scenario_downloader = None
+                scenario_resolver = None
+
+            result = execute_upgrade_scenario(
+                {
+                    "job_id": "cli-mautic-upgrade-" + str(args.instance_uid),
+                    "command_id": "apply",
+                    "capability": {"capability_id": "mautic_upgrade"},
+                    "command": {"command_id": "apply"},
+                    "input": {"instance_uid": str(args.instance_uid)},
+                },
+                config=cfg,
+                scenario_downloader=scenario_downloader,
+                scenario_resolver=scenario_resolver,
+                inventory_rescan=rescan_after_scenario,
+            )
+            if result.get("status") == "succeeded":
+                _push_state_after_change(cfg, "mautic-upgrade-scenario-apply")
+            print("MCD_MAUTIC_UPGRADE_RECEIPT=" + json.dumps(result, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
+            return 0 if result.get("status") == "succeeded" else 1
         if args.scenario_file:
             if args.op != "apply":
                 print("--scenario-file is valid only with mautic-upgrade apply")

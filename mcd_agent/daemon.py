@@ -649,6 +649,11 @@ def _default_commercial_worker_factory(config: AgentConfig) -> Callable[[threadi
                         grant=str(pin["artifact_grant"]),
                         expected_size=int(pin["artifact_size_bytes"]),
                     ),
+                    scenario_resolver=lambda request: portal_client.resolve_mautic_upgrade_scenario(
+                        installation_id=installation_id,
+                        instance_uid=str(request["instance_uid"]),
+                        source_version=str(request["source_version"]),
+                    ),
                 )
 
             def rescan_inventory(installation_id: str) -> Mapping[str, Any]:

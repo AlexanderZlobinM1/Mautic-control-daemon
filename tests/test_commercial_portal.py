@@ -181,6 +181,38 @@ def test_authenticated_artifact_download_requires_api_key(tmp_path):
     state.put("portal_agent_credential", "credential")
 
 
+def test_mautic_upgrade_scenario_resolution_is_catalog_only(tmp_path):
+    state = CommercialState(str(Path(tmp_path) / "state.sqlite"))
+    state.put("portal_api_base", "https://portal.example/api/v1/commercial")
+    state.put("portal_agent_credential", "credential")
+    state.put("agent_id", "agent-1")
+    client = PortalClient(state)
+    calls = []
+
+    def fake_request(method, path, payload, idempotency_key):
+        calls.append((method, path, payload, idempotency_key))
+        return {"status": "matched"}
+
+    client._request = fake_request
+    assert client.resolve_mautic_upgrade_scenario(
+        installation_id="installation-1",
+        instance_uid="instance-1",
+        source_version="7.2.2",
+    ) == {"status": "matched"}
+    assert calls == [(
+        "POST",
+        "agents/agent-1/installations/installation-1/scenarios/resolve",
+        {
+            "schema": "portal-mcd-mautic-upgrade-scenario-resolve-request-v1",
+            "contract_version": "1.0",
+            "operation": "mautic-upgrade",
+            "instance_uid": "instance-1",
+            "source_version": "7.2.2",
+        },
+        "mautic-upgrade-scenario:instance-1:7.2.2",
+    )]
+
+
 def test_inventory_and_adopt_use_api_key_envelope_without_agent_signature(monkeypatch, tmp_path):
     state = CommercialState(str(tmp_path / "state.sqlite"))
     state.put("portal_api_base", "https://portal.example/api/v1/commercial")

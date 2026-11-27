@@ -126,23 +126,6 @@ def build_capability_inventory(
                     ],
                 }
             )
-            unsigned["capabilities"].append(
-                {
-                    "capability_id": "mautic_upgrade_scenario_v1",
-                    "version": CAPABILITY_VERSION,
-                    "commands": [
-                        {
-                            "command_id": "apply",
-                            "version": COMMAND_VERSION,
-                            "execution": "generic_primitive",
-                            "mutates_state": True,
-                            "input_schema_ref": "portal://mcd/input/mautic-upgrade-scenario-v1",
-                            "target_scope": "instance",
-                            **binding,
-                        }
-                    ],
-                }
-            )
         from mcd_agent.connected_host_lifecycle import capability as lifecycle_capability
         lifecycle = lifecycle_capability(config)
         if lifecycle is not None:
@@ -160,10 +143,31 @@ def build_capability_inventory(
     return unsigned
 
 
-def _execute_mautic_upgrade(job: Mapping[str, Any], config: AgentConfig | None) -> Mapping[str, Any]:
+def _execute_mautic_upgrade(
+    job: Mapping[str, Any],
+    config: AgentConfig | None,
+    *,
+    scenario_downloader: Callable[[Mapping[str, Any]], bytes] | None = None,
+    scenario_resolver: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+    inventory_rescan: Callable[[], Any] | None = None,
+) -> Mapping[str, Any]:
     value = job.get("input")
+    if config is None:
+        return {"status": "failed", "reason": "commercial_mautic_upgrade_config_unavailable"}
+    # The Portal/MCC command is deliberately only the standard Mautic upgrade
+    # command plus the stable instance UID.  Scenario resolution, artifact
+    # retrieval, patch staging and execution stay inside MCD.
+    if isinstance(value, Mapping) and set(value) == {"instance_uid"}:
+        from mcd_agent.mautic_upgrade_scenario import execute
+        return execute(
+            job,
+            config=config,
+            scenario_downloader=scenario_downloader,
+            scenario_resolver=scenario_resolver,
+            inventory_rescan=inventory_rescan,
+        )
     required = {"instance_uid", "target_version", "mode", "upgrade_plan_ref", "upgrade_plan_sha256"}
-    if config is None or not isinstance(value, Mapping) or set(value) != required:
+    if not isinstance(value, Mapping) or set(value) != required:
         return {"status": "failed", "reason": "commercial_mautic_upgrade_input_invalid"}
     requested_instance_uid = str(value.get("instance_uid") or "").strip()
     try:
@@ -330,27 +334,25 @@ def execute_generic_primitive(
     job: Mapping[str, Any], *, inventory_rescan: Callable[[], Any] | None = None,
     config: AgentConfig | None = None,
     scenario_downloader: Callable[[Mapping[str, Any]], bytes] | None = None,
+    scenario_resolver: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
 ) -> Mapping[str, Any]:
     """Execute one declared primitive without caller-controlled paths or argv.
 
-    The input is intentionally empty for every primitive. Rejecting any
-    non-empty input prevents Portal from smuggling a path, command or secret
-    into this generic boundary.
+    Generic primitives reject caller-controlled paths, commands and secrets.
+    The Mautic upgrade scenario is the one typed exception: its input carries
+    only the target instance UID; MCD resolves every upgrade parameter and
+    artifact itself.
     """
     command = str((job.get("command") or {}).get("command_id") or "")
     capability = str((job.get("capability") or {}).get("capability_id") or "")
     if command == "read_service_status" and capability == "maintenance":
         return _execute_maintenance_service_status(job, config)
     if command == "apply" and str((job.get("capability") or {}).get("capability_id") or "") == "mautic_upgrade":
-        return _execute_mautic_upgrade(job, config)
-    if command == "apply" and str((job.get("capability") or {}).get("capability_id") or "") == "mautic_upgrade_scenario_v1":
-        if config is None:
-            return {"status": "failed", "reason": "mautic_upgrade_scenario_config_unavailable"}
-        from mcd_agent.mautic_upgrade_scenario import execute
-        return execute(
+        return _execute_mautic_upgrade(
             job,
-            config=config,
+            config,
             scenario_downloader=scenario_downloader,
+            scenario_resolver=scenario_resolver,
             inventory_rescan=inventory_rescan,
         )
     value = job.get("input")

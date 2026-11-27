@@ -140,6 +140,25 @@ class ScenarioArtifactStore:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
             handle.close()
 
+    def read_current(self) -> tuple[dict[str, Any], bytes] | None:
+        """Read the current local catalog entry and its verified bytes."""
+        handle = self._lock()
+        try:
+            active = self._read_pointer()
+            if active is None:
+                return None
+            path = self.objects / str(active["digest"])[7:]
+            try:
+                data = path.read_bytes()
+            except OSError as exc:
+                raise ScenarioArtifactStoreError("scenario_store_active_object_missing") from exc
+            if _digest(data) != active["digest"]:
+                raise ScenarioArtifactStoreError("scenario_store_active_object_integrity_invalid")
+            return dict(active), data
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            handle.close()
+
     def _write_json_atomic(self, destination: Path, value: Mapping[str, Any]) -> None:
         temporary = self.staging / ("." + destination.name + "." + secrets.token_hex(8) + ".tmp")
         try:

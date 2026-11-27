@@ -1,10 +1,12 @@
 ## 1.7.33 - 2026-11-27
 
-- Add the typed `mautic_upgrade_scenario_v1` capability for MCD 1.7.
-  MCD verifies or fetches the exact scenario artifact, projects its complete
-  upgrade parameters through the existing `mcd-cli mautic-upgrade` flow,
-  applies the immutable patch plan, clears cache, rescans inventory and emits
-  bound terminal evidence. Mautic 6 remains unchanged.
+- Route the standard `mautic_upgrade`/`apply` command through the MCD-owned
+  scenario executor for MCD 1.7. MCC sends only the target instance command;
+  MCD resolves or fetches the
+  exact scenario artifact, projects its complete upgrade parameters through
+  the existing `mcd-cli mautic-upgrade` flow, applies the immutable patch plan,
+  clears cache, rescans inventory and emits bound terminal evidence. Mautic 6
+  remains unchanged.
 
 ## 1.7.31 - 2026-11-27
 

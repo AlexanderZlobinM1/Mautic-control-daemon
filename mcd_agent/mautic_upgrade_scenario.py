@@ -10,6 +10,7 @@ CLI.  It is intentionally limited to the 1.7 commercial capability.
 from __future__ import annotations
 
 import hashlib
+import base64
 import json
 import os
 import re
@@ -18,14 +19,16 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from mcd_agent.commercial_portal import canonical_json
+from mcd_agent.discovery import discover_mautic
+from mcd_agent.mautic_version_cache import read_mautic_version_evidence_read_only
 from mcd_agent.scenario_artifact_store import ScenarioArtifactStore
 
 
 SCENARIO_SCHEMA = "mcd-mautic-upgrade-scenario-v1"
 CONTRACT_VERSION = "1.0"
-CAPABILITY_ID = "mautic_upgrade_scenario_v1"
+CAPABILITY_ID = "mautic_upgrade"
 COMMAND_ID = "apply"
-INPUT_SCHEMA_REF = "portal://mcd/input/mautic-upgrade-scenario-v1"
+INPUT_SCHEMA_REF = "portal://mcd/input/mautic-upgrade-apply-v1"
 _SHA_RE = re.compile(r"sha256:[0-9a-f]{64}")
 _VERSION_RE = re.compile(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?")
 _ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}")
@@ -119,11 +122,101 @@ def _artifact_pin(value: Any, *, allow_local: bool = False) -> dict[str, Any]:
     }
 
 
-def _scenario_store(config: Any) -> ScenarioArtifactStore:
+def _scenario_store(config: Any, instance_uid: str = "") -> ScenarioArtifactStore:
     state_path = Path(str(getattr(config, "state_db_path", "") or "")).expanduser()
     if not state_path.is_absolute() or not state_path.name:
         raise MauticUpgradeScenarioError("mautic_upgrade_scenario_state_path_invalid")
-    return ScenarioArtifactStore(state_path.resolve().parent / "scenario-artifacts")
+    root = state_path.resolve().parent / "scenario-artifacts"
+    if instance_uid:
+        root = root / _identifier(instance_uid, "mautic_upgrade_scenario_instance_invalid")
+    return ScenarioArtifactStore(root)
+
+
+def _install_for_uid(config: Any, instance_uid: str) -> Any:
+    installs = discover_mautic(
+        config.discovery_roots,
+        config.exclude_path_contains,
+        config.supported_mautic_majors,
+        config.custom_instances,
+    )
+    matches = [item for item in installs if str(getattr(item, "instance_uid", "")) == instance_uid]
+    if len(matches) != 1:
+        raise MauticUpgradeScenarioError("mautic_upgrade_scenario_instance_not_current")
+    return matches[0]
+
+
+def _resolve_scenario(
+    config: Any,
+    *,
+    instance_uid: str,
+    application_root: str,
+    resolver: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None,
+    allow_local: bool = False,
+) -> tuple[str, str, dict[str, Any], str]:
+    evidence = read_mautic_version_evidence_read_only(application_root)
+    source_version = str(evidence.get("version") or "").strip()
+    if not source_version or str(evidence.get("source") or "") != "static_metadata":
+        raise MauticUpgradeScenarioError("mautic_upgrade_scenario_source_version_unavailable")
+    local_store = _scenario_store(config, instance_uid)
+    local = local_store.read_current()
+    local_result: tuple[str, str, dict[str, Any], str] | None = None
+    if local is not None:
+        active, raw = local
+        try:
+            document = json.loads(raw.decode("utf-8"))
+            if not isinstance(document, Mapping):
+                raise ValueError("document")
+            local_id = _identifier(document.get("scenario_id"), "mautic_upgrade_scenario_local_invalid")
+            local_revision = _identifier(document.get("scenario_revision"), "mautic_upgrade_scenario_local_invalid")
+            if document.get("instance_uid") != instance_uid or document.get("application_root") != application_root:
+                raise MauticUpgradeScenarioError("mautic_upgrade_scenario_local_binding_mismatch")
+            digest = _digest(active.get("digest"), "mautic_upgrade_scenario_local_invalid")
+            local_pin = {
+                "artifact_path": str(local_store.objects / digest[7:]),
+                "artifact_grant": "local",
+                "artifact_digest": digest,
+                "artifact_size_bytes": int(active["size_bytes"]),
+                "artifact_media_type": "application/json",
+                "artifact_revision": local_revision,
+                "artifact_trust_mode": "local_file",
+                "artifact_transport": "local_file",
+                "trusted_catalog": {
+                    "source": "local",
+                    "transport": "local_file",
+                    "status": "active",
+                    "revision": local_revision,
+                    "artifact_digest": digest,
+                },
+            }
+            local_result = (local_id, local_revision, local_pin, source_version)
+        except (MauticUpgradeScenarioError, KeyError, TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
+            local_result = None
+
+    if resolver is None:
+        if local_result is not None:
+            return local_result
+        raise MauticUpgradeScenarioError("mautic_upgrade_scenario_resolver_unavailable")
+    try:
+        result = resolver(
+            {
+                "operation": "mautic-upgrade",
+                "instance_uid": instance_uid,
+                "source_version": source_version,
+            }
+        )
+    except Exception:
+        if local_result is not None:
+            return local_result
+        raise MauticUpgradeScenarioError("mautic_upgrade_scenario_resolve_failed")
+    resolved = _mapping(result, "mautic_upgrade_scenario_resolution_invalid")
+    if resolved.get("status") not in {"matched", "succeeded"}:
+        if local_result is not None:
+            return local_result
+        raise MauticUpgradeScenarioError("mautic_upgrade_scenario_not_available")
+    scenario_id = _identifier(resolved.get("scenario_id"), "mautic_upgrade_scenario_resolution_invalid")
+    scenario_revision = _identifier(resolved.get("scenario_revision"), "mautic_upgrade_scenario_resolution_invalid")
+    pin = _artifact_pin(resolved.get("scenario_artifact"), allow_local=allow_local)
+    return scenario_id, scenario_revision, pin, source_version
 
 
 def load_scenario_artifact(
@@ -134,9 +227,10 @@ def load_scenario_artifact(
     scenario_revision: str,
     idempotency_key: str,
     downloader: Callable[[Mapping[str, Any]], bytes] | None,
+    instance_uid: str = "",
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Load the exact local scenario or fetch/activate the exact MCC pin."""
-    store = _scenario_store(config)
+    store = _scenario_store(config, instance_uid)
     digest = str(pin["artifact_digest"])
     revision = str(pin["artifact_revision"])
     raw = store.read_active(revision=revision, digest=digest)
@@ -194,8 +288,8 @@ def validate_scenario_document(
     application_root: str,
 ) -> dict[str, Any]:
     value = dict(document)
-    required = {"schema", "contract_version", "scenario_id", "scenario_revision", "scenario_digest", "instance_uid", "application_root", "source_version", "target_version", "cli", "patch", "post"}
-    if not required.issubset(value) or set(value) - required - {"context"} or value["schema"] != SCENARIO_SCHEMA or value["contract_version"] != CONTRACT_VERSION:
+    required = {"schema", "contract_version", "scenario_id", "scenario_revision", "scenario_digest", "instance_uid", "application_root", "source_version", "target_version", "cli", "post"}
+    if not required.issubset(value) or set(value) - required - {"context", "patch"} or value["schema"] != SCENARIO_SCHEMA or value["contract_version"] != CONTRACT_VERSION:
         raise MauticUpgradeScenarioError("mautic_upgrade_scenario_schema_invalid")
     if value["scenario_id"] != scenario_id or value["scenario_revision"] != scenario_revision:
         raise MauticUpgradeScenarioError("mautic_upgrade_scenario_binding_mismatch")
@@ -211,29 +305,33 @@ def validate_scenario_document(
         raise MauticUpgradeScenarioError("mautic_upgrade_scenario_cli_invalid")
     if any(type(cli[key]) is not bool for key in cli_required - {"mode"}) or cli["yes"] is not True or cli["mcc_preflighted_single_instance"] is not True:
         raise MauticUpgradeScenarioError("mautic_upgrade_scenario_cli_invalid")
-    patch = _mapping(value["patch"], "mautic_upgrade_scenario_patch_invalid")
-    patch_required = {"catalog_revision", "catalog_sha256", "plan_sha256", "run_id", "plan"}
-    if set(patch) != patch_required:
-        raise MauticUpgradeScenarioError("mautic_upgrade_scenario_patch_invalid")
-    catalog_revision = _identifier(patch["catalog_revision"], "mautic_upgrade_scenario_patch_invalid")
-    catalog_sha = _digest(patch["catalog_sha256"], "mautic_upgrade_scenario_patch_invalid")
-    run_id = _identifier(patch["run_id"], "mautic_upgrade_scenario_patch_invalid", 128)
-    plan = _mapping(patch["plan"], "mautic_upgrade_scenario_patch_invalid")
-    plan_sha = _digest(patch["plan_sha256"], "mautic_upgrade_scenario_patch_invalid")
-    if plan_sha != _canonical_sha(plan) or plan.get("run_id") != run_id:
-        raise MauticUpgradeScenarioError("mautic_upgrade_scenario_patch_binding_mismatch")
-    if plan.get("source_version") != source or plan.get("target_version") != target:
-        raise MauticUpgradeScenarioError("mautic_upgrade_scenario_patch_version_mismatch")
-    try:
-        from mcd_agent.mautic_patch_plan import validate_upgrade_plan
-        validate_upgrade_plan(
-            json.dumps(plan, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
-            source,
-            target,
-            str(cli["mode"]),
-        )
-    except Exception as exc:
-        raise MauticUpgradeScenarioError("mautic_upgrade_scenario_patch_plan_invalid") from exc
+    patch_value = value.get("patch")
+    patch = None
+    if patch_value is not None:
+        patch = _mapping(patch_value, "mautic_upgrade_scenario_patch_invalid")
+        patch_required = {"catalog_revision", "catalog_sha256", "plan_sha256", "run_id", "plan"}
+        if set(patch) != patch_required:
+            raise MauticUpgradeScenarioError("mautic_upgrade_scenario_patch_invalid")
+        catalog_revision = _identifier(patch["catalog_revision"], "mautic_upgrade_scenario_patch_invalid")
+        catalog_sha = _digest(patch["catalog_sha256"], "mautic_upgrade_scenario_patch_invalid")
+        run_id = _identifier(patch["run_id"], "mautic_upgrade_scenario_patch_invalid", 128)
+        plan = _mapping(patch["plan"], "mautic_upgrade_scenario_patch_invalid")
+        plan_sha = _digest(patch["plan_sha256"], "mautic_upgrade_scenario_patch_invalid")
+        if plan_sha != _canonical_sha(plan) or plan.get("run_id") != run_id:
+            raise MauticUpgradeScenarioError("mautic_upgrade_scenario_patch_binding_mismatch")
+        if plan.get("source_version") != source or plan.get("target_version") != target:
+            raise MauticUpgradeScenarioError("mautic_upgrade_scenario_patch_version_mismatch")
+        try:
+            from mcd_agent.install_type import detect_install_type
+            from mcd_agent.mautic_patch_plan import validate_upgrade_plan
+            validate_upgrade_plan(
+                json.dumps(plan, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+                source,
+                target,
+                (detect_install_type(application_root) if cli["mode"] == "auto" else str(cli["mode"])),
+            )
+        except Exception as exc:
+            raise MauticUpgradeScenarioError("mautic_upgrade_scenario_patch_plan_invalid") from exc
     post = _mapping(value["post"], "mautic_upgrade_scenario_post_invalid")
     if set(post) != {"cache_clear", "inventory_rescan"} or post["cache_clear"] is not True or post["inventory_rescan"] is not True:
         raise MauticUpgradeScenarioError("mautic_upgrade_scenario_post_invalid")
@@ -242,14 +340,14 @@ def validate_scenario_document(
         "source_version": source,
         "target_version": target,
         "cli": cli,
-        "patch": {
+        **({"patch": {
             **patch,
             "catalog_revision": catalog_revision,
             "catalog_sha256": catalog_sha,
             "plan_sha256": plan_sha,
             "run_id": run_id,
             "plan": plan,
-        },
+        }} if patch is not None else {}),
     }
 
 
@@ -271,11 +369,17 @@ def _safe_projection(
         "source_version": value["source_version"],
         "target_version": value["target_version"],
         **cli,
-        "patch_catalog_revision": value["patch"]["catalog_revision"],
-        "patch_catalog_sha256": value["patch"]["catalog_sha256"],
-        "patch_plan_sha256": value["patch"]["plan_sha256"],
-        "patch_run_id": value["patch"]["run_id"],
     }
+    patch = value.get("patch")
+    if isinstance(patch, Mapping):
+        projection.update({
+            "patch_catalog_revision": patch["catalog_revision"],
+            "patch_catalog_sha256": patch["catalog_sha256"],
+            "patch_plan_sha256": patch["plan_sha256"],
+            "patch_run_id": patch["run_id"],
+        })
+    else:
+        projection["patch_source"] = "mcd-resolved-before-apply"
     return projection
 
 
@@ -297,29 +401,99 @@ def _write_json_context(directory: Path, name: str, value: Mapping[str, Any]) ->
     return str(path)
 
 
+def _resolve_patch_plan(config: Any, install: Any, *, source: str, target: str, mode: str) -> Mapping[str, Any] | None:
+    """Ask the existing MCD patch resolver for the optional current plan."""
+    if not str(getattr(config, "mcc_url", "") or "").strip():
+        return None
+    try:
+        from mcd_agent.mautic_patch_resolution import resolve_plan
+        from mcd_agent.install_type import detect_install_type
+        selected_mode = detect_install_type(install.root) if mode == "auto" else mode
+        selected = resolve_plan(
+            config,
+            install,
+            trigger="upgrade_lifecycle",
+            phase="dependency_update_preflight",
+            operation="apply",
+            observed_version=source,
+            observed_major=int(source.split(".", 1)[0]),
+            target_version=target,
+            install_type=selected_mode,
+        )
+        return selected if selected.get("status") == "selected" else None
+    except Exception:
+        # A missing MCC connection means the verified local scenario remains
+        # authoritative; the upgrade itself still follows that scenario.
+        return None
+
+
+def _stage_patch_plan(config: Any, instance_uid: str, selected: Mapping[str, Any]) -> dict[str, Any]:
+    """Materialise and re-check all selected patch bytes before apply."""
+    plan = _mapping(selected.get("plan"), "mautic_upgrade_scenario_patch_plan_invalid")
+    run_id = _identifier(plan.get("run_id"), "mautic_upgrade_scenario_patch_plan_invalid", 128)
+    state_path = Path(str(getattr(config, "state_db_path", "") or "")).expanduser().resolve()
+    root = state_path.parent / "patches" / _identifier(instance_uid, "mautic_upgrade_scenario_instance_invalid") / run_id
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(root, 0o700)
+    files: list[dict[str, Any]] = []
+    for payload in plan.get("payloads", []) if isinstance(plan.get("payloads"), list) else []:
+        item = _mapping(payload, "mautic_upgrade_scenario_patch_payload_invalid")
+        relative = _text(item.get("path"), "mautic_upgrade_scenario_patch_payload_invalid", 512)
+        if relative.startswith("/") or ".." in Path(relative).parts:
+            raise MauticUpgradeScenarioError("mautic_upgrade_scenario_patch_payload_path_invalid")
+        encoded = item.get("content_base64")
+        expected = str(item.get("sha256") or "").lower()
+        if not isinstance(encoded, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+            raise MauticUpgradeScenarioError("mautic_upgrade_scenario_patch_payload_invalid")
+        try:
+            content = base64.b64decode(encoded, validate=True)
+        except (ValueError, TypeError) as exc:
+            raise MauticUpgradeScenarioError("mautic_upgrade_scenario_patch_payload_invalid") from exc
+        if hashlib.sha256(content).hexdigest() != expected:
+            raise MauticUpgradeScenarioError("mautic_upgrade_scenario_patch_payload_sha256_mismatch")
+        destination = (root / relative).resolve()
+        if root not in destination.parents:
+            raise MauticUpgradeScenarioError("mautic_upgrade_scenario_patch_payload_path_invalid")
+        destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        temporary = destination.with_name("." + destination.name + ".tmp")
+        with temporary.open("wb") as handle:
+            os.chmod(temporary, 0o600)
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+        files.append({"path": str(destination), "sha256": expected, "size_bytes": len(content)})
+    return {
+        "status": "staged",
+        "root": str(root),
+        "run_id": run_id,
+        "files": files,
+    }
+
+
 def execute(
     job: Mapping[str, Any],
     *,
     config: Any,
     scenario_downloader: Callable[[Mapping[str, Any]], bytes] | None,
+    scenario_resolver: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None,
     inventory_rescan: Callable[[], Any] | None,
 ) -> Mapping[str, Any]:
     value = _mapping(job.get("input"), "mautic_upgrade_scenario_input_invalid")
-    required = {"scenario_id", "scenario_revision", "scenario_artifact", "instance_uid", "application_root"}
+    required = {"instance_uid"}
     if set(value) != required:
         return {"status": "failed", "reason": "mautic_upgrade_scenario_input_invalid"}
-    scenario_id = _identifier(value["scenario_id"], "mautic_upgrade_scenario_input_invalid")
-    scenario_revision = _identifier(value["scenario_revision"], "mautic_upgrade_scenario_input_invalid")
     instance_uid = _identifier(value["instance_uid"], "mautic_upgrade_scenario_input_invalid")
-    application_root = _text(value["application_root"], "mautic_upgrade_scenario_input_invalid", 4096)
-    if not application_root.startswith("/"):
-        return {"status": "failed", "reason": "mautic_upgrade_scenario_root_invalid"}
-    pin = _artifact_pin(value["scenario_artifact"], allow_local=bool(job.get("_local_scenario")))
     try:
-        from mcd_agent.mautic_upgrade import _pick_install_record
-        install = _pick_install_record(config, application_root)
-        if str(install.instance_uid or "") != instance_uid or str(install.root) != application_root:
-            raise MauticUpgradeScenarioError("mautic_upgrade_scenario_instance_not_current")
+        install = _install_for_uid(config, instance_uid)
+        application_root = str(install.root)
+        scenario_id, scenario_revision, pin, _source_version = _resolve_scenario(
+            config,
+            instance_uid=instance_uid,
+            application_root=application_root,
+            resolver=scenario_resolver,
+            allow_local=bool(job.get("_local_scenario")),
+        )
         document, delivery = load_scenario_artifact(
             config,
             pin,
@@ -327,6 +501,7 @@ def execute(
             scenario_revision=scenario_revision,
             idempotency_key=str(job.get("job_id") or job.get("command_id") or "scenario"),
             downloader=scenario_downloader,
+            instance_uid=instance_uid,
         )
         scenario = validate_scenario_document(
             document,
@@ -336,20 +511,46 @@ def execute(
             instance_uid=instance_uid,
             application_root=application_root,
         )
+        selected_patch = scenario.get("patch")
+        patch_cache: dict[str, Any] | None = None
+        fresh_patch = _resolve_patch_plan(
+            config,
+            install,
+            source=str(scenario["source_version"]),
+            target=str(scenario["target_version"]),
+            mode=str(scenario["cli"]["mode"]),
+        )
+        if fresh_patch is not None:
+            selected_patch = {
+                "catalog_revision": fresh_patch.get("catalog_revision"),
+                "catalog_sha256": "sha256:" + str(fresh_patch.get("catalog_sha256") or ""),
+                "plan_sha256": "sha256:" + str(fresh_patch.get("plan_sha256") or ""),
+                "run_id": str((_mapping(fresh_patch.get("plan"), "mautic_upgrade_scenario_patch_plan_invalid")).get("run_id") or ""),
+                "plan": _mapping(fresh_patch.get("plan"), "mautic_upgrade_scenario_patch_plan_invalid"),
+            }
+        if isinstance(selected_patch, Mapping):
+            patch_cache = _stage_patch_plan(config, instance_uid, {
+                "plan": selected_patch["plan"],
+            })
+        if isinstance(selected_patch, Mapping):
+            scenario = {**scenario, "patch": dict(selected_patch)}
+        from mcd_agent.install_type import detect_install_type
+        effective_mode = detect_install_type(application_root) if scenario["cli"]["mode"] == "auto" else scenario["cli"]["mode"]
         projection = _safe_projection(
             scenario,
             root=application_root,
             instance_uid=instance_uid,
             artifact_digest=pin["artifact_digest"],
         )
+        projection["effective_mode"] = effective_mode
         print("MCD_MAUTIC_UPGRADE_SCENARIO_PARAMETERS=" + json.dumps(projection, ensure_ascii=True, sort_keys=True, separators=(",", ":")), flush=True)
         cli = scenario["cli"]
-        patch = scenario["patch"]
-        plan_json = json.dumps(patch["plan"], ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        patch = scenario.get("patch")
+        plan_json = json.dumps(patch["plan"], ensure_ascii=True, sort_keys=True, separators=(",", ":")) if isinstance(patch, Mapping) else None
         upgrade_kwargs: dict[str, Any] = {
             "config": config,
             "root": application_root,
-            "mode": cli["mode"],
+            "mode": effective_mode,
             "yes": True,
             "do_backup": cli["backup"],
             "with_system_upgrade": cli["with_system_upgrade"],
@@ -359,7 +560,7 @@ def execute(
             "allow_release_transition": cli["allow_release_transition"],
             "mcc_preflighted_single_instance": True,
             "patch_plan_json": plan_json,
-            "patch_run_id": patch["run_id"],
+            "patch_run_id": patch["run_id"] if isinstance(patch, Mapping) else None,
             "operation_id": str(job.get("job_id") or job.get("command_id") or "mautic-upgrade-scenario"),
         }
         optional = scenario.get("context")
@@ -404,13 +605,17 @@ def execute(
             "application_root": application_root,
             "cli_parameters": projection,
             "patch": {
-                "catalog_revision": patch["catalog_revision"],
-                "catalog_sha256": patch["catalog_sha256"],
-                "plan_sha256": patch["plan_sha256"],
-                "run_id": patch["run_id"],
+                "status": "staged" if isinstance(patch, Mapping) else "not_available",
+                **({
+                    "catalog_revision": patch["catalog_revision"],
+                    "catalog_sha256": patch["catalog_sha256"],
+                    "plan_sha256": patch["plan_sha256"],
+                    "run_id": patch["run_id"],
+                } if isinstance(patch, Mapping) else {}),
+                "cache": patch_cache,
                 "selected": [
                     {"id": row.get("id"), "payload_path": row.get("payload_path"), "payload_sha256": next((item.get("sha256") for item in patch["plan"].get("payloads", []) if item.get("path") == row.get("payload_path")), None)}
-                    for row in patch["plan"].get("patches", []) if isinstance(row, Mapping)
+                    for row in (patch["plan"].get("patches", []) if isinstance(patch, Mapping) else []) if isinstance(row, Mapping)
                 ],
             },
             "cache_clear": {"status": "succeeded", "owner": "mcd-cli-mautic-upgrade"},
@@ -476,15 +681,17 @@ def execute_local_file(
                 "command_id": "apply",
                 "_local_scenario": True,
                 "input": {
-                    "scenario_id": scenario_id,
-                    "scenario_revision": scenario_revision,
-                    "scenario_artifact": pin,
                     "instance_uid": instance_uid,
-                    "application_root": application_root,
                 },
             },
             config=config,
             scenario_downloader=lambda _pin: raw,
+            scenario_resolver=lambda _request: {
+                "status": "matched",
+                "scenario_id": scenario_id,
+                "scenario_revision": scenario_revision,
+                "scenario_artifact": pin,
+            },
             inventory_rescan=inventory_rescan,
         )
     except MauticUpgradeScenarioError as exc:

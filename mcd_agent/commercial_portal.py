@@ -1382,6 +1382,39 @@ class PortalClient:
             raise CommercialPortalError(stage="artifact.download", code="commercial_artifact_size_mismatch")
         return body
 
+    def resolve_mautic_upgrade_scenario(
+        self,
+        *,
+        installation_id: str,
+        instance_uid: str,
+        source_version: str,
+    ) -> dict[str, Any]:
+        """Resolve the current Mautic upgrade scenario without carrying it in the command.
+
+        The Portal/MCC side returns only the exact catalog binding.  MCD still
+        owns artifact retrieval, validation and execution; this request is a
+        catalog lookup, not an upgrade operation.
+        """
+        agent_id = str(self.state.get("agent_id") or "")
+        installation = str(installation_id or "").strip()
+        uid = str(instance_uid or "").strip()
+        source = str(source_version or "").strip()
+        if not agent_id or not installation or not uid or not source:
+            raise ValueError("commercial_mautic_upgrade_scenario_resolution_input_invalid")
+        payload = {
+            "schema": "portal-mcd-mautic-upgrade-scenario-resolve-request-v1",
+            "contract_version": "1.0",
+            "operation": "mautic-upgrade",
+            "instance_uid": uid,
+            "source_version": source,
+        }
+        return self._request(
+            "POST",
+            f"agents/{quote(agent_id, safe='')}/installations/{quote(installation, safe='')}/scenarios/resolve",
+            payload,
+            idempotency_key=f"mautic-upgrade-scenario:{uid}:{source}",
+        )
+
     def command_state(self, *, installation_id: str, command_id: str) -> dict[str, Any]:
         agent_id = str(self.state.get("agent_id") or "")
         parts = [quote(value, safe="") for value in (agent_id, installation_id, command_id)]

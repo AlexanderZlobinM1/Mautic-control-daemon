@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from mcd_agent.commercial_portal import canonical_json
-from mcd_agent.commercial_primitives import build_capability_inventory
+from mcd_agent.commercial_primitives import build_capability_inventory, execute_generic_primitive
 from mcd_agent.mautic_upgrade_scenario import (
     SCENARIO_SCHEMA,
     execute,
@@ -86,7 +86,7 @@ def _scenario(pin: dict[str, object]) -> dict[str, object]:
     return document
 
 
-def test_inventory_advertises_typed_upgrade_scenario_with_existing_binding(monkeypatch):
+def test_inventory_advertises_only_standard_upgrade_command(monkeypatch):
     from mcd_agent import commercial_primitives as primitives
 
     binding = {"binding_schema": "mcd-upgrade-os-binding-v1", "binding_sha256": "sha256:" + "a" * 64}
@@ -96,16 +96,55 @@ def test_inventory_advertises_typed_upgrade_scenario_with_existing_binding(monke
         dns_name="mautic.example.com",
         config=object(),
     )
-    capability = next(item for item in inventory["capabilities"] if item["capability_id"] == "mautic_upgrade_scenario_v1")
+    capability = next(item for item in inventory["capabilities"] if item["capability_id"] == "mautic_upgrade")
     assert capability["commands"] == [{
         "command_id": "apply",
         "version": "1.0",
         "execution": "generic_primitive",
         "mutates_state": True,
-        "input_schema_ref": "portal://mcd/input/mautic-upgrade-scenario-v1",
+        "input_schema_ref": "portal://mcd/input/mautic-upgrade-apply-v1",
         "target_scope": "instance",
         **binding,
     }]
+    assert not any(item["capability_id"] == "mautic_upgrade_scenario_v1" for item in inventory["capabilities"])
+
+
+def test_standard_upgrade_command_routes_minimal_input_to_mcd_scenario_executor(monkeypatch):
+    from mcd_agent import mautic_upgrade_scenario as scenario
+
+    calls = []
+    monkeypatch.setattr(
+        scenario,
+        "execute",
+        lambda job, **kwargs: calls.append((job, kwargs)) or {"status": "succeeded", "owner": "mcd"},
+    )
+    config = object()
+    job = {
+        "job_id": "upgrade-1",
+        "capability": {"capability_id": "mautic_upgrade"},
+        "command": {"command_id": "apply"},
+        "input": {"instance_uid": "instance-1"},
+    }
+    assert execute_generic_primitive(job, config=config) == {"status": "succeeded", "owner": "mcd"}
+    assert calls and calls[0][0] is job
+    assert calls[0][1]["config"] is config
+
+
+def test_standard_upgrade_command_rejects_scenario_parameters_from_caller(monkeypatch):
+    from mcd_agent import mautic_upgrade_scenario as scenario
+
+    called = []
+    monkeypatch.setattr(scenario, "execute", lambda *_args, **_kwargs: called.append(True))
+    result = execute_generic_primitive(
+        {
+            "capability": {"capability_id": "mautic_upgrade"},
+            "command": {"command_id": "apply"},
+            "input": {"instance_uid": "instance-1", "scenario_id": "caller-controlled"},
+        },
+        config=object(),
+    )
+    assert result == {"status": "failed", "reason": "commercial_mautic_upgrade_input_invalid"}
+    assert called == []
 
 
 def test_parameter_projection_contains_scenario_and_artifact_bindings():
@@ -151,6 +190,35 @@ def test_scenario_artifact_uses_local_exact_cache_without_download(tmp_path: Pat
     assert delivery["status"] == "local_cache_hit"
 
 
+def test_local_catalog_runs_when_mcc_resolution_is_unavailable(monkeypatch, tmp_path: Path):
+    from mcd_agent import mautic_upgrade_scenario as scenario
+
+    config = SimpleNamespace(state_db_path=str(tmp_path / "state.sqlite3"))
+    document = _scenario(_pin(b"placeholder"))
+    raw = json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
+    pin = _pin(raw)
+    store = scenario._scenario_store(config, "instance-1")
+    store.deliver(
+        pin=pin,
+        artifact=raw,
+        verify=lambda candidate, _payload: {
+            "artifact_revision": candidate["artifact_revision"],
+            "artifact_digest": candidate["artifact_digest"],
+        },
+        binding={"scenario_id": document["scenario_id"], "scenario_revision": document["scenario_revision"], "idempotency_key": "seed"},
+    )
+    monkeypatch.setattr(scenario, "read_mautic_version_evidence_read_only", lambda _root: {"version": "7.2.2", "source": "static_metadata"})
+    resolved = scenario._resolve_scenario(
+        config,
+        instance_uid="instance-1",
+        application_root=document["application_root"],
+        resolver=lambda _request: (_ for _ in ()).throw(RuntimeError("offline")),
+        allow_local=True,
+    )
+    assert resolved[0:2] == ("mautic-upgrade-7-2-3", "upgrade-r1")
+    assert resolved[2]["artifact_trust_mode"] == "local_file"
+
+
 def test_validate_scenario_binds_plan_and_post_steps(monkeypatch):
     from mcd_agent import mautic_patch_plan
 
@@ -174,10 +242,11 @@ def test_execute_returns_mcd_receipt_bindings(monkeypatch, tmp_path: Path):
     from mcd_agent import mautic_upgrade
     from mcd_agent import mautic_upgrade_scenario as scenario
 
-    monkeypatch.setattr(mautic_upgrade, "_pick_install_record", lambda _config, _root: SimpleNamespace(instance_uid="instance-1", root="/var/www/example/public_html"))
+    monkeypatch.setattr(scenario, "_install_for_uid", lambda _config, _uid: SimpleNamespace(instance_uid="instance-1", root="/var/www/example/public_html"))
     monkeypatch.setattr(mautic_upgrade, "run_upgrade_apply", lambda **_kwargs: 0)
     monkeypatch.setattr(scenario, "validate_scenario_document", lambda document, **_kwargs: document)
     monkeypatch.setattr(scenario, "_safe_projection", lambda value, **kwargs: {"root": kwargs["root"], "instance_uid": kwargs["instance_uid"], "target_version": value["target_version"]})
+    monkeypatch.setattr(scenario, "read_mautic_version_evidence_read_only", lambda _root: {"version": "7.2.2", "source": "static_metadata"})
     monkeypatch.setattr("mcd_agent.mautic_version_cache.read_mautic_version_evidence_read_only", lambda _root: {"version": "7.2.3", "source": "static_metadata"})
     raw = json.dumps(_scenario(_pin(b"placeholder")), sort_keys=True, separators=(",", ":")).encode()
     pin = _pin(raw)
@@ -185,19 +254,32 @@ def test_execute_returns_mcd_receipt_bindings(monkeypatch, tmp_path: Path):
     raw = json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
     pin = _pin(raw)
     config = SimpleNamespace(state_db_path=str(tmp_path / "state.sqlite3"))
-    result = execute(
-        {"job_id": "job-1", "command_id": "apply", "input": {
+    resolved_requests = []
+
+    def resolve(request):
+        resolved_requests.append(dict(request))
+        return {
+            "status": "matched",
             "scenario_id": "mautic-upgrade-7-2-3",
             "scenario_revision": "upgrade-r1",
             "scenario_artifact": pin,
+        }
+
+    result = execute(
+        {"job_id": "job-1", "command_id": "apply", "input": {
             "instance_uid": "instance-1",
-            "application_root": "/var/www/example/public_html",
         }},
         config=config,
         scenario_downloader=lambda _pin: raw,
+        scenario_resolver=resolve,
         inventory_rescan=lambda: {"status": "succeeded", "discovered_count": 1},
     )
     assert result["status"] == "succeeded"
     assert result["scenario"]["id"] == "mautic-upgrade-7-2-3"
     assert result["final_version"]["version"] == "7.2.3"
     assert result["inventory_rescan"]["status"] == "succeeded"
+    assert resolved_requests == [{
+        "operation": "mautic-upgrade",
+        "instance_uid": "instance-1",
+        "source_version": "7.2.2",
+    }]

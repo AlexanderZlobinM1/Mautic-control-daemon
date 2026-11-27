@@ -93,18 +93,29 @@ plan и остаётся идемпотентным.
 
 ### Mautic 7 upgrade scenario
 
-Для MCD 1.7 кнопка Mautic upgrade передаёт задачу в capability
-`mautic_upgrade_scenario_v1`. MCC публикует внешний JSON-сценарий и его
-неизменяемую привязку `scenario_id`, `scenario_revision`, `artifact_digest` и
-`artifact_size_bytes`. Если такой сценарий уже есть в локальном кеше и его
-полный SHA совпадает, MCD использует кеш без сетевого запроса. Иначе MCD
-скачивает ровно указанный объект через authenticated MCC transport, проверяет
+Для MCD 1.7 кнопка Mautic upgrade вызывает стандартную capability
+`mautic_upgrade`, command `apply`, и передаёт только короткую команду с
+`instance_uid`. MCC не
+передаёт в командном payload сценарий, SHA, target, patch plan или CLI flags.
+MCD сам по текущей локальной версии запрашивает latest-compatible scenario у
+Portal/MCC catalog. Если exact scenario уже есть в локальном кеше и его полный
+SHA совпадает, MCD использует кеш без сетевого запроса; иначе получает exact
+catalog binding через authenticated transport, скачивает объект, проверяет
 revision, размер и SHA, атомарно сохраняет его и только после этого разбирает
 параметры.
 
-Сценарий содержит source/target version, mode, backup/system-upgrade flags,
-immutable patch catalog и plan references, canonical `plan_sha256`, selected
-patch payloads, а также обязательные `cache_clear` и `inventory_rescan` steps.
+Если MCC недоступен, текущий проверенный сценарий из локального каталога
+считается последним и запускается. При доступном MCC MCD отдельно запрашивает
+актуальные патчи через существующий patch resolver, проверяет SHA каждого
+payload и заранее раскладывает их в персональную для инстанса папку `patches`.
+Только после завершения этой проверки запускается штатный upgrade handler;
+патч-план применяется им в канонических фазах после установки исходного
+Mautic.
+
+Сценарий содержит source/target version, mode, backup/system-upgrade flags и
+обязательные `cache_clear` и `inventory_rescan` steps. Если каталог патчей
+передал встроенный план, он также проверяется; обычный путь получает план
+отдельным запросом MCD.
 `scenario_digest` — отдельный SHA канонического JSON без самого поля
 `scenario_digest`; он не является самоссылочным SHA полного файла.
 
@@ -118,8 +129,9 @@ patch, migration, rollback и supervision поведением. После ус�
 
 Локальный `mcd-cli` и команда, пришедшая от MCC, используют этот же MCD
 executor и тот же `execute`-путь; различается только адаптер входа: локальный
-CLI читает staged-файл, а MCC передаёт его exact artifact pin. MCC не выполняет
-upgrade, не дублирует cache clear и не выбирает другой алгоритм.
+CLI может передать локально staged-файл, а MCC передаёт только `instance_uid`.
+MCC не выполняет upgrade, не дублирует cache clear, не передаёт сценарий или
+патчи и не выбирает другой алгоритм.
 
 Terminal generic receipt обязан содержать те же scenario/instance bindings,
 CLI parameter projection, patch catalog/plan/payload SHA, фактическую версию,
