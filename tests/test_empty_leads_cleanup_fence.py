@@ -1,5 +1,6 @@
 import pytest
 from collections import deque
+from threading import Event, Thread
 
 from mcd_agent.daemon import (
     _empty_leads_cleanup_pending_due,
@@ -34,6 +35,47 @@ def test_cleanup_uses_short_db_lock_even_when_instance_root_work_is_active():
     assert result["lock_scope"] == "database_advisory_batch"
     assert db.deleted == [{"mode": "both_null", "batch_size": 5000, "max_batches": 1}]
     assert db.released == [db.connection]
+
+
+def test_cleanup_deletes_before_long_segment_session_finishes(monkeypatch):
+    db = FakeDB()
+    segment_started = Event()
+    segment_finished = Event()
+    cleanup_finished = Event()
+    segment_release = Event()
+    result = {}
+
+    def forbidden_root_fence(*_args, **_kwargs):
+        raise AssertionError("cleanup must not acquire the segment root fence")
+
+    monkeypatch.setattr("mcd_agent.empty_leads_cleanup.cleanup_fence", forbidden_root_fence)
+
+    def long_segment_update():
+        segment_started.set()
+        segment_release.wait(timeout=2)
+        segment_finished.set()
+
+    def cleanup_batch():
+        result["value"] = delete_empty_leads_safely(
+            db,
+            "/var/www/ogistra",
+            mode="both_null",
+            batch_size=5000,
+        )
+        cleanup_finished.set()
+
+    segment_thread = Thread(target=long_segment_update)
+    cleanup_thread = Thread(target=cleanup_batch)
+    segment_thread.start()
+    assert segment_started.wait(timeout=1)
+    cleanup_thread.start()
+    assert cleanup_finished.wait(timeout=1)
+    assert not segment_finished.is_set()
+    assert result["value"]["total_deleted"] == 1
+    segment_release.set()
+    segment_thread.join(timeout=2)
+    cleanup_thread.join(timeout=2)
+    assert segment_finished.is_set()
 
 
 def test_busy_db_lock_defers_without_delete():

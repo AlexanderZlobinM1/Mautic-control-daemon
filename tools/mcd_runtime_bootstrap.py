@@ -407,19 +407,20 @@ def _install_runtime(install_dir: Path, stage: Path, manifest: dict[str, Any]) -
         cwd=Path("/"),
     )
     removed_metadata.extend(_remove_agent_distribution_metadata(site_dir, keep=metadata_name))
-    version_probe = _run(
-        [
-            str(python),
-            "-c",
-            "import importlib.metadata as m, mcd_agent; print(m.version('mcd-agent')); print(mcd_agent.__version__); print(mcd_agent.__file__)",
-        ],
-        cwd=install_dir,
-    )
-    lines = [line.strip() for line in (version_probe.stdout or "").splitlines() if line.strip()]
-    if len(lines) < 3:
-        raise BridgeError("installed runtime verification returned incomplete output")
-    package_version, imported_version, imported_path = lines[-3:]
     expected = str(manifest.get("version") or "").strip()
+    manifest_payload = manifest.get("payload_sha256") if isinstance(manifest.get("payload_sha256"), dict) else {}
+    expected_cleanup_sha = str(manifest_payload.get("mcd_agent/empty_leads_cleanup.py") or "").strip().lower()
+    if expected_cleanup_sha:
+        probe = _install_runtime_probe(
+            install_dir,
+            expected,
+            expected_cleanup_sha256=expected_cleanup_sha,
+        )
+    else:
+        probe = _install_runtime_probe(install_dir, expected)
+    package_version = probe["metadata_version"]
+    imported_version = probe["imported_version"]
+    imported_path = probe["imported_path"]
     expected_path = (site_dir / "mcd_agent" / "__init__.py").resolve()
     if package_version != expected or imported_version != expected:
         raise BridgeError(
@@ -432,6 +433,11 @@ def _install_runtime(install_dir: Path, stage: Path, manifest: dict[str, Any]) -
         "imported_version": imported_version,
         "imported_path": str(Path(imported_path).resolve()),
         "site_dir": str(site_dir.resolve()),
+        **{
+            key: value
+            for key, value in probe.items()
+            if key.startswith("cleanup_")
+        },
         "removed_metadata": json.dumps(removed_metadata, ensure_ascii=True),
         "removed_shadow_hooks": json.dumps(removed_hooks, ensure_ascii=True),
     }
@@ -955,8 +961,17 @@ def _successful_replay(
         return None
     if not isinstance(manifest, dict) or str(manifest.get("version") or "").strip() != target:
         return None
+    manifest_payload = manifest.get("payload_sha256") if isinstance(manifest.get("payload_sha256"), dict) else {}
+    expected_cleanup_sha = str(manifest_payload.get("mcd_agent/empty_leads_cleanup.py") or "").strip().lower()
     try:
-        readback = _install_runtime_probe(install_dir, target)
+        if expected_cleanup_sha:
+            readback = _install_runtime_probe(
+                install_dir,
+                target,
+                expected_cleanup_sha256=expected_cleanup_sha,
+            )
+        else:
+            readback = _install_runtime_probe(install_dir, target)
     except Exception:  # noqa: BLE001 - stale/incomplete state must use normal guarded flow
         return None
     replay = dict(payload)
@@ -1176,20 +1191,61 @@ def bridge(args: argparse.Namespace) -> dict[str, Any]:
                     shutil.rmtree(package_snapshot, ignore_errors=True)
 
 
-def _install_runtime_probe(install_dir: Path, target: str) -> dict[str, str]:
+def _install_runtime_probe(
+    install_dir: Path,
+    target: str,
+    *,
+    expected_cleanup_sha256: str = "",
+) -> dict[str, str]:
     python = _venv_python(install_dir)
+    cleanup_probe = ""
+    if expected_cleanup_sha256:
+        cleanup_probe = (
+            "import hashlib, pathlib; "
+            "import mcd_agent.empty_leads_cleanup as cleanup; "
+            "cleanup_path=pathlib.Path(cleanup.__file__).resolve(); "
+            "print(str(cleanup_path)); "
+            "print(hashlib.sha256(cleanup_path.read_bytes()).hexdigest()); "
+        )
     probe = _run(
         [
             str(python),
             "-c",
-            "import importlib.metadata as m, mcd_agent; print(m.version('mcd-agent')); print(mcd_agent.__version__); print(mcd_agent.__file__)",
+            "import importlib.metadata as m, pathlib, mcd_agent; "
+            "print(m.version('mcd-agent')); print(mcd_agent.__version__); print(mcd_agent.__file__); "
+            + cleanup_probe,
         ],
         cwd=install_dir,
     )
     lines = [line.strip() for line in (probe.stdout or "").splitlines() if line.strip()]
-    if len(lines) < 3 or lines[-3] != target or lines[-2] != target:
+    required_lines = 5 if expected_cleanup_sha256 else 3
+    if len(lines) < required_lines:
         raise BridgeError(f"post-switch runtime probe mismatch target={target}: {lines!r}")
-    return {"metadata_version": lines[-3], "imported_version": lines[-2], "imported_path": str(Path(lines[-1]).resolve())}
+    if lines[-required_lines] != target or lines[-required_lines + 1] != target:
+        raise BridgeError(
+            f"installed runtime version mismatch expected={target} "
+            f"metadata={lines[-required_lines]} imported={lines[-required_lines + 1]}"
+        )
+    result = {
+        "metadata_version": lines[-required_lines],
+        "imported_version": lines[-required_lines + 1],
+        "imported_path": str(Path(lines[-required_lines + 2]).resolve()),
+    }
+    if expected_cleanup_sha256:
+        cleanup_path = Path(lines[-2]).resolve()
+        cleanup_sha = lines[-1].lower()
+        expected_path = (_site_dir(python) / "mcd_agent" / "empty_leads_cleanup.py").resolve()
+        if cleanup_path != expected_path:
+            raise BridgeError(
+                f"installed cleanup module path mismatch expected={expected_path} imported={cleanup_path}"
+            )
+        if cleanup_sha != expected_cleanup_sha256.lower():
+            raise BridgeError(
+                f"installed cleanup module hash mismatch expected={expected_cleanup_sha256} actual={cleanup_sha}"
+            )
+        result["cleanup_module_path"] = str(cleanup_path)
+        result["cleanup_module_sha256"] = cleanup_sha
+    return result
 
 
 def _parser() -> argparse.ArgumentParser:

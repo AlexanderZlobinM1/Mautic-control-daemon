@@ -50,14 +50,18 @@ def _record_error(errors: list[dict[str, Any]], code: str, **facts: Any) -> None
 def _module_snapshot() -> dict[str, Any]:
     import mcd_agent
     import mcd_agent.daemon as daemon
+    import mcd_agent.empty_leads_cleanup as cleanup
 
     daemon_path = Path(str(getattr(daemon, "__file__", ""))).resolve()
+    cleanup_path = Path(str(getattr(cleanup, "__file__", ""))).resolve()
     return {
         "running_version": str(getattr(mcd_agent, "__version__", "") or ""),
         "package_version": str(importlib.metadata.version("mcd-agent") or ""),
         "module_path": str(Path(str(getattr(mcd_agent, "__file__", ""))).resolve()),
         "daemon_path": str(daemon_path),
         "daemon_sha256": _sha256(daemon_path) if daemon_path.is_file() else "",
+        "cleanup_module_path": str(cleanup_path),
+        "cleanup_module_sha256": _sha256(cleanup_path) if cleanup_path.is_file() else "",
         "python": str(Path(sys.executable).resolve()),
     }
 
@@ -65,12 +69,14 @@ def _module_snapshot() -> dict[str, Any]:
 def _probe_interpreter(interpreter: Path) -> dict[str, Any]:
     code = (
         "import hashlib, importlib.metadata as m, json, pathlib, sys; "
-        "import mcd_agent, mcd_agent.daemon as d; "
+        "import mcd_agent, mcd_agent.daemon as d, mcd_agent.empty_leads_cleanup as c; "
         "p=pathlib.Path(d.__file__).resolve(); h=hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() else ''; "
+        "cp=pathlib.Path(c.__file__).resolve(); ch=hashlib.sha256(cp.read_bytes()).hexdigest() if cp.is_file() else ''; "
         "print(json.dumps({'running_version':str(getattr(mcd_agent,'__version__','') or ''),"
         "'package_version':str(m.version('mcd-agent') or ''),"
         "'module_path':str(pathlib.Path(mcd_agent.__file__).resolve()),"
-        "'daemon_path':str(p),'daemon_sha256':h,'python':str(pathlib.Path(sys.executable).resolve())},"
+        "'daemon_path':str(p),'daemon_sha256':h,'cleanup_module_path':str(cp),"
+        "'cleanup_module_sha256':ch,'python':str(pathlib.Path(sys.executable).resolve())},"
         "sort_keys=True))"
     )
     try:
@@ -231,6 +237,7 @@ def check_runtime_integrity(
     candidate_version = str(manifest.get("version") or "").strip()
     candidate_commit = str(manifest.get("source_commit") or "").strip()
     candidate_daemon = str(manifest_payload.get("mcd_agent/daemon.py") or "").strip().lower()
+    candidate_cleanup = str(manifest_payload.get("mcd_agent/empty_leads_cleanup.py") or "").strip().lower()
     wheel_name = str(manifest.get("wheel") or "").strip()
     wheel_path = (runtime / wheel_name).resolve() if wheel_name else runtime / "__missing_wheel__"
     candidate_wheel = str(manifest_payload.get(wheel_name) or "").strip().lower()
@@ -238,6 +245,7 @@ def check_runtime_integrity(
         "version": candidate_version,
         "source_commit": candidate_commit,
         "daemon_sha256": candidate_daemon,
+        "cleanup_module_sha256": candidate_cleanup,
         "wheel": str(wheel_path),
         "wheel_sha256": candidate_wheel,
         "manifest_sha256": _sha256(manifest_path),
@@ -255,6 +263,11 @@ def check_runtime_integrity(
         _record_error(errors, "runtime_candidate_daemon_hash_missing")
     elif not (runtime / "mcd_agent" / "daemon.py").is_file() or _sha256(runtime / "mcd_agent" / "daemon.py") != candidate_daemon:
         _record_error(errors, "runtime_source_daemon_hash_mismatch", expected=candidate_daemon)
+    if candidate_cleanup and (
+        not (runtime / "mcd_agent" / "empty_leads_cleanup.py").is_file()
+        or _sha256(runtime / "mcd_agent" / "empty_leads_cleanup.py") != candidate_cleanup
+    ):
+        _record_error(errors, "runtime_source_cleanup_module_hash_mismatch", expected=candidate_cleanup)
     if not candidate_wheel or not re.fullmatch(r"[0-9a-f]{64}", candidate_wheel):
         _record_error(errors, "runtime_candidate_wheel_hash_missing")
     elif wheel_path.is_file() and _sha256(wheel_path) != candidate_wheel:
@@ -285,6 +298,13 @@ def check_runtime_integrity(
                 _record_error(errors, code, expected=required_version, actual=current.get(key))
         if required_daemon and str(current.get("daemon_sha256") or "").lower() != required_daemon:
             _record_error(errors, "runtime_current_daemon_hash_mismatch", expected=required_daemon, actual=current.get("daemon_sha256"))
+        if candidate_cleanup and str(current.get("cleanup_module_sha256") or "").lower() != candidate_cleanup:
+            _record_error(
+                errors,
+                "runtime_current_cleanup_module_hash_mismatch",
+                expected=candidate_cleanup,
+                actual=current.get("cleanup_module_sha256"),
+            )
 
     exec_raw, systemd_error = _systemd_property(service_name, "ExecStart")
     active, _ = _systemd_property(service_name, "ActiveState")
@@ -316,6 +336,13 @@ def check_runtime_integrity(
                     _record_error(errors, code, expected=required_version, actual=probe.get(key))
             if required_daemon and str(probe.get("daemon_sha256") or "").lower() != required_daemon:
                 _record_error(errors, "runtime_systemd_daemon_hash_mismatch", expected=required_daemon, actual=probe.get("daemon_sha256"))
+            if candidate_cleanup and str(probe.get("cleanup_module_sha256") or "").lower() != candidate_cleanup:
+                _record_error(
+                    errors,
+                    "runtime_systemd_cleanup_module_hash_mismatch",
+                    expected=candidate_cleanup,
+                    actual=probe.get("cleanup_module_sha256"),
+                )
             if not _under_site_packages(str(probe.get("module_path") or "")):
                 _record_error(errors, "runtime_systemd_imported_path_not_site_packages", actual=probe.get("module_path"))
 
