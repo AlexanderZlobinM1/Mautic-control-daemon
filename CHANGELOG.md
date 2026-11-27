@@ -1,3 +1,10 @@
+## 1.6.159 - 2026-11-27
+
+- Honor the operator-selected `min_contact_age_days` cleanup value per
+  instance. A value of `0` now disables the date predicate while receipts keep
+  the current-time cutoff and effective value; positive values retain the
+  strict age cutoff.
+
 ## 1.6.158 - 2026-11-27
 
 - Execute the host-wide maintenance ring in its own dedicated worker. Ordinary

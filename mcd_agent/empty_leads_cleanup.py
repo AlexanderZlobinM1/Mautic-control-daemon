@@ -19,11 +19,12 @@ def cleanup_fence(root: str, lock_directory: str = "/run/lock/mcd-tasks"):
     yield
 
 
-def delete_empty_leads_safely(db, root: str, *, mode: str, batch_size: int, cutoff_utc: str,
+def delete_empty_leads_safely(db, root: str, *, mode: str, batch_size: int, cutoff_utc: str | None,
                              lock_directory: str = "/run/lock/mcd-tasks"):
     """Delete at most one batch under a per-database advisory lock.
 
-    ``root`` and ``lock_directory`` remain accepted for compatibility with
+    ``cutoff_utc=None`` explicitly disables the age predicate for
+    ``min_contact_age_days=0``. ``root`` and ``lock_directory`` remain accepted for compatibility with
     existing operation callers, but are intentionally not used for fencing.
     The DB lock is held only for this bounded SQL batch, so cleanup can make
     progress while a long scheduler session continues and concurrent cleanup

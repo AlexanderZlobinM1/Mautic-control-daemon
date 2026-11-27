@@ -128,3 +128,40 @@ def test_empty_cleanup_ring_receipt_contains_effective_settings_and_requeues_bat
     assert receipt["cutoff_utc"] == "2026-11-20 00:00:00"
     assert receipt["effective_settings"]["batch_size"] == 5000
     assert list(ring) == [("/var/www/a", "empty_leads_cleanup")]
+
+
+def test_zero_age_cleanup_passes_no_cutoff_but_receipts_current_cutoff():
+    store = _Store()
+    ring = deque([("/var/www/a", "empty_leads_cleanup")])
+    maps = _maps()
+    inst = _inst("/var/www/a")
+    config = _config(
+        empty_leads_cleanup_min_contact_age_days=7,
+        empty_leads_cleanup_instance_settings={"a": {"min_contact_age_days": 0}},
+    )
+
+    with patch.object(
+        daemon,
+        "delete_empty_leads_safely",
+        return_value={"total_deleted": 1, "cutoff_utc": None, "age_filter_enabled": False},
+    ) as delete:
+        daemon._run_empty_leads_cleanup_ring_item(
+            config,
+            store,
+            inst,
+            ring,
+            now=1000.0,
+            now_utc=daemon.datetime(2026, 11, 27, tzinfo=daemon.timezone.utc),
+            ring_position=0,
+            empty_leads_cleanup_state_cache=maps["empty_leads_cleanup_state_cache"],
+            last_empty_leads_cleanup_ts=maps["last_empty_leads_cleanup_ts"],
+            last_empty_leads_cleanup_idle_ts={},
+            empty_leads_cleanup_window_counts=maps["empty_leads_cleanup_window_counts"],
+            empty_leads_cleanup_window_keys=maps["empty_leads_cleanup_window_keys"],
+            empty_leads_cleanup_done_window_keys=maps["empty_leads_cleanup_done_window_keys"],
+        )
+
+    assert delete.call_args.kwargs["cutoff_utc"] is None
+    receipt = store.values[daemon._maintenance_cleanup_receipt_key("/var/www/a", "empty_leads_cleanup")]
+    assert receipt["min_contact_age_days"] == 0
+    assert receipt["cutoff_utc"] == "2026-11-27 00:00:00"

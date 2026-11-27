@@ -1190,7 +1190,7 @@ class MauticDB:
         mode: str,
         batch_size: int,
         max_batches: int,
-        cutoff_utc: str,
+        cutoff_utc: str | None,
     ) -> dict[str, Any]:
         """
         Delete contacts that are unusable for import/matching.
@@ -1213,17 +1213,21 @@ class MauticDB:
             predicate = mobile_empty
         else:
             raise ValueError(f"unsupported_empty_leads_cleanup_mode:{normalized_mode}")
-        cutoff = str(cutoff_utc or "").strip()
-        if not cutoff:
-            raise ValueError("empty_leads_cleanup_cutoff_required")
+        if cutoff_utc is None:
+            cutoff: str | None = None
+        else:
+            cutoff = str(cutoff_utc).strip()
+            if not cutoff:
+                raise ValueError("empty_leads_cleanup_cutoff_required")
         limit = max(1, int(batch_size))
         batches_left = max(1, int(max_batches))
+        age_clause = " AND `date_added` < %s" if cutoff is not None else ""
         delete_sql = (
             f"DELETE FROM `{table}` "
             "WHERE `id` IN ("
             "  SELECT doomed.id FROM ("
             f"    SELECT `id` FROM `{table}` "
-            f"    WHERE {predicate} AND `date_added` < %s "
+            f"    WHERE {predicate}{age_clause} "
             "    ORDER BY `id` ASC "
             "    LIMIT %s"
             "  ) doomed"
@@ -1237,7 +1241,8 @@ class MauticDB:
         with self._connect() as conn:
             while batches_run < batches_left:
                 with conn.cursor() as cur:
-                    affected = int(cur.execute(delete_sql, (cutoff, limit)) or 0)
+                    params = (cutoff, limit) if cutoff is not None else (limit,)
+                    affected = int(cur.execute(delete_sql, params) or 0)
                 last_deleted = affected
                 if affected <= 0:
                     stop_reason = "empty"
@@ -1256,6 +1261,7 @@ class MauticDB:
             "stop_reason": stop_reason,
             "batch_size": limit,
             "cutoff_utc": cutoff,
+            "age_filter_enabled": cutoff is not None,
         }
 
     def add_dnc_for_emails(
