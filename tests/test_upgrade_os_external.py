@@ -144,6 +144,30 @@ def test_bound_operation_uses_only_pinned_cached_profile() -> None:
     )
 
 
+def test_bound_not_applicable_runtime_is_a_successful_terminal_receipt() -> None:
+    receipt = {
+        "status": "not_applicable",
+        "required_runtime_active": True,
+        "runtime": "php_builtin_server",
+        "not_applicable_services": ["nginx", "php-fpm"],
+    }
+    with patch.object(
+        upgrade_os_external,
+        "load_configured_profile_cache",
+        return_value={"profile": {}},
+    ), patch.object(
+        upgrade_os_external,
+        "_configured_external_operation",
+        return_value=receipt,
+    ):
+        assert upgrade_os_external.run_upgrade_os_operation(
+            SimpleNamespace(),
+            component="nginx",
+            operation="nginx_service_transition",
+            operation_input={"action": "status", "dry_run": "false"},
+        ) == receipt
+
+
 def test_bound_terminal_error_never_falls_back() -> None:
     with patch.object(
         upgrade_os_external,

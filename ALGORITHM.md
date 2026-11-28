@@ -2562,6 +2562,9 @@ must not invoke it implicitly.
 value и не считается утечкой только из-за такого же служебного значения в
 typed receipt. Любой непустой JSON context и любая opaque-строка по-прежнему
 проходят строгую проверку на echo и при совпадении блокируют результат.
+Типизированный terminal status `not_applicable` считается успешным только на
+общей границе external operation; конкретный MCD caller затем обязан проверить
+свои обязательные поля receipt (например, `required_runtime_active`).
 
 В DEV 1.7 оставшиеся APT contract callsites подключены к одному generic
 dispatcher поверх тех же operation bindings, без нового runner или отдельного

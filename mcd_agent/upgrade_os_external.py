@@ -20,6 +20,7 @@ _SUCCESS_STATUSES = {
     "already_present",
     "applied",
     "noop",
+    "not_applicable",
     "ok",
     "planned",
     "rolled_back",

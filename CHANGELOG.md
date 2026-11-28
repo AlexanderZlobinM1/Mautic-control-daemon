@@ -1,3 +1,12 @@
+## 1.7.42 - 2026-11-28
+
+- Treat an external operation's typed `not_applicable` terminal result as a
+  successful receipt. Callers still enforce their operation-specific fields,
+  including `required_runtime_active`; unsupported or failed statuses remain
+  fail-closed. This lets image runtimes explicitly declare host services such
+  as nginx/php-fpm inapplicable without disguising the result as a generic
+  no-op.
+
 ## 1.7.41 - 2026-11-28
 
 - Accept successful external-operation receipts when a declared JSON runtime
