@@ -1,12 +1,13 @@
 import pytest
 from collections import deque
 from threading import Event, Thread
+from types import SimpleNamespace
 
 from mcd_agent.daemon import (
     _empty_leads_cleanup_pending_due,
+    _maintenance_cleanup_ring_reconcile,
     _empty_leads_cleanup_state_load,
     _empty_leads_cleanup_state_save,
-    _service_cleanup_ring_select,
 )
 from mcd_agent.empty_leads_cleanup import CleanupBusy, cleanup_fence, delete_empty_leads_safely
 
@@ -162,18 +163,30 @@ def test_deferred_cleanup_is_durable_and_due_on_next_retry():
     assert _empty_leads_cleanup_pending_due(restored, 101.0)
 
 
-def test_service_ring_is_one_worker_and_instance_order_is_contact_then_orphan():
-    ring = deque([
-        ("instance-a", "empty_leads_cleanup"),
+def test_service_ring_rebuilds_after_completion_from_current_tiles():
+    config = SimpleNamespace(
+        empty_leads_cleanup_enabled=True,
+        empty_leads_cleanup_instance_settings={},
+        enable_page_hits_orphan_cleanup=True,
+        page_hits_orphan_cleanup_instance_settings={},
+    )
+    instance_a = SimpleNamespace(root="instance-a", db=object())
+    instance_b = SimpleNamespace(root="instance-b", db=object())
+    ring = deque([("instance-a", "empty_leads_cleanup")])
+
+    _maintenance_cleanup_ring_reconcile(
+        config,
+        ring,
+        [instance_a, instance_b],
+        completed_item=("instance-a", "empty_leads_cleanup"),
+    )
+
+    assert list(ring) == [
         ("instance-a", "page_hits_orphan_cleanup"),
         ("instance-b", "empty_leads_cleanup"),
         ("instance-b", "page_hits_orphan_cleanup"),
-    ])
-    assert _service_cleanup_ring_select(ring, "instance-a", ["empty_leads_cleanup", "page_hits_orphan_cleanup"]) == "empty_leads_cleanup"
-    ring.append(("instance-a", "page_hits_orphan_cleanup"))
-    assert _service_cleanup_ring_select(ring, "instance-a", ["empty_leads_cleanup", "page_hits_orphan_cleanup"]) == "page_hits_orphan_cleanup"
-    ring.append(("instance-b", "empty_leads_cleanup"))
-    assert _service_cleanup_ring_select(ring, "instance-b", ["empty_leads_cleanup", "page_hits_orphan_cleanup"]) == "empty_leads_cleanup"
+        ("instance-a", "empty_leads_cleanup"),
+    ]
 
 
 def test_host_ring_advances_sixty_items_while_ordinary_planner_is_blocked():
@@ -190,8 +203,9 @@ def test_host_ring_advances_sixty_items_while_ordinary_planner_is_blocked():
     def service_worker():
         while ring:
             root = ring[0][0]
-            assert _service_cleanup_ring_select(ring, root, ["empty_leads_cleanup"]) == "empty_leads_cleanup"
             visited.append(root)
+            ring.rotate(-1)
+            ring.pop()
         worker_finished.set()
 
     planner_thread = Thread(target=slow_ordinary_planner)
@@ -207,6 +221,12 @@ def test_host_ring_advances_sixty_items_while_ordinary_planner_is_blocked():
 
 
 def test_unconfigured_service_is_skipped_without_ring_admission():
+    config = SimpleNamespace(
+        empty_leads_cleanup_enabled=False,
+        empty_leads_cleanup_instance_settings={},
+        enable_page_hits_orphan_cleanup=False,
+        page_hits_orphan_cleanup_instance_settings={},
+    )
     ring = deque()
-    assert _service_cleanup_ring_select(ring, "instance-a", []) == ""
+    _maintenance_cleanup_ring_reconcile(config, ring, [SimpleNamespace(root="instance-a", db=object())])
     assert list(ring) == []
