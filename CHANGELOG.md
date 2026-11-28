@@ -1,3 +1,7 @@
+## 1.6.160 - 2026-11-28
+
+- Simplify the host-wide maintenance cleanup ring: enabled cleanup tiles stay in a durable FIFO, completed items return to the tail immediately, and maintenance/backup pause only the next start.
+
 ## 1.6.159 - 2026-11-27
 
 - Honor the operator-selected `min_contact_age_days` cleanup value per
