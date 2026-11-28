@@ -1,3 +1,11 @@
+## 1.7.36 - 2026-11-28
+
+- Keep the independently verified `runtime/scenario` artifact cache outside
+  immutable release payload accounting while preserving strict rejection of
+  every other unlisted runtime file. Preserve that cache across normal runtime
+  package swaps, so a synced Mautic upgrade scenario remains executable after
+  config reload, process restart and an offline MCD update.
+
 ## 1.7.35 - 2026-11-28
 
 - Resolve the standard UID-only Mautic upgrade command from MCD's current

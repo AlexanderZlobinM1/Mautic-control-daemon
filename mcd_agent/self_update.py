@@ -80,6 +80,7 @@ _RUNTIME_FORBIDDEN_TOP_LEVEL = {
     "setup.cfg",
     "tox.ini",
 }
+_RUNTIME_MUTABLE_CACHE_DIRECTORIES = {"scenario"}
 
 
 def assert_production_runtime_origin(install_dir: str | Path = "/opt/mcd") -> None:
@@ -479,7 +480,11 @@ def _runtime_dependency_wheelhouse(stage: Path, manifest: dict[str, Any]) -> Pat
     return root
 
 
-def _runtime_manifest(source_dir: Path) -> dict[str, Any] | None:
+def _runtime_manifest(
+    source_dir: Path,
+    *,
+    allow_runtime_cache: bool = False,
+) -> dict[str, Any] | None:
     """Read and verify the detached runtime payload manifest.
 
     Every listed payload hash and the absence of checkout material are
@@ -524,6 +529,15 @@ def _runtime_manifest(source_dir: Path) -> dict[str, Any] | None:
             raise RuntimeError(f"runtime manifest payload checksum mismatch: {rel}")
         listed_files.add(rel)
 
+    for name in _RUNTIME_MUTABLE_CACHE_DIRECTORIES:
+        cache = source_dir / name
+        if not cache.exists() and not cache.is_symlink():
+            continue
+        if not allow_runtime_cache:
+            raise RuntimeError(f"runtime package contains mutable cache directory: {name}")
+        if cache.is_symlink() or not cache.is_dir():
+            raise RuntimeError(f"runtime mutable cache path is invalid: {name}")
+
     actual_files = {
         path.relative_to(source_dir).as_posix()
         for path in source_dir.rglob("*")
@@ -531,6 +545,7 @@ def _runtime_manifest(source_dir: Path) -> dict[str, Any] | None:
         and path.name != _RUNTIME_MANIFEST_NAME
         and "__pycache__" not in path.parts
         and path.suffix != ".pyc"
+        and path.relative_to(source_dir).parts[0] not in _RUNTIME_MUTABLE_CACHE_DIRECTORIES
     }
     unlisted = sorted(actual_files - listed_files)
     if unlisted:
@@ -561,16 +576,16 @@ def _runtime_manifest(source_dir: Path) -> dict[str, Any] | None:
     return raw
 
 
-def _runtime_wheel(source_dir: Path) -> Path | None:
-    manifest = _runtime_manifest(source_dir)
+def _runtime_wheel(source_dir: Path, *, allow_runtime_cache: bool = False) -> Path | None:
+    manifest = _runtime_manifest(source_dir, allow_runtime_cache=allow_runtime_cache)
     if manifest is None:
         return None
     raw_name = str(manifest.get("wheel") or "").strip()
     return (source_dir / raw_name).resolve()
 
 
-def _runtime_requirements(source_dir: Path) -> Path:
-    manifest = _runtime_manifest(source_dir)
+def _runtime_requirements(source_dir: Path, *, allow_runtime_cache: bool = False) -> Path:
+    manifest = _runtime_manifest(source_dir, allow_runtime_cache=allow_runtime_cache)
     if manifest is None:
         raise RuntimeError("runtime-only dependency sync requires a verified manifest")
     return (source_dir / str(manifest["requirements"])).resolve()
@@ -583,9 +598,10 @@ def _write_runtime_package_receipt(
     *,
     package_version: str,
     imported_path: str,
+    allow_runtime_cache: bool = False,
 ) -> None:
     manifest_path = source_dir / _RUNTIME_MANIFEST_NAME
-    manifest = _runtime_manifest(source_dir) or {}
+    manifest = _runtime_manifest(source_dir, allow_runtime_cache=allow_runtime_cache) or {}
     receipt = {
         "schema": "mcd-runtime-package-receipt-v1",
         "runtime_only": True,
@@ -598,7 +614,9 @@ def _write_runtime_package_receipt(
         "wheel_sha256": _sha256_file(wheel_path),
         "manifest": str(manifest_path),
         "manifest_sha256": _sha256_file(manifest_path),
-        "requirements_sha256": _sha256_file(_runtime_requirements(source_dir)),
+        "requirements_sha256": _sha256_file(
+            _runtime_requirements(source_dir, allow_runtime_cache=allow_runtime_cache)
+        ),
         "imported_path": str(Path(imported_path).resolve()),
         "checked_at": datetime.now(timezone.utc).isoformat(),
         "forbidden_source_material": [],
@@ -827,7 +845,13 @@ def _merge_unowned_package_files(old_package: Path, new_package: Path, owned: se
             shutil.copy2(candidate, destination)
 
 
-def _install_agent_package_from_runtime_wheel(install_dir: Path, source_dir: Path, wheel_path: Path) -> None:
+def _install_agent_package_from_runtime_wheel(
+    install_dir: Path,
+    source_dir: Path,
+    wheel_path: Path,
+    *,
+    allow_runtime_cache: bool = False,
+) -> None:
     """Install a verified wheel transactionally into the managed venv."""
     venv_python = install_dir / "venv" / "bin" / "python"
     if not venv_python.exists():
@@ -849,7 +873,7 @@ def _install_agent_package_from_runtime_wheel(install_dir: Path, source_dir: Pat
     site_dir = Path((site_proc.stdout or "").strip())
     if not site_dir.is_dir():
         raise RuntimeError(f"venv site-packages directory not found: {site_dir}")
-    manifest = _runtime_manifest(source_dir) or {}
+    manifest = _runtime_manifest(source_dir, allow_runtime_cache=allow_runtime_cache) or {}
     expected_ver = str(manifest.get("version") or "").strip()
     payload_hashes = manifest.get("payload_sha256") if isinstance(manifest.get("payload_sha256"), dict) else {}
     expected_daemon = str(payload_hashes.get("mcd_agent/daemon.py") or "").strip().lower()
@@ -921,6 +945,7 @@ def _install_agent_package_from_runtime_wheel(install_dir: Path, source_dir: Pat
             install_dir, source_dir, wheel_path,
             package_version=str(verify.get("package_version") or ""),
             imported_path=str(verify.get("imported_path") or ""),
+            allow_runtime_cache=allow_runtime_cache,
         )
     except Exception:
         if mutation_started:
@@ -937,10 +962,36 @@ def _install_agent_package_from_runtime_wheel(install_dir: Path, source_dir: Pat
 
 def _install_agent_package_for_source(install_dir: Path, source_dir: Path) -> None:
     """Install only a verified detached runtime wheel, never a project checkout."""
-    runtime_wheel = _runtime_wheel(source_dir)
+    allow_runtime_cache = source_dir.resolve() == (install_dir / "runtime").resolve()
+    runtime_wheel = _runtime_wheel(source_dir, allow_runtime_cache=allow_runtime_cache)
     if runtime_wheel is None:
         raise RuntimeError("runtime-only update requires a verified manifest and wheel; source checkout installation is forbidden")
-    _install_agent_package_from_runtime_wheel(install_dir, source_dir, runtime_wheel)
+    _install_agent_package_from_runtime_wheel(
+        install_dir,
+        source_dir,
+        runtime_wheel,
+        allow_runtime_cache=allow_runtime_cache,
+    )
+
+
+def _preserve_runtime_cache(source_dir: Path, destination_dir: Path) -> list[str]:
+    """Carry independently verified mutable artifact caches across a runtime swap."""
+    preserved: list[str] = []
+    for name in sorted(_RUNTIME_MUTABLE_CACHE_DIRECTORIES):
+        source = source_dir / name
+        if not source.exists() and not source.is_symlink():
+            continue
+        if source.is_symlink() or not source.is_dir():
+            raise RuntimeError(f"runtime mutable cache path is invalid: {name}")
+        for candidate in source.rglob("*"):
+            if candidate.is_symlink():
+                raise RuntimeError(f"runtime mutable cache contains a symlink: {name}")
+        destination = destination_dir / name
+        if destination.exists() or destination.is_symlink():
+            raise RuntimeError(f"runtime package collides with mutable cache directory: {name}")
+        shutil.copytree(source, destination, symlinks=False)
+        preserved.append(name)
+    return preserved
 
 
 def _migrate_forbidden_runtime_includes(
@@ -2066,6 +2117,7 @@ def _apply_update_locked(cfg: AgentConfig, plan: dict[str, Any], lock_f) -> tupl
         _extract_archive_to_dir(archive_path, src_next_dir)
         _install_requirements_for_staged_source(install_dir, src_next_dir)
         _pre_switch_smoke_check(install_dir, src_next_dir)
+        _preserve_runtime_cache(src_dir, src_next_dir)
 
         old_src_dir = updates_dir / f"runtime.prev-{now_s}"
         if old_src_dir.exists():

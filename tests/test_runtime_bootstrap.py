@@ -80,6 +80,28 @@ def test_bridge_removes_only_stale_mcd_distribution_metadata(tmp_path: Path) -> 
     assert unrelated.is_dir()
 
 
+def test_bridge_preserves_scenario_cache_across_runtime_swap(tmp_path: Path) -> None:
+    bridge = _load_bridge()
+    active = tmp_path / "runtime"
+    staged = tmp_path / "runtime.next"
+    scenario = active / "scenario" / "mautic-upgrade" / "1.0.0" / "scenario.sh"
+    scenario.parent.mkdir(parents=True)
+    scenario.write_text("#!/bin/sh\n", encoding="utf-8")
+    staged.mkdir()
+
+    assert bridge._preserve_runtime_cache(active, staged) == ["scenario"]
+    assert (staged / "scenario" / "mautic-upgrade" / "1.0.0" / "scenario.sh").read_bytes() == b"#!/bin/sh\n"
+
+    (staged / "scenario").rename(tmp_path / "copied-scenario")
+    (scenario.parent / "escape").symlink_to(tmp_path)
+    try:
+        bridge._preserve_runtime_cache(active, staged)
+    except bridge.BridgeError as exc:
+        assert str(exc) == "runtime mutable cache contains a symlink: scenario"
+    else:
+        raise AssertionError("mutable scenario cache symlinks must fail closed")
+
+
 def test_bridge_successful_replay_is_read_only_and_hash_bound(tmp_path: Path) -> None:
     bridge = _load_bridge()
     install = tmp_path / "install"

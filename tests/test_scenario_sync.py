@@ -38,6 +38,33 @@ def _config(tmp_path: Path) -> SimpleNamespace:
     )
 
 
+def _runtime_release_fixture(root: Path) -> None:
+    files: list[Path] = []
+    for relative in (
+        "mcd_agent/__init__.py",
+        "mcd_agent/daemon.py",
+        "mcd_agent/state_push.py",
+        "mcd_agent/mcd_control.py",
+        "requirements.txt",
+        "wheel/mcd_agent.whl",
+    ):
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"runtime fixture\n")
+        files.append(path)
+    manifest = {
+        "schema": "mcd-runtime-package-v1",
+        "version": "1.7.36",
+        "wheel": "wheel/mcd_agent.whl",
+        "requirements": "requirements.txt",
+        "payload_sha256": {
+            path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in files
+        },
+    }
+    (root / "mcd-runtime-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+
 def test_state_sync_verifies_and_activates_then_reuses_exact_cache(tmp_path, monkeypatch):
     config = _config(tmp_path)
     package = b"#!/bin/sh\nexit 0\n"
@@ -67,6 +94,41 @@ def test_state_sync_verifies_and_activates_then_reuses_exact_cache(tmp_path, mon
     monkeypatch.setattr(scenario_sync.request, "urlopen", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("cache miss")))
     second = scenario_sync.apply_sync(config, payload)
     assert second["status"] == "already_current"
+
+
+def test_synced_scenario_cache_does_not_break_next_config_load(tmp_path, monkeypatch):
+    from mcd_agent import config as config_module
+
+    config = _config(tmp_path)
+    runtime = Path(config.mcd_install_dir) / "runtime"
+    _runtime_release_fixture(runtime)
+    package = b"#!/bin/sh\nexit 0\n"
+    payload = _payload(package)
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, *_args):
+            return package
+
+    monkeypatch.setattr(scenario_sync.request, "urlopen", lambda *_args, **_kwargs: Response())
+    assert scenario_sync.apply_sync(config, payload)["status"] == "activated"
+    monkeypatch.setattr(config_module, "DEFAULT_RUNTIME_ARTIFACT_DIR", str(runtime))
+    config_path = tmp_path / "mcd.toml"
+    config_path.write_text(
+        "[mcc]\nurl=\"https://mcc.example\"\ntoken=\"token\"\n"
+        "[state]\nbackend=\"sqlite\"\n",
+        encoding="utf-8",
+    )
+
+    loaded = config_module.load_config(str(config_path), allow_recover_from_mcc=False)
+
+    assert loaded.mcc_url == "https://mcc.example"
+    assert scenario_sync.local_scenario(config, "mautic-upgrade")["pin"]["artifact_digest"].startswith("sha256:")
 
 
 def test_state_sync_does_not_replace_active_runtime_after_digest_failure(tmp_path, monkeypatch):

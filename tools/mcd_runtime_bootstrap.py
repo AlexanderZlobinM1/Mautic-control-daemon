@@ -86,6 +86,7 @@ FORBIDDEN_TOP_LEVEL = {
     "setup.cfg",
     "tox.ini",
 }
+MUTABLE_RUNTIME_CACHE_DIRECTORIES = {"scenario"}
 
 
 class BridgeError(RuntimeError):
@@ -263,6 +264,11 @@ def _validate_manifest(stage: Path) -> dict[str, Any]:
         if actual != expected_sha:
             raise BridgeError(f"runtime manifest payload checksum mismatch: {name}")
         listed.add(name)
+
+    for name in MUTABLE_RUNTIME_CACHE_DIRECTORIES:
+        cache = stage / name
+        if cache.exists() or cache.is_symlink():
+            raise BridgeError(f"runtime package contains mutable cache directory: {name}")
 
     actual_files = {
         path.relative_to(stage).as_posix()
@@ -1239,6 +1245,26 @@ def _remove_forbidden_production_tree(path: Path) -> bool:
     return True
 
 
+def _preserve_runtime_cache(source_dir: Path, destination_dir: Path) -> list[str]:
+    """Carry mutable, independently verified artifact caches across the swap."""
+    preserved: list[str] = []
+    for name in sorted(MUTABLE_RUNTIME_CACHE_DIRECTORIES):
+        source = source_dir / name
+        if not source.exists() and not source.is_symlink():
+            continue
+        if source.is_symlink() or not source.is_dir():
+            raise BridgeError(f"runtime mutable cache path is invalid: {name}")
+        for candidate in source.rglob("*"):
+            if candidate.is_symlink():
+                raise BridgeError(f"runtime mutable cache contains a symlink: {name}")
+        destination = destination_dir / name
+        if destination.exists() or destination.is_symlink():
+            raise BridgeError(f"runtime package collides with mutable cache directory: {name}")
+        shutil.copytree(source, destination, symlinks=False)
+        preserved.append(name)
+    return preserved
+
+
 def bridge(args: argparse.Namespace) -> dict[str, Any]:
     install_dir = Path(args.install_dir).resolve()
     archive = Path(args.archive).resolve()
@@ -1328,6 +1354,7 @@ def bridge(args: argparse.Namespace) -> dict[str, Any]:
             try:
                 package_snapshot = _snapshot_installed_runtime_package(install_dir)
                 package_result = _install_runtime(install_dir, stage, manifest, custom_cache_dir=getattr(args, "custom_cache_dir", None))
+                preserved_runtime_cache = _preserve_runtime_cache(runtime_dir, stage)
 
                 if old_runtime.exists():
                     raise BridgeError(f"rollback runtime path already exists: {old_runtime}")
@@ -1392,6 +1419,7 @@ def bridge(args: argparse.Namespace) -> dict[str, Any]:
                         "config_includes": config_migration,
                         "declared_profile": declared_profile or None,
                         "forbidden_production_tree_removed": forbidden_removed,
+                        "preserved_runtime_cache": preserved_runtime_cache,
                     },
                     "service": {
                         "systemd": not bool(args.no_systemd),

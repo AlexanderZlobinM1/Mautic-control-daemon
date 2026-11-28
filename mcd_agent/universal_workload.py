@@ -188,7 +188,7 @@ def resolve_universal_workload_reference(*, runtime_settings: dict[str, Any], co
     if not manifest_path.is_file():
         return {}
     from mcd_agent.self_update import _runtime_manifest
-    manifest = _runtime_manifest(runtime)
+    manifest = _runtime_manifest(runtime, allow_runtime_cache=True)
     ref = manifest.get(key) if manifest is not None else None
     if ref is None:
         return {}

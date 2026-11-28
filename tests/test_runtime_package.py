@@ -72,9 +72,37 @@ class RuntimePackageTests(unittest.TestCase):
             manifest = self_update._runtime_manifest(root)
             self.assertEqual(manifest["version"], "1.5.134")
             self.assertEqual(self_update._runtime_wheel(root), wheel.resolve())
+            scenario = root / "scenario" / "mautic-upgrade" / "1.0.0" / "scenario.sh"
+            scenario.parent.mkdir(parents=True)
+            scenario.write_text("#!/bin/sh\n", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "mutable cache directory"):
+                self_update._runtime_manifest(root)
+            manifest = self_update._runtime_manifest(root, allow_runtime_cache=True)
+            self.assertEqual(manifest["version"], "1.5.134")
             (root / "README.md").write_text("checkout material\n", encoding="utf-8")
             with self.assertRaises(RuntimeError):
-                self_update._runtime_manifest(root)
+                self_update._runtime_manifest(root, allow_runtime_cache=True)
+
+    def test_runtime_cache_is_preserved_without_accepting_links(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mcd-runtime-cache-") as tmp:
+            root = Path(tmp)
+            active = root / "runtime"
+            staged = root / "runtime.next"
+            scenario = active / "scenario" / "mautic-upgrade" / "1.0.0" / "scenario.sh"
+            scenario.parent.mkdir(parents=True)
+            scenario.write_text("#!/bin/sh\n", encoding="utf-8")
+            staged.mkdir()
+
+            self.assertEqual(self_update._preserve_runtime_cache(active, staged), ["scenario"])
+            self.assertEqual(
+                (staged / "scenario" / "mautic-upgrade" / "1.0.0" / "scenario.sh").read_text(encoding="utf-8"),
+                "#!/bin/sh\n",
+            )
+
+            shutil.rmtree(staged / "scenario")
+            (scenario.parent / "escape").symlink_to(root)
+            with self.assertRaisesRegex(RuntimeError, "contains a symlink"):
+                self_update._preserve_runtime_cache(active, staged)
 
     def test_builder_emits_runtime_only_archive_with_detached_provenance(self) -> None:
         root = Path(__file__).parents[1]
