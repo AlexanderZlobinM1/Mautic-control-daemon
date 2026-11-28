@@ -76,9 +76,9 @@ class PreparedTargetTests(unittest.TestCase):
     contract = json.loads(
         (Path(__file__).parents[1] / "mcd_agent/contracts/mautic-prepared-target-v1.json").read_text()
     )
-    self.assertEqual(__version__, "1.7.44")
+    self.assertEqual(__version__, "1.7.45")
     self.assertEqual(contract["candidate"], {
-        "agent_version": "1.7.44",
+        "agent_version": "1.7.45",
         "lineage": "current-mcd-prepared-target",
         "approved_baseline": "1.5.268",
         "baseline_role": "historical-rollback-audit-only",

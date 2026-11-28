@@ -176,6 +176,12 @@ CLI parameter projection, patch catalog/plan/payload SHA, фактическую
 cache-clear result и inventory-rescan result. Mautic 6 этот capability не
 рекламирует и не использует.
 
+Если внешний upgrade-сценарий завершается ошибкой, MCD сохраняет в CLI receipt
+его уже проверенный и ограниченный terminal result: код и этап ошибки, exit code
+и безопасные evidence-маркеры MCD. Сырые stdout/stderr и секретные поля в
+receipt не переносятся. Ошибка сценария не должна схлопываться в общий статус,
+по которому невозможно отличить Composer, patch, cache и rescan этапы.
+
 Разрешение Mautic application root для Composer split-layout проверяет сначала
 project root с `composer.json` и `bin/console`, затем `docroot/` или `public/` с
 валидированными `app/` и `plugins/`. Если в project root остался только

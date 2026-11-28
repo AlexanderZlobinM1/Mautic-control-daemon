@@ -351,7 +351,12 @@ def _run_external_scenario(
         except MauticUpgradeScenarioError:
             target_version = ""
     from mcd_agent.install_type import detect_install_type
-    from mcd_agent.commercial_self_hosted import ExternalProcessPolicy, default_scenario_runner_argv
+    from mcd_agent.commercial_self_hosted import (
+        ExternalProcessPolicy,
+        RunnerExecutionError,
+        RunnerTimeoutError,
+        default_scenario_runner_argv,
+    )
 
     install_type = detect_install_type(str(install.root))
     selected = (
@@ -407,7 +412,27 @@ def _run_external_scenario(
         )
     except Exception as exc:
         reason = str(getattr(exc, "code", "mautic_upgrade_scenario_runner_failed"))
-        return {"status": "failed", "reason": reason, "scenario": {"id": scenario_id, "revision": scenario_revision, "artifact_digest": pin["artifact_digest"]}}
+        runner_failure: dict[str, Any] = {
+            "status": "failed",
+            "error_code": reason,
+        }
+        if isinstance(exc, (RunnerExecutionError, RunnerTimeoutError)):
+            evidence = getattr(exc, "evidence", None)
+            if isinstance(evidence, Mapping):
+                runner_failure["evidence"] = dict(evidence)
+            terminal_result = getattr(exc, "result", None)
+            if isinstance(terminal_result, Mapping):
+                runner_failure["result"] = dict(terminal_result)
+        return {
+            "status": "failed",
+            "reason": reason,
+            "scenario": {
+                "id": scenario_id,
+                "revision": scenario_revision,
+                "artifact_digest": pin["artifact_digest"],
+            },
+            "runner": runner_failure,
+        }
     patch_result: Mapping[str, Any] = {"status": "not_available"}
     if patch is not None:
         from mcd_agent.mautic_patch_plan_v3 import atomic_preflight, execute as execute_patch_plan

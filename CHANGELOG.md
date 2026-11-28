@@ -1,3 +1,10 @@
+## 1.7.45 - 2026-11-28
+
+- Preserve the external scenario runner's bounded, secret-filtered terminal
+  result and evidence in failed `mautic-upgrade` CLI receipts. A scenario
+  failure now exposes its exact nested stage, exit code and sanitized MCD
+  markers instead of collapsing every failure to `upgrade_failed`.
+
 ## 1.7.44 - 2026-11-28
 
 - Retry the idempotent post-upgrade AssetMapper generation and cache-clear

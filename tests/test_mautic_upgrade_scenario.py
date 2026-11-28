@@ -453,6 +453,115 @@ def test_execute_uses_state_synced_external_scenario_runner(monkeypatch, tmp_pat
     assert context_args["target_version"] == ""
 
 
+def test_external_scenario_failure_preserves_bounded_runner_receipt(monkeypatch, tmp_path: Path):
+    from mcd_agent import commercial_self_hosted
+    from mcd_agent import mautic_upgrade_scenario as scenario
+    from mcd_agent.inventory import InstanceInventory
+
+    artifact = tmp_path / "mautic-upgrade.sh"
+    artifact.write_bytes(b"#!/bin/sh\nexit 70\n")
+    digest = "sha256:" + hashlib.sha256(artifact.read_bytes()).hexdigest()
+    pin = {
+        "artifact_path": str(artifact),
+        "artifact_grant": "mcc-state-sync",
+        "artifact_digest": digest,
+        "artifact_size_bytes": artifact.stat().st_size,
+        "artifact_media_type": "application/x-sh",
+        "artifact_revision": "1.0.0",
+        "artifact_trust_mode": "mcc_catalog_sha256",
+        "artifact_transport": "mcc_authenticated_api",
+        "trusted_catalog": {
+            "source": "mcc",
+            "transport": "mcc_authenticated_api",
+            "status": "active",
+            "revision": "1.0.0",
+            "artifact_digest": digest,
+        },
+    }
+    root = tmp_path / "public_html"
+    console = root / "bin" / "console"
+    console.parent.mkdir(parents=True)
+    console.write_text("#!/usr/bin/env php\n", encoding="utf-8")
+    state_path = tmp_path / "state.sqlite3"
+    inventory = InstanceInventory(str(state_path))
+    try:
+        inventory.add_or_update_manual(
+            name="instance-1",
+            root=str(root),
+            console_path=str(console),
+            local_php_path=None,
+            mautic_major=7,
+            db_host=None,
+            db_port=None,
+            db_name=None,
+            db_user=None,
+            db_password=None,
+            db_table_prefix=None,
+            instance_uid="instance-1",
+            runtime_php_bin="/usr/bin/php8.4",
+            runtime_user="www-data",
+        )
+    finally:
+        inventory.conn.close()
+
+    class FailingRunner:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def run(self, **_kwargs):
+            raise commercial_self_hosted.RunnerExecutionError(
+                "upgrade_failed",
+                evidence={
+                    "schema": "mcd-self-hosted-runner-evidence-v1",
+                    "admission_stage": "result_decode",
+                    "exit_code": 70,
+                },
+                result={
+                    "status": "failed",
+                    "error_code": "upgrade_failed",
+                    "result": {
+                        "failed_stage": "assetmapper_verification",
+                        "nested_exit_code": 1,
+                        "assetmapper": {
+                            "status": "failed",
+                            "reason": "manifest_http_unavailable",
+                            "attempts": 3,
+                        },
+                    },
+                },
+            )
+
+    config = SimpleNamespace(state_db_path=str(state_path), command_timeout_sec=60)
+    monkeypatch.setattr(scenario, "local_scenario", lambda *_args: {"id": "mautic-upgrade", "version": "1.0.0", "pin": pin})
+    monkeypatch.setattr(scenario, "read_mautic_version_evidence_read_only", lambda _root: {"version": "7.2.0", "source": "static_metadata"})
+    monkeypatch.setattr(scenario, "_latest_upgrade_target", lambda *_args: (_ for _ in ()).throw(AssertionError("offline path must not resolve target")))
+    monkeypatch.setattr(scenario, "_resolve_patch_plan", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("mcd_agent.install_type.detect_install_type", lambda _root: "composer")
+    monkeypatch.setattr(
+        scenario,
+        "_external_scenario_context",
+        lambda **_kwargs: ({"job": {"job_id": "job-1"}, "scenario": {}}, {}),
+    )
+    monkeypatch.setattr(commercial_self_hosted, "ExternalProcessPolicy", FailingRunner)
+    monkeypatch.setattr(commercial_self_hosted, "default_scenario_runner_argv", lambda: ["runner"])
+
+    result = scenario.execute(
+        {"job_id": "job-1", "command_id": "apply", "input": {"instance_uid": "instance-1"}},
+        config=config,
+        scenario_downloader=None,
+        scenario_resolver=None,
+        inventory_rescan=lambda: {"status": "succeeded"},
+    )
+
+    assert result["status"] == "failed"
+    assert result["reason"] == "upgrade_failed"
+    assert result["scenario"]["artifact_digest"] == digest
+    assert result["runner"]["error_code"] == "upgrade_failed"
+    assert result["runner"]["evidence"]["exit_code"] == 70
+    assert result["runner"]["result"]["result"]["failed_stage"] == "assetmapper_verification"
+    assert result["runner"]["result"]["result"]["assetmapper"]["attempts"] == 3
+
+
 def test_external_scenario_context_covers_mautic_72_patch_matrix(monkeypatch):
     from mcd_agent import commercial_detector
     from mcd_agent import mautic_upgrade_scenario as scenario
