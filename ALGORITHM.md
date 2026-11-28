@@ -2558,6 +2558,11 @@ registration-password contract remains compatible. The extracted Zabbix
 monitor-user bootstrap must be an explicit operation; routine APT observation
 must not invoke it implicitly.
 
+Пустое JSON-поле runtime context (`{}`, `[]` или `null`) не содержит private
+value и не считается утечкой только из-за такого же служебного значения в
+typed receipt. Любой непустой JSON context и любая opaque-строка по-прежнему
+проходят строгую проверку на echo и при совпадении блокируют результат.
+
 В DEV 1.7 оставшиеся APT contract callsites подключены к одному generic
 dispatcher поверх тех же operation bindings, без нового runner или отдельного
 registry: `state_push` вызывает

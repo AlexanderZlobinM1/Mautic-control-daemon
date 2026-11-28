@@ -141,6 +141,50 @@ def test_private_execution_exception_is_not_public(tmp_path, monkeypatch):
     assert output == 'custom structured execution rejected'
 
 
+@pytest.mark.parametrize(('encoded', 'result_value'), [
+    ('{}', {}),
+    ('[]', []),
+    ('null', None),
+])
+def test_semantically_empty_json_runtime_field_is_not_a_private_echo(tmp_path, encoded, result_value):
+    frame = terminal(result={'status': 'not_applicable', 'runtime_facts': result_value})
+    script = tmp_path / 'empty-facts.py'
+    script.write_text('#!' + sys.executable + '''
+import sys,json,struct
+n=struct.unpack("!I",sys.stdin.buffer.read(4))[0]
+value=json.loads(sys.stdin.buffer.read(n))
+assert value["cfg_facts_json"]==''' + repr(encoded) + '''
+print(''' + repr(json.dumps(frame)) + ''')
+''')
+    script.chmod(0o700)
+    code, output = _run_capture_result(
+        script,
+        [],
+        runtime_input={'cfg_facts_json': encoded},
+    )
+    assert code == 0
+    assert json.loads(output) == frame['result']
+
+
+def test_opaque_empty_object_string_remains_private(tmp_path):
+    script = tmp_path / 'opaque-empty-object.py'
+    script.write_text('#!' + sys.executable + '''
+import sys,json,struct
+n=struct.unpack("!I",sys.stdin.buffer.read(4))[0]
+value=json.loads(sys.stdin.buffer.read(n))["registration_password"]
+sys.stderr.write(value)
+print(''' + repr(json.dumps(terminal())) + ''')
+''')
+    script.chmod(0o700)
+    code, output = _run_capture_result(
+        script,
+        [],
+        runtime_input={'registration_password': '{}'},
+    )
+    assert code != 0
+    assert output == 'custom private output rejected'
+
+
 def test_private_input_cannot_detach_or_use_direct_logging(monkeypatch):
     from mcd_agent.custom_scripts import run_custom_script_by_key
     code, output = run_custom_script_by_key(None, script_key='x', runtime_input={'registration_password':'synthetic'})

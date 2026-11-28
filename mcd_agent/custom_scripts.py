@@ -2186,7 +2186,22 @@ def _run_capture_result(script_path: Path, args: list[str], *, cwd: Path | None 
                 raise ValueError()
             if any(not isinstance(value, str) for value in runtime_input.values()):
                 raise ValueError()
-            private_values = [value for value in runtime_input.values() if value]
+            private_values = []
+            for field, value in runtime_input.items():
+                # JSON runtime fields are produced by MCD's declared mapping.
+                # A semantically empty document contains no private value, and
+                # treating the ubiquitous ``{}``/``[]`` bytes as a secret echo
+                # rejects otherwise valid structured result frames.  Keep the
+                # strict echo guard for every non-empty JSON document and for
+                # all opaque/private string fields.
+                if field.endswith("_json"):
+                    try:
+                        if json.loads(value) in ({}, [], None):
+                            continue
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        pass
+                if value:
+                    private_values.append(value)
             framed = struct.pack("!I", len(payload)) + payload
         except (ValueError, TypeError, UnicodeError):
             return 2, "custom runtime input invalid"

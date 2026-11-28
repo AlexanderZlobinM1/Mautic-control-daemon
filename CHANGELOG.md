@@ -1,3 +1,11 @@
+## 1.7.41 - 2026-11-28
+
+- Accept successful external-operation receipts when a declared JSON runtime
+  field is semantically empty. Empty `{}`, `[]` and `null` documents carry no
+  private value and no longer trigger the private-output echo guard merely
+  because the structured result contains an empty object. Non-empty JSON and
+  opaque private strings remain protected by the existing strict rejection.
+
 ## 1.7.40 - 2026-11-28
 
 - Restore a scheduler pause owned by the current Mautic upgrade attempt when
