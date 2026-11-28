@@ -122,6 +122,93 @@ class AssetMapperVerificationTests(unittest.TestCase):
             self.assertTrue(result["rollback"]["available"])
             self.assertTrue(all(asset["status"] == "ok" for asset in result["assets"]))
 
+    def test_uses_detected_local_http_origin_with_actual_port(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "index.php").write_text("<?php", encoding="utf-8")
+            build = root / "assets" / "build"
+            build.mkdir(parents=True)
+            (build / "manifest.json").write_text(
+                json.dumps({"css": "/assets/build/app.css"}),
+                encoding="utf-8",
+            )
+            (build / "app.css").write_text("body{}", encoding="utf-8")
+            curl_commands: list[list[str]] = []
+
+            def runner(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+                if command[0] != "curl":
+                    return subprocess.CompletedProcess(command, 0, "", "")
+                curl_commands.append(command)
+                if command[-1].startswith("http://127.0.0.1:61340"):
+                    return subprocess.CompletedProcess(command, 7, "", "connection refused")
+                content_type = "application/json" if command[-1].endswith("manifest.json") else "text/css"
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    f"HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\n\r\n",
+                    "",
+                )
+
+            result = verify_assetmapper_upgrade(
+                project_root=root,
+                install_root=root,
+                console_path=root / "bin" / "console",
+                php_bin="php",
+                runtime_user="www-data",
+                target_version="7.2.3",
+                probe_origins=["http://127.0.0.1:61340", "http://127.0.0.1:8080"],
+                runner=runner,
+            )
+
+            self.assertEqual(result["status"], "success")
+            self.assertEqual(result["selected_origin"], "http://127.0.0.1:8080")
+            self.assertEqual(len(result["manifest"]["attempts"]), 2)
+            self.assertTrue(curl_commands[-1][-1].startswith("http://127.0.0.1:8080/"))
+            self.assertTrue(all("--resolve" not in command for command in curl_commands))
+
+    def test_production_origin_keeps_local_sni_resolution(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "index.php").write_text("<?php", encoding="utf-8")
+            build = root / "assets" / "build"
+            build.mkdir(parents=True)
+            (build / "manifest.json").write_text(json.dumps({"css": "/assets/build/app.css"}), encoding="utf-8")
+            (build / "app.css").write_text("body{}", encoding="utf-8")
+            curl_commands: list[list[str]] = []
+
+            def runner(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+                if command[0] == "curl":
+                    curl_commands.append(command)
+                    content_type = "application/json" if command[-1].endswith("manifest.json") else "text/css"
+                    return subprocess.CompletedProcess(
+                        command,
+                        0,
+                        f"HTTP/2 200\r\ncontent-type: {content_type}\r\n\r\n",
+                        "",
+                    )
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            result = verify_assetmapper_upgrade(
+                project_root=root,
+                install_root=root,
+                console_path=root / "bin" / "console",
+                php_bin="php",
+                runtime_user="www-data",
+                target_version="7.2.3",
+                domain="mautic.example.test",
+                runner=runner,
+            )
+
+            self.assertEqual(result["status"], "success")
+            self.assertEqual(result["selected_origin"], "https://mautic.example.test")
+            self.assertTrue(curl_commands)
+            self.assertTrue(
+                all(
+                    command[command.index("--resolve") + 1] == "mautic.example.test:443:127.0.0.1"
+                    for command in curl_commands
+                )
+            )
+
     def test_rejects_html_response_for_css(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             project = Path(td) / "project"

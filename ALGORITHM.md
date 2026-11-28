@@ -152,6 +152,17 @@ CLI может передать локально staged-файл, а MCC пер�
 MCC не выполняет upgrade, не дублирует cache clear, не передаёт сценарий или
 патчи и не выбирает другой алгоритм.
 
+Финальная проверка использует фактический HTTP origin текущего runtime, а не
+придумывает `https://<host>:443`. Для обычного доменного хоста MCD по-прежнему
+строго проверяет локальный origin через 127.0.0.1 с настоящими Host/SNI и затем
+внешний HTTPS. Для image/local runtime MCD сохраняет scheme и port из
+`site_url`, а при встроенном `php -S` читает его реальный bind из PID 1 и
+проверяет локальный HTTP endpoint на этом порту. AssetMapper manifest и все
+ссылочные assets проверяются через один успешно выбранный origin; отсутствие
+публичного домена означает только, что внешний probe неприменим, но локальная
+проверка остаётся обязательной. Это один post-upgrade алгоритм для локального
+CLI и MCC-вызова, без sandbox-исключений.
+
 Terminal generic receipt обязан содержать те же scenario/instance bindings,
 CLI parameter projection, patch catalog/plan/payload SHA, фактическую версию,
 cache-clear result и inventory-rescan result. Mautic 6 этот capability не

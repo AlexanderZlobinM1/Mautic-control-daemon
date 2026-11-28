@@ -1,3 +1,11 @@
+## 1.7.43 - 2026-11-28
+
+- Verify the post-upgrade application and AssetMapper output against the
+  runtime's actual HTTP origin. Domain hosts retain strict local Host/SNI plus
+  external HTTPS checks, while image/local runtimes preserve configured ports
+  and discover a PID 1 `php -S` bind instead of fabricating HTTPS port 443.
+  Local and MCC-triggered upgrades continue through the same canonical CLI.
+
 ## 1.7.42 - 2026-11-28
 
 - Treat an external operation's typed `not_applicable` terminal result as a

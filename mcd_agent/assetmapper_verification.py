@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import json
-import os
+import ipaddress
 from pathlib import Path
 import re
 import subprocess
 from typing import Any, Callable
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 
 SCHEMA = "mcd-mautic-assetmapper-verification-v2"
@@ -105,20 +105,59 @@ def _status_code(headers: str) -> int | None:
     return int(matches[-1]) if matches else None
 
 
+def _normalize_origin(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        parsed = urlsplit(raw if "://" in raw else f"https://{raw}")
+        scheme = str(parsed.scheme or "").lower()
+        host = str(parsed.hostname or "").strip().lower()
+        port = parsed.port
+    except (TypeError, ValueError):
+        return ""
+    if scheme not in {"http", "https"} or not host or parsed.username or parsed.password:
+        return ""
+    bracketed_host = f"[{host}]" if ":" in host else host
+    netloc = f"{bracketed_host}:{port}" if port is not None else bracketed_host
+    return urlunsplit((scheme, netloc, "", "", ""))
+
+
+def _origin_url(origin: str, path: str) -> str:
+    normalized_path = "/" + str(path or "").lstrip("/")
+    return str(origin).rstrip("/") + normalized_path
+
+
+def _is_loopback_host(host: str) -> bool:
+    normalized = str(host or "").strip().lower().rstrip(".")
+    if normalized in {"localhost", "ip6-localhost"} or normalized.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
 def _curl_headers(
     url: str,
     *,
-    domain: str,
+    resolve_local: bool,
     timeout_sec: int,
     runner: Callable[..., subprocess.CompletedProcess[str]],
 ) -> tuple[int | None, str, int]:
     try:
+        parsed = urlsplit(url)
+        host = str(parsed.hostname or "").strip()
+        port = int(parsed.port or (443 if parsed.scheme == "https" else 80))
+    except (TypeError, ValueError):
+        return None, "", 1
+    command = ["curl", "-ksS", "--max-time", str(max(5, int(timeout_sec)))]
+    if resolve_local and host and not _is_loopback_host(host):
+        command.extend(["--resolve", f"{host}:{port}:127.0.0.1"])
+    command.extend(["-o", "/dev/null", "-D", "-", url])
+    try:
         proc = runner(
-            [
-                "curl", "-ksS", "--max-time", str(max(5, int(timeout_sec))),
-                "--resolve", f"{domain.strip()}:443:127.0.0.1",
-                "-o", "/dev/null", "-D", "-", url,
-            ],
+            command,
             text=True,
             capture_output=True,
             timeout=timeout_sec,
@@ -152,8 +191,9 @@ def verify_assetmapper_upgrade(
     console_path: str | Path,
     php_bin: str,
     runtime_user: str,
-    domain: str,
     target_version: str,
+    domain: str = "",
+    probe_origins: list[str] | tuple[str, ...] | None = None,
     rollback_available: bool = True,
     timeout_sec: int = 120,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
@@ -181,8 +221,14 @@ def verify_assetmapper_upgrade(
     if webroot_source not in {"composer", "archive"}:
         result["reason"] = "webroot source is not explicit"
         return result
-    if not str(domain or "").strip():
-        result["reason"] = "instance domain is unavailable for SNI/Host verification"
+    origins: list[str] = []
+    for value in list(probe_origins or []) + ([f"https://{domain.strip()}"] if str(domain or "").strip() else []):
+        origin = _normalize_origin(str(value or ""))
+        if origin and origin not in origins:
+            origins.append(origin)
+    result["probe_origins"] = origins
+    if not origins:
+        result["reason"] = "instance HTTP origin is unavailable for AssetMapper verification"
         return result
     console = str(Path(console_path).resolve())
     operations = [
@@ -207,16 +253,39 @@ def verify_assetmapper_upgrade(
     if not manifest.is_file():
         result["reason"] = "AssetMapper manifest is missing from the served webroot"
         return result
-    manifest_status, manifest_content_type, manifest_rc = _curl_headers(
-        f"https://{domain.strip()}{result['manifest_url']}",
-        domain=domain,
-        timeout_sec=timeout_sec,
-        runner=runner,
+    selected_origin = ""
+    manifest_status: int | None = None
+    manifest_content_type = ""
+    manifest_attempts: list[dict[str, Any]] = []
+    for origin in origins:
+        manifest_status, manifest_content_type, manifest_rc = _curl_headers(
+            _origin_url(origin, str(result["manifest_url"])),
+            resolve_local=True,
+            timeout_sec=timeout_sec,
+            runner=runner,
+        )
+        manifest_attempts.append(
+            {
+                "origin": origin,
+                "http_status": manifest_status,
+                "content_type": manifest_content_type,
+                "returncode": manifest_rc,
+            }
+        )
+        if manifest_rc == 0 and manifest_status == 200 and manifest_content_type == "application/json":
+            selected_origin = origin
+            break
+    result["manifest"].update(
+        {
+            "http_status": manifest_status,
+            "content_type": manifest_content_type,
+            "attempts": manifest_attempts,
+        }
     )
-    result["manifest"].update({"http_status": manifest_status, "content_type": manifest_content_type})
-    if manifest_rc != 0 or manifest_status != 200 or manifest_content_type != "application/json":
+    if not selected_origin:
         result["reason"] = "AssetMapper manifest did not return HTTP 200 application/json"
         return result
+    result["selected_origin"] = selected_origin
     try:
         data = json.loads(manifest.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -253,9 +322,14 @@ def verify_assetmapper_upgrade(
             result["assets"].append(asset)
             result["reason"] = "manifest-referenced asset is missing from served webroot"
             return result
-        url = f"https://{domain.strip()}{url_path}"
+        url = _origin_url(selected_origin, url_path)
         try:
-            status, content_type, returncode = _curl_headers(url, domain=domain, timeout_sec=timeout_sec, runner=runner)
+            status, content_type, returncode = _curl_headers(
+                url,
+                resolve_local=True,
+                timeout_sec=timeout_sec,
+                runner=runner,
+            )
         except (OSError, subprocess.TimeoutExpired) as exc:
             asset["status"] = "failed"
             asset["reason"] = f"HTTP probe failed: {type(exc).__name__}"

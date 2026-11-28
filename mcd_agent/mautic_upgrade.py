@@ -6,6 +6,7 @@ from uuid import uuid4
 
 import json
 import hashlib
+import ipaddress
 import logging
 import os
 from datetime import datetime, timezone
@@ -1895,7 +1896,12 @@ def _curl_probe(url: str, *, resolve_local_host: str | None = None, follow_redir
     if follow_redirects:
         cmd.append("-L")
     if resolve_local_host:
-        cmd.extend(["--resolve", f"{resolve_local_host}:443:127.0.0.1"])
+        try:
+            parsed = urlsplit(url)
+            port = int(parsed.port or (443 if parsed.scheme == "https" else 80))
+        except (TypeError, ValueError):
+            port = 443
+        cmd.extend(["--resolve", f"{resolve_local_host}:{port}:127.0.0.1"])
     cmd.extend(["-o", "/dev/null", "-D", "-", url])
     proc = subprocess.run(cmd, capture_output=True, text=True)
     body = (proc.stdout or proc.stderr or "").strip()
@@ -1903,7 +1909,7 @@ def _curl_probe(url: str, *, resolve_local_host: str | None = None, follow_redir
         detail = body or f"curl rc={proc.returncode}"
         return UpgradeProbeResult(False, f"curl failed for {url}", detail)
     lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
-    status_line = next((ln for ln in lines if ln.startswith("HTTP/")), "")
+    status_line = next((ln for ln in reversed(lines) if ln.startswith("HTTP/")), "")
     if not status_line:
         return UpgradeProbeResult(False, f"probe returned no HTTP status for {url}", body[:600])
     m = re.search(r"^HTTP/\S+\s+(\d{3})\b", status_line)
@@ -1951,6 +1957,73 @@ def _best_probe_domain(inst: MauticInstall) -> str:
     return candidates[0] if candidates else ""
 
 
+def _normalize_probe_origin(value: str | None, *, default_scheme: str = "https") -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        parsed = urlsplit(raw if "://" in raw else f"{default_scheme}://{raw}")
+        scheme = str(parsed.scheme or "").lower()
+        host = str(parsed.hostname or "").strip().lower()
+        port = parsed.port
+    except (TypeError, ValueError):
+        return ""
+    if scheme not in {"http", "https"} or not host or parsed.username or parsed.password:
+        return ""
+    bracketed_host = f"[{host}]" if ":" in host else host
+    netloc = f"{bracketed_host}:{port}" if port is not None else bracketed_host
+    return urlunsplit((scheme, netloc, "", "", ""))
+
+
+def _probe_origin_url(origin: str, path: str = "/") -> str:
+    return str(origin).rstrip("/") + "/" + str(path or "").lstrip("/")
+
+
+def _probe_origin_host(origin: str) -> str:
+    try:
+        return str(urlsplit(origin).hostname or "").strip().lower()
+    except (TypeError, ValueError):
+        return ""
+
+
+def _is_local_probe_host(host: str) -> bool:
+    normalized = str(host or "").strip().lower().rstrip(".")
+    if not normalized or normalized in {"localhost", "ip6-localhost", "_"} or normalized.endswith(".localhost"):
+        return True
+    try:
+        address = ipaddress.ip_address(normalized)
+    except ValueError:
+        return "." not in normalized
+    return bool(address.is_loopback or address.is_private or address.is_link_local or address.is_unspecified)
+
+
+def _php_builtin_server_origin(cmdline_path: str | Path = "/proc/1/cmdline") -> str:
+    try:
+        raw = Path(cmdline_path).read_bytes()
+    except OSError:
+        return ""
+    tokens = [token.decode("utf-8", errors="replace").strip() for token in raw.split(b"\0") if token]
+    for index, token in enumerate(tokens[:-1]):
+        if token != "-S":
+            continue
+        binding = tokens[index + 1].strip()
+        try:
+            parsed = urlsplit(f"//{binding}")
+            host = str(parsed.hostname or "").strip().lower()
+            port = parsed.port
+        except (TypeError, ValueError):
+            continue
+        if not host or port is None or not (1 <= int(port) <= 65535):
+            continue
+        if host in {"0.0.0.0", "::", "*", "localhost"}:
+            host = "127.0.0.1"
+        elif not _is_local_probe_host(host):
+            continue
+        bracketed_host = f"[{host}]" if ":" in host else host
+        return f"http://{bracketed_host}:{int(port)}"
+    return ""
+
+
 def _domain_from_site_url(site_url: str | None) -> str:
     value = str(site_url or "").strip()
     if not value:
@@ -1965,7 +2038,16 @@ def _domain_from_site_url(site_url: str | None) -> str:
     return host
 
 
+def _origin_from_site_url(site_url: str | None) -> str:
+    return _normalize_probe_origin(site_url, default_scheme="https")
+
+
 def _site_url_domain_from_install(inst: MauticInstall) -> str:
+    origin = _site_url_origin_from_install(inst)
+    return _probe_origin_host(origin) if origin and not _is_local_probe_host(_probe_origin_host(origin)) else ""
+
+
+def _site_url_origin_from_install(inst: MauticInstall) -> str:
     candidates: list[Path] = []
     if str(inst.local_php_path or "").strip():
         candidates.append(Path(str(inst.local_php_path)))
@@ -1980,11 +2062,47 @@ def _site_url_domain_from_install(inst: MauticInstall) -> str:
             continue
         seen.add(key)
         try:
-            domain = _domain_from_site_url(parse_local_php(str(path)).get("site_url", ""))
+            origin = _origin_from_site_url(parse_local_php(str(path)).get("site_url", ""))
         except Exception:
-            domain = ""
-        if domain:
-            return domain
+            origin = ""
+        if origin:
+            return origin
+    return ""
+
+
+def _best_probe_origins(
+    inst: MauticInstall,
+    *,
+    pid1_cmdline_path: str | Path = "/proc/1/cmdline",
+) -> list[str]:
+    domain_origins: list[str] = []
+    for value in [inst.primary_domain, *list(inst.domains or [])]:
+        origin = _normalize_probe_origin(str(value or ""), default_scheme="https")
+        if origin and origin not in domain_origins:
+            domain_origins.append(origin)
+    site_origin = _site_url_origin_from_install(inst)
+    runtime_origin = _php_builtin_server_origin(pid1_cmdline_path)
+    candidates: list[str] = []
+    site_host = _probe_origin_host(site_origin)
+    if runtime_origin and site_origin and _is_local_probe_host(site_host):
+        candidates.extend([runtime_origin, site_origin])
+        candidates.extend(domain_origins)
+    else:
+        candidates.extend(domain_origins)
+        if site_origin:
+            candidates.append(site_origin)
+        if runtime_origin:
+            candidates.append(runtime_origin)
+    if not candidates:
+        candidates.extend(domain_origins)
+    return list(dict.fromkeys(origin for origin in candidates if origin))
+
+
+def _public_probe_origin(origins: list[str]) -> str:
+    for origin in origins:
+        host = _probe_origin_host(origin)
+        if host and not _is_local_probe_host(host):
+            return origin
     return ""
 
 
@@ -1996,17 +2114,36 @@ def _post_upgrade_verify(
 ) -> None:
     _permissions_check(config, inst.root, stage_label="post-upgrade")
     _verify_nginx_and_php_services(config, target_php_version=target_php_version)
-    domain = _best_probe_domain(inst)
-    if not domain:
-        print("Post-check: no instance domain detected, skipping local/external HTTP probes")
+    origins = _best_probe_origins(inst)
+    if not origins:
+        print("Post-check: no instance HTTP origin detected, skipping local/external HTTP probes")
         return
 
-    local = _curl_probe(f"https://{domain}/", resolve_local_host=domain, follow_redirects=True, timeout_sec=20)
-    if not local.ok:
-        raise RuntimeError(f"Post-check failed: local origin probe: {local.summary}; {local.detail}".strip())
+    local: UpgradeProbeResult | None = None
+    local_origin = ""
+    local_failures: list[str] = []
+    for origin in origins:
+        host = _probe_origin_host(origin)
+        probe = _curl_probe(
+            _probe_origin_url(origin),
+            resolve_local_host=None if _is_local_probe_host(host) else host,
+            follow_redirects=True,
+            timeout_sec=20,
+        )
+        if probe.ok:
+            local = probe
+            local_origin = origin
+            break
+        local_failures.append(f"{origin}: {probe.summary}")
+    if local is None:
+        raise RuntimeError("Post-check failed: local origin probe: " + "; ".join(local_failures))
     print("Post-check: local origin OK: " + local.summary)
 
-    external = _curl_probe(f"https://{domain}/", follow_redirects=True, timeout_sec=25)
+    external_origin = _public_probe_origin(origins)
+    if not external_origin:
+        print(f"Post-check: external probe not applicable for local runtime origin {local_origin}")
+        return
+    external = _curl_probe(_probe_origin_url(external_origin), follow_redirects=True, timeout_sec=25)
     if not external.ok:
         raise RuntimeError(f"Post-check failed: external probe: {external.summary}; {external.detail}".strip())
     print("Post-check: external HTTPS OK: " + external.summary)
@@ -2029,6 +2166,7 @@ def _verify_assetmapper_upgrade(
         php_bin=config.php_bin,
         runtime_user=config.mautic_run_as_user or "www-data",
         domain=_best_probe_domain(inst),
+        probe_origins=_best_probe_origins(inst),
         target_version=target,
         rollback_available=rollback_available,
     )

@@ -12,6 +12,7 @@ from unittest.mock import patch
 from mcd_agent.mautic_upgrade import (
     _apply_mautic7_twig_include_hotfix,
     _best_probe_domain,
+    _best_probe_origins,
     _clean_target_version,
     _clear_prod_cache_with_fallback,
     _composer_update_args,
@@ -20,11 +21,14 @@ from mcd_agent.mautic_upgrade import (
     _hard_clear_prod_cache,
     _normalize_mautic7_composer_constraints,
     _normalize_mautic7_loopback_redis_cache,
+    _php_builtin_server_origin,
+    _post_upgrade_verify,
     _latest_same_branch,
     _release_family_label,
     _resolve_composer_project_root,
     _safe_mautic7_loopback_redis_dsn,
     _upgrade_target_relation,
+    UpgradeProbeResult,
 )
 
 
@@ -476,6 +480,78 @@ final class OverrideIncludeExtension
             inst = SimpleNamespace(primary_domain="", domains=[], local_php_path="", root=str(root))
 
             self.assertEqual(_best_probe_domain(inst), "sita.sales-snap.com")
+
+    def test_php_builtin_server_origin_uses_real_local_port(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            cmdline = Path(td) / "cmdline"
+            cmdline.write_bytes(b"\0".join([b"php", b"-S", b"0.0.0.0:8080", b"-t", b"docroot"]) + b"\0")
+
+            self.assertEqual(_php_builtin_server_origin(cmdline), "http://127.0.0.1:8080")
+
+    def test_probe_origins_prefer_runtime_port_but_keep_public_domain(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            cfg = root / "config" / "local.php"
+            cfg.parent.mkdir(parents=True)
+            cfg.write_text("<?php return ['site_url' => 'http://127.0.0.1:61340'];\n", encoding="utf-8")
+            cmdline = root / "pid1.cmdline"
+            cmdline.write_bytes(b"\0".join([b"php", b"-S", b"0.0.0.0:8080", b"-t", b"docroot"]) + b"\0")
+            inst = SimpleNamespace(
+                primary_domain="mautic.example.test",
+                domains=[],
+                local_php_path="",
+                root=str(root),
+            )
+
+            self.assertEqual(
+                _best_probe_origins(inst, pid1_cmdline_path=cmdline),
+                [
+                    "http://127.0.0.1:8080",
+                    "http://127.0.0.1:61340",
+                    "https://mautic.example.test",
+                ],
+            )
+
+    def test_post_upgrade_verify_accepts_local_runtime_without_external_https(self) -> None:
+        config = SimpleNamespace()
+        inst = SimpleNamespace(root="/var/www/html")
+        local_result = UpgradeProbeResult(True, "http://127.0.0.1:8080/ -> HTTP 200", "HTTP/1.1 200")
+        with (
+            patch("mcd_agent.mautic_upgrade._permissions_check"),
+            patch("mcd_agent.mautic_upgrade._verify_nginx_and_php_services"),
+            patch(
+                "mcd_agent.mautic_upgrade._best_probe_origins",
+                return_value=["http://127.0.0.1:8080"],
+            ),
+            patch("mcd_agent.mautic_upgrade._curl_probe", return_value=local_result) as curl_probe,
+        ):
+            _post_upgrade_verify(config, inst, target_php_version="8.3")
+
+        curl_probe.assert_called_once_with(
+            "http://127.0.0.1:8080/",
+            resolve_local_host=None,
+            follow_redirects=True,
+            timeout_sec=20,
+        )
+
+    def test_post_upgrade_verify_keeps_local_and_external_production_probes(self) -> None:
+        config = SimpleNamespace()
+        inst = SimpleNamespace(root="/var/www/html")
+        success = UpgradeProbeResult(True, "https://mautic.example.test/ -> HTTP 200", "HTTP/2 200")
+        with (
+            patch("mcd_agent.mautic_upgrade._permissions_check"),
+            patch("mcd_agent.mautic_upgrade._verify_nginx_and_php_services"),
+            patch(
+                "mcd_agent.mautic_upgrade._best_probe_origins",
+                return_value=["https://mautic.example.test"],
+            ),
+            patch("mcd_agent.mautic_upgrade._curl_probe", return_value=success) as curl_probe,
+        ):
+            _post_upgrade_verify(config, inst, target_php_version="8.3")
+
+        self.assertEqual(curl_probe.call_count, 2)
+        self.assertEqual(curl_probe.call_args_list[0].kwargs["resolve_local_host"], "mautic.example.test")
+        self.assertNotIn("resolve_local_host", curl_probe.call_args_list[1].kwargs)
 
 
 if __name__ == "__main__":
