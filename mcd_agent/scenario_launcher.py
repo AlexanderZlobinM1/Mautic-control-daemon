@@ -364,8 +364,13 @@ def _write_memfd(name: str, payload: bytes, *, mode: int) -> int:
 
 
 def _sterile_environment() -> dict[str, str]:
+    # Executable scenarios are allowed to compose the already-installed MCD
+    # CLI, but must not inherit the caller's ambient PATH.  The launcher is a
+    # console script from the managed MCD virtualenv, so sys.executable's
+    # directory is the canonical, verified location of the matching CLI.
+    managed_bin = os.path.dirname(os.path.abspath(sys.executable))
     return {
-        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "PATH": managed_bin + ":/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         "LC_ALL": "C",
         "LANG": "C",
     }

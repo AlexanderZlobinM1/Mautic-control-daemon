@@ -1,3 +1,10 @@
+## 1.7.38 - 2026-11-28
+
+- Expose the matching managed-venv `mcd-cli` to executable scenarios through
+  the launcher's fixed sterile `PATH`. Scenario artifacts can now compose the
+  canonical direct MCD operation without inheriting an ambient operator path
+  or depending on an optional system-wide CLI symlink.
+
 ## 1.7.37 - 2026-11-28
 
 - Normalize the SHA-256 read from the verified local scenario manifest before

@@ -16,6 +16,7 @@ from mcd_agent.scenario_launcher import (
     FRAME_MAGIC,
     LEGACY_SCENARIO_CONTEXT_SCHEMA,
     SCENARIO_CONTEXT_SCHEMA,
+    _sterile_environment,
     build_scenario_context,
     encode_request_frame,
 )
@@ -216,6 +217,26 @@ def test_launcher_executes_signed_artifact_without_shell_and_exposes_context_on_
     )
     assert result.returncode == 0, result.stderr.decode()
     assert json.loads(result.stdout) == {"status": "succeeded", "job_id": "job-1"}
+
+
+def test_launcher_sterile_path_exposes_only_managed_mcd_cli_and_fixed_system_paths() -> None:
+    environment = _sterile_environment()
+    parts = environment["PATH"].split(":")
+
+    assert parts[0] == os.path.dirname(os.path.abspath(sys.executable))
+    assert parts[1:] == [
+        "/usr/local/sbin",
+        "/usr/local/bin",
+        "/usr/sbin",
+        "/usr/bin",
+        "/sbin",
+        "/bin",
+    ]
+    assert environment == {
+        "PATH": environment["PATH"],
+        "LC_ALL": "C",
+        "LANG": "C",
+    }
 
 
 def test_launcher_rejects_non_executable_json_artifact() -> None:
