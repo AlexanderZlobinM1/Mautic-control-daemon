@@ -9,6 +9,7 @@ import hashlib
 import ipaddress
 import logging
 import os
+import pwd
 from datetime import datetime, timezone
 from pathlib import Path
 import re
@@ -751,22 +752,66 @@ def _load_prepared_target_input(
         raise RuntimeError(f"Prepared Mautic target rejected: {exc}") from exc
 
 
-def _command_with_user(cmd: list[str], *, as_www_data: bool = False) -> list[str]:
-    full = cmd
-    if as_www_data:
-        full = ["sudo", "-u", "www-data"] + cmd
-    return full
+def _command_runtime_user(*, as_www_data: bool = False, run_as_user: str | None = None) -> str:
+    user = str(run_as_user or ("www-data" if as_www_data else "")).strip()
+    if user:
+        if re.fullmatch(r"[A-Za-z0-9_.-]+", user) is None:
+            raise RuntimeError("Invalid command runtime user")
+        return user
+    return pwd.getpwuid(os.geteuid()).pw_name
 
 
-def _run_capture(cmd: list[str], *, cwd: str, as_www_data: bool = False) -> subprocess.CompletedProcess[str]:
-    full = _command_with_user(cmd, as_www_data=as_www_data)
+def _command_environment(*, as_www_data: bool = False, run_as_user: str | None = None) -> dict[str, str]:
+    """Return a complete deterministic environment for a direct MCD command."""
+    user = _command_runtime_user(as_www_data=as_www_data, run_as_user=run_as_user)
+    try:
+        account = pwd.getpwnam(user)
+    except KeyError as exc:
+        raise RuntimeError(f"Command runtime user does not exist: {user}") from exc
+    home = Path(str(account.pw_dir or ""))
+    if not home.is_absolute() or not home.is_dir():
+        raise RuntimeError(f"Command runtime home is unavailable: {user}")
+    env = dict(os.environ)
+    env["HOME"] = str(home)
+    env["COMPOSER_HOME"] = str(home / ".composer")
+    return env
+
+
+def _command_with_user(
+    cmd: list[str],
+    *,
+    as_www_data: bool = False,
+    run_as_user: str | None = None,
+) -> list[str]:
+    user = _command_runtime_user(as_www_data=as_www_data, run_as_user=run_as_user)
+    current_user = pwd.getpwuid(os.geteuid()).pw_name
+    if user != current_user:
+        return ["sudo", "-H", "-u", user] + cmd
+    return cmd
+
+
+def _run_capture(
+    cmd: list[str],
+    *,
+    cwd: str,
+    as_www_data: bool = False,
+    run_as_user: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    full = _command_with_user(cmd, as_www_data=as_www_data, run_as_user=run_as_user)
+    env = _command_environment(as_www_data=as_www_data, run_as_user=run_as_user)
     logging.info("run: %s", " ".join(full))
-    return subprocess.run(full, cwd=cwd, text=True, capture_output=True)
+    return subprocess.run(full, cwd=cwd, text=True, capture_output=True, env=env)
 
 
-def _run(cmd: list[str], *, cwd: str, as_www_data: bool = False) -> None:
-    full = _command_with_user(cmd, as_www_data=as_www_data)
-    proc = _run_capture(cmd, cwd=cwd, as_www_data=as_www_data)
+def _run(
+    cmd: list[str],
+    *,
+    cwd: str,
+    as_www_data: bool = False,
+    run_as_user: str | None = None,
+) -> None:
+    full = _command_with_user(cmd, as_www_data=as_www_data, run_as_user=run_as_user)
+    proc = _run_capture(cmd, cwd=cwd, as_www_data=as_www_data, run_as_user=run_as_user)
     if proc.returncode != 0:
         raise RuntimeError(f"Command failed ({proc.returncode}): {' '.join(full)}\n{proc.stdout}\n{proc.stderr}")
 
@@ -813,8 +858,18 @@ def _hard_clear_prod_cache(root: str) -> None:
     print("Composer preflight: cleared var/cache/prod")
 
 
-def _clear_prod_cache_with_fallback(project_root: str, console_path: str, php_bin: str) -> None:
-    proc = _run_capture([php_bin, console_path, "cache:clear"], cwd=project_root, as_www_data=True)
+def _clear_prod_cache_with_fallback(
+    project_root: str,
+    console_path: str,
+    php_bin: str,
+    *,
+    run_as_user: str = "www-data",
+) -> None:
+    proc = _run_capture(
+        [php_bin, console_path, "cache:clear"],
+        cwd=project_root,
+        run_as_user=run_as_user,
+    )
     if proc.returncode == 0:
         print("Composer post-update cache clear ok")
         return
@@ -824,7 +879,11 @@ def _clear_prod_cache_with_fallback(project_root: str, console_path: str, php_bi
     if proc.stderr.strip():
         print(proc.stderr.strip())
     _hard_clear_prod_cache(project_root)
-    _run([php_bin, console_path, "cache:clear"], cwd=project_root, as_www_data=True)
+    _run(
+        [php_bin, console_path, "cache:clear"],
+        cwd=project_root,
+        run_as_user=run_as_user,
+    )
 
 
 def _safe_mautic7_loopback_redis_dsn(dsn: str) -> str:
@@ -915,10 +974,16 @@ def _composer_update_args(*, dry_run: bool = False) -> list[str]:
     return args
 
 
-def _command_version_line(cmd: list[str], *, cwd: str, as_www_data: bool = False) -> str:
-    proc = _run_capture(cmd, cwd=cwd, as_www_data=as_www_data)
+def _command_version_line(
+    cmd: list[str],
+    *,
+    cwd: str,
+    as_www_data: bool = False,
+    run_as_user: str | None = None,
+) -> str:
+    proc = _run_capture(cmd, cwd=cwd, as_www_data=as_www_data, run_as_user=run_as_user)
     if proc.returncode != 0:
-        full = _command_with_user(cmd, as_www_data=as_www_data)
+        full = _command_with_user(cmd, as_www_data=as_www_data, run_as_user=run_as_user)
         raise RuntimeError(
             f"Version preflight failed ({proc.returncode}): {' '.join(full)}\n{proc.stdout}\n{proc.stderr}"
         )
@@ -1650,6 +1715,7 @@ def _apply_composer(
     after_source_install=None,
     *,
     composer_bin: str,
+    run_as_user: str = "www-data",
 ) -> None:
     project_root = _resolve_composer_project_root(root)
     cjson = Path(project_root) / "composer.json"
@@ -1658,7 +1724,7 @@ def _apply_composer(
     composer_version = _command_version_line(
         [composer_bin, "-V", "--no-interaction", "--no-ansi"],
         cwd=project_root,
-        as_www_data=True,
+        run_as_user=run_as_user,
     )
     readiness = composer_readiness_from_observation(composer_bin, composer_version)
     if readiness.get("status") not in {"reused", "success"}:
@@ -1671,8 +1737,11 @@ def _apply_composer(
     stage = getattr(after_source_install, "target_stage", None)
     from mcd_agent.composer_permissions import prepare_composer_paths
     staged_root = getattr(stage, "root", None)
-    permissions = prepare_composer_paths(project_root,
-        target_project_root=str(staged_root) if isinstance(staged_root, (str, Path)) else None)
+    permissions = prepare_composer_paths(
+        project_root,
+        target_project_root=str(staged_root) if isinstance(staged_root, (str, Path)) else None,
+        runtime_user=run_as_user,
+    )
     print("Composer permissions prepared: " + json.dumps(permissions, sort_keys=True))
     text = cjson.read_text(encoding="utf-8")
     updated, changes = _replace_version_tokens(text, current, target)
@@ -1685,7 +1754,11 @@ def _apply_composer(
             raise RuntimeError("Staged Composer target lacks exact dependency lock")
         for name, content in stage.composer_files.items():
             (Path(project_root) / name).write_bytes(content)
-    _run([composer_bin, *_composer_update_args(dry_run=True), "--no-scripts"], cwd=project_root, as_www_data=True)
+    _run(
+        [composer_bin, *_composer_update_args(dry_run=True), "--no-scripts"],
+        cwd=project_root,
+        run_as_user=run_as_user,
+    )
     print("Composer dependency dry-run ok")
     # Post-update scripts boot Mautic. They must never load the previous core's
     # compiled container after Composer has replaced its classes and services.
@@ -1693,7 +1766,7 @@ def _apply_composer(
     _run(
         ["env", "COMPOSER_SKIP_SCRIPTS=" + ",".join(deferred_events), composer_bin, *(["install", "--no-interaction", "--no-scripts"] if stage is not None else _composer_update_args())],
         cwd=project_root,
-        as_www_data=True,
+        run_as_user=run_as_user,
     )
     patched = False
     _normalize_mautic7_loopback_redis_cache(project_root, target)
@@ -1705,12 +1778,25 @@ def _apply_composer(
     scripts = json.loads(cjson.read_text(encoding="utf-8")).get("scripts", {})
     for event in deferred_events:
         if event in scripts:
-            _run([composer_bin, "run-script", "--no-interaction", event], cwd=project_root, as_www_data=True)
-    _clear_prod_cache_with_fallback(project_root, console_path, php_bin)
+            _run(
+                [composer_bin, "run-script", "--no-interaction", event],
+                cwd=project_root,
+                run_as_user=run_as_user,
+            )
+    _clear_prod_cache_with_fallback(
+        project_root,
+        console_path,
+        php_bin,
+        run_as_user=run_as_user,
+    )
     if patched:
         print("Mautic 7 Twig include hotfix cache refresh completed")
     _patch_lifecycle_phase(after_source_install, project_root, "before_doctrine_migrations")
-    _run([php_bin, console_path, "mautic:update:apply", "--finish"], cwd=project_root, as_www_data=True)
+    _run(
+        [php_bin, console_path, "mautic:update:apply", "--finish"],
+        cwd=project_root,
+        run_as_user=run_as_user,
+    )
     migration_cmd = _doctrine_migrate_command(project_root, console_path, php_bin)
     _run_doctrine_migrate_with_reconcile(project_root, console_path, php_bin, migration_cmd)
     _verify_or_reconcile_doctrine_migrations(project_root, console_path, php_bin)
@@ -2803,6 +2889,7 @@ def run_upgrade_apply(
                 target,
                 patch_hook,
                 composer_bin=composer_bin,
+                run_as_user=config.mautic_run_as_user or "www-data",
             )
         else:
             raise RuntimeError(f"Unsupported mode: {mode}")

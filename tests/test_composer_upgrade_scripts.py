@@ -41,7 +41,7 @@ class ComposerUpgradeScriptTests(unittest.TestCase):
             stack.enter_context(patch("mcd_agent.mautic_upgrade._doctrine_migrate_command", return_value="doctrine:migrations:migrate"))
 
             def run(cmd, **kwargs):
-                self.assertEqual(kwargs, {"cwd": td, "as_www_data": True})
+                self.assertEqual(kwargs, {"cwd": td, "run_as_user": "www-data"})
                 if "--dry-run" in cmd:
                     self.assertIn("--no-scripts", cmd)
                     record("dry-run")()

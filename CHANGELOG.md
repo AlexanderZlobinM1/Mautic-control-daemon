@@ -1,3 +1,11 @@
+## 1.7.51 - 2026-11-28
+
+- Give every direct upgrade command a deterministic `HOME` and
+  `COMPOSER_HOME` for its effective runtime user, independent of the calling
+  scenario's sanitized environment.
+- Run Composer lifecycle commands as the selected registered runtime user and
+  preserve the existing supervised upgrade, patch-phase and receipt path.
+
 ## 1.7.50 - 2026-11-28
 
 - Deliver the MCC-selected immutable patch plan, SHA, run ID and canonical

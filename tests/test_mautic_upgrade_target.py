@@ -23,6 +23,7 @@ from mcd_agent.mautic_upgrade import (
     _normalize_mautic7_loopback_redis_cache,
     _php_builtin_server_origin,
     _post_upgrade_verify,
+    _run_capture,
     _latest_same_branch,
     _release_family_label,
     _resolve_composer_project_root,
@@ -33,6 +34,54 @@ from mcd_agent.mautic_upgrade import (
 
 
 class MauticUpgradeTargetTests(unittest.TestCase):
+    def test_direct_command_restores_home_when_parent_environment_is_sterile(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root_home = Path(td) / "root"
+            root_home.mkdir()
+            account = SimpleNamespace(pw_name="root", pw_dir=str(root_home))
+            with (
+                patch.dict("mcd_agent.mautic_upgrade.os.environ", {}, clear=True),
+                patch("mcd_agent.mautic_upgrade.os.geteuid", return_value=0),
+                patch("mcd_agent.mautic_upgrade.pwd.getpwuid", return_value=account),
+                patch("mcd_agent.mautic_upgrade.pwd.getpwnam", return_value=account),
+                patch("mcd_agent.mautic_upgrade.subprocess.run") as run,
+            ):
+                _run_capture(["composer", "update"], cwd=td)
+
+            self.assertEqual(run.call_args.args[0], ["composer", "update"])
+            self.assertEqual(run.call_args.kwargs["env"]["HOME"], str(root_home))
+            self.assertEqual(
+                run.call_args.kwargs["env"]["COMPOSER_HOME"],
+                str(root_home / ".composer"),
+            )
+
+    def test_direct_command_uses_selected_runtime_user_home(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root_home = Path(td) / "root"
+            runtime_home = Path(td) / "runtime"
+            root_home.mkdir()
+            runtime_home.mkdir()
+            root_account = SimpleNamespace(pw_name="root", pw_dir=str(root_home))
+            runtime_account = SimpleNamespace(pw_name="mautic", pw_dir=str(runtime_home))
+            with (
+                patch.dict("mcd_agent.mautic_upgrade.os.environ", {}, clear=True),
+                patch("mcd_agent.mautic_upgrade.os.geteuid", return_value=0),
+                patch("mcd_agent.mautic_upgrade.pwd.getpwuid", return_value=root_account),
+                patch("mcd_agent.mautic_upgrade.pwd.getpwnam", return_value=runtime_account),
+                patch("mcd_agent.mautic_upgrade.subprocess.run") as run,
+            ):
+                _run_capture(["composer", "update"], cwd=td, run_as_user="mautic")
+
+            self.assertEqual(
+                run.call_args.args[0],
+                ["sudo", "-H", "-u", "mautic", "composer", "update"],
+            )
+            self.assertEqual(run.call_args.kwargs["env"]["HOME"], str(runtime_home))
+            self.assertEqual(
+                run.call_args.kwargs["env"]["COMPOSER_HOME"],
+                str(runtime_home / ".composer"),
+            )
+
     def test_composer_project_root_uses_parent_lock_without_parent_console(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             project = Path(td)
@@ -351,7 +400,11 @@ class MauticUpgradeTargetTests(unittest.TestCase):
             _clear_prod_cache_with_fallback("/tmp/app", "bin/console", "php")
 
             hard_clear.assert_called_once_with("/tmp/app")
-            run.assert_called_once_with(["php", "bin/console", "cache:clear"], cwd="/tmp/app", as_www_data=True)
+            run.assert_called_once_with(
+                ["php", "bin/console", "cache:clear"],
+                cwd="/tmp/app",
+                run_as_user="www-data",
+            )
 
     def test_mautic7_loopback_redis_dsn_uses_hex_loopback(self) -> None:
         self.assertEqual(
