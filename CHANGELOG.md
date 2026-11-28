@@ -1,3 +1,13 @@
+## 1.7.49 - 2026-11-28
+
+- Remove the remaining agent-result key compatibility cleanup from runtime
+  configuration and control storage. MCD no longer knows, migrates, deletes or
+  acknowledges that unrequested key layer; any historical host residue is an
+  operator-owned cleanup outside product code.
+- Add a source-level regression that rejects reintroduction of result-receipt
+  key generation, storage or rotation markers while preserving the existing
+  host, instance, job, request and operation identities.
+
 ## 1.7.48 - 2026-11-28
 
 - Remove the unrequested agent-result signing identity end to end. State push,

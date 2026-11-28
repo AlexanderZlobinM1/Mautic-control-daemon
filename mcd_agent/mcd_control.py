@@ -18,20 +18,6 @@ class ControlStore:
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(self.path) as db:
             db.execute("CREATE TABLE IF NOT EXISTS mcd_control_jobs (job_id TEXT PRIMARY KEY, request_json TEXT NOT NULL, receipt_json TEXT NOT NULL, updated_at REAL NOT NULL)")
-            db.execute("DROP TABLE IF EXISTS mcd_result_key_ack")
-            rows = db.execute("SELECT job_id,receipt_json FROM mcd_control_jobs").fetchall()
-            for job_id, receipt_json in rows:
-                try:
-                    receipt = json.loads(receipt_json)
-                except (TypeError, ValueError):
-                    continue
-                if not isinstance(receipt, dict) or "signature" not in receipt:
-                    continue
-                receipt.pop("signature", None)
-                db.execute(
-                    "UPDATE mcd_control_jobs SET receipt_json=?,updated_at=? WHERE job_id=?",
-                    (json.dumps(receipt, sort_keys=True), time.time(), job_id),
-                )
             db.commit()
 
     def receipts(self, *, include_conflict_acknowledged: bool = False) -> list[dict[str, Any]]:

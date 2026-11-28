@@ -6,30 +6,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.error import HTTPError
 
-from mcd_agent.config import _remove_retired_result_key_file, load_config
+from mcd_agent.config import load_config
 from mcd_agent.mcd_control import ControlStore
 from mcd_agent.state_push import MCCStatePusher, state_identity_payload
-
-
-def test_config_has_no_independent_result_key(tmp_path):
-    config = Path(tmp_path) / "mcd.toml"
-    retired_key = tmp_path / "retired-result.key"
-    retired_key.write_bytes(b"retired-private-key")
-    config.write_text(
-        '[mcc]\nhost_name = "worker.example.test"\n'
-        f'[runtime]\nresult_signing_key_path = "{retired_key}"\n',
-        encoding="utf-8",
-    )
-
-    loaded = load_config(str(config), allow_recover_from_mcc=False)
-
-    assert not hasattr(loaded, "result_signing_key_path")
-    assert loaded.agent_id.startswith("mcd-agent-")
-    assert not retired_key.exists()
-    assert "result_signing_key_path" not in config.read_text(encoding="utf-8")
-
-    restarted = load_config(str(config), allow_recover_from_mcc=False)
-    assert restarted.agent_id == loaded.agent_id
 
 
 def test_config_preserves_explicit_agent_id(tmp_path):
@@ -39,15 +18,6 @@ def test_config_preserves_explicit_agent_id(tmp_path):
     loaded = load_config(str(config), allow_recover_from_mcc=False)
 
     assert loaded.agent_id == "assigned-agent-1"
-
-
-def test_retired_result_key_file_is_removed(tmp_path):
-    key_path = tmp_path / "result-signing.key"
-    key_path.write_bytes(b"retired-private-key")
-    key_path.chmod(0o600)
-
-    assert _remove_retired_result_key_file(key_path) is True
-    assert not key_path.exists()
 
 
 def test_state_identity_uses_existing_agent_and_host_fields(monkeypatch):
@@ -61,14 +31,8 @@ def test_state_identity_uses_existing_agent_and_host_fields(monkeypatch):
     }
 
 
-def test_control_store_removes_legacy_key_state_and_runs_by_job_identity(tmp_path):
+def test_control_store_runs_by_job_identity(tmp_path):
     db_path = str(Path(tmp_path) / "state.db")
-    with sqlite3.connect(db_path) as db:
-        db.execute(
-            "CREATE TABLE mcd_result_key_ack "
-            "(key_id TEXT PRIMARY KEY, ack_json TEXT NOT NULL, updated_at REAL NOT NULL)"
-        )
-
     store = ControlStore(db_path)
     command = {
         "command": "docker_runtime_preflight_v1",
@@ -89,40 +53,25 @@ def test_control_store_removes_legacy_key_state_and_runs_by_job_identity(tmp_pat
 
     assert receipts[0]["status"] == "succeeded"
     assert "signature" not in receipts[0]
-    with sqlite3.connect(db_path) as db:
-        assert db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='mcd_result_key_ack'"
-        ).fetchone() is None
 
 
-def test_existing_control_receipt_loses_retired_signature(tmp_path):
-    state_db = tmp_path / "state.sqlite"
-    with sqlite3.connect(state_db) as db:
-        db.execute(
-            "CREATE TABLE mcd_control_jobs "
-            "(job_id TEXT PRIMARY KEY, request_json TEXT NOT NULL, "
-            "receipt_json TEXT NOT NULL, updated_at REAL NOT NULL)"
-        )
-        db.execute(
-            "INSERT INTO mcd_control_jobs VALUES (?,?,?,?)",
-            (
-                "job-1",
-                json.dumps({"job_id": "job-1"}),
-                json.dumps(
-                    {
-                        "job_id": "job-1",
-                        "status": "succeeded",
-                        "signature": {"value": "retired"},
-                    }
-                ),
-                1.0,
-            ),
-        )
-        db.commit()
-
-    receipt = ControlStore(str(state_db)).receipts()[0]
-
-    assert receipt == {"job_id": "job-1", "status": "succeeded"}
+def test_runtime_has_no_result_receipt_key_layer() -> None:
+    runtime_root = Path(__file__).resolve().parents[1] / "mcd_agent"
+    forbidden = (
+        "result" + "_signing_key",
+        "result" + "-signing.key",
+        "mcd_" + "result_key_ack",
+        "signed_" + "rotation",
+        "signing_key_" + "rotation",
+    )
+    offenders: list[str] = []
+    for path in runtime_root.rglob("*"):
+        if path.suffix not in {".py", ".json", ".toml"}:
+            continue
+        text = path.read_text(encoding="utf-8")
+        if any(marker in text for marker in forbidden):
+            offenders.append(str(path.relative_to(runtime_root.parent)))
+    assert offenders == []
 
 
 def test_state_push_executes_new_control_command_immediately(tmp_path):

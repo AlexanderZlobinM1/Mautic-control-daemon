@@ -43,10 +43,7 @@ LEGACY_RUNTIME_KEYS: tuple[str, ...] = (
     "max_parallel_segments_active",
     "max_parallel_segments_non_whitelist_active",
     "segment_non_whitelist_policy",
-    "result_signing_key_path",
 )
-
-_RETIRED_RESULT_KEY_DEFAULT_PATH = Path("/opt/mcd/var/keys/result-signing.key")
 
 _DEFAULT_CLUSTER_FILE_NODE_PATHS = [
     "/etc/cron.d",
@@ -1823,34 +1820,11 @@ def _auto_migrate_legacy_runtime_keys(config_path: str) -> int:
         text = p.read_text(encoding="utf-8")
     except Exception:
         return 0
-    try:
-        legacy_runtime = tomllib.loads(text).get("runtime", {})
-        legacy_key_path = (
-            Path(str(legacy_runtime.get("result_signing_key_path") or ""))
-            if isinstance(legacy_runtime, dict)
-            else Path()
-        )
-        if legacy_key_path.is_absolute():
-            _remove_retired_result_key_file(legacy_key_path)
-    except (OSError, TypeError, ValueError):
-        pass
     text2, removed = _remove_section_keys_text(text, "runtime", set(LEGACY_RUNTIME_KEYS))
     if removed <= 0:
         return 0
     p.write_text(text2, encoding="utf-8")
     return removed
-
-
-def _remove_retired_result_key_file(path: Path = _RETIRED_RESULT_KEY_DEFAULT_PATH) -> bool:
-    """Remove the retired agent-result key from its former fixed location."""
-    try:
-        if not path.is_file() or path.is_symlink():
-            return False
-        path.unlink()
-        return True
-    except OSError:
-        return False
-
 
 def _auto_migrate_legacy_sql_defaults(config_path: str) -> int:
     """
@@ -4014,7 +3988,6 @@ def load_config(path: str, *, allow_recover_from_mcc: bool = True) -> AgentConfi
         _auto_migrate_legacy_runtime_keys(path)
     except Exception:
         pass
-    _remove_retired_result_key_file()
     try:
         _auto_migrate_legacy_sql_defaults(path)
     except Exception:
