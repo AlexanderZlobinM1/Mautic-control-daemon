@@ -1,3 +1,10 @@
+## 1.7.39 - 2026-11-28
+
+- Resolve an explicit upgrade root from MCD's durable registered-instance
+  inventory when it intentionally sits outside `discovery_roots`. The UID-only
+  scenario and the canonical direct upgrade command now use the same complete
+  manual registration instead of failing a second discovery pass.
+
 ## 1.7.38 - 2026-11-28
 
 - Expose the matching managed-venv `mcd-cli` to executable scenarios through

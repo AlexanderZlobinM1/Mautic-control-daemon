@@ -25,6 +25,7 @@ from mcd_agent.config import AgentConfig
 from mcd_agent.source_operation import stable_source_operation
 from mcd_agent.discovery import discover_mautic
 from mcd_agent.install_type import detect_install_type
+from mcd_agent.inventory import InstanceInventory
 from mcd_agent.maintenance_mode import (
     cron_marker_path,
     restore_cron_service_if_needed,
@@ -150,6 +151,23 @@ def _pick_install_record(config: AgentConfig, root: str | None) -> MauticInstall
     if root:
         for inst in installs:
             if inst.root == root:
+                return inst
+        # A complete manual registration is authoritative even when its root
+        # is intentionally outside discovery_roots.  This is the normal path
+        # for stable-UID MCC/standalone operations; do not rediscover or
+        # synthesize a second installation record.
+        inventory = InstanceInventory(config.state_db_path)
+        try:
+            registered = [inst for inst in inventory.list_instances() if inst.root == root]
+        finally:
+            inventory.conn.close()
+        if len(registered) == 1:
+            inst = registered[0]
+            if (
+                str(getattr(inst, "runtime", "host") or "host") == "host"
+                and Path(inst.root).is_dir()
+                and Path(inst.console_path).is_file()
+            ):
                 return inst
         raise RuntimeError(f"Mautic install not found: {root}")
     if not installs:

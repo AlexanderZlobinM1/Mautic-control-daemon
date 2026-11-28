@@ -278,6 +278,53 @@ def test_registered_manual_instance_is_current_for_uid_only_upgrade(tmp_path: Pa
     assert selected.runtime_php_bin == "/usr/bin/php8.4"
 
 
+def test_direct_upgrade_resolves_registered_manual_root_outside_discovery(tmp_path: Path, monkeypatch):
+    from mcd_agent.inventory import InstanceInventory
+    from mcd_agent import mautic_upgrade
+
+    root = tmp_path / "manual" / "public_html"
+    console = root / "bin" / "console"
+    console.parent.mkdir(parents=True)
+    console.write_text("#!/usr/bin/env php\n", encoding="utf-8")
+    state_path = tmp_path / "state" / "mcd-state.db"
+    inventory = InstanceInventory(str(state_path))
+    try:
+        inventory.add_or_update_manual(
+            name="manual-instance",
+            root=str(root),
+            console_path=str(console),
+            local_php_path=None,
+            mautic_major=7,
+            db_host=None,
+            db_port=None,
+            db_name=None,
+            db_user=None,
+            db_password=None,
+            db_table_prefix=None,
+            instance_uid="manual-instance",
+            runtime_php_bin="/usr/bin/php8.4",
+            runtime_user="www-data",
+        )
+    finally:
+        inventory.conn.close()
+
+    monkeypatch.setattr(mautic_upgrade, "discover_mautic", lambda *_args: [])
+    selected = mautic_upgrade._pick_install_record(
+        SimpleNamespace(
+            state_db_path=str(state_path),
+            discovery_roots=[],
+            exclude_path_contains=[],
+            supported_mautic_majors=[7],
+            custom_instances=[],
+        ),
+        str(root),
+    )
+
+    assert selected.instance_uid == "manual-instance"
+    assert selected.root == str(root)
+    assert selected.source == "manual"
+
+
 def test_execute_returns_mcd_receipt_bindings(monkeypatch, tmp_path: Path):
     from mcd_agent import mautic_upgrade
     from mcd_agent import mautic_upgrade_scenario as scenario
