@@ -54,7 +54,7 @@ def _runtime_release_fixture(root: Path) -> None:
         files.append(path)
     manifest = {
         "schema": "mcd-runtime-package-v1",
-        "version": "1.7.36",
+        "version": "1.7.37",
         "wheel": "wheel/mcd_agent.whl",
         "requirements": "requirements.txt",
         "payload_sha256": {
@@ -89,7 +89,9 @@ def test_state_sync_verifies_and_activates_then_reuses_exact_cache(tmp_path, mon
     assert calls == [True]
     runtime = scenario_sync.read_runtime(config)
     assert runtime["manifest_sha256"] == payload["manifest_sha256"]
-    assert scenario_sync.local_scenario(config, "mautic-upgrade")["pin"]["artifact_media_type"] == "application/x-sh"
+    local = scenario_sync.local_scenario(config, "mautic-upgrade")
+    assert local["pin"]["artifact_media_type"] == "application/x-sh"
+    assert local["pin"]["artifact_digest"] == "sha256:" + hashlib.sha256(package).hexdigest()
 
     monkeypatch.setattr(scenario_sync.request, "urlopen", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("cache miss")))
     second = scenario_sync.apply_sync(config, payload)

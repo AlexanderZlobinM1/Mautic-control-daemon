@@ -1,3 +1,10 @@
+## 1.7.37 - 2026-11-28
+
+- Normalize the SHA-256 read from the verified local scenario manifest before
+  constructing the execution pin. The standard UID-only upgrade path now emits
+  one `sha256:` prefix instead of rejecting its own synced artifact as an
+  invalid runner context.
+
 ## 1.7.36 - 2026-11-28
 
 - Keep the independently verified `runtime/scenario` artifact cache outside

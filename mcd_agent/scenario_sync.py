@@ -249,7 +249,7 @@ def local_scenario(config: Any, scenario_id: str) -> dict[str, Any] | None:
         path = _package_path(root, row)
         package = row["package"]
         media_type = "application/x-sh" if str(package["file"]).lower().endswith((".sh", ".bash")) else "application/x-elf"
-        digest = "sha256:" + str(package["sha256"])
+        digest = "sha256:" + _raw_sha(package["sha256"])
         revision = str(row["version"])
         return {
             "id": str(row["id"]),
