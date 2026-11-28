@@ -1,11 +1,11 @@
 {
   "schema": "mcd-docker-runtime-image-inventory-v1",
   "contract_version": "1.0",
-  "purpose": "Signed read-only inventory of locally staged Docker runtime images",
+  "purpose": "Read-only inventory of locally staged Docker runtime images",
   "read_only": true,
   "pull": false,
   "freshness_max_sec": 900,
-  "binding": ["agent_id", "host_fingerprint", "signature.key_id"],
+  "binding": ["agent_id", "host_fingerprint"],
   "image_fields": [
     "image_ref",
     "fixed_runtime_ref",
@@ -15,9 +15,5 @@
     "labels",
     "files_sha256"
   ],
-  "runtime_image_digest": "Docker RepoDigest only; MCC artifact-pair/files digests are not accepted",
-  "signature": {
-    "algorithm": "ed25519",
-    "key": "MCD result-signing key acknowledged by MCC"
-  }
+  "runtime_image_digest": "Docker RepoDigest only; MCC artifact-pair/files digests are not accepted"
 }

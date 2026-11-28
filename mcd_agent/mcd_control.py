@@ -18,7 +18,21 @@ class ControlStore:
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(self.path) as db:
             db.execute("CREATE TABLE IF NOT EXISTS mcd_control_jobs (job_id TEXT PRIMARY KEY, request_json TEXT NOT NULL, receipt_json TEXT NOT NULL, updated_at REAL NOT NULL)")
-            db.execute("CREATE TABLE IF NOT EXISTS mcd_result_key_ack (key_id TEXT PRIMARY KEY, ack_json TEXT NOT NULL, updated_at REAL NOT NULL)")
+            db.execute("DROP TABLE IF EXISTS mcd_result_key_ack")
+            rows = db.execute("SELECT job_id,receipt_json FROM mcd_control_jobs").fetchall()
+            for job_id, receipt_json in rows:
+                try:
+                    receipt = json.loads(receipt_json)
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(receipt, dict) or "signature" not in receipt:
+                    continue
+                receipt.pop("signature", None)
+                db.execute(
+                    "UPDATE mcd_control_jobs SET receipt_json=?,updated_at=? WHERE job_id=?",
+                    (json.dumps(receipt, sort_keys=True), time.time(), job_id),
+                )
+            db.commit()
 
     def receipts(self, *, include_conflict_acknowledged: bool = False) -> list[dict[str, Any]]:
         with sqlite3.connect(self.path) as db:
@@ -85,23 +99,7 @@ class ControlStore:
                 out.append(receipt)
         return out
 
-    def record_key_ack(self, ack: Mapping[str, Any]) -> None:
-        with sqlite3.connect(self.path) as db:
-            db.execute("INSERT OR REPLACE INTO mcd_result_key_ack VALUES (?,?,?)", (str(ack["key_id"]), json.dumps(dict(ack), sort_keys=True), time.time()))
-            db.commit()
-
-    def active_key_ack(self, key_id: str) -> dict[str, Any] | None:
-        with sqlite3.connect(self.path) as db:
-            row = db.execute("SELECT ack_json FROM mcd_result_key_ack WHERE key_id=?", (key_id,)).fetchone()
-        if not row:
-            return None
-        value = json.loads(row[0])
-        return value if value.get("status") == "active" else None
-
-    def execute_pending(self, *, agent_id: str, host_fingerprint: str, active_key: tuple[Any, str] | None, runner: Any, signer: Any) -> list[dict[str, Any]]:
-        if not active_key:
-            return []
-        private, key_id = active_key
+    def execute_pending(self, *, runner: Any) -> list[dict[str, Any]]:
         with sqlite3.connect(self.path) as db:
             rows = db.execute("SELECT job_id,request_json,receipt_json FROM mcd_control_jobs").fetchall()
         out = []
@@ -117,7 +115,7 @@ class ControlStore:
                 db.execute("UPDATE mcd_control_jobs SET receipt_json=?,updated_at=? WHERE job_id=?", (json.dumps({"job_id": job_id, "status": "running", "idempotency_key": job_id}, sort_keys=True), time.time(), job_id)); db.commit()
             try:
                 result = dict(runner(request))
-                terminal = signer({"schema": "mcd-docker-runtime-preflight-terminal-v1", "contract_version": "1.0", "job_id": job_id, "request_id": request["request_id"], "probe_id": request["probe_id"], "status": "succeeded", "idempotency_key": job_id, "result": result}, private, key_id)
+                terminal = {"schema": "mcd-docker-runtime-preflight-terminal-v1", "contract_version": "1.0", "job_id": job_id, "request_id": request["request_id"], "probe_id": request["probe_id"], "status": "succeeded", "idempotency_key": job_id, "result": result}
             except Exception as exc:
                 terminal = {"schema": "mcd-docker-runtime-preflight-terminal-v1", "contract_version": "1.0", "job_id": job_id, "request_id": request.get("request_id"), "probe_id": request.get("probe_id"), "status": "failed", "idempotency_key": job_id, "error": type(exc).__name__, "error_code": str(getattr(exc, "error_code", "") or "docker_preflight_runner_failure"), "stage": str(getattr(exc, "stage", "") or "runner"), "detail": _safe_error_detail(getattr(exc, "detail", "") or getattr(exc, "stderr", "") or exc)}
                 for field in ("error_code", "stage", "exit_code", "stderr", "cleanup"):

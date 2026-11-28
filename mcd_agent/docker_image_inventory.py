@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-import base64
 import hashlib
 import json
 import re
@@ -9,10 +8,7 @@ import subprocess
 from importlib.resources import files
 from typing import Any, Callable, Mapping
 
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-
 from mcd_agent.commercial_portal import canonical_json
-from mcd_agent.result_signing import sign_result
 
 SCHEMA = "mcd-docker-runtime-image-inventory-v1"
 CAPABILITY_SCHEMA = "mcd-docker-runtime-image-inventory-capability-v1"
@@ -31,9 +27,8 @@ def capability() -> dict[str, Any]:
         "inventory_schema": SCHEMA,
         "read_only": True,
         "pull": False,
-        "signed": True,
         "freshness_max_sec": MAX_AGE_SECONDS,
-        "bound_fields": ["agent_id", "host_fingerprint", "key_id"],
+        "bound_fields": ["agent_id", "host_fingerprint"],
         "image_fields": [
             "image_ref",
             "fixed_runtime_ref",
@@ -97,12 +92,10 @@ def _image_item(raw: Mapping[str, Any], listed: Mapping[str, Any]) -> dict[str, 
     }
 
 
-def collect_signed_inventory(
+def collect_inventory(
     *,
     agent_id: str,
     host_fingerprint: str,
-    private_key: Any | None,
-    key_id: str,
     run: Callable[..., Any] = _run_default,
     now: datetime | None = None,
 ) -> dict[str, Any]:
@@ -118,9 +111,6 @@ def collect_signed_inventory(
         "freshness": {"observed_at": observed, "max_age_sec": MAX_AGE_SECONDS},
         "images": [],
     }
-    if private_key is None or not key_id:
-        base["reason"] = "result_signing_key_unavailable"
-        return base
     try:
         listed_result = run(
             ["/usr/bin/docker", "image", "ls", "--all", "--no-trunc", "--format", "{{json .}}"],
@@ -167,15 +157,14 @@ def collect_signed_inventory(
         base["reason"] = "docker_image_inventory_probe_failed"
         base["error_type"] = type(exc).__name__
     base["inventory_sha256"] = "sha256:" + hashlib.sha256(canonical_json({"images": base["images"]})).hexdigest()
-    return sign_result(base, private_key, str(key_id))
+    return base
 
 
-def validate_signed_inventory(
+def validate_inventory(
     value: Mapping[str, Any],
     *,
     expected_agent_id: str,
     expected_host_fingerprint: str,
-    public_key: str,
     now: datetime | None = None,
     max_age_seconds: int = MAX_AGE_SECONDS,
 ) -> dict[str, Any]:
@@ -211,15 +200,4 @@ def validate_signed_inventory(
     expected_hash = "sha256:" + hashlib.sha256(canonical_json({"images": images})).hexdigest()
     if value.get("inventory_sha256") != expected_hash:
         raise ValueError("docker_image_inventory_tampered")
-    signature = value.get("signature")
-    if not isinstance(signature, dict) or signature.get("algorithm") != "ed25519" or not signature.get("key_id") or not signature.get("value"):
-        raise ValueError("docker_image_inventory_signature_invalid")
-    try:
-        raw_key = base64.urlsafe_b64decode(str(public_key) + "=" * (-len(str(public_key)) % 4))
-        raw_signature = base64.urlsafe_b64decode(str(signature["value"]) + "=" * (-len(str(signature["value"])) % 4))
-        unsigned = dict(value)
-        unsigned.pop("signature", None)
-        Ed25519PublicKey.from_public_bytes(raw_key).verify(raw_signature, canonical_json(unsigned))
-    except Exception as exc:
-        raise ValueError("docker_image_inventory_signature_invalid") from exc
     return dict(value)

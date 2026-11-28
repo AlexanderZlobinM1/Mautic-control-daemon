@@ -43,7 +43,10 @@ LEGACY_RUNTIME_KEYS: tuple[str, ...] = (
     "max_parallel_segments_active",
     "max_parallel_segments_non_whitelist_active",
     "segment_non_whitelist_policy",
+    "result_signing_key_path",
 )
+
+_RETIRED_RESULT_KEY_DEFAULT_PATH = Path("/opt/mcd/var/keys/result-signing.key")
 
 _DEFAULT_CLUSTER_FILE_NODE_PATHS = [
     "/etc/cron.d",
@@ -503,7 +506,6 @@ class AgentConfig:
     mautic_run_as_user: str | None
     command_timeout_sec: int
     state_db_path: str
-    result_signing_key_path: str
     state_backend: str
     state_mysql_host: str | None
     state_mysql_unix_socket: str | None
@@ -1821,11 +1823,33 @@ def _auto_migrate_legacy_runtime_keys(config_path: str) -> int:
         text = p.read_text(encoding="utf-8")
     except Exception:
         return 0
+    try:
+        legacy_runtime = tomllib.loads(text).get("runtime", {})
+        legacy_key_path = (
+            Path(str(legacy_runtime.get("result_signing_key_path") or ""))
+            if isinstance(legacy_runtime, dict)
+            else Path()
+        )
+        if legacy_key_path.is_absolute():
+            _remove_retired_result_key_file(legacy_key_path)
+    except (OSError, TypeError, ValueError):
+        pass
     text2, removed = _remove_section_keys_text(text, "runtime", set(LEGACY_RUNTIME_KEYS))
     if removed <= 0:
         return 0
     p.write_text(text2, encoding="utf-8")
     return removed
+
+
+def _remove_retired_result_key_file(path: Path = _RETIRED_RESULT_KEY_DEFAULT_PATH) -> bool:
+    """Remove the retired agent-result key from its former fixed location."""
+    try:
+        if not path.is_file() or path.is_symlink():
+            return False
+        path.unlink()
+        return True
+    except OSError:
+        return False
 
 
 def _auto_migrate_legacy_sql_defaults(config_path: str) -> int:
@@ -3096,9 +3120,6 @@ def _load_config_inner(path: str) -> AgentConfig:
         mautic_run_as_user=str(runtime.get("mautic_run_as_user")).strip() if runtime.get("mautic_run_as_user") else "www-data",
         command_timeout_sec=int(runtime.get("command_timeout_sec", 0)),
         state_db_path=str(runtime.get("state_db_path", "/opt/mcd/var/mcd-state.db")),
-        result_signing_key_path=str(
-            runtime.get("result_signing_key_path", "/opt/mcd/var/keys/result-signing.key")
-        ),
         state_backend=state_backend,
         state_mysql_host=(
             str(runtime.get("state_mysql_host", state.get("mysql_host", ""))).strip()
@@ -3993,6 +4014,7 @@ def load_config(path: str, *, allow_recover_from_mcc: bool = True) -> AgentConfi
         _auto_migrate_legacy_runtime_keys(path)
     except Exception:
         pass
+    _remove_retired_result_key_file()
     try:
         _auto_migrate_legacy_sql_defaults(path)
     except Exception:

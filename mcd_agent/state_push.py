@@ -35,11 +35,9 @@ from mcd_agent.config import AgentConfig
 from mcd_agent.form_embed import load_form_embed_state
 from mcd_agent.host_identity import resolve_agent_identity
 from mcd_agent.mcd_control import ControlStore, SCHEMA
-from mcd_agent.result_signing import ensure_result_key
-from mcd_agent.result_signing import sign_result
 from mcd_agent.docker_preflight_runner import DockerRuntimePreflightRunner
 from mcd_agent.docker_image_inventory import capability as docker_image_inventory_capability
-from mcd_agent.docker_image_inventory import collect_signed_inventory
+from mcd_agent.docker_image_inventory import collect_inventory
 from mcd_agent.commercial_portal import _host_fingerprint
 from mcd_agent.install_readiness import collect_mautic_install_readiness
 from mcd_agent.instance_size import INSTANCE_SIZE_REFRESH_SEC, InstanceSizeCache
@@ -295,8 +293,8 @@ def _ingest_control_response(
             if result.get("status") == "failed":
                 logging.error("MCC scenario catalog sync failed: %s", result.get("reason"))
         except Exception:
-            # Scenario delivery must not prevent ordinary command ACKs or
-            # result-key processing from reaching the next state push.
+            # Scenario delivery must not prevent ordinary command processing
+            # from reaching the next state push.
             logging.exception("MCC scenario catalog sync crashed")
     store = ControlStore(state_db_path)
     commands = control.get("commands")
@@ -308,17 +306,7 @@ def _ingest_control_response(
                 host_fingerprint=str(payload.get("host_fingerprint") or ""),
             )
         except ValueError:
-            # Invalid command envelopes must not suppress an otherwise valid key ACK.
             pass
-    ack = control.get("result_signing_key_ack")
-    result_key = payload.get("result_signing_key")
-    if (
-        isinstance(ack, dict)
-        and ack.get("status") in {"active", "retired", "revoked"}
-        and isinstance(result_key, dict)
-        and ack.get("key_id") == result_key.get("key_id")
-    ):
-        store.record_key_ack(ack)
 
 
 def _reconcile_control_receipt_conflict(state_db_path: str, response_text: str) -> int:
@@ -2499,24 +2487,10 @@ class MCCStatePusher:
     def _execute_pending_control_jobs(
         self,
         control_store: ControlStore,
-        *,
-        agent_id: str,
-        host_fingerprint: str,
-        result_key: dict[str, Any] | None,
-        key_path: str,
     ) -> list[dict[str, Any]]:
-        if not result_key or not key_path:
-            return []
         try:
-            private_key, _ = ensure_result_key(key_path)
-            if not control_store.active_key_ack(str(result_key.get("key_id") or "")):
-                return []
             return control_store.execute_pending(
-                agent_id=agent_id,
-                host_fingerprint=host_fingerprint,
-                active_key=(private_key, str(result_key["key_id"])),
                 runner=DockerRuntimePreflightRunner(),
-                signer=sign_result,
             )
         except Exception:
             return []
@@ -2621,29 +2595,12 @@ class MCCStatePusher:
         instances_snapshot_complete: bool = True,
     ) -> dict[str, Any]:
         identity = resolve_agent_identity(self.cfg)
-        result_key = None
-        result_private_key = None
-        key_path = str(getattr(self.cfg, "result_signing_key_path", "") or "")
-        if key_path:
-            try:
-                result_private_key, result_key = ensure_result_key(key_path)
-            except Exception:
-                result_key = None
         control_store = ControlStore(self.cfg.state_db_path)
         state_identity = state_identity_payload(self.cfg)
-        if result_key and key_path:
-            self._execute_pending_control_jobs(
-                control_store,
-                agent_id=state_identity["agent_id"],
-                host_fingerprint=state_identity["host_fingerprint"],
-                result_key=result_key,
-                key_path=key_path,
-            )
-        docker_image_inventory = collect_signed_inventory(
+        self._execute_pending_control_jobs(control_store)
+        docker_image_inventory = collect_inventory(
             agent_id=state_identity["agent_id"],
             host_fingerprint=state_identity["host_fingerprint"],
-            private_key=result_private_key,
-            key_id=str(result_key.get("key_id") or "") if isinstance(result_key, dict) else "",
         )
         from mcd_agent.mautic_release_authorization import runtime_capabilities as release_capabilities
         instances = []
@@ -2717,7 +2674,6 @@ class MCCStatePusher:
             "plugin_inventory_observations": plugin_inventory_observations,
             "docker_runtime_image_inventory_capability": docker_image_inventory_capability(),
             "docker_runtime_image_inventory": docker_image_inventory,
-            "result_signing_key": result_key,
             **state_identity,
             "hostname": str(identity.get("effective_hostname") or ""),
             "mcc_host_name": str(identity.get("effective_mcc_host_name") or ""),
@@ -2815,13 +2771,8 @@ class MCCStatePusher:
                                 control.get("schema") == SCHEMA or isinstance(control.get("control"), dict)
                             ):
                                 _ingest_control_response(self.cfg.state_db_path, payload, control, self.cfg)
-                                result_key = payload.get("result_signing_key")
                                 executed_receipts = self._execute_pending_control_jobs(
                                     ControlStore(self.cfg.state_db_path),
-                                    agent_id=str(payload.get("agent_id") or ""),
-                                    host_fingerprint=str(payload.get("host_fingerprint") or ""),
-                                    result_key=result_key if isinstance(result_key, dict) else None,
-                                    key_path=str(getattr(self.cfg, "result_signing_key_path", "") or ""),
                                 )
                         except (ValueError, json.JSONDecodeError):
                             pass

@@ -1,3 +1,14 @@
+## 1.7.48 - 2026-11-28
+
+- Remove the unrequested agent-result signing identity end to end. State push,
+  control execution, terminal receipts and Docker image inventory now bind to
+  the existing agent/host/job/request identities and immutable digests without
+  generating, rotating or acknowledging an additional key.
+- Migrate existing installations by removing the retired runtime setting,
+  fixed private-key file, acknowledgement table and stored control-receipt
+  signatures. Bearer-authenticated MCC transport and SSH behavior are
+  unchanged.
+
 ## 1.7.47 - 2026-11-28
 
 - Bind the canonical direct Mautic upgrade to the selected registered
@@ -934,8 +945,8 @@
 
 - Ingest and execute a valid MCC control command immediately after the
   successful state response is parsed; force the following state push to carry
-  the signed terminal receipt instead of waiting for the heartbeat interval.
-- Keep command execution idempotent and gated by the acknowledged result key.
+  the terminal receipt instead of waiting for the heartbeat interval.
+- Keep command execution idempotent and bound to the existing job identity.
 
 ## 1.5.222 - 2026-10-26
 

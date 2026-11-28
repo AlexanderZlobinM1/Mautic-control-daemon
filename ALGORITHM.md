@@ -1246,24 +1246,21 @@ Mautic-командой и execution lock, восстанавливает durabl
    older runtime remains rejected.
    The sidecar must accept the complete valid split TOML graph, including
    array-of-table sections, while never writing configuration.
-   The MCD runtime always supplies an MCD-owned default
-   `runtime.result_signing_key_path` (`/opt/mcd/var/keys/result-signing.key`)
-   when the operator has not overridden it. The first state push creates the
-   Ed25519 key with mode `0600`; MCC must acknowledge the public key before
-   any signed control terminal receipt can execute.
    The `mcd-state-v1` payload also always carries a typed, non-empty
    `agent_id`: an explicit `[mcc].agent_id` is authoritative; otherwise MCD
    derives a stable `mcd-agent-<sha256>` identity from the canonical MCC host
    name (or local hostname in standalone mode). The value is stable across
-   restart and is sent together with the host fingerprint and result key.
-   MCD unwraps the MCC state response before processing its control envelope
-   and persists a matching key ACK even when the response carries no control
-   commands; command-envelope validation remains independent and invalid
-   commands are never executed because an ACK was received.
+   restart and is sent together with the host fingerprint.
+   Control jobs and receipts use the existing agent, host, job and request
+   identities; this route creates no additional key, ownership credential or
+   rotation lifecycle.
+   MCD unwraps the MCC state response before processing its control envelope;
+   command-envelope validation remains independent and invalid commands are
+   never executed.
   A valid command received in a successful state response is ingested and
   executed in the same state-push cycle after the response is parsed; the
-  resulting signed terminal receipt is marked for the next state push instead
-  of waiting for the normal 300-second heartbeat. This preserves the
+  resulting terminal receipt is marked for the next state push instead of
+  waiting for the normal 300-second heartbeat. This preserves the
   accepted-to-terminal lifecycle without shortening command TTLs or creating
   duplicate jobs.
   Docker preflight failures are typed at the identity and fixed argv
@@ -1994,7 +1991,6 @@ cycle без ручного `segments:update`, profile/capacity/data changes. Ad
 | manual existing commercial-key fallback keeps pending/active/disconnected state idempotently | `mcd_agent/commercial_manual_activation.py`, `mcd_agent/commercial_portal.py`, `mcd_agent/daemon.py` | `tests/test_commercial_manual_activation.py`, redacted `mcd-commercial-manual-activation-receipt-v1` |
 | active Portal state is reconciled after daemon startup; incomplete construction and exited workers retry without duplicates | `mcd_agent/daemon.py:_reconcile_commercial_worker` | `tests/test_daemon_commercial_guard.py` activation-material retry; `tests/test_commercial_self_hosted_v2.py` activate -> poll -> terminal v2 |
 | Fail2ban startup safety is externalized to an MCC-owned scenario/recipe delivered through Portal and the obsolete MCD startup guard boundary is absent | MCC Debian-family scenario/recipe delivered through Portal; no `fail2ban_guard` runtime import/caller | `tests/test_daemon_commercial_guard.py`; `fail2ban-native-replacement-proof-20261101.json`; `fail2ban-external-lifecycle-receipt-20261101.json` |
-| result-signing identity bootstraps from MCD-owned config and gates signed control execution on MCC ACK | `mcd_agent/config.py`, `mcd_agent/result_signing.py`, `mcd_agent/state_push.py`, `mcd_agent/mcd_control.py` | `tests/test_result_signing.py`, `tests/test_mcd_control.py`, live `mcd-state-v1` identity/key/ACK and terminal-receipt evidence |
 | authority-safe desired runtime projection | `mcd_agent/config.py`, `mcd_agent/runtime_overrides.py` | `tests/test_runtime_override_direction.py`, `tests/test_runtime_stable_keys.py`, `tests/test_runtime_migration_adapter.py` |
 | natural b2bss/Adonis evidence | runtime TaskStore/MCC receipts | rollout acceptance (после package/install) |
 
