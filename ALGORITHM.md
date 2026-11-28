@@ -163,6 +163,14 @@ MCC не выполняет upgrade, не дублирует cache clear, не �
 проверка остаётся обязательной. Это один post-upgrade алгоритм для локального
 CLI и MCC-вызова, без sandbox-исключений.
 
+Генерация AssetMapper и очистка cache являются идемпотентными завершающими
+операциями. Если Mautic временно возвращает ненулевой код сразу после замены
+Composer-зависимостей, MCD повторяет каждую такую операцию не более трёх раз с
+короткой паузой и фиксирует номер и результат каждой попытки в evidence. Только
+успешная попытка разрешает продолжение проверки manifest/assets; три неуспеха
+оставляют upgrade fail-closed и требуют rollback/разбора. Командный вывод при
+этом не попадает в публичный receipt.
+
 Terminal generic receipt обязан содержать те же scenario/instance bindings,
 CLI parameter projection, patch catalog/plan/payload SHA, фактическую версию,
 cache-clear result и inventory-rescan result. Mautic 6 этот capability не

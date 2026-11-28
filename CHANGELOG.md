@@ -1,3 +1,11 @@
+## 1.7.44 - 2026-11-28
+
+- Retry the idempotent post-upgrade AssetMapper generation and cache-clear
+  commands up to three bounded attempts. A transient Mautic exit immediately
+  after Composer replacement no longer marks an otherwise healthy upgrade as
+  failed; every attempt remains visible as sanitized evidence, and persistent
+  failures still stop the upgrade fail-closed.
+
 ## 1.7.43 - 2026-11-28
 
 - Verify the post-upgrade application and AssetMapper output against the

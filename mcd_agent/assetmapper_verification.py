@@ -5,6 +5,7 @@ import ipaddress
 from pathlib import Path
 import re
 import subprocess
+import time
 from typing import Any, Callable
 from urllib.parse import urlsplit, urlunsplit
 
@@ -196,6 +197,8 @@ def verify_assetmapper_upgrade(
     probe_origins: list[str] | tuple[str, ...] | None = None,
     rollback_available: bool = True,
     timeout_sec: int = 120,
+    command_attempts: int = 3,
+    command_retry_delay_sec: float = 2.0,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> dict[str, Any]:
     """Generate and verify public AssetMapper output without exposing command output."""
@@ -235,15 +238,49 @@ def verify_assetmapper_upgrade(
         ("mautic:assets:generate", [str(php_bin), console, "mautic:assets:generate", "--no-interaction"]),
         ("cache:clear", [str(php_bin), console, "cache:clear", "--no-interaction"]),
     ]
+    attempts = max(1, min(5, int(command_attempts)))
     for name, command in operations:
-        try:
-            proc = _run_runtime_command(command, cwd=project, runtime_user=runtime_user, timeout_sec=timeout_sec, runner=runner)
-        except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
-            result["reason"] = f"{name} could not run as runtime user: {type(exc).__name__}"
+        proc: subprocess.CompletedProcess[str] | None = None
+        error_type = ""
+        for attempt in range(1, attempts + 1):
+            try:
+                proc = _run_runtime_command(
+                    command,
+                    cwd=project,
+                    runtime_user=runtime_user,
+                    timeout_sec=timeout_sec,
+                    runner=runner,
+                )
+                error_type = ""
+                result["commands"].append(
+                    {
+                        "name": name,
+                        "returncode": proc.returncode,
+                        "runtime_user": runtime_user,
+                        "attempt": attempt,
+                    }
+                )
+                if proc.returncode == 0:
+                    break
+            except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+                proc = None
+                error_type = type(exc).__name__
+                result["commands"].append(
+                    {
+                        "name": name,
+                        "returncode": None,
+                        "runtime_user": runtime_user,
+                        "attempt": attempt,
+                        "error_type": error_type,
+                    }
+                )
+            if attempt < attempts and command_retry_delay_sec > 0:
+                time.sleep(float(command_retry_delay_sec))
+        if proc is None:
+            result["reason"] = f"{name} could not run as runtime user: {error_type or 'unknown'}"
             return result
-        result["commands"].append({"name": name, "returncode": proc.returncode, "runtime_user": runtime_user})
         if proc.returncode != 0:
-            result["reason"] = f"{name} failed"
+            result["reason"] = f"{name} failed after {attempts} attempts"
             return result
 
     manifest = webroot / "assets" / "build" / "manifest.json"

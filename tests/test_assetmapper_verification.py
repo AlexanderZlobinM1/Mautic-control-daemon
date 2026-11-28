@@ -46,12 +46,61 @@ class AssetMapperVerificationTests(unittest.TestCase):
             result = verify_assetmapper_upgrade(
                 project_root=root, install_root=root, console_path=root / "bin/console",
                 php_bin="php", runtime_user="www-data", domain="example.test",
-                target_version="7.2.1", rollback_available=False, runner=runner)
+                target_version="7.2.1", rollback_available=False,
+                command_retry_delay_sec=0, runner=runner)
             self.assertEqual(result["status"], "failed")
-            self.assertEqual(result["reason"], "mautic:assets:generate failed")
+            self.assertEqual(result["reason"], "mautic:assets:generate failed after 3 attempts")
             self.assertEqual(result["rollback"], {"available": False, "required": True, "attempted": False})
-            self.assertEqual(len(calls), 1)
+            self.assertEqual(len(calls), 3)
             self.assertNotIn("private diagnostic", json.dumps(result))
+
+    def test_transient_runtime_command_failure_is_retried_before_rollback(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "index.php").write_text("<?php", encoding="utf-8")
+            build = root / "assets/build"
+            build.mkdir(parents=True)
+            (build / "app.css").write_text("body{}", encoding="utf-8")
+            (build / "manifest.json").write_text(
+                json.dumps({"css": "/assets/build/app.css"}),
+                encoding="utf-8",
+            )
+            command_attempts = {"mautic:assets:generate": 0, "cache:clear": 0}
+
+            def runner(command, **kwargs):
+                if command[0] == "curl":
+                    content_type = "application/json" if command[-1].endswith("manifest.json") else "text/css"
+                    return subprocess.CompletedProcess(
+                        command, 0, f"HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\n\r\n", ""
+                    )
+                name = next(value for value in command if value in command_attempts)
+                command_attempts[name] += 1
+                return subprocess.CompletedProcess(command, 1 if command_attempts[name] == 1 else 0, "", "private transient")
+
+            result = verify_assetmapper_upgrade(
+                project_root=root,
+                install_root=root,
+                console_path=root / "bin/console",
+                php_bin="php",
+                runtime_user="www-data",
+                domain="example.test",
+                target_version="7.2.3",
+                command_retry_delay_sec=0,
+                runner=runner,
+            )
+
+            self.assertEqual(result["status"], "success")
+            self.assertEqual(command_attempts, {"mautic:assets:generate": 2, "cache:clear": 2})
+            self.assertEqual(
+                [(row["name"], row["attempt"], row["returncode"]) for row in result["commands"]],
+                [
+                    ("mautic:assets:generate", 1, 1),
+                    ("mautic:assets:generate", 2, 0),
+                    ("cache:clear", 1, 1),
+                    ("cache:clear", 2, 0),
+                ],
+            )
+            self.assertNotIn("private transient", json.dumps(result))
 
     def test_composer_layout_uses_declared_nonstandard_webroot(self) -> None:
         with tempfile.TemporaryDirectory() as td:
