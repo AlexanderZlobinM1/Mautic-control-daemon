@@ -182,6 +182,15 @@ cache-clear result и inventory-rescan result. Mautic 6 этот capability не
 receipt не переносятся. Ошибка сценария не должна схлопываться в общий статус,
 по которому невозможно отличить Composer, patch, cache и rescan этапы.
 
+Канонический прямой `mcd-cli mautic-upgrade apply`, который вызывает сценарий,
+сам всегда завершает выполнение marker-ом
+`MCD_MAUTIC_UPGRADE_RECEIPT`. При успехе marker фиксирует terminal success и
+target; при ошибке — фактический этап (`preflight`, maintenance, backup,
+source upgrade, AssetMapper, dependency restore, version/patch/system/post
+verification, cache или maintenance exit), bounded reason и exit code.
+Сценарий только переносит эти типизированные поля в свой terminal result; он не
+читает и не публикует сырой stdout/stderr и не угадывает причину по тексту.
+
 Разрешение Mautic application root для Composer split-layout проверяет сначала
 project root с `composer.json` и `bin/console`, затем `docroot/` или `public/` с
 валидированными `app/` и `plugins/`. Если в project root остался только

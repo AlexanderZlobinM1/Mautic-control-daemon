@@ -343,6 +343,23 @@ def test_source_change_during_maintenance_aborts_before_first_mutation(invocatio
     assert events == ["stage", "maintenance", "cleanup"]
 
 
+def test_apply_error_preserves_exact_runtime_stage(invocation, monkeypatch):
+    args, events = wire_upgrade(invocation, monkeypatch)
+
+    def fail_assetmapper(*_args, **_kwargs):
+        raise RuntimeError("manifest_http_unavailable after 3 attempts")
+
+    monkeypatch.setattr(upgrade, "_verify_assetmapper_upgrade", fail_assetmapper)
+
+    with pytest.raises(upgrade.MauticUpgradeApplyError) as caught:
+        upgrade.run_upgrade_apply(**args, mcc_preflighted_single_instance=True)
+
+    assert caught.value.stage == "assetmapper_verification"
+    assert caught.value.reason == "manifest_http_unavailable after 3 attempts"
+    assert caught.value.error_type == "RuntimeError"
+    assert events == ["stage", "maintenance", "permissions", "install", "cleanup"]
+
+
 @pytest.mark.parametrize("operation", ["check", "interactive"])
 def test_cli_cannot_ignore_manual_flag_on_other_operations(monkeypatch, operation):
     from mcd_agent import cli
@@ -365,6 +382,96 @@ def test_cli_forwards_manual_flag_and_exact_job_fields(invocation, monkeypatch):
     assert captured["root"] == invocation["root"]
     assert captured["patch_plan_json"] == invocation["raw_plan"]
     assert captured["patch_run_id"] == invocation["run_id"]
+
+
+def test_direct_cli_emits_typed_stage_failure_receipt(invocation, monkeypatch, capsys):
+    from mcd_agent import cli
+    from mcd_agent.mautic_upgrade import MauticUpgradeApplyError
+
+    monkeypatch.setattr(cli, "load_config", lambda *a: object())
+    monkeypatch.setattr(cli, "maybe_notify_update", lambda *a: None)
+
+    def fail(**_kwargs):
+        raise MauticUpgradeApplyError(
+            "assetmapper_verification",
+            "manifest_http_unavailable after 3 attempts",
+            "RuntimeError",
+        )
+
+    monkeypatch.setattr(cli, "run_upgrade_apply", fail)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "mcd-cli",
+            "mautic-upgrade",
+            "apply",
+            "--root",
+            invocation["root"],
+            "--mode",
+            "composer",
+            "--target",
+            "7.1.4",
+            "--yes",
+        ],
+    )
+
+    assert cli.main() == 1
+    lines = [
+        line for line in capsys.readouterr().out.splitlines()
+        if line.startswith("MCD_MAUTIC_UPGRADE_RECEIPT=")
+    ]
+    assert len(lines) == 1
+    receipt = json.loads(lines[0].split("=", 1)[1])
+    assert receipt == {
+        "error_code": "upgrade_failed",
+        "exit_code": 1,
+        "failed_stage": "assetmapper_verification",
+        "reason": "manifest_http_unavailable after 3 attempts",
+        "schema": "mcd-mautic-upgrade-direct-receipt-v1",
+        "status": "failed",
+        "target_version": "7.1.4",
+    }
+
+
+def test_direct_cli_emits_typed_success_receipt(invocation, monkeypatch, capsys):
+    from mcd_agent import cli
+
+    pushed = []
+    monkeypatch.setattr(cli, "load_config", lambda *a: object())
+    monkeypatch.setattr(cli, "maybe_notify_update", lambda *a: None)
+    monkeypatch.setattr(cli, "run_upgrade_apply", lambda **_kwargs: 0)
+    monkeypatch.setattr(cli, "_push_state_after_change", lambda _cfg, reason: pushed.append(reason))
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "mcd-cli",
+            "mautic-upgrade",
+            "apply",
+            "--root",
+            invocation["root"],
+            "--mode",
+            "composer",
+            "--target",
+            "7.1.4",
+            "--yes",
+        ],
+    )
+
+    assert cli.main() == 0
+    lines = [
+        line for line in capsys.readouterr().out.splitlines()
+        if line.startswith("MCD_MAUTIC_UPGRADE_RECEIPT=")
+    ]
+    assert len(lines) == 1
+    receipt = json.loads(lines[0].split("=", 1)[1])
+    assert receipt == {
+        "exit_code": 0,
+        "schema": "mcd-mautic-upgrade-direct-receipt-v1",
+        "stage": "complete",
+        "status": "succeeded",
+        "target_version": "7.1.4",
+    }
+    assert pushed == ["mautic-upgrade-apply"]
 
 
 @pytest.mark.parametrize("preflighted", [False, True])

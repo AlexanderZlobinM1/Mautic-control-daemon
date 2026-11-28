@@ -126,6 +126,7 @@ from mcd_agent.hardware_profile import (
 from mcd_agent.mautic_composer_move import move_zip_to_composer
 from mcd_agent.mautic_image_install import install_from_image
 from mcd_agent.mautic_upgrade import (
+    MauticUpgradeApplyError,
     run_upgrade_apply,
     run_upgrade_authorize_repair,
     run_upgrade_check,
@@ -240,6 +241,42 @@ from mcd_agent.runtime_integrity import check_runtime_integrity
 from mcd_agent.version_check import maybe_notify_update
 
 _MANUAL_CMD_SEP = "\x1f"
+
+
+def _emit_direct_mautic_upgrade_receipt(
+    *,
+    status: str,
+    exit_code: int,
+    target_version: str,
+    error: BaseException | None = None,
+) -> None:
+    """Emit the typed terminal record consumed by external upgrade scenarios."""
+    payload: dict[str, object] = {
+        "schema": "mcd-mautic-upgrade-direct-receipt-v1",
+        "status": str(status),
+        "exit_code": int(exit_code),
+        "target_version": str(target_version or ""),
+    }
+    if error is None:
+        payload["stage"] = "complete"
+    else:
+        stage = str(getattr(error, "stage", "upgrade_apply") or "upgrade_apply")
+        reason = str(getattr(error, "reason", "") or str(error) or type(error).__name__)
+        payload.update(
+            {
+                "error_code": "upgrade_failed",
+                "failed_stage": stage,
+                "reason": " ".join(reason.split())[:512],
+            }
+        )
+        attempts = getattr(error, "attempts", None)
+        if isinstance(attempts, int) and attempts >= 0:
+            payload["attempts"] = attempts
+    print(
+        "MCD_MAUTIC_UPGRADE_RECEIPT="
+        + json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+        flush=True,
+    )
 
 
 def _ask(prompt: str) -> str:
@@ -4180,30 +4217,56 @@ def main() -> int:
             if rc == 0:
                 _push_state_after_change(cfg, "mautic-upgrade-interactive")
             return rc
-        rc = run_upgrade_apply(
-            config=cfg,
-            root=args.root,
-            mode=args.mode,
-            yes=bool(args.yes),
-            do_backup=bool(args.backup),
-            with_system_upgrade=bool(args.with_system_upgrade),
-            target_override=str(args.target or "").strip() or None,
-            allow_minor=bool(args.allow_minor),
-            allow_major=bool(args.allow_major),
-            allow_release_transition=bool(args.allow_release_transition),
-            mcc_release_authorization_context_file=str(args.mcc_release_authorization_context_file or ""),
-            mcc_release_authorization_context_sha256=str(args.mcc_release_authorization_context_sha256 or ""),
-            patch_plan_json=str(args.patch_plan_json or "") or None,
-            patch_run_id=str(args.patch_run_id or "") or None,
-            repair_plan_json=str(args.repair_plan_json or "") or None,
-            repair_auth_context_file=str(args.repair_auth_context_file or "") or None,
-            patch_backup_context_file=str(args.patch_backup_context_file or "") or None,
-            repair_auth_key_file=str(args.repair_auth_key_file or "/etc/mcd/mcc-operation-signing.key"),
-            mcc_preflighted_single_instance=bool(args.mcc_preflighted_single_instance),
-            prepared_target_json=str(args.prepared_target_json or "") or None,
-            prepared_target_file=str(args.prepared_target_file or "") or None,
-            prepared_target_sha256=str(args.prepared_target_sha256 or ""),
-        )
+        try:
+            rc = run_upgrade_apply(
+                config=cfg,
+                root=args.root,
+                mode=args.mode,
+                yes=bool(args.yes),
+                do_backup=bool(args.backup),
+                with_system_upgrade=bool(args.with_system_upgrade),
+                target_override=str(args.target or "").strip() or None,
+                allow_minor=bool(args.allow_minor),
+                allow_major=bool(args.allow_major),
+                allow_release_transition=bool(args.allow_release_transition),
+                mcc_release_authorization_context_file=str(args.mcc_release_authorization_context_file or ""),
+                mcc_release_authorization_context_sha256=str(args.mcc_release_authorization_context_sha256 or ""),
+                patch_plan_json=str(args.patch_plan_json or "") or None,
+                patch_run_id=str(args.patch_run_id or "") or None,
+                repair_plan_json=str(args.repair_plan_json or "") or None,
+                repair_auth_context_file=str(args.repair_auth_context_file or "") or None,
+                patch_backup_context_file=str(args.patch_backup_context_file or "") or None,
+                repair_auth_key_file=str(args.repair_auth_key_file or "/etc/mcd/mcc-operation-signing.key"),
+                mcc_preflighted_single_instance=bool(args.mcc_preflighted_single_instance),
+                prepared_target_json=str(args.prepared_target_json or "") or None,
+                prepared_target_file=str(args.prepared_target_file or "") or None,
+                prepared_target_sha256=str(args.prepared_target_sha256 or ""),
+            )
+        except Exception as exc:
+            _emit_direct_mautic_upgrade_receipt(
+                status="failed",
+                exit_code=1,
+                target_version=str(args.target or ""),
+                error=exc,
+            )
+            return 1
+        if rc == 0:
+            _emit_direct_mautic_upgrade_receipt(
+                status="succeeded",
+                exit_code=0,
+                target_version=str(args.target or ""),
+            )
+        else:
+            _emit_direct_mautic_upgrade_receipt(
+                status="failed",
+                exit_code=int(rc),
+                target_version=str(args.target or ""),
+                error=MauticUpgradeApplyError(
+                    "upgrade_apply",
+                    f"upgrade_returned_nonzero:{int(rc)}",
+                    "ReturnCode",
+                ),
+            )
         if rc == 0:
             _push_state_after_change(cfg, "mautic-upgrade-apply")
         return rc

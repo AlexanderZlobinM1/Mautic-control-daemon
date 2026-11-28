@@ -1,3 +1,11 @@
+## 1.7.46 - 2026-11-28
+
+- Emit one bounded typed terminal receipt from the canonical direct
+  `mcd-cli mautic-upgrade apply` command on both success and failure. Runtime
+  failures retain their exact upgrade stage and sanitized reason, allowing an
+  external scenario to report the nested cause without copying raw command
+  output or inventing a second executor.
+
 ## 1.7.45 - 2026-11-28
 
 - Preserve the external scenario runner's bounded, secret-filtered terminal

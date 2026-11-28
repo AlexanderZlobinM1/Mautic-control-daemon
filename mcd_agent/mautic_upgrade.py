@@ -107,6 +107,17 @@ class UpgradeMaintenanceGuard:
     dispatch_fence: Any = None
 
 
+class MauticUpgradeApplyError(RuntimeError):
+    """Preserve the exact failed upgrade stage for bounded CLI receipts."""
+
+    def __init__(self, stage: str, reason: str, error_type: str) -> None:
+        normalized_reason = " ".join(str(reason or error_type or "upgrade_failed").split())
+        super().__init__(normalized_reason[:512])
+        self.stage = str(stage or "upgrade_apply")
+        self.reason = normalized_reason[:512]
+        self.error_type = str(error_type or "RuntimeError")
+
+
 def _emit_maintenance_guard_failure(
     *,
     reason: str,
@@ -2287,6 +2298,7 @@ def run_upgrade_apply(
         )
     install_root, console = inst.root, inst.console_path
     current = _read_current_version(install_root, console, config.php_bin, config.mautic_run_as_user)
+    upgrade_stage = "preflight"
     patch_resolution: dict[str, Any] | None = None
     validated_patch_plan: dict[str, Any] | None = None
     patch_evidence_started = datetime.now(timezone.utc).isoformat()
@@ -2611,6 +2623,7 @@ def run_upgrade_apply(
             print("Cancelled")
             return 0
 
+    upgrade_stage = "maintenance_admission"
     try:
         if cross_line:
             require_live_release_authorization()
@@ -2619,11 +2632,18 @@ def run_upgrade_apply(
             operation_id=upgrade_operation_id,
             target_php_version=target_php_version,
         )
-    except Exception:
+    except Exception as exc:
         if target_stage is not None:
             target_stage.close()
-        raise
+        if isinstance(exc, MauticUpgradeApplyError):
+            raise
+        raise MauticUpgradeApplyError(
+            upgrade_stage,
+            str(exc),
+            type(exc).__name__,
+        ) from exc
     try:
+        upgrade_stage = "pre_upgrade_validation"
         if target_stage is not None:
             from mcd_agent.mautic_patch_plan import _target_version
             target_stage.verify_original(_resolve_composer_project_root(install_root) if chosen_mode == "composer" else install_root,
@@ -2652,6 +2672,7 @@ def run_upgrade_apply(
             print("Mautic import tag remediation rollback: " + str(restore.get("status", "clean")))
 
         if do_backup or prepared_target is not None:
+            upgrade_stage = "backup"
             backup_receipt = run_upgrade_os_operation(
                 config,
                 component="filesystem",
@@ -2718,6 +2739,7 @@ def run_upgrade_apply(
                 raise RuntimeError("Mautic JSON schema repair rejected or failed")
 
         if prepared_target is not None:
+            upgrade_stage = "source_upgrade"
             if cross_line:
                 require_live_release_authorization()
             elif not mcc_preflighted_single_instance:
@@ -2734,12 +2756,14 @@ def run_upgrade_apply(
                 backup_id=upgrade_backup_id,
             )
         elif chosen_mode == "zip":
+            upgrade_stage = "source_upgrade"
             if cross_line:
                 require_live_release_authorization()
             elif not mcc_preflighted_single_instance:
                 _require_release_approval(config, target, current)
             _apply_zip(config, install_root, console, config.php_bin, target, patch_hook)
         elif chosen_mode == "composer":
+            upgrade_stage = "source_upgrade"
             if cross_line:
                 require_live_release_authorization()
             elif not mcc_preflighted_single_instance:
@@ -2762,6 +2786,7 @@ def run_upgrade_apply(
         else:
             raise RuntimeError(f"Unsupported mode: {mode}")
 
+        upgrade_stage = "assetmapper_verification"
         _verify_assetmapper_upgrade(
             config,
             inst,
@@ -2773,6 +2798,7 @@ def run_upgrade_apply(
         # Restore transport dependencies for API senders after upgrade
         # (especially relevant for zip installs where update flow may drop composer deps).
         if prepared_target is None:
+            upgrade_stage = "sender_dependency_restore"
             ensure_mailer_packages_for_sender_config(
                 config=config,
                 root=install_root,
@@ -2791,6 +2817,7 @@ def run_upgrade_apply(
         if prepared_target is None and _parse_semver(current)[0] != 7 and _parse_semver(target)[0] == 7:
             _ensure_mautic7_locale_fix(config, install_root)
 
+        upgrade_stage = "version_verification"
         final_version = _read_current_version(install_root, console, config.php_bin, config.mautic_run_as_user)
         if _parse_semver(final_version) != _parse_semver(target):
             raise RuntimeError(f"Post-check failed: Mautic version is {final_version}, expected {target}")
@@ -2814,6 +2841,7 @@ def run_upgrade_apply(
                 flush=True,
             )
         if target_stage is not None:
+            upgrade_stage = "patch_verification"
             from mcd_agent.mautic_patch_stage import application_root
             from mcd_agent.mautic_patch_plan_v3 import verify_applied
             verification = verify_applied(str(application_root(install_root)), validated_patch_plan,
@@ -2830,6 +2858,7 @@ def run_upgrade_apply(
         if import_patch.get("status") == "error":
             raise RuntimeError("Import tag patch after upgrade failed: " + str(import_patch.get("reason")))
         if manual_system_upgrade:
+            upgrade_stage = "system_upgrade"
             from mcd_agent.mautic_patch_resolution import canonical_json_sha256
             system_evidence = {
                 "schema": "mcd-mautic-manual-system-upgrade-execution-v1",
@@ -2870,6 +2899,7 @@ def run_upgrade_apply(
                 raise
             print("MCD_MANUAL_SYSTEM_UPGRADE_EVIDENCE=" + json.dumps(system_evidence, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
         elif with_system_upgrade:
+            upgrade_stage = "system_upgrade"
             _apply_system_upgrade(
                 current,
                 target,
@@ -2879,11 +2909,13 @@ def run_upgrade_apply(
             )
             php_transition_applied = True
             config = replace(config, php_bin=rebind_php_after_system_upgrade(config.php_bin))
+        upgrade_stage = "post_upgrade_verification"
         _post_upgrade_verify(config, inst, target_php_version=target_php_version)
+        upgrade_stage = "version_cache"
         cache_count = _write_upgrade_version_cache(install_root, final_version)
         print(f"Mautic version cache refreshed: {final_version} ({cache_count} path(s))")
         print(f"Upgrade completed: {current} -> {final_version}")
-    except Exception:
+    except Exception as exc:
         rollback_state = {"available": bool(patch_evidence_outcomes), "attempted": False, "succeeded": False}
         if target_stage is not None:
             from mcd_agent.mautic_patch_plan_v3 import rollback as rollback_v3
@@ -2958,14 +2990,27 @@ def run_upgrade_apply(
             _exit_upgrade_maintenance(config, guard)
         except Exception as cleanup_error:
             print(f"WARN maintenance cleanup failed after upgrade error: {cleanup_error}")
-        raise
+        if isinstance(exc, MauticUpgradeApplyError):
+            raise
+        raise MauticUpgradeApplyError(
+            upgrade_stage,
+            str(exc),
+            type(exc).__name__,
+        ) from exc
     finally:
         if target_stage is not None:
             target_stage.close()
         if prepared_target is not None:
             prepared_target.close()
 
-    _exit_upgrade_maintenance(config, guard)
+    try:
+        _exit_upgrade_maintenance(config, guard)
+    except Exception as exc:
+        raise MauticUpgradeApplyError(
+            "maintenance_exit",
+            str(exc),
+            type(exc).__name__,
+        ) from exc
     return 0
 
 

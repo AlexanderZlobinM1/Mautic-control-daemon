@@ -54,7 +54,7 @@ def _runtime_release_fixture(root: Path) -> None:
         files.append(path)
     manifest = {
         "schema": "mcd-runtime-package-v1",
-        "version": "1.7.45",
+        "version": "1.7.46",
         "wheel": "wheel/mcd_agent.whl",
         "requirements": "requirements.txt",
         "payload_sha256": {
