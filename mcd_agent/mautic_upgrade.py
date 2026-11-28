@@ -189,6 +189,26 @@ def _pick_install_record(config: AgentConfig, root: str | None) -> MauticInstall
     return installs[0]
 
 
+def _config_for_install_runtime(config: AgentConfig, inst: MauticInstall) -> AgentConfig:
+    """Bind commands to the runtime facts of the selected registered instance."""
+    runtime_php = str(getattr(inst, "runtime_php_bin", "") or "").strip()
+    runtime_user = str(getattr(inst, "runtime_user", "") or "").strip()
+    if not runtime_php and not runtime_user:
+        return config
+    if (
+        not runtime_php
+        or not runtime_user
+        or not Path(runtime_php).is_absolute()
+        or re.fullmatch(r"[A-Za-z0-9_.-]+", runtime_user) is None
+    ):
+        raise RuntimeError("Registered Mautic instance runtime is incomplete")
+    return replace(
+        config,
+        php_bin=runtime_php,
+        mautic_run_as_user=runtime_user,
+    )
+
+
 def _pick_install(config: AgentConfig, root: str | None) -> tuple[str, str]:
     inst = _pick_install_record(config, root)
     return inst.root, inst.console_path
@@ -2296,6 +2316,7 @@ def run_upgrade_apply(
         raise RuntimeError(
             "Docker Mautic upgrades are image-managed; activate a new platform image instead"
         )
+    config = _config_for_install_runtime(config, inst)
     install_root, console = inst.root, inst.console_path
     current = _read_current_version(install_root, console, config.php_bin, config.mautic_run_as_user)
     upgrade_stage = "preflight"

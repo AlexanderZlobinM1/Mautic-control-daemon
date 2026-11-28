@@ -146,6 +146,13 @@ patch, migration, rollback и supervision поведением. После ус�
 тот же контур завершает cache clear, MCD перечитывает финальную версию и
 запускает inventory rescan.
 
+Перед первым чтением версии прямой upgrade привязывает PHP executable и
+run-as user к выбранной зарегистрированной instance/runtime записи. Если
+`runtime_php_bin` и `runtime_user` объявлены при регистрации, они являются
+фактическим runtime-контрактом этого инстанса для всех шагов upgrade, включая
+Composer, cache clear и post-check; host-global defaults не могут их
+перезаписать. Неполная runtime-пара блокируется до первой мутации.
+
 Локальный `mcd-cli` и команда, пришедшая от MCC, используют этот же MCD
 executor и тот же `execute`-путь; различается только адаптер входа: локальный
 CLI может передать локально staged-файл, а MCC передаёт только `instance_uid`.

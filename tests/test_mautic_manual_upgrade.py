@@ -150,9 +150,28 @@ class Install:
     console_path: str = "bin/console"
     runtime: str = "host"
     mautic_major: int = 7
+    runtime_php_bin: str | None = None
+    runtime_user: str | None = None
 
 
-def wire_upgrade(invocation, monkeypatch, kind="composer"):
+@dataclass(frozen=True)
+class UpgradeConfig:
+    php_bin: str
+    mautic_run_as_user: str
+    state_db_path: str
+    mcc_url: str
+    mcc_token: str
+
+
+def wire_upgrade(
+    invocation,
+    monkeypatch,
+    kind="composer",
+    *,
+    runtime_php_bin=None,
+    runtime_user=None,
+    runtime_calls=None,
+):
     root = Path(invocation["root"])
     if kind == "zip":
         (root / "composer.json").write_text('{"name":"mautic/core","require":{}}')
@@ -166,11 +185,29 @@ def wire_upgrade(invocation, monkeypatch, kind="composer"):
     monkeypatch.setattr("mcd_agent.mautic_patch_plan_v3.verify_applied", lambda *a, **kw: {"status": "success"})
     monkeypatch.setattr(upgrade, "_prepare_patch_target_stage", lambda *a, **kw: events.append("stage") or SimpleNamespace(close=lambda: None, verify_original=lambda *a: None))
     installed = [False]
-    cfg = SimpleNamespace(php_bin="php", mautic_run_as_user="www-data",
-                          state_db_path=str(root / "state.db"),
-                          mcc_url="https://mcc.example.test", mcc_token="test-shared-token")
-    monkeypatch.setattr(upgrade, "_pick_install_record", lambda *a: Install(str(root)))
-    monkeypatch.setattr(upgrade, "_read_current_version", lambda *a: invocation["target"] if installed[0] else "7.1.3")
+    cfg = UpgradeConfig(
+        php_bin="/usr/bin/php",
+        mautic_run_as_user="www-data",
+        state_db_path=str(root / "state.db"),
+        mcc_url="https://mcc.example.test",
+        mcc_token="test-shared-token",
+    )
+    monkeypatch.setattr(
+        upgrade,
+        "_pick_install_record",
+        lambda *a: Install(
+            str(root),
+            runtime_php_bin=runtime_php_bin,
+            runtime_user=runtime_user,
+        ),
+    )
+
+    def read_version(_root, _console, php_bin, run_as_user):
+        if runtime_calls is not None:
+            runtime_calls.append((php_bin, run_as_user))
+        return invocation["target"] if installed[0] else "7.1.3"
+
+    monkeypatch.setattr(upgrade, "_read_current_version", read_version)
 
     def deny(request, **kwargs):
         events.append("global_authorization")
@@ -221,6 +258,24 @@ def test_manual_latest_without_patch_plan_uses_regular_upgrade_path(invocation, 
     invocation.update(target="7.1.5", raw_plan=None, run_id=None)
     args, events = wire_upgrade(invocation, monkeypatch)
     assert upgrade.run_upgrade_apply(**args, mcc_preflighted_single_instance=True) == 0
+    assert events == ["maintenance", "permissions", "install", "cleanup"]
+
+
+def test_registered_runtime_php_and_user_override_global_upgrade_defaults(invocation, monkeypatch):
+    invocation.update(target="7.1.5", raw_plan=None, run_id=None)
+    runtime_calls = []
+    args, events = wire_upgrade(
+        invocation,
+        monkeypatch,
+        runtime_php_bin="/usr/local/bin/php",
+        runtime_user="mautic-runtime",
+        runtime_calls=runtime_calls,
+    )
+
+    assert upgrade.run_upgrade_apply(**args, mcc_preflighted_single_instance=True) == 0
+    assert runtime_calls
+    assert set(runtime_calls) == {("/usr/local/bin/php", "mautic-runtime")}
+    assert args["config"].php_bin == "/usr/bin/php"
     assert events == ["maintenance", "permissions", "install", "cleanup"]
 
 

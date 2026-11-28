@@ -1,3 +1,10 @@
+## 1.7.47 - 2026-11-28
+
+- Bind the canonical direct Mautic upgrade to the selected registered
+  instance's `runtime_php_bin` and `runtime_user`. Manual/image runtimes no
+  longer fall back to a different host-global PHP path during Composer cache
+  clear or other upgrade commands.
+
 ## 1.7.46 - 2026-11-28
 
 - Emit one bounded typed terminal receipt from the canonical direct
