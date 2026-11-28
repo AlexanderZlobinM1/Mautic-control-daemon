@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 from pathlib import Path
@@ -451,6 +452,102 @@ def test_execute_uses_state_synced_external_scenario_runner(monkeypatch, tmp_pat
     assert result["scenario"]["artifact_digest"] == digest
     assert result["cache_clear"]["status"] == "scenario_owned"
     assert context_args["target_version"] == ""
+
+
+def test_external_scenario_delivers_patch_plan_to_scenario_at_canonical_root(monkeypatch, tmp_path: Path):
+    from mcd_agent import commercial_detector, commercial_self_hosted
+    from mcd_agent import mautic_upgrade_scenario as scenario
+    from mcd_agent.mautic_patch_resolution import canonical_json_sha256, read_plan_file
+
+    artifact = tmp_path / "mautic-upgrade.sh"
+    artifact.write_bytes(b"#!/bin/sh\nexit 0\n")
+    wrapper = tmp_path / "project"
+    application = wrapper / "docroot"
+    (wrapper / "bin").mkdir(parents=True)
+    (wrapper / "bin" / "console").write_text("#!/usr/bin/env php\n", encoding="utf-8")
+    (wrapper / "composer.json").write_text("{}\n", encoding="utf-8")
+    (application / "app").mkdir(parents=True)
+    (application / "plugins").mkdir()
+    state_path = tmp_path / "state.sqlite3"
+    state_path.touch()
+    payload = b"fixture patch bytes"
+    plan = {
+        "run_id": "patch-run-1",
+        "patches": [],
+        "payloads": [{
+            "path": "patches/test.patch",
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "content_base64": base64.b64encode(payload).decode("ascii"),
+        }],
+    }
+    plan_sha256 = canonical_json_sha256(plan)
+    selected = {
+        "status": "selected",
+        "catalog_revision": "catalog-1",
+        "catalog_sha256": "a" * 64,
+        "plan_sha256": plan_sha256,
+        "plan": plan,
+    }
+    install = SimpleNamespace(
+        root=str(wrapper),
+        console_path=str(wrapper / "bin" / "console"),
+        runtime_php_bin="/usr/local/bin/php",
+        runtime_user="www-data",
+    )
+    config = SimpleNamespace(
+        state_db_path=str(state_path),
+        mcc_url="https://mcc.example.invalid",
+        command_timeout_sec=60,
+        php_bin="/usr/local/bin/php",
+        composer_bin="/usr/local/bin/composer",
+        mautic_run_as_user="www-data",
+    )
+    captured = {}
+
+    class FakeRunner:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def run(self, **kwargs):
+            captured.update(kwargs)
+            return {"status": "succeeded", "result": {"status": "succeeded"}}
+
+    monkeypatch.setattr(commercial_detector, "read_normalized_applicability_facts", lambda **_kwargs: {"schema": "facts", "facts": []})
+    monkeypatch.setattr(commercial_detector, "applicability_facts_digest", lambda _facts: "sha256:" + "1" * 64)
+    monkeypatch.setattr(commercial_self_hosted, "ExternalProcessPolicy", FakeRunner)
+    monkeypatch.setattr(commercial_self_hosted, "default_scenario_runner_argv", lambda: ["runner"])
+    monkeypatch.setattr(scenario, "_latest_upgrade_target", lambda *_args: "7.2.3")
+    monkeypatch.setattr(scenario, "_resolve_patch_plan", lambda *_args, **_kwargs: selected)
+    monkeypatch.setattr(scenario, "read_mautic_version_evidence_read_only", lambda _root: {"version": "7.2.3"})
+    monkeypatch.setattr("mcd_agent.install_type.detect_install_type", lambda _root: "composer")
+    monkeypatch.setattr("mcd_agent.mautic_patch_plan_v3.atomic_preflight", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("outer preflight must not run")))
+    monkeypatch.setattr("mcd_agent.mautic_patch_plan_v3.execute", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("outer patch apply must not run")))
+
+    result = scenario._run_external_scenario(
+        config=config,
+        install=install,
+        instance_uid="instance-1",
+        scenario_id="mautic-upgrade",
+        scenario_revision="1.0.1",
+        pin={"artifact_path": str(artifact), "artifact_digest": "sha256:" + hashlib.sha256(artifact.read_bytes()).hexdigest()},
+        source_version="7.2.0",
+        job={"job_id": "job-1", "command_id": "apply"},
+        inventory_rescan=lambda: (_ for _ in ()).throw(AssertionError("outer rescan must not run")),
+    )
+
+    parameters = captured["context"]["parameters"]
+    assert parameters["root"] == str(wrapper)
+    assert parameters["patch_application_root"] == str(application)
+    assert parameters["patch_plan_sha256"] == plan_sha256
+    assert parameters["patch_run_id"] == "patch-run-1"
+    plan_file = Path(parameters["patch_plan_file"])
+    assert plan_file.is_absolute()
+    assert plan_file.stat().st_mode & 0o777 == 0o600
+    assert json.loads(read_plan_file(str(plan_file), plan_sha256)) == plan
+    assert result["status"] == "succeeded"
+    assert result["patch"]["status"] == "scenario_owned"
+    assert result["cache_clear"]["status"] == "scenario_owned"
+    assert result["inventory_rescan"]["status"] == "scenario_owned"
 
 
 def test_external_scenario_failure_preserves_bounded_runner_receipt(monkeypatch, tmp_path: Path):

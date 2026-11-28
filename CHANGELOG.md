@@ -1,3 +1,11 @@
+## 1.7.50 - 2026-11-28
+
+- Deliver the MCC-selected immutable patch plan, SHA, run ID and canonical
+  application root to the external upgrade scenario. The scenario now owns the
+  documented upgrade, patch, cache-clear and rescan ordering through existing
+  `mcd-cli` operations.
+- Remove MCD's duplicate post-scenario patch application and inventory rescan.
+
 ## 1.7.49 - 2026-11-28
 
 - Remove the remaining agent-result key compatibility cleanup from runtime

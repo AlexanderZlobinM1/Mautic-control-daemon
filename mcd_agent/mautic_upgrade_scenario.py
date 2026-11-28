@@ -268,6 +268,7 @@ def _external_scenario_context(
     target_version: str,
     install_type: str,
     run_id: str,
+    patch_context: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Build only observed host/application facts for the generic runner."""
     from mcd_agent.commercial_detector import (
@@ -315,6 +316,8 @@ def _external_scenario_context(
         "composer_bin": composer,
         "runtime_php": php_version,
     }
+    if patch_context is not None:
+        parameters.update(dict(patch_context))
     context = {
         "schema": "mcd-scenario-executable-context-v1",
         "contract_version": "1.0",
@@ -372,6 +375,7 @@ def _run_external_scenario(
     )
     patch_cache = None
     patch = None
+    patch_context = None
     if selected is not None:
         plan = _mapping(selected.get("plan"), "mautic_upgrade_scenario_patch_plan_invalid")
         patch = {
@@ -381,7 +385,18 @@ def _run_external_scenario(
             "run_id": str(plan.get("run_id") or ""),
             "plan": plan,
         }
-        patch_cache = _stage_patch_plan(config, instance_uid, {"plan": plan})
+        patch_cache = _stage_patch_plan(config, instance_uid, selected)
+        try:
+            from mcd_agent.mautic_patch_stage import application_root
+            patch_application_root = str(application_root(str(install.root)))
+        except RuntimeError as exc:
+            raise MauticUpgradeScenarioError("mautic_upgrade_scenario_patch_root_invalid") from exc
+        patch_context = {
+            "patch_plan_file": patch_cache["plan_file"],
+            "patch_plan_sha256": patch_cache["plan_sha256"],
+            "patch_run_id": patch_cache["run_id"],
+            "patch_application_root": patch_application_root,
+        }
     run_id = str(job.get("job_id") or job.get("command_id") or "scenario")
     context, facts = _external_scenario_context(
         config=config,
@@ -394,6 +409,7 @@ def _run_external_scenario(
         target_version=target_version,
         install_type=install_type,
         run_id=run_id,
+        patch_context=patch_context,
     )
     runner = ExternalProcessPolicy(
         default_scenario_runner_argv(),
@@ -433,42 +449,17 @@ def _run_external_scenario(
             },
             "runner": runner_failure,
         }
-    patch_result: Mapping[str, Any] = {"status": "not_available"}
-    if patch is not None:
-        from mcd_agent.mautic_patch_plan_v3 import atomic_preflight, execute as execute_patch_plan
-        from mcd_agent.mautic_patch_fact_binding import bound_provider, needs_facts
-
-        plan = patch["plan"]
-        root = str(install.root)
-        facts_provider = bound_provider(config, root) if needs_facts(plan) else None
-        preflight = atomic_preflight(
-            root,
-            plan,
-            facts_provider=facts_provider,
-        )
-        accepted_facts = preflight.get("facts_receipt")
-        patch_result = execute_patch_plan(
-            root,
-            plan,
-            phase="post_source_install",
-            observed_major=int(source_version.split(".", 1)[0]),
-            facts_provider=facts_provider,
-            accepted_facts=accepted_facts,
-        )
-        if patch_result.get("status") != "success":
-            return {"status": "failed", "reason": "mautic_upgrade_scenario_patch_apply_failed", "scenario": {"id": scenario_id, "revision": scenario_revision}, "runner": runner_result, "patch": patch_result}
     final_version = read_mautic_version_evidence_read_only(str(install.root))
-    inventory = inventory_rescan() if inventory_rescan is not None else {"status": "not_configured"}
     return {
         "status": "succeeded",
         "scenario": {"id": scenario_id, "revision": scenario_revision, "artifact_digest": pin["artifact_digest"]},
         "instance_uid": instance_uid,
         "application_root": str(install.root),
         "runner": runner_result,
-        "patch": {"status": "staged_and_applied" if patch is not None else "not_available", "cache": patch_cache, "result": patch_result},
+        "patch": {"status": "scenario_owned" if patch is not None else "not_available", "cache": patch_cache},
         "cache_clear": {"status": "scenario_owned"},
         "final_version": final_version,
-        "inventory_rescan": inventory,
+        "inventory_rescan": {"status": "scenario_owned"},
     }
 
 
@@ -688,6 +679,22 @@ def _stage_patch_plan(config: Any, instance_uid: str, selected: Mapping[str, Any
     root = state_path.parent / "patches" / _identifier(instance_uid, "mautic_upgrade_scenario_instance_invalid") / run_id
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(root, 0o700)
+    from mcd_agent.mautic_patch_resolution import canonical_json_sha256
+    plan_sha256 = canonical_json_sha256(plan)
+    expected_plan_sha256 = str(selected.get("plan_sha256") or "").lower().removeprefix("sha256:")
+    if expected_plan_sha256 and (
+        not re.fullmatch(r"[0-9a-f]{64}", expected_plan_sha256)
+        or expected_plan_sha256 != plan_sha256
+    ):
+        raise MauticUpgradeScenarioError("mautic_upgrade_scenario_patch_plan_sha256_mismatch")
+    plan_file = root / "plan.json"
+    plan_temporary = root / ".plan.json.tmp"
+    with plan_temporary.open("wb") as handle:
+        os.chmod(plan_temporary, 0o600)
+        handle.write(canonical_json(plan) + b"\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(plan_temporary, plan_file)
     files: list[dict[str, Any]] = []
     for payload in plan.get("payloads", []) if isinstance(plan.get("payloads"), list) else []:
         item = _mapping(payload, "mautic_upgrade_scenario_patch_payload_invalid")
@@ -720,6 +727,8 @@ def _stage_patch_plan(config: Any, instance_uid: str, selected: Mapping[str, Any
         "status": "staged",
         "root": str(root),
         "run_id": run_id,
+        "plan_file": str(plan_file),
+        "plan_sha256": plan_sha256,
         "files": files,
     }
 
