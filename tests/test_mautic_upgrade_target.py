@@ -145,6 +145,53 @@ class MauticUpgradeTargetTests(unittest.TestCase):
                 self.assertFalse(pause_flag.exists())
                 restore_cron.assert_called_once_with(cfg)
 
+    def test_upgrade_maintenance_guard_removes_owned_pause_when_cron_stop_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            pause_flag = Path(td) / "scheduler.pause"
+            cfg = SimpleNamespace(scheduler_pause_flag_path=str(pause_flag))
+            with (
+                patch(
+                    "mcd_agent.mautic_upgrade.stop_cron_service",
+                    side_effect=RuntimeError("external service probe failed"),
+                ),
+                patch(
+                    "mcd_agent.mautic_upgrade.stop_running_tasks_for_maintenance"
+                ) as stop_tasks,
+            ):
+                output = io.StringIO()
+                with redirect_stdout(output), self.assertRaisesRegex(
+                    RuntimeError, "unable to stop cron service"
+                ):
+                    _enter_upgrade_maintenance(cfg)
+
+                self.assertFalse(pause_flag.exists())
+                stop_tasks.assert_not_called()
+                evidence_lines = [
+                    line.split("=", 1)[1]
+                    for line in output.getvalue().splitlines()
+                    if line.startswith("MCD_MAINTENANCE_GUARD_EVIDENCE=")
+                ]
+                self.assertEqual(len(evidence_lines), 1)
+                evidence = json.loads(evidence_lines[0])
+                self.assertEqual(evidence["reason"], "cron_stop_failed")
+                self.assertEqual(evidence["error_type"], "RuntimeError")
+                self.assertTrue(evidence["cleanup"]["pause_owned"])
+                self.assertTrue(evidence["cleanup"]["pause_removed"])
+
+    def test_upgrade_maintenance_guard_preserves_existing_pause_when_cron_stop_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            pause_flag = Path(td) / "scheduler.pause"
+            pause_flag.write_text("paused\n", encoding="utf-8")
+            cfg = SimpleNamespace(scheduler_pause_flag_path=str(pause_flag))
+            with patch(
+                "mcd_agent.mautic_upgrade.stop_cron_service",
+                side_effect=RuntimeError("external service probe failed"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "unable to stop cron service"):
+                    _enter_upgrade_maintenance(cfg)
+
+                self.assertTrue(pause_flag.exists())
+
     def test_upgrade_maintenance_guard_preserves_existing_maintenance(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             pause_flag = Path(td) / "scheduler.pause"

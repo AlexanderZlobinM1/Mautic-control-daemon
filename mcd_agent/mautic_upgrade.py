@@ -269,11 +269,36 @@ def _enter_upgrade_maintenance_locked(
     if marker.exists():
         print(f"Maintenance guard: cron stop marker already present ({marker}); leaving ownership unchanged")
     else:
-        cron_stop = stop_cron_service(
-            config,
-            operation_id=operation_id,
-            target_php_version=target_php_version,
-        )
+        try:
+            cron_stop = stop_cron_service(
+                config,
+                operation_id=operation_id,
+                target_php_version=target_php_version,
+            )
+        except Exception as exc:
+            pause_removed = False
+            if owned_pause_flag and pause_flag.exists():
+                try:
+                    pause_flag.unlink()
+                    pause_removed = not pause_flag.exists()
+                except OSError:
+                    pause_removed = False
+            _emit_maintenance_guard_failure(
+                reason="cron_stop_failed",
+                error_type=type(exc).__name__,
+                cleanup={
+                    "cron_restore": {
+                        "requested": False,
+                        "reason": "cron_stop_did_not_complete",
+                    },
+                    "pause_owned": bool(owned_pause_flag),
+                    "pause_removed": bool(pause_removed),
+                    "dispatch_fence": "held_until_failure_evidence_emitted",
+                },
+            )
+            raise RuntimeError(
+                "Maintenance guard failed: unable to stop cron service"
+            ) from exc
         if not bool(cron_stop.get("ok", False)):
             pause_removed = False
             if owned_pause_flag and pause_flag.exists():

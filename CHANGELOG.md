@@ -1,3 +1,10 @@
+## 1.7.40 - 2026-11-28
+
+- Restore a scheduler pause owned by the current Mautic upgrade attempt when
+  external cron quiescence raises before the maintenance guard is established.
+  The failure now emits bounded maintenance evidence and releases the dispatch
+  fence without leaving future scheduler or upgrade work silently paused.
+
 ## 1.7.39 - 2026-11-28
 
 - Resolve an explicit upgrade root from MCD's durable registered-instance
