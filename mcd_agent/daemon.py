@@ -8206,28 +8206,6 @@ def _empty_leads_cleanup_retry_delay(config: AgentConfig) -> float:
         return 1.0
 
 
-def _service_cleanup_ring_select(
-    ring: deque[tuple[str, str]],
-    root: str,
-    due_services: Sequence[str],
-    *,
-    worker_limit: int = 1,
-    active_workers: int = 0,
-) -> str:
-    """Admit due maintenance work and select at most one host-wide job."""
-    if int(active_workers) >= max(1, int(worker_limit)):
-        return ""
-    due = [str(name) for name in due_services]
-    for service_name in due:
-        item = (str(root), service_name)
-        if item not in ring:
-            ring.append(item)
-    if not ring or ring[0][0] != str(root):
-        return ""
-    _, selected = ring.popleft()
-    return selected if selected in due else ""
-
-
 def _maintenance_cleanup_ring_load(store: object) -> deque[tuple[str, str]]:
     """Restore the host-wide maintenance queue without coupling to dispatch state."""
     try:
@@ -8266,10 +8244,75 @@ def _maintenance_cleanup_ring_save(
                 "schema": _MAINTENANCE_CLEANUP_RING_SCHEMA,
                 "updated_at": float(now_ts),
                 "items": [[str(root), str(service)] for root, service in ring],
+                "cursor": (
+                    [str(ring[0][0]), str(ring[0][1])]
+                    if ring
+                    else None
+                ),
             },
         )
     except Exception as exc:
         logging.warning("maintenance cleanup ring persist failed: %s", exc)
+
+
+def _maintenance_cleanup_enabled_items(
+    config: AgentConfig,
+    installs: Sequence[object],
+) -> list[tuple[str, str]]:
+    """Return the current tile-enabled cleanup items in stable host order."""
+    result: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for inst in installs:
+        root = str(getattr(inst, "root", "") or "").strip()
+        if not root or not getattr(inst, "db", None) or not _scheduler_install_is_runnable(inst):
+            continue
+        empty_enabled = bool(_empty_leads_cleanup_effective_setting(config, inst)[0])
+        page_enabled = bool(_page_hits_orphan_cleanup_effective_setting(config, inst)[0])
+        for service, enabled in (
+            ("empty_leads_cleanup", empty_enabled),
+            ("page_hits_orphan_cleanup", page_enabled),
+        ):
+            item = (root, service)
+            if enabled and item not in seen:
+                result.append(item)
+                seen.add(item)
+    return result
+
+
+def _maintenance_cleanup_ring_reconcile(
+    config: AgentConfig,
+    ring: deque[tuple[str, str]],
+    installs: Sequence[object],
+    *,
+    completed_item: tuple[str, str] | None = None,
+) -> None:
+    """Rebuild the service circle from current tile state without waiting for due."""
+    enabled_items = _maintenance_cleanup_enabled_items(config, installs)
+    enabled = set(enabled_items)
+    kept: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    completed = tuple(completed_item) if completed_item is not None else None
+    for item in ring:
+        pair = (str(item[0]), str(item[1]))
+        if pair not in enabled or pair == completed or pair in seen:
+            continue
+        kept.append(pair)
+        seen.add(pair)
+    for item in enabled_items:
+        if item not in seen and item != completed:
+            kept.append(item)
+            seen.add(item)
+    if completed is not None and completed in enabled:
+        kept.append(completed)
+    ring.clear()
+    ring.extend(kept)
+
+
+def _maintenance_cleanup_ring_paused(
+    scheduler_paused: bool,
+    backup_paused: bool,
+) -> bool:
+    return bool(scheduler_paused or backup_paused)
 
 
 def _maintenance_cleanup_ring_position(
@@ -8430,13 +8473,11 @@ def _run_page_hits_cleanup_ring_item(
             batch_size=batch_size,
         )
         message_deleted = int(message_result.get("deleted", 0) or 0)
-        requeue = bool((total_deleted > 0 and stop_reason != "empty") or message_deleted > 0)
-        page_hits_orphan_cleanup_active[root] = requeue and last_deleted > 0
-        if schedule_occurrence and not requeue:
+        requeue = bool(enabled)
+        page_hits_orphan_cleanup_active[root] = bool(enabled)
+        if schedule_occurrence and not enabled:
             page_hits_orphan_cleanup_done_window_keys[root] = schedule_occurrence
             page_hits_orphan_cleanup_window_counts[root] = page_hits_orphan_cleanup_window_counts.get(root, 0) + 1
-        if requeue and (root, "page_hits_orphan_cleanup") not in ring:
-            ring.append((root, "page_hits_orphan_cleanup"))
         receipt = {
             **base_receipt,
             "event": "delete" if total_deleted or message_deleted else "idle",
@@ -8445,7 +8486,7 @@ def _run_page_hits_cleanup_ring_item(
             "preview_count": preview_count,
             "last_deleted": last_deleted,
             "result": dict(result),
-            "next_due": now if requeue else now + float(interval),
+            "next_due": now,
         }
         _maintenance_cleanup_receipt_save(store, root, "page_hits_orphan_cleanup", receipt, finished_at=now)
         logging.info(
@@ -8459,7 +8500,7 @@ def _run_page_hits_cleanup_ring_item(
             ring_position,
         )
     except CleanupBusy as exc:
-        next_due = now + _empty_leads_cleanup_retry_delay(config)
+        next_due = now
         if (root, "page_hits_orphan_cleanup") not in ring:
             ring.append((root, "page_hits_orphan_cleanup"))
         _maintenance_cleanup_receipt_save(
@@ -8470,7 +8511,7 @@ def _run_page_hits_cleanup_ring_item(
             finished_at=now,
         )
     except Exception as exc:
-        next_due = now + _empty_leads_cleanup_retry_delay(config)
+        next_due = now
         if (root, "page_hits_orphan_cleanup") not in ring:
             ring.append((root, "page_hits_orphan_cleanup"))
         _maintenance_cleanup_receipt_save(
@@ -8494,164 +8535,16 @@ def _maintenance_cleanup_ring_admit(
     ring: deque[tuple[str, str]],
     *,
     now: float,
-    cluster_cron_allowed: bool,
-    empty_leads_cleanup_state_cache: dict[str, dict[str, Any]],
-    last_empty_leads_cleanup_ts: dict[str, float],
-    empty_leads_cleanup_window_counts: dict[str, int],
-    empty_leads_cleanup_window_keys: dict[str, str],
-    empty_leads_cleanup_done_window_keys: dict[str, str],
-    last_page_hits_orphan_cleanup_ts: dict[str, float],
-    page_hits_orphan_cleanup_active: dict[str, bool],
-    page_hits_orphan_cleanup_window_counts: dict[str, int],
-    page_hits_orphan_cleanup_window_keys: dict[str, str],
-    page_hits_orphan_cleanup_done_window_keys: dict[str, str],
 ) -> dict[str, object]:
-    """Admit the live tile schedule into the independent host service ring.
-
-    This deliberately reads ``installs`` directly.  It does not use ordinary
-    pending roots, planner rings, lifecycle gates, or a rebuild result.  A
-    queued item remains durable until its own lane consumes it.
-    """
-    live_by_root: dict[str, object] = {}
-    known: set[tuple[str, str]] = set(ring)
-    for inst in installs:
-        root = str(getattr(inst, "root", "") or "").strip()
-        if not root or not getattr(inst, "db", None) or not _scheduler_install_is_runnable(inst):
-            continue
-        live_by_root[root] = inst
-        empty_setting = _empty_leads_cleanup_effective_setting(config, inst)
-        (
-            empty_enabled,
-            empty_interval,
-            _empty_mode,
-            empty_schedule_type,
-            empty_cron_expr,
-            _empty_batch_size,
-            _empty_age_days,
-            empty_window_min,
-            empty_window_start,
-            empty_window_end,
-            empty_max_runs,
-        ) = empty_setting
-        state = empty_leads_cleanup_state_cache.get(root)
-        if state is None:
-            state = _empty_leads_cleanup_state_load(store, root)
-            empty_leads_cleanup_state_cache[root] = state
-        empty_pending = _empty_leads_cleanup_pending_due(state, now)
-        previous_empty_receipt = state.get("receipt") if isinstance(state, Mapping) else {}
-        if not isinstance(previous_empty_receipt, Mapping):
-            previous_empty_receipt = {}
-        empty_in_window, empty_window_key = _cleanup_session_key(
-            schedule_type=empty_schedule_type,
-            now_local=datetime.now(),
-            now_epoch=now,
-            interval_sec=empty_interval,
-            cron_expr=empty_cron_expr,
-            window_min=empty_window_min,
-            window_start=empty_window_start,
-            window_end=empty_window_end,
-        )
-        empty_due = bool(
-            empty_window_key
-            and empty_in_window
-            and (
-                float(
-                    last_empty_leads_cleanup_ts.get(root, 0.0)
-                    or state.get("finished_at", 0.0)
-                    or 0.0
-                ) <= 0
-                or now
-                - float(
-                    last_empty_leads_cleanup_ts.get(root, 0.0)
-                    or state.get("finished_at", 0.0)
-                    or 0.0
-                )
-                >= max(1.0, float(config.dispatch_interval_sec))
-            )
-        )
-        if empty_window_key:
-            if empty_leads_cleanup_window_keys.get(root) != empty_window_key:
-                empty_leads_cleanup_window_keys[root] = empty_window_key
-                empty_leads_cleanup_window_counts[root] = 0
-            if (
-                empty_leads_cleanup_done_window_keys.get(root) == empty_window_key
-                or (
-                    previous_empty_receipt.get("event") == "idle"
-                    and str(previous_empty_receipt.get("schedule_occurrence") or "") == empty_window_key
-                )
-            ):
-                empty_due = False
-            if empty_max_runs > 0 and empty_leads_cleanup_window_counts.get(root, 0) >= empty_max_runs and not empty_pending:
-                empty_due = False
-        if empty_enabled and cluster_cron_allowed and (empty_due or empty_pending):
-            item = (root, "empty_leads_cleanup")
-            if item not in known:
-                ring.append(item)
-                known.add(item)
-
-        (
-            page_enabled,
-            page_interval,
-            page_schedule_type,
-            page_cron_expr,
-            page_window_min,
-            page_window_start,
-            page_window_end,
-            _page_batch_size,
-            page_batches,
-            _page_sleep_sec,
-            _page_grace_min,
-            _page_max_run_sec,
-        ) = _page_hits_orphan_cleanup_effective_setting(config, inst)
-        previous_page_receipt = _maintenance_cleanup_receipt_load(store, root, "page_hits_orphan_cleanup")
-        page_pending = bool(page_hits_orphan_cleanup_active.get(root, False))
-        page_in_window, page_window_key = _cleanup_session_key(
-            schedule_type=page_schedule_type,
-            now_local=datetime.now(),
-            now_epoch=now,
-            interval_sec=page_interval,
-            cron_expr=page_cron_expr,
-            window_min=page_window_min,
-            window_start=page_window_start,
-            window_end=page_window_end,
-        )
-        page_due = bool(
-            page_window_key
-            and page_in_window
-            and (
-                float(
-                    last_page_hits_orphan_cleanup_ts.get(root, 0.0)
-                    or previous_page_receipt.get("finished_at", 0.0)
-                    or 0.0
-                ) <= 0
-                or now
-                - float(
-                    last_page_hits_orphan_cleanup_ts.get(root, 0.0)
-                    or previous_page_receipt.get("finished_at", 0.0)
-                    or 0.0
-                )
-                >= max(1.0, float(config.dispatch_interval_sec))
-            )
-        )
-        if page_window_key:
-            if page_hits_orphan_cleanup_window_keys.get(root) != page_window_key:
-                page_hits_orphan_cleanup_window_keys[root] = page_window_key
-                page_hits_orphan_cleanup_window_counts[root] = 0
-            if (
-                (
-                    page_hits_orphan_cleanup_done_window_keys.get(root) == page_window_key
-                    or str(previous_page_receipt.get("schedule_occurrence") or "") == page_window_key
-                )
-                and not page_pending
-            ):
-                page_due = False
-            if page_batches > 0 and page_hits_orphan_cleanup_window_counts.get(root, 0) >= page_batches and not page_pending:
-                page_due = False
-        if page_enabled and cluster_cron_allowed and (page_due or page_pending):
-            item = (root, "page_hits_orphan_cleanup")
-            if item not in known:
-                ring.append(item)
-                known.add(item)
+    """Reconcile the host service ring from the current tile state."""
+    live_by_root = {
+        str(getattr(inst, "root", "") or "").strip(): inst
+        for inst in installs
+        if str(getattr(inst, "root", "") or "").strip()
+        and getattr(inst, "db", None)
+        and _scheduler_install_is_runnable(inst)
+    }
+    _maintenance_cleanup_ring_reconcile(config, ring, list(live_by_root.values()))
     _maintenance_cleanup_ring_save(store, ring, now_ts=now)
     return live_by_root
 
@@ -8766,7 +8659,7 @@ def _run_empty_leads_cleanup_ring_item(
             cutoff_utc=query_cutoff_utc,
         )
         deleted = int(result.get("total_deleted", 0) or 0)
-        next_due = now if deleted > 0 else now + float(interval)
+        next_due = now
         receipt = {
             **base_receipt,
             "event": "delete" if deleted > 0 else "idle",
@@ -8780,7 +8673,7 @@ def _run_empty_leads_cleanup_ring_item(
             root,
             status="pending" if deleted > 0 else "idle",
             now_ts=now,
-            next_retry_at=now if deleted > 0 else next_due,
+            next_retry_at=now,
             pending_since=pending_since if deleted > 0 else None,
             attempts=attempts,
             receipt=receipt,
@@ -8788,10 +8681,8 @@ def _run_empty_leads_cleanup_ring_item(
         _maintenance_cleanup_receipt_save(store, root, "empty_leads_cleanup", receipt, finished_at=now)
         last_empty_leads_cleanup_ts[root] = now
         last_empty_leads_cleanup_idle_ts[root] = 0.0 if deleted > 0 else now
-        if schedule_occurrence and deleted <= 0:
+        if schedule_occurrence and not enabled:
             empty_leads_cleanup_done_window_keys[root] = schedule_occurrence
-        if deleted > 0 and (root, "empty_leads_cleanup") not in ring:
-            ring.append((root, "empty_leads_cleanup"))
         logging.info(
             "[%s] empty_leads_cleanup ring %s age_days=%s cutoff_utc=%s deleted=%s next_due=%s ring_position=%s",
             root,
@@ -23882,57 +23773,62 @@ def run_loop(
             while not maintenance_cleanup_stop.is_set():
                 with maintenance_cleanup_lock:
                     if not maintenance_cleanup_ring:
+                        queued_item = None
+                    elif _maintenance_cleanup_ring_paused(
+                        scheduler_dispatch_pause_active,
+                        backup_dispatch_pause_active,
+                    ):
+                        queued_item = None
+                    else:
+                        queued_item = maintenance_cleanup_ring[0]
+                    if queued_item is None:
                         break
-                    queued_root, queued_service = maintenance_cleanup_ring[0]
+                    queued_root, queued_service = queued_item
                     queued_inst = maintenance_cleanup_installs_by_root.get(queued_root)
                     if queued_inst is None:
-                        maintenance_cleanup_ring.popleft()
-                        _maintenance_cleanup_ring_save(store, maintenance_cleanup_ring, now_ts=time.time())
-                        continue
-                    selected_service = _service_cleanup_ring_select(
-                        maintenance_cleanup_ring,
-                        queued_root,
-                        [queued_service],
-                        worker_limit=1,
-                        active_workers=0,
-                    )
-                    if not selected_service:
                         break
                     _maintenance_cleanup_ring_save(store, maintenance_cleanup_ring, now_ts=time.time())
-                    worker_now = time.time()
-                    worker_config = config
-                    if selected_service == "empty_leads_cleanup":
-                        _run_empty_leads_cleanup_ring_item(
-                            worker_config,
-                            store,
-                            queued_inst,
-                            maintenance_cleanup_ring,
-                            now=worker_now,
-                            now_utc=datetime.now(timezone.utc),
-                            ring_position=0,
-                            empty_leads_cleanup_state_cache=empty_leads_cleanup_state_cache,
-                            last_empty_leads_cleanup_ts=last_empty_leads_cleanup_ts,
-                            last_empty_leads_cleanup_idle_ts=last_empty_leads_cleanup_idle_ts,
-                            empty_leads_cleanup_window_counts=empty_leads_cleanup_window_counts,
-                            empty_leads_cleanup_window_keys=empty_leads_cleanup_window_keys,
-                            empty_leads_cleanup_done_window_keys=empty_leads_cleanup_done_window_keys,
-                        )
-                    elif selected_service == "page_hits_orphan_cleanup":
-                        _run_page_hits_cleanup_ring_item(
-                            worker_config,
-                            store,
-                            queued_inst,
-                            maintenance_cleanup_ring,
-                            now=worker_now,
-                            now_utc=datetime.now(timezone.utc),
-                            ring_position=0,
-                            page_hits_orphan_cleanup_active=page_hits_orphan_cleanup_active,
-                            page_hits_orphan_cleanup_window_counts=page_hits_orphan_cleanup_window_counts,
-                            page_hits_orphan_cleanup_done_window_keys=page_hits_orphan_cleanup_done_window_keys,
-                        )
-                    else:
-                        logging.warning("[%s] unknown maintenance cleanup service: %s", queued_root, selected_service)
-                        _maintenance_cleanup_ring_save(store, maintenance_cleanup_ring, now_ts=time.time())
+                worker_now = time.time()
+                worker_config = config
+                if queued_service == "empty_leads_cleanup":
+                    _run_empty_leads_cleanup_ring_item(
+                        worker_config,
+                        store,
+                        queued_inst,
+                        maintenance_cleanup_ring,
+                        now=worker_now,
+                        now_utc=datetime.now(timezone.utc),
+                        ring_position=0,
+                        empty_leads_cleanup_state_cache=empty_leads_cleanup_state_cache,
+                        last_empty_leads_cleanup_ts=last_empty_leads_cleanup_ts,
+                        last_empty_leads_cleanup_idle_ts=last_empty_leads_cleanup_idle_ts,
+                        empty_leads_cleanup_window_counts=empty_leads_cleanup_window_counts,
+                        empty_leads_cleanup_window_keys=empty_leads_cleanup_window_keys,
+                        empty_leads_cleanup_done_window_keys=empty_leads_cleanup_done_window_keys,
+                    )
+                elif queued_service == "page_hits_orphan_cleanup":
+                    _run_page_hits_cleanup_ring_item(
+                        worker_config,
+                        store,
+                        queued_inst,
+                        maintenance_cleanup_ring,
+                        now=worker_now,
+                        now_utc=datetime.now(timezone.utc),
+                        ring_position=0,
+                        page_hits_orphan_cleanup_active=page_hits_orphan_cleanup_active,
+                        page_hits_orphan_cleanup_window_counts=page_hits_orphan_cleanup_window_counts,
+                        page_hits_orphan_cleanup_done_window_keys=page_hits_orphan_cleanup_done_window_keys,
+                    )
+                else:
+                    logging.warning("[%s] unknown maintenance cleanup service: %s", queued_root, queued_service)
+                with maintenance_cleanup_lock:
+                    _maintenance_cleanup_ring_reconcile(
+                        worker_config,
+                        maintenance_cleanup_ring,
+                        list(maintenance_cleanup_installs_by_root.values()),
+                        completed_item=(queued_root, queued_service),
+                    )
+                    _maintenance_cleanup_ring_save(store, maintenance_cleanup_ring, now_ts=time.time())
 
     maintenance_cleanup_thread = threading.Thread(
         target=_maintenance_cleanup_worker,
@@ -27067,10 +26963,6 @@ def run_loop(
             running=running,
             enabled=cluster_cron_allowed,
         )
-        maintenance_cleanup_worker_limit = max(
-            1,
-            int(getattr(config, "maintenance_cleanup_workers", 1) or 1),
-        )
         with maintenance_cleanup_lock:
             admitted_maintenance_installs = _maintenance_cleanup_ring_admit(
                 config,
@@ -27078,24 +26970,10 @@ def run_loop(
                 store,
                 maintenance_cleanup_ring,
                 now=now,
-                cluster_cron_allowed=cluster_cron_allowed,
-                empty_leads_cleanup_state_cache=empty_leads_cleanup_state_cache,
-                last_empty_leads_cleanup_ts=last_empty_leads_cleanup_ts,
-                empty_leads_cleanup_window_counts=empty_leads_cleanup_window_counts,
-                empty_leads_cleanup_window_keys=empty_leads_cleanup_window_keys,
-                empty_leads_cleanup_done_window_keys=empty_leads_cleanup_done_window_keys,
-                last_page_hits_orphan_cleanup_ts=last_page_hits_orphan_cleanup_ts,
-                page_hits_orphan_cleanup_active=page_hits_orphan_cleanup_active,
-                page_hits_orphan_cleanup_window_counts=page_hits_orphan_cleanup_window_counts,
-                page_hits_orphan_cleanup_window_keys=page_hits_orphan_cleanup_window_keys,
-                page_hits_orphan_cleanup_done_window_keys=page_hits_orphan_cleanup_done_window_keys,
             )
             maintenance_cleanup_installs_by_root.clear()
             maintenance_cleanup_installs_by_root.update(admitted_maintenance_installs)
         maintenance_cleanup_wakeup.set()
-        # The dedicated worker owns the service ring. The ordinary dispatcher
-        # must never execute or wait for a maintenance item.
-        maintenance_cleanup_workers_started = maintenance_cleanup_worker_limit
         for inst in _iter_instances_with_root_dispatch_gate(
             dispatch_installs,
             busy_roots=main_dispatch_busy_roots,
@@ -29052,381 +28930,7 @@ def run_loop(
                     mautic_lock_cleanup_backup_reason or "backup_guard",
                 )
 
-            (
-                page_hits_cleanup_enabled,
-                page_hits_cleanup_interval,
-                page_hits_cleanup_schedule_type,
-                page_hits_cleanup_cron_expr,
-                page_hits_cleanup_window_min,
-                page_hits_cleanup_window_start,
-                page_hits_cleanup_window_end,
-                page_hits_cleanup_batch_size,
-                page_hits_cleanup_batches,
-                page_hits_cleanup_sleep_sec,
-                page_hits_cleanup_grace_min,
-                page_hits_cleanup_max_run_sec,
-            ) = _page_hits_orphan_cleanup_effective_setting(config, inst)
-            last_page_hits_cleanup = last_page_hits_orphan_cleanup_ts.get(root, 0.0)
-            page_hits_cleanup_backup_running = bool(backup_thread is not None and backup_thread.is_alive()) or backup_lock_active(
-                config
-            )
-            page_hits_cleanup_backup_pause, page_hits_cleanup_backup_reason = _backup_dispatch_pause_state(
-                config,
-                backup_running=page_hits_cleanup_backup_running,
-                now_local=dt,
-            )
-            page_hits_cleanup_in_window, page_hits_cleanup_window_key = _cleanup_session_key(
-                schedule_type=page_hits_cleanup_schedule_type,
-                now_local=datetime.now(),
-                now_epoch=now,
-                interval_sec=page_hits_cleanup_interval,
-                cron_expr=page_hits_cleanup_cron_expr,
-                window_min=page_hits_cleanup_window_min,
-                window_start=page_hits_cleanup_window_start,
-                window_end=page_hits_cleanup_window_end,
-            )
-            page_hits_cleanup_pending_due = bool(page_hits_orphan_cleanup_active.get(root, False))
-            page_hits_cleanup_due = (
-                bool(page_hits_cleanup_window_key)
-                and page_hits_cleanup_in_window
-                and (last_page_hits_cleanup <= 0 or now - last_page_hits_cleanup >= max(1.0, float(config.dispatch_interval_sec)))
-            )
-            if page_hits_cleanup_window_key:
-                if page_hits_orphan_cleanup_window_keys.get(root) != page_hits_cleanup_window_key:
-                    page_hits_orphan_cleanup_window_keys[root] = page_hits_cleanup_window_key
-                    page_hits_orphan_cleanup_window_counts[root] = 0
-                if page_hits_orphan_cleanup_done_window_keys.get(root) == page_hits_cleanup_window_key and not page_hits_cleanup_pending_due:
-                    page_hits_cleanup_due = False
-                if (
-                    page_hits_cleanup_batches > 0
-                    and page_hits_orphan_cleanup_window_counts.get(root, 0) >= page_hits_cleanup_batches
-                    and not page_hits_cleanup_pending_due
-                ):
-                    page_hits_cleanup_due = False
-            page_hits_cleanup_due = (
-                page_hits_cleanup_enabled
-                and cluster_cron_allowed
-                and (page_hits_cleanup_due or page_hits_cleanup_pending_due)
-            )
-            page_hits_cleanup_cutoff_utc = (
-                now_utc - timedelta(minutes=page_hits_cleanup_grace_min)
-            ).strftime("%Y-%m-%d %H:%M:%S")
-            if (
-                page_hits_cleanup_enabled
-                and cluster_cron_allowed
-                and page_hits_cleanup_in_window
-                and page_hits_cleanup_backup_pause
-                and bool(page_hits_cleanup_window_key)
-            ):
-                logging.info(
-                    "[%s] page_hits_orphan_cleanup skipped: backup guard active (%s)",
-                    root,
-                    page_hits_cleanup_backup_reason or "backup_guard",
-                )
-
-            (
-                empty_cleanup_enabled,
-                empty_cleanup_interval,
-                empty_cleanup_mode,
-                empty_cleanup_schedule_type,
-                empty_cleanup_cron_expr,
-                empty_cleanup_batch_size,
-                empty_cleanup_min_contact_age_days,
-                empty_cleanup_window_min,
-                empty_cleanup_window_start,
-                empty_cleanup_window_end,
-                empty_cleanup_max_runs_per_window,
-            ) = _empty_leads_cleanup_effective_setting(
-                config,
-                inst,
-            )
-            empty_cleanup_cutoff_utc = (
-                now_utc - timedelta(days=empty_cleanup_min_contact_age_days)
-            ).strftime("%Y-%m-%d %H:%M:%S")
-            empty_cleanup_query_cutoff_utc = (
-                empty_cleanup_cutoff_utc if empty_cleanup_min_contact_age_days > 0 else None
-            )
-            if root not in empty_leads_cleanup_state_cache:
-                empty_leads_cleanup_state_cache[root] = _empty_leads_cleanup_state_load(store, root)
-            empty_cleanup_state = empty_leads_cleanup_state_cache.get(root, {})
-            empty_cleanup_pending_due = _empty_leads_cleanup_pending_due(empty_cleanup_state, now)
-            last_empty_cleanup = last_empty_leads_cleanup_ts.get(root, 0.0)
-            empty_cleanup_due = False
-            empty_cleanup_in_window = False
-            empty_cleanup_window_key = ""
-            empty_cleanup_in_window, empty_cleanup_window_key = _cleanup_session_key(
-                schedule_type=empty_cleanup_schedule_type,
-                now_local=datetime.now(),
-                now_epoch=now,
-                interval_sec=empty_cleanup_interval,
-                cron_expr=empty_cleanup_cron_expr,
-                window_min=empty_cleanup_window_min,
-                window_start=empty_cleanup_window_start,
-                window_end=empty_cleanup_window_end,
-            )
-
-            # All cleanup schedule modes share the same drain-loop semantics:
-            # a schedule occurrence opens a cleanup session, MCD runs one SQL
-            # batch per dispatch tick, and the session stops only when a pass
-            # deletes zero rows or the configured repeat limit is reached.
-            empty_cleanup_due = (
-                bool(empty_cleanup_window_key)
-                and empty_cleanup_in_window
-                and (last_empty_cleanup <= 0 or now - last_empty_cleanup >= max(1.0, float(config.dispatch_interval_sec)))
-            )
-            if empty_cleanup_window_key:
-                if empty_leads_cleanup_window_keys.get(root) != empty_cleanup_window_key:
-                    empty_leads_cleanup_window_keys[root] = empty_cleanup_window_key
-                    empty_leads_cleanup_window_counts[root] = 0
-                if empty_leads_cleanup_done_window_keys.get(root) == empty_cleanup_window_key:
-                    empty_cleanup_due = False
-                if (
-                    empty_cleanup_max_runs_per_window > 0
-                    and empty_leads_cleanup_window_counts.get(root, 0) >= empty_cleanup_max_runs_per_window
-                ):
-                    empty_cleanup_due = False
-            service_cleanup_candidates: list[str] = []
-            if (
-                empty_cleanup_enabled
-                and cluster_cron_allowed
-                and (empty_cleanup_due or empty_cleanup_pending_due)
-            ):
-                service_cleanup_candidates.append("empty_leads_cleanup")
-            if page_hits_cleanup_due:
-                service_cleanup_candidates.append("page_hits_orphan_cleanup")
-            selected_service_cleanup = _service_cleanup_ring_select(
-                maintenance_cleanup_ring,
-                root,
-                service_cleanup_candidates,
-                worker_limit=maintenance_cleanup_worker_limit,
-                active_workers=maintenance_cleanup_workers_started,
-            )
-            if selected_service_cleanup:
-                maintenance_cleanup_workers_started += 1
-            if selected_service_cleanup == "page_hits_orphan_cleanup":
-                try:
-                    page_hits_index_ready = db.orphan_page_hits_cleanup_index_ready()
-                except Exception as e:
-                    page_hits_index_ready = False
-                    logging.warning("[%s] page_hits_orphan_cleanup index check failed: %s", root, e)
-                if not page_hits_index_ready:
-                    page_hits_orphan_cleanup_active[root] = False
-                    logging.warning(
-                        "[%s] page_hits_orphan_cleanup skipped: required index idx_mcd_ph_lead_date is missing",
-                        root,
-                    )
-                    if page_hits_cleanup_window_key:
-                        page_hits_orphan_cleanup_done_window_keys[root] = page_hits_cleanup_window_key
-                        page_hits_orphan_cleanup_window_counts[root] = (
-                            page_hits_orphan_cleanup_window_counts.get(root, 0) + 1
-                        )
-                    last_page_hits_orphan_cleanup_ts[root] = now
-                    selected_service_cleanup = ""
-
-            page_hits_requeue = False
-            if selected_service_cleanup == "page_hits_orphan_cleanup":
-                page_hits_cleanup_lock = db.try_acquire_orphan_page_hits_cleanup_lock()
-                if page_hits_cleanup_lock is None:
-                    logging.info("[%s] page_hits_orphan_cleanup skipped: cleanup lock is already held", root)
-                    selected_service_cleanup = ""
-
-            if selected_service_cleanup == "page_hits_orphan_cleanup":
-                try:
-                    preview = db.preview_orphan_page_hits_batch(
-                        cutoff_utc=page_hits_cleanup_cutoff_utc,
-                        batch_size=page_hits_cleanup_batch_size,
-                    )
-                    preview_count = int(preview.get("preview_count", 0) or 0)
-                    if preview_count > 0:
-                        logging.info(
-                            "[%s] page_hits_orphan_cleanup preview count=%s min_id=%s max_id=%s min_date_hit=%s max_date_hit=%s cutoff_utc=%s fair_queue=%s",
-                            root,
-                            preview_count,
-                            preview.get("min_id"),
-                            preview.get("max_id"),
-                            preview.get("min_date_hit"),
-                            preview.get("max_date_hit"),
-                            page_hits_cleanup_cutoff_utc,
-                            "shared" if len(service_cleanup_candidates) > 1 else "solo",
-                        )
-                        result = db.delete_orphan_page_hits(
-                            cutoff_utc=page_hits_cleanup_cutoff_utc,
-                            batch_size=page_hits_cleanup_batch_size,
-                            max_batches=1,
-                            sleep_sec=page_hits_cleanup_sleep_sec,
-                            max_run_sec=page_hits_cleanup_max_run_sec,
-                        )
-                        last_deleted = int(result.get("last_deleted", 0) or 0)
-                        total_deleted = int(result.get("total_deleted", 0) or 0)
-                        stop_reason = str(result.get("stop_reason") or "-")
-                        page_hits_requeue = bool(total_deleted > 0 and stop_reason != "empty")
-                        page_hits_orphan_cleanup_active[root] = bool(total_deleted > 0 and last_deleted > 0 and stop_reason != "empty")
-                        logging.info(
-                            "[%s] page_hits_orphan_cleanup ok batches=%s deleted=%s last_deleted=%s elapsed=%.2fs stop=%s cutoff_utc=%s fair_queue=%s",
-                            root,
-                            int(result.get("batches_run", 0) or 0),
-                            total_deleted,
-                            last_deleted,
-                            float(result.get("elapsed_sec", 0.0) or 0.0),
-                            stop_reason,
-                            page_hits_cleanup_cutoff_utc,
-                            "shared" if len(service_cleanup_candidates) > 1 else "solo",
-                        )
-                    else:
-                        page_hits_orphan_cleanup_active[root] = False
-                        logging.debug("[%s] page_hits_orphan_cleanup idle cutoff_utc=%s", root, page_hits_cleanup_cutoff_utc)
-
-                    message_result = db.delete_orphan_page_hit_notifications(
-                        cutoff_utc=page_hits_cleanup_cutoff_utc,
-                        batch_size=page_hits_cleanup_batch_size,
-                    )
-                    message_deleted = int(message_result.get("deleted", 0) or 0)
-                    if message_deleted > 0:
-                        page_hits_requeue = True
-                        page_hits_orphan_cleanup_active[root] = True
-                        logging.info(
-                            "[%s] page_hit_notification_cleanup ok table=%s scanned=%s deleted=%s orphan_hits=%s invalid_hits=%s cutoff_utc=%s",
-                            root,
-                            message_result.get("table", "-"),
-                            int(message_result.get("scanned", 0) or 0),
-                            message_deleted,
-                            int(message_result.get("orphan_hits", 0) or 0),
-                            int(message_result.get("invalid_hits", 0) or 0),
-                            page_hits_cleanup_cutoff_utc,
-                        )
-                    elif preview_count <= 0 and page_hits_cleanup_window_key:
-                        page_hits_orphan_cleanup_done_window_keys[root] = page_hits_cleanup_window_key
-                except Exception as e:
-                    page_hits_requeue = True
-                    page_hits_orphan_cleanup_active[root] = False
-                    logging.warning("[%s] page_hits_orphan_cleanup failed: %s", root, e)
-                finally:
-                    db.release_orphan_page_hits_cleanup_lock(page_hits_cleanup_lock)
-                last_page_hits_orphan_cleanup_ts[root] = now
-                if page_hits_cleanup_window_key:
-                    page_hits_orphan_cleanup_window_counts[root] = page_hits_orphan_cleanup_window_counts.get(root, 0) + 1
-                if page_hits_requeue and (str(root), "page_hits_orphan_cleanup") not in maintenance_cleanup_ring:
-                    maintenance_cleanup_ring.append((str(root), "page_hits_orphan_cleanup"))
-
-            if selected_service_cleanup == "empty_leads_cleanup":
-                previous_state = empty_leads_cleanup_state_cache.get(root, {})
-                pending_since = float(previous_state.get("pending_since") or now)
-                attempts = int(previous_state.get("attempts") or 0) + 1
-                _empty_leads_cleanup_state_save(
-                    store,
-                    empty_leads_cleanup_state_cache,
-                    root,
-                    status="running",
-                    now_ts=now,
-                    next_retry_at=now,
-                    pending_since=pending_since,
-                    attempts=attempts,
-                    receipt={"event": "start", "observed_at": now, "attempt": attempts},
-                )
-                try:
-                    result = delete_empty_leads_safely(
-                        db, root,
-                        mode=empty_cleanup_mode,
-                        batch_size=empty_cleanup_batch_size,
-                        cutoff_utc=empty_cleanup_query_cutoff_utc,
-                    )
-                    deleted = int(result.get("total_deleted", 0) or 0)
-                    if deleted > 0:
-                        last_empty_leads_cleanup_idle_ts[root] = 0.0
-                        _empty_leads_cleanup_state_save(
-                            store,
-                            empty_leads_cleanup_state_cache,
-                            root,
-                            status="pending",
-                            now_ts=now,
-                            next_retry_at=now,
-                            pending_since=pending_since,
-                            attempts=attempts,
-                            receipt={
-                                "event": "delete",
-                                "observed_at": now,
-                                "deleted": deleted,
-                                "result": dict(result) if isinstance(result, dict) else {},
-                            },
-                        )
-                        logging.info(
-                            "[%s] empty_leads_cleanup ok mode=%s age_days=%s cutoff_utc=%s batches=%s batch_size=%s deleted=%s elapsed=%.2fs stop=%s",
-                            root,
-                            str(result.get("mode") or empty_cleanup_mode),
-                            empty_cleanup_min_contact_age_days,
-                            str(result.get("cutoff_utc") or empty_cleanup_cutoff_utc),
-                            int(result.get("batches_run", 0) or 0),
-                            int(result.get("batch_size", 0) or empty_cleanup_batch_size),
-                            deleted,
-                            float(result.get("elapsed_sec", 0.0) or 0.0),
-                            str(result.get("stop_reason") or "-"),
-                        )
-                    else:
-                        last_empty_leads_cleanup_idle_ts[root] = now
-                        _empty_leads_cleanup_state_save(
-                            store,
-                            empty_leads_cleanup_state_cache,
-                            root,
-                            status="idle",
-                            now_ts=now,
-                            next_retry_at=0.0,
-                            pending_since=None,
-                            attempts=attempts,
-                            receipt={"event": "idle", "observed_at": now, "deleted": 0},
-                        )
-                        if empty_cleanup_window_key:
-                            empty_leads_cleanup_done_window_keys[root] = empty_cleanup_window_key
-                        logging.debug("[%s] empty_leads_cleanup idle mode=%s", root, empty_cleanup_mode)
-                except CleanupBusy as exc:
-                    _empty_leads_cleanup_state_save(
-                        store,
-                        empty_leads_cleanup_state_cache,
-                        root,
-                        status="pending",
-                        now_ts=now,
-                        next_retry_at=now + _empty_leads_cleanup_retry_delay(config),
-                        pending_since=pending_since,
-                        attempts=attempts,
-                        receipt={"event": "deferred", "observed_at": now, "reason": str(exc)},
-                    )
-                    if (str(root), "empty_leads_cleanup") not in maintenance_cleanup_ring:
-                        maintenance_cleanup_ring.append((str(root), "empty_leads_cleanup"))
-                    logging.debug("[%s] empty_leads_cleanup deferred: %s", root, exc)
-                except Exception as e:
-                    _empty_leads_cleanup_state_save(
-                        store,
-                        empty_leads_cleanup_state_cache,
-                        root,
-                        status="pending",
-                        now_ts=now,
-                        next_retry_at=now + _empty_leads_cleanup_retry_delay(config),
-                        pending_since=pending_since,
-                        attempts=attempts,
-                        receipt={"event": "failed", "observed_at": now, "reason": str(e)},
-                    )
-                    if (str(root), "empty_leads_cleanup") not in maintenance_cleanup_ring:
-                        maintenance_cleanup_ring.append((str(root), "empty_leads_cleanup"))
-                    logging.warning("[%s] empty_leads_cleanup failed: %s", root, e)
-                else:
-                    last_empty_leads_cleanup_ts[root] = now
-                    if deleted > 0 and (str(root), "empty_leads_cleanup") not in maintenance_cleanup_ring:
-                        maintenance_cleanup_ring.append((str(root), "empty_leads_cleanup"))
-                    if empty_cleanup_window_key:
-                        empty_leads_cleanup_window_counts[root] = empty_leads_cleanup_window_counts.get(root, 0) + 1
-            elif (
-                empty_cleanup_enabled
-                and cluster_cron_allowed
-                and empty_cleanup_due
-                and backup_dispatch_pause
-                and now - last_empty_leads_cleanup_skip_ts.get(root, 0.0) >= 300
-            ):
-                logging.info(
-                    "[%s] empty_leads_cleanup skipped: backup guard active (%s)",
-                    root,
-                    backup_pause_reason or "backup_guard",
-                )
-                last_empty_leads_cleanup_skip_ts[root] = now
-
+            # Maintenance cleanup is owned exclusively by the dedicated service ring.
             last_cache_clear = last_cache_clear_ts.get(root, 0.0)
             if (
                 config.enable_cache_clear
